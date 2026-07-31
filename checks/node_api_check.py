@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from modmux.models import Provider
 
 import config
+import node_api
 from _manager import AppStartBlocker, AppStartBlockerKind
 from _mod_ops import ArchiveDataEntry, ClientPackSelection
 from _security import Access_Control, Power_Level
@@ -62,10 +63,26 @@ from apps._config import (
     ModrinthModMetadata,
     ModType,
 )
-from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
-from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
+from apps._config_files import (
+    AppConfigFile,
+    AppConfigFileContent,
+    AppConfigFileKind,
+    AppConfigFileRoot,
+)
+from apps._console import (
+    ConsoleAction,
+    ConsoleActionParameter,
+    ConsoleActionResult,
+    ConsoleResponseSource,
+)
 from apps._mod import Mod
-from apps._save_files import AppSaveEntry, AppSaveEntryKind, AppSaveRoot, AppSaveRootMode
+from apps._node_api import NodeModUploadSource
+from apps._save_files import (
+    AppSaveEntry,
+    AppSaveEntryKind,
+    AppSaveRoot,
+    AppSaveRootMode,
+)
 from apps._settings import (
     App_Settings,
     BoolSettingSpec,
@@ -94,9 +111,14 @@ from apps.factorio import (
     FactorioModPortalResolution,
 )
 from apps.factorio.node_api import (
+    NodeModPortalInstallRequest,
     NodeModPortalResolveResult,
     NodeModPortalVersionEntry,
+    NodeModPortalVersionList,
+    NodeModUpdateCheckResult,
+    NodeModUpdateDependency,
     NodeModUpdateDependencyAction,
+    NodeModUpdateRequest,
     NodeModUpdateStatus,
 )
 from apps.minecraft import (
@@ -108,9 +130,24 @@ from apps.minecraft import (
     MinecraftShapelessRecipe,
 )
 from apps.minecraft.pack_export import PackFormat, PackPurpose
-from apps.satisfactory import Satisfactory, SatisfactoryBlueprintOwnershipStore, SatisfactoryServerState
-from apps.sevendays import SevenDays, SevenDaysSandboxOption, SevenDaysSandboxOptionsSnapshot
-from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
+from apps.satisfactory import (
+    Satisfactory,
+    SatisfactoryBlueprintOwnershipStore,
+    SatisfactoryServerState,
+)
+from apps.sevendays import (
+    SevenDays,
+    SevenDaysSandboxOption,
+    SevenDaysSandboxOptionsSnapshot,
+)
+from chat_hub import (
+    ChatAuthor,
+    ChatAuthorKind,
+    ChatEndpoint,
+    ChatEndpointId,
+    ChatEvent,
+    ChatHub,
+)
 from maintenance import MaintenanceService
 from map_annotations import MapAnnotationDraft
 from node_api import (
@@ -118,22 +155,15 @@ from node_api import (
     NodeApiService,
     NodeAppActivityProviderEntry,
     NodeAppEntry,
-    NodeAppMutationAction,
-    NodeAppMutationResult,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
-    NodeBulkLauncherMetadataApplyRequest,
-    NodeBulkLauncherMetadataRequest,
     NodeCapacityMutationResult,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
-    NodeClientPackConfigUpdateRequest,
-    NodeClientPackModConfigUpdate,
-    NodeClientPackPublishRequest,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
@@ -144,28 +174,11 @@ from node_api import (
     NodeDiskEntry,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
-    NodeDownloadRequest,
     NodeFactorioModSettings,
     NodeFontSourceSettingsMutationResult,
     NodeMinecraftRecipeMutationAction,
     NodeMinecraftRecipeMutationRequest,
     NodeMinecraftRecipeMutationResult,
-    NodeModEntry,
-    NodeModList,
-    NodeModMetadataFetchRequest,
-    NodeModMetadataResolveRequest,
-    NodeModMutationAction,
-    NodeModMutationResult,
-    NodeModPageResolveRequest,
-    NodeModPortalInstallRequest,
-    NodeModPortalVersionList,
-    NodeModPropertiesUpdateRequest,
-    NodeModUpdateCheckResult,
-    NodeModUpdateDependency,
-    NodeModUpdateRequest,
-    NodeModUploadBatchResult,
-    NodeModUploadResult,
-    NodeModUploadSource,
     NodeRestartRecord,
     NodeRestartScheduleState,
     NodeRestartState,
@@ -183,13 +196,37 @@ from node_api import (
     NodeSystemSample,
     NodeSystemSummary,
     NodeWebChatRequest,
+)
+from node_api_app_state import (
+    NodeAppMutationAction,
+    NodeAppMutationResult,
     required_app_mutation_level,
     required_app_mutation_scope,
+)
+from node_api_chat import NodeChatInjectionRequest
+from node_api_client_pack import NodeClientPackService
+from node_api_mod import (
+    NodeBulkLauncherMetadataApplyRequest,
+    NodeBulkLauncherMetadataRequest,
+    NodeClientPackConfigUpdateRequest,
+    NodeClientPackModConfigUpdate,
+    NodeClientPackPublishRequest,
+    NodeDownloadRequest,
+    NodeModEntry,
+    NodeModList,
+    NodeModMetadataFetchRequest,
+    NodeModMetadataResolveRequest,
+    NodeModMutationAction,
+    NodeModMutationResult,
+    NodeModPageResolveRequest,
+    NodeModPropertiesUpdateRequest,
+    NodeModUploadBatchResult,
+    NodeModUploadResult,
     required_mod_mutation_level,
 )
+from node_api_mod_service import NodeModService
 from node_api_relay import NodeRelayTTSRequest, RemoteRelayTTSForwarder
 from node_auth import NodeAccessGrant, NodeApiScope, verify_node_token
-from node_api_chat import NodeChatInjectionRequest
 from restart_state import RestartKind, RestartRecord
 from restart_targets import RestartTarget
 
@@ -224,7 +261,7 @@ class _ServersDatEntry:
 def _read_nbt_string(content: bytes, offset: int) -> tuple[str, int]:
     length = struct.unpack_from(">H", content, offset)[0]
     offset += 2
-    value = content[offset:offset + length].decode("utf-8")
+    value = content[offset : offset + length].decode("utf-8")
     return value, offset + length
 
 
@@ -562,39 +599,70 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsNone(NodeApiService.app_color_hex(None))
 
     def test_app_mutation_start_requires_user_scope_and_level(self) -> None:
-        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.START), NodeApiScope.APP_CONTROL)
+        self.assertEqual(
+            required_app_mutation_scope(NodeAppMutationAction.START),
+            NodeApiScope.APP_CONTROL,
+        )
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.START), Power_Level.user)
 
     def test_app_mutation_enable_requires_manage_scope_and_sudo_level(self) -> None:
-        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.ENABLE), NodeApiScope.APP_MANAGE)
+        self.assertEqual(
+            required_app_mutation_scope(NodeAppMutationAction.ENABLE),
+            NodeApiScope.APP_MANAGE,
+        )
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.ENABLE), Power_Level.sudo)
 
     def test_app_mutation_kill_requires_manage_scope_and_sudo_level(self) -> None:
-        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.KILL), NodeApiScope.APP_MANAGE)
+        self.assertEqual(
+            required_app_mutation_scope(NodeAppMutationAction.KILL),
+            NodeApiScope.APP_MANAGE,
+        )
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.KILL), Power_Level.sudo)
 
     def test_app_mutation_rename_requires_manage_scope_and_sudo_level(self) -> None:
-        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.RENAME), NodeApiScope.APP_MANAGE)
+        self.assertEqual(
+            required_app_mutation_scope(NodeAppMutationAction.RENAME),
+            NodeApiScope.APP_MANAGE,
+        )
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.RENAME), Power_Level.sudo)
 
-    def test_app_mutation_update_details_requires_manage_scope_and_sudo_level(self) -> None:
-        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.UPDATE_DETAILS), NodeApiScope.APP_MANAGE)
-        self.assertEqual(required_app_mutation_level(NodeAppMutationAction.UPDATE_DETAILS), Power_Level.sudo)
+    def test_app_mutation_update_details_requires_manage_scope_and_sudo_level(
+        self,
+    ) -> None:
+        self.assertEqual(
+            required_app_mutation_scope(NodeAppMutationAction.UPDATE_DETAILS),
+            NodeApiScope.APP_MANAGE,
+        )
+        self.assertEqual(
+            required_app_mutation_level(NodeAppMutationAction.UPDATE_DETAILS),
+            Power_Level.sudo,
+        )
 
     def test_app_mutation_update_requires_manage_scope_and_sudo_level(self) -> None:
-        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.UPDATE), NodeApiScope.APP_MANAGE)
+        self.assertEqual(
+            required_app_mutation_scope(NodeAppMutationAction.UPDATE),
+            NodeApiScope.APP_MANAGE,
+        )
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.UPDATE), Power_Level.sudo)
 
     def test_app_mutation_verify_requires_manage_scope_and_sudo_level(self) -> None:
-        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.VERIFY), NodeApiScope.APP_MANAGE)
+        self.assertEqual(
+            required_app_mutation_scope(NodeAppMutationAction.VERIFY),
+            NodeApiScope.APP_MANAGE,
+        )
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.VERIFY), Power_Level.sudo)
 
-    def test_app_mutation_branch_select_requires_manage_scope_and_sudo_level(self) -> None:
+    def test_app_mutation_branch_select_requires_manage_scope_and_sudo_level(
+        self,
+    ) -> None:
         self.assertEqual(
             required_app_mutation_scope(NodeAppMutationAction.SELECT_UPDATE_BRANCH),
             NodeApiScope.APP_MANAGE,
         )
-        self.assertEqual(required_app_mutation_level(NodeAppMutationAction.SELECT_UPDATE_BRANCH), Power_Level.sudo)
+        self.assertEqual(
+            required_app_mutation_level(NodeAppMutationAction.SELECT_UPDATE_BRANCH),
+            Power_Level.sudo,
+        )
 
     def test_mod_download_requires_user_but_config_read_allows_visitors(self) -> None:
         service = NodeApiService()
@@ -608,7 +676,9 @@ class NodeApiTests(unittest.TestCase):
             Power_Level.visitor,
         )
 
-    def test_node_operation_scope_requires_sudo_while_management_requires_root(self) -> None:
+    def test_node_operation_scope_requires_sudo_while_management_requires_root(
+        self,
+    ) -> None:
         service = NodeApiService()
 
         self.assertEqual(
@@ -620,7 +690,9 @@ class NodeApiTests(unittest.TestCase):
             Power_Level.root,
         )
 
-    def test_build_console_action_list_includes_parameter_metadata_and_permissions(self) -> None:
+    def test_build_console_action_list_includes_parameter_metadata_and_permissions(
+        self,
+    ) -> None:
         parameter = ConsoleActionParameter[str](
             key="message",
             label="Message",
@@ -655,7 +727,10 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsNotNone(result.actions[0].parameter)
         assert result.actions[0].parameter is not None
         self.assertEqual(result.actions[0].parameter.value_type_name, "str")
-        self.assertEqual(result.actions[0].parameter.description, "Broadcast a message to every player.")
+        self.assertEqual(
+            result.actions[0].parameter.description,
+            "Broadcast a message to every player.",
+        )
         self.assertEqual(result.actions[0].parameter.recent_inputs, ())
 
     def test_build_console_action_list_marks_running_runtime(self) -> None:
@@ -676,7 +751,9 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertTrue(result.actions[0].runtime_running)
 
-    def test_build_console_action_list_includes_recent_inputs_for_authorised_users(self) -> None:
+    def test_build_console_action_list_includes_recent_inputs_for_authorised_users(
+        self,
+    ) -> None:
         parameter = ConsoleActionParameter[str](
             key="message",
             label="Message",
@@ -702,7 +779,9 @@ class NodeApiTests(unittest.TestCase):
         assert result.actions[0].parameter is not None
         self.assertEqual(result.actions[0].parameter.recent_inputs, ("Hello world",))
 
-    def test_build_console_action_list_omits_actions_outside_current_app_version(self) -> None:
+    def test_build_console_action_list_omits_actions_outside_current_app_version(
+        self,
+    ) -> None:
         gated_action = ConsoleAction(
             key="say",
             label="Say",
@@ -723,7 +802,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.actions, ())
         self.assertFalse(app.supports_console_actions)
 
-    def test_build_console_action_list_includes_actions_at_matching_app_version(self) -> None:
+    def test_build_console_action_list_includes_actions_at_matching_app_version(
+        self,
+    ) -> None:
         gated_action = ConsoleAction(
             key="say",
             label="Say",
@@ -746,7 +827,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.actions[0].key, "say")
         self.assertTrue(app.supports_console_actions)
 
-    def test_execute_console_action_returns_structured_result_and_tracks_recent_inputs(self) -> None:
+    def test_execute_console_action_returns_structured_result_and_tracks_recent_inputs(
+        self,
+    ) -> None:
         parameter = ConsoleActionParameter[str](
             key="message",
             label="Message",
@@ -785,7 +868,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.text, "[Server] hi")
         self.assertEqual(result.source, ConsoleResponseSource.RCON)
 
-    def test_execute_console_action_skips_player_gate_for_manual_rcon_action(self) -> None:
+    def test_execute_console_action_skips_player_gate_for_manual_rcon_action(
+        self,
+    ) -> None:
         execute = AsyncMock(return_value=ConsoleActionResult(summary="ok"))
         action = ConsoleAction(
             key="say",
@@ -811,7 +896,9 @@ class NodeApiTests(unittest.TestCase):
         app.player_count.assert_not_awaited()
         execute.assert_awaited_once_with(app, None)
 
-    def test_execute_console_action_skips_player_gate_when_rcon_override_is_disabled(self) -> None:
+    def test_execute_console_action_skips_player_gate_when_rcon_override_is_disabled(
+        self,
+    ) -> None:
         execute = AsyncMock(return_value=ConsoleActionResult(summary="ok"))
         action = ConsoleAction(
             key="say",
@@ -838,7 +925,9 @@ class NodeApiTests(unittest.TestCase):
         app.player_count.assert_not_awaited()
         execute.assert_awaited_once_with(app, None)
 
-    def test_execute_console_action_requires_running_app_when_action_demands_it(self) -> None:
+    def test_execute_console_action_requires_running_app_when_action_demands_it(
+        self,
+    ) -> None:
         action = ConsoleAction(
             key="save_all",
             label="Save All",
@@ -880,7 +969,10 @@ class NodeApiTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.status_code, 503)
-        self.assertEqual(str(raised.exception.detail), "Console action failed: Minecraft Alpha API is unavailable.")
+        self.assertEqual(
+            str(raised.exception.detail),
+            "Console action failed: Minecraft Alpha API is unavailable.",
+        )
 
     def test_read_console_stdout_returns_recent_tail_and_truncation_state(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -922,7 +1014,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertTrue(entries[0].supports_console_actions)
 
-    def test_build_minecraft_recipe_workspace_state_reads_managed_recipe_and_registry_data(self) -> None:
+    def test_build_minecraft_recipe_workspace_state_reads_managed_recipe_and_registry_data(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
             recipe_book_path = directory / ".yukibot" / "recipes.json"
@@ -956,7 +1050,10 @@ class NodeApiTests(unittest.TestCase):
             workspace_state = service.build_minecraft_recipe_workspace_state(cast(App, app))
 
         self.assertEqual(workspace_state.recipe_book.data_path, ".yukibot/recipes.json")
-        self.assertEqual(workspace_state.recipe_book.script_path, "kubejs/server_scripts/yuki_recipes.js")
+        self.assertEqual(
+            workspace_state.recipe_book.script_path,
+            "kubejs/server_scripts/yuki_recipes.js",
+        )
         self.assertIsNotNone(workspace_state.recipe_book.payload)
         self.assertEqual(workspace_state.item_registry.data_path, ".yukibot/registries/items.json")
         self.assertTrue(workspace_state.item_registry.file_exists)
@@ -970,7 +1067,9 @@ class NodeApiTests(unittest.TestCase):
             ["minecraft:stone"],
         )
 
-    def test_build_sevendays_sandbox_options_state_reads_persisted_dataset(self) -> None:
+    def test_build_sevendays_sandbox_options_state_reads_persisted_dataset(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
             app = object.__new__(SevenDays)
@@ -1019,7 +1118,9 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(parsed, state)
 
-    def test_build_minecraft_item_icon_response_returns_png_file_when_icon_exists(self) -> None:
+    def test_build_minecraft_item_icon_response_returns_png_file_when_icon_exists(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
             asset_path = directory / "kubejs" / "assets" / "minecraft" / "textures" / "item" / "dirt.png"
@@ -1035,9 +1136,14 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsInstance(response, FileResponse)
         assert isinstance(response, FileResponse)
         self.assertEqual(response.media_type, "image/png")
-        self.assertEqual(Path(response.path), directory / ".yukibot" / "assets" / "item_icons" / "minecraft" / "dirt.png")
+        self.assertEqual(
+            Path(response.path),
+            directory / ".yukibot" / "assets" / "item_icons" / "minecraft" / "dirt.png",
+        )
 
-    def test_build_minecraft_item_icon_response_returns_svg_placeholder_when_icon_is_missing(self) -> None:
+    def test_build_minecraft_item_icon_response_returns_svg_placeholder_when_icon_is_missing(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
             app = object.__new__(Minecraft)
@@ -1050,7 +1156,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(response.media_type, "image/svg+xml")
         self.assertIn("<svg", response.body.decode("utf-8"))
 
-    def test_append_minecraft_recipe_mutation_persists_and_returns_workspace_state(self) -> None:
+    def test_append_minecraft_recipe_mutation_persists_and_returns_workspace_state(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
             app = object.__new__(Minecraft)
@@ -1082,9 +1190,14 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsNotNone(result.workspace.recipe_book.payload)
         recipe_book = MinecraftRecipeBook.from_mapping(cast(dict[str, object], result.workspace.recipe_book.payload))
         self.assertEqual(len(recipe_book.mutations), 1)
-        self.assertEqual(recipe_book.mutations[0].to_mapping()["id"], "yukibot:yukiplayer/minecraft/gravel")
+        self.assertEqual(
+            recipe_book.mutations[0].to_mapping()["id"],
+            "yukibot:yukiplayer/minecraft/gravel",
+        )
 
-    def test_append_minecraft_recipe_mutation_requires_linked_minecraft_username(self) -> None:
+    def test_append_minecraft_recipe_mutation_requires_linked_minecraft_username(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             app = object.__new__(Minecraft)
             app.name = "minecraft_alpha"
@@ -1158,9 +1271,16 @@ class NodeApiTests(unittest.TestCase):
                 )
             )
 
-        replaced_recipe_book = MinecraftRecipeBook.from_mapping(cast(dict[str, object], replace_result.workspace.recipe_book.payload))
-        deleted_recipe_book = MinecraftRecipeBook.from_mapping(cast(dict[str, object], delete_result.workspace.recipe_book.payload))
-        self.assertEqual(replaced_recipe_book.mutations[0].to_mapping()["id"], "yukibot:yukiplayer/minecraft/sand")
+        replaced_recipe_book = MinecraftRecipeBook.from_mapping(
+            cast(dict[str, object], replace_result.workspace.recipe_book.payload)
+        )
+        deleted_recipe_book = MinecraftRecipeBook.from_mapping(
+            cast(dict[str, object], delete_result.workspace.recipe_book.payload)
+        )
+        self.assertEqual(
+            replaced_recipe_book.mutations[0].to_mapping()["id"],
+            "yukibot:yukiplayer/minecraft/sand",
+        )
         self.assertEqual(deleted_recipe_book.mutations, ())
 
     def test_single_mod_download_url_is_signed_and_escaped(self) -> None:
@@ -1178,7 +1298,10 @@ class NodeApiTests(unittest.TestCase):
         query = parse_qs(parsed.query)
         token = query["access_token"][0]
 
-        self.assertEqual(parsed.path, "/api/node/apps/minecraft%20alpha/mods/Some%20Mod%2B1.0.jar/download")
+        self.assertEqual(
+            parsed.path,
+            "/api/node/apps/minecraft%20alpha/mods/Some%20Mod%2B1.0.jar/download",
+        )
         grant = verify_node_token(
             secret="secret",
             token=token,
@@ -1207,8 +1330,14 @@ class NodeApiTests(unittest.TestCase):
         )
         with patch.object(config, "MOD_WEB_SERVER", server):
             service = NodeApiService()
-            self.assertEqual(service.presence_stream_url(), "https://erin.example/api/node/presence/stream")
-            self.assertEqual(service.presence_stream_url(base_url="/api/node"), "/api/node/presence/stream")
+            self.assertEqual(
+                service.presence_stream_url(),
+                "https://erin.example/api/node/presence/stream",
+            )
+            self.assertEqual(
+                service.presence_stream_url(base_url="/api/node"),
+                "/api/node/presence/stream",
+            )
 
     def test_map_api_url_is_signed_and_escaped(self) -> None:
         server = replace(
@@ -1245,7 +1374,10 @@ class NodeApiTests(unittest.TestCase):
             service = NodeApiService()
             url = service.mod_download_url("minecraft_alpha", enabled_only=True)
 
-        self.assertEqual(url, "https://erin.example/api/node/apps/minecraft_alpha/mods/download?enabled_only=true")
+        self.assertEqual(
+            url,
+            "https://erin.example/api/node/apps/minecraft_alpha/mods/download?enabled_only=true",
+        )
 
     def test_mod_download_url_can_use_same_origin_base_path(self) -> None:
         server = replace(
@@ -1288,7 +1420,10 @@ class NodeApiTests(unittest.TestCase):
         query = parse_qs(parsed.query)
         token = query["access_token"][0]
 
-        self.assertEqual(parsed.path, "/api/node/apps/minecraft%20alpha/configs/mod-configs/Foo%20Bar/config.toml")
+        self.assertEqual(
+            parsed.path,
+            "/api/node/apps/minecraft%20alpha/configs/mod-configs/Foo%20Bar/config.toml",
+        )
         grant = verify_node_token(
             secret="secret",
             token=token,
@@ -1313,7 +1448,10 @@ class NodeApiTests(unittest.TestCase):
         query = parse_qs(parsed.query)
         token = query["access_token"][0]
 
-        self.assertEqual(parsed.path, "/api/node/apps/minecraft%20alpha/configs/roots/mod-configs/download")
+        self.assertEqual(
+            parsed.path,
+            "/api/node/apps/minecraft%20alpha/configs/roots/mod-configs/download",
+        )
         grant = verify_node_token(
             secret="secret",
             token=token,
@@ -1363,7 +1501,10 @@ class NodeApiTests(unittest.TestCase):
         query = parse_qs(parsed.query)
         token = query["access_token"][0]
 
-        self.assertEqual(parsed.path, "/api/node/apps/minecraft%20alpha/saves/world/Current%20World/download")
+        self.assertEqual(
+            parsed.path,
+            "/api/node/apps/minecraft%20alpha/saves/world/Current%20World/download",
+        )
         grant = verify_node_token(
             secret="secret",
             token=token,
@@ -1430,6 +1571,29 @@ class NodeApiTests(unittest.TestCase):
         self.assertIn("/api/node/discord-settings", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
         self.assertIn("/api/node/apps/{app_name}/factorio/generation/running-world", handlers)
+
+    def test_node_api_does_not_expose_mod_domain_contracts(self) -> None:
+        for name in (
+            "NodeModEntry",
+            "NodeModList",
+            "NodeModMutationAction",
+            "NodeModMutationResult",
+            "NodeDownloadRequest",
+            "required_mod_mutation_level",
+        ):
+            self.assertFalse(hasattr(node_api, name), name)
+        self.assertIs(get_type_hints(NodeApiService.build_mod_list)["return"], NodeModList)
+
+    def test_node_api_does_not_expose_app_mutation_contracts(self) -> None:
+        for name in (
+            "NodeAppMutationAction",
+            "NodeAppMutationRequest",
+            "NodeAppMutationResult",
+            "required_app_mutation_level",
+            "required_app_mutation_scope",
+        ):
+            self.assertFalse(hasattr(node_api, name), name)
+        self.assertIs(get_type_hints(NodeApiService.mutate_app)["return"], NodeAppMutationResult)
 
     def test_node_api_allows_authorized_cross_origin_uploads(self) -> None:
         app = FastAPI()
@@ -1551,7 +1715,10 @@ class NodeApiTests(unittest.TestCase):
         mapped = event.to_mapping()
         restored = NodeChatStreamEvent.from_mapping(mapped)
 
-        self.assertEqual(mapped["app_stats"]["version_source"], AppVersionSource.INSTALLED_FILES.value)
+        self.assertEqual(
+            mapped["app_stats"]["version_source"],
+            AppVersionSource.INSTALLED_FILES.value,
+        )
         self.assertEqual(restored, event)
 
     def test_app_runtime_summary_defaults_version_source_to_startup(self) -> None:
@@ -1623,7 +1790,8 @@ class NodeApiTests(unittest.TestCase):
             storage_total_bytes=None,
             footprint_bytes=None,
             runtime_fault=AppRuntimeFault(
-                kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"
+                kind=AppRuntimeFaultKind.CRASH,
+                summary="Failed to start the minecraft server",
             ),
             transition_state=NodeAppTransitionState.NONE,
             connected_player_names=("Yoko", "Bea"),
@@ -1685,7 +1853,8 @@ class NodeApiTests(unittest.TestCase):
             supports_settings=True,
             supports_chat=True,
             runtime_fault=AppRuntimeFault(
-                kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"
+                kind=AppRuntimeFaultKind.CRASH,
+                summary="Failed to start the minecraft server",
             ),
             color_hex="#336699",
         )
@@ -1711,7 +1880,9 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(restored, event)
 
-    def test_websocket_exception_from_http_maps_policy_and_internal_failures(self) -> None:
+    def test_websocket_exception_from_http_maps_policy_and_internal_failures(
+        self,
+    ) -> None:
         policy_error = NodeApiService._websocket_exception_from_http(HTTPException(status_code=404, detail="Missing"))
         internal_error = NodeApiService._websocket_exception_from_http(HTTPException(status_code=503, detail="Busy"))
 
@@ -1805,7 +1976,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.settings[1].current_input_value, "Beta")
         self.assertEqual(result.settings[1].recent_inputs, ("Beta",))
 
-    def test_build_setting_list_shows_restricted_values_when_hide_policy_is_disabled(self) -> None:
+    def test_build_setting_list_shows_restricted_values_when_hide_policy_is_disabled(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings_pointer = root / "settings.json"
@@ -1841,7 +2014,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.settings[0].revealed_value_text, "")
         self.assertEqual(result.settings[0].current_input_value, "secret")
 
-    def test_build_setting_list_keeps_hidden_values_obfuscated_for_privileged_users(self) -> None:
+    def test_build_setting_list_keeps_hidden_values_obfuscated_for_privileged_users(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings_pointer = root / "settings.json"
@@ -1878,7 +2053,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.settings[0].default_text, "")
         self.assertEqual(result.settings[0].current_input_value, "")
 
-    def test_build_setting_list_supports_reveal_threshold_below_edit_threshold(self) -> None:
+    def test_build_setting_list_supports_reveal_threshold_below_edit_threshold(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings_pointer = root / "settings.json"
@@ -1913,7 +2090,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.settings[0].revealed_value_text, "alpha-seed")
         self.assertEqual(result.settings[0].current_input_value, "")
 
-    def test_build_setting_list_prefers_choice_labels_for_value_and_default_text(self) -> None:
+    def test_build_setting_list_prefers_choice_labels_for_value_and_default_text(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings_pointer = root / "settings.json"
@@ -2154,9 +2333,14 @@ class NodeApiTests(unittest.TestCase):
                 )
 
         self.assertEqual(raised.exception.status_code, 503)
-        self.assertEqual(str(raised.exception.detail), "Save upload failed: Satisfactory save API is unavailable.")
+        self.assertEqual(
+            str(raised.exception.detail),
+            "Save upload failed: Satisfactory save API is unavailable.",
+        )
 
-    def test_build_blueprint_list_marks_delete_permission_from_owner_and_sudo(self) -> None:
+    def test_build_blueprint_list_marks_delete_permission_from_owner_and_sudo(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             app = _build_blueprint_app(root)
@@ -2205,7 +2389,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.default_session_name, "Shared")
         self.assertEqual(round_trip.default_session_name, "Shared")
 
-    def test_build_blueprint_list_blocks_main_delete_when_config_has_different_owner(self) -> None:
+    def test_build_blueprint_list_blocks_main_delete_when_config_has_different_owner(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             app = _build_blueprint_app(root)
@@ -2517,8 +2703,14 @@ class NodeApiTests(unittest.TestCase):
         )
         service = NodeApiService()
         with (
-            patch("apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
-            patch("apps.factorio.node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
+            patch(
+                "apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings",
+                return_value=Mock(),
+            ),
+            patch(
+                "apps.factorio.node_api.download_factorio_mods_from_portal",
+                new=AsyncMock(side_effect=fake_download),
+            ),
             patch.object(service, "upload_mod_paths", new=AsyncMock(return_value=expected)) as upload,
         ):
             result = asyncio.run(
@@ -2580,7 +2772,10 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
 
-        with patch("apps.factorio.node_api.list_factorio_mod_portal_release_options", new=AsyncMock(side_effect=fake_versions)):
+        with patch(
+            "apps.factorio.node_api.list_factorio_mod_portal_release_options",
+            new=AsyncMock(side_effect=fake_versions),
+        ):
             result = asyncio.run(
                 NodeApiService().list_installed_mod_versions(
                     app=cast(App[Any], cast(object, app)),
@@ -2649,7 +2844,10 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
-        with patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
+        with patch(
+            "apps.factorio.node_api.resolve_factorio_mod_portal_candidates",
+            new=AsyncMock(return_value=resolution),
+        ):
             result = asyncio.run(
                 NodeApiService().resolve_mod_link_dependencies(
                     app=cast(App[Any], cast(object, app)),
@@ -2658,14 +2856,25 @@ class NodeApiTests(unittest.TestCase):
             )
 
         self.assertIsInstance(result, NodeModPortalResolveResult)
-        self.assertEqual(tuple(entry.mod_id for entry in result.dependencies), ("root", "dep-new", "dep-installed"))
-        self.assertEqual(tuple(entry.selected_by_default for entry in result.dependencies), (True, True, False))
-        self.assertEqual(tuple(entry.installed for entry in result.dependencies), (False, False, True))
+        self.assertEqual(
+            tuple(entry.mod_id for entry in result.dependencies),
+            ("root", "dep-new", "dep-installed"),
+        )
+        self.assertEqual(
+            tuple(entry.selected_by_default for entry in result.dependencies),
+            (True, True, False),
+        )
+        self.assertEqual(
+            tuple(entry.installed for entry in result.dependencies),
+            (False, False, True),
+        )
         self.assertTrue(result.dependencies[0].is_root)
         self.assertEqual(result.dependencies[0].dependency_mod_ids, ("dep-new", "dep-installed"))
         self.assertEqual(result.dependencies[1].parent_mod_ids, ("root",))
 
-    def test_resolve_mod_link_dependencies_marks_vanilla_dependencies_installed(self) -> None:
+    def test_resolve_mod_link_dependencies_marks_vanilla_dependencies_installed(
+        self,
+    ) -> None:
         manager = Mock()
         manager.list_mods.return_value = ()
         with TemporaryDirectory() as temp_dir:
@@ -2718,7 +2927,10 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
 
-            with patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
+            with patch(
+                "apps.factorio.node_api.resolve_factorio_mod_portal_candidates",
+                new=AsyncMock(return_value=resolution),
+            ):
                 result = asyncio.run(
                     NodeApiService().resolve_mod_link_dependencies(
                         app=cast(App[Any], cast(object, app)),
@@ -2781,7 +2993,10 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
-        with patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)) as resolve:
+        with patch(
+            "apps.factorio.node_api.resolve_factorio_mod_portal_candidates",
+            new=AsyncMock(return_value=resolution),
+        ) as resolve:
             result = asyncio.run(
                 NodeApiService().check_mod_update(
                     app=cast(App[Any], cast(object, app)),
@@ -2802,7 +3017,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.latest_version, "1.1.0")
         self.assertIn("1.0.0 -> 1.1.0", result.message)
 
-    def test_check_mod_update_treats_vanilla_factorio_dependency_as_current(self) -> None:
+    def test_check_mod_update_treats_vanilla_factorio_dependency_as_current(
+        self,
+    ) -> None:
         class _FactorioTestMod(_TestMod):
             def native_metadata_id(self) -> str:
                 return "root"
@@ -2869,7 +3086,10 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
 
-            with patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
+            with patch(
+                "apps.factorio.node_api.resolve_factorio_mod_portal_candidates",
+                new=AsyncMock(return_value=resolution),
+            ):
                 result = asyncio.run(
                     NodeApiService().check_mod_update(
                         app=cast(App[Any], cast(object, app)),
@@ -2877,7 +3097,10 @@ class NodeApiTests(unittest.TestCase):
                     )
                 )
 
-        self.assertEqual(tuple(dependency.mod_id for dependency in result.dependencies), ("space-age",))
+        self.assertEqual(
+            tuple(dependency.mod_id for dependency in result.dependencies),
+            ("space-age",),
+        )
         self.assertEqual(result.dependencies[0].title, "Space Age")
         self.assertEqual(result.dependencies[0].action, NodeModUpdateDependencyAction.CURRENT)
         self.assertEqual(result.dependencies[0].current_version, "2.1.9")
@@ -2978,9 +3201,18 @@ class NodeApiTests(unittest.TestCase):
                 )
 
             with (
-                patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
-                patch("apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
-                patch("apps.factorio.node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
+                patch(
+                    "apps.factorio.node_api.resolve_factorio_mod_portal_candidates",
+                    new=AsyncMock(return_value=resolution),
+                ),
+                patch(
+                    "apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings",
+                    return_value=Mock(),
+                ),
+                patch(
+                    "apps.factorio.node_api.download_factorio_mods_from_portal",
+                    new=AsyncMock(side_effect=fake_download),
+                ),
             ):
                 result = asyncio.run(
                     NodeApiService().update_mod(
@@ -2998,7 +3230,9 @@ class NodeApiTests(unittest.TestCase):
             self.assertEqual(tuple(mod.name for mod in result.mods), ("root_1.1.0.zip",))
             self.assertIn("1.0.0 to 1.1.0", result.message)
 
-    def test_update_mod_installs_and_updates_required_factorio_dependencies(self) -> None:
+    def test_update_mod_installs_and_updates_required_factorio_dependencies(
+        self,
+    ) -> None:
         class _FactorioTestMod(_TestMod):
             def __init__(self, cfg: Mod_Config, *, native_id: str, nice_name: str) -> None:
                 super().__init__(cfg, nice_name=nice_name)
@@ -3178,9 +3412,18 @@ class NodeApiTests(unittest.TestCase):
                 return tuple(downloads)
 
             with (
-                patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
-                patch("apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
-                patch("apps.factorio.node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
+                patch(
+                    "apps.factorio.node_api.resolve_factorio_mod_portal_candidates",
+                    new=AsyncMock(return_value=resolution),
+                ),
+                patch(
+                    "apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings",
+                    return_value=Mock(),
+                ),
+                patch(
+                    "apps.factorio.node_api.download_factorio_mods_from_portal",
+                    new=AsyncMock(side_effect=fake_download),
+                ),
             ):
                 result = asyncio.run(
                     NodeApiService().update_mod(
@@ -3190,7 +3433,10 @@ class NodeApiTests(unittest.TestCase):
                     )
                 )
 
-            self.assertEqual([await_call.args[0] for await_call in manager.remove.await_args_list], [old_root, old_dependency])
+            self.assertEqual(
+                [await_call.args[0] for await_call in manager.remove.await_args_list],
+                [old_root, old_dependency],
+            )
             self.assertEqual(manager.add.await_count, 3)
             self.assertEqual(
                 tuple(mod.name for mod in result.mods),
@@ -3275,7 +3521,10 @@ class NodeApiTests(unittest.TestCase):
         )
 
         with (
-            patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
+            patch(
+                "apps.factorio.node_api.resolve_factorio_mod_portal_candidates",
+                new=AsyncMock(return_value=resolution),
+            ),
             patch("apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings") as credentials,
         ):
             with self.assertRaises(HTTPException) as raised:
@@ -3491,7 +3740,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(result.save.can_delete)
         app.delete_save_file_async.assert_awaited_once_with(file_id="world/world")
 
-    def test_update_setting_and_save_settings_use_attached_settings_manager(self) -> None:
+    def test_update_setting_and_save_settings_use_attached_settings_manager(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings_pointer = root / "settings.json"
@@ -3730,8 +3981,10 @@ class NodeApiTests(unittest.TestCase):
             "Added mods:\n- Sodium (0.5.11)",
         )
 
-    def test_client_pack_automated_changelog_reports_added_removed_and_updated_mods(self) -> None:
-        text = NodeApiService._client_pack_automated_changelog_text(
+    def test_client_pack_automated_changelog_reports_added_removed_and_updated_mods(
+        self,
+    ) -> None:
+        text = NodeClientPackService._automated_changelog_text(
             current=(
                 ClientPackModSnapshot(name="alpha.jar", friendly="Alpha", version="2.0.0"),
                 ClientPackModSnapshot(name="gamma.jar", friendly="Gamma", version=None),
@@ -3753,7 +4006,9 @@ class NodeApiTests(unittest.TestCase):
             "- Alpha: 1.0.0 -> 2.0.0",
         )
 
-    def test_client_pack_automated_changelog_treats_disabled_mod_as_removed(self) -> None:
+    def test_client_pack_automated_changelog_treats_disabled_mod_as_removed(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "enabled.jar").write_bytes(b"enabled")
@@ -3775,16 +4030,19 @@ class NodeApiTests(unittest.TestCase):
             )
             manager = Mock()
             manager.list_mods.return_value = (enabled, disabled)
-            manager.get.side_effect = {enabled.name: enabled, disabled.name: disabled}.__getitem__
+            manager.get.side_effect = {
+                enabled.name: enabled,
+                disabled.name: disabled,
+            }.__getitem__
             app = _build_app(manager)
             app.directory = root
             app.cfg.directory = root
             app.cfg.apps_dir = root
             service = NodeApiService()
 
-            current = service._default_client_pack_mod_snapshots(app)
+            current = service._client_packs.default_mod_snapshots(app)
 
-        text = NodeApiService._client_pack_automated_changelog_text(
+        text = NodeClientPackService._automated_changelog_text(
             current=current,
             published=(
                 ClientPackModSnapshot(name="enabled.jar", friendly="Enabled Mod", version="1.0.0"),
@@ -3793,11 +4051,16 @@ class NodeApiTests(unittest.TestCase):
             has_published_pack=True,
         )
 
-        self.assertEqual(current, (ClientPackModSnapshot(name="enabled.jar", friendly="Enabled Mod", version="1.0.0"),))
+        self.assertEqual(
+            current,
+            (ClientPackModSnapshot(name="enabled.jar", friendly="Enabled Mod", version="1.0.0"),),
+        )
         self.assertEqual(text, "Removed mods:\n- Disabled Mod (1.0.0)")
 
-    def test_client_pack_automated_changelog_matches_versioned_filename_changes_by_friendly_name(self) -> None:
-        text = NodeApiService._client_pack_automated_changelog_text(
+    def test_client_pack_automated_changelog_matches_versioned_filename_changes_by_friendly_name(
+        self,
+    ) -> None:
+        text = NodeClientPackService._automated_changelog_text(
             current=(
                 ClientPackModSnapshot(name="alpha-2.0.0.jar", friendly="Alpha", version="2.0.0"),
                 ClientPackModSnapshot(name="gamma.jar", friendly="Gamma", version=None),
@@ -3878,7 +4141,10 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(entries[0].enabled)
         self.assertTrue(entries[0].supports_chat)
         self.assertEqual(entries[0].scope, "minecraft")
-        self.assertEqual(entries[0].map_url, "https://example.invalid/squaremap/?world=minecraft_overworld")
+        self.assertEqual(
+            entries[0].map_url,
+            "https://example.invalid/squaremap/?world=minecraft_overworld",
+        )
 
     def test_list_apps_includes_update_info(self) -> None:
         app = _build_app(Mock())
@@ -3954,7 +4220,10 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.player_capacity, 8)
         self.assertEqual(entry.connected_player_names, ("Alice", "Bob"))
         self.assertTrue(entry.supports_chat)
-        self.assertEqual(entry.map_url, "https://example.invalid/squaremap/?world=minecraft_overworld")
+        self.assertEqual(
+            entry.map_url,
+            "https://example.invalid/squaremap/?world=minecraft_overworld",
+        )
         self.assertEqual(entry.join_address, "play.example.test:25565")
         self.assertEqual(entry.join_direct_ip_address, "203.0.113.10:25565")
         self.assertEqual(entry.title_font_preset, AppTitleFont.MINECRAFT_TEN.value)
@@ -3971,8 +4240,14 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsNone(entry.relay_advancements_enabled)
         self.assertIsNone(entry.relay_advancement_term)
         self.assertIsNotNone(entry.resource_points)
-        self.assertEqual(entry.resource_points.cpu_points_running if entry.resource_points is not None else None, 3)
-        self.assertEqual(entry.resource_points.cpu_points_startup if entry.resource_points is not None else None, 5)
+        self.assertEqual(
+            entry.resource_points.cpu_points_running if entry.resource_points is not None else None,
+            3,
+        )
+        self.assertEqual(
+            entry.resource_points.cpu_points_startup if entry.resource_points is not None else None,
+            5,
+        )
 
     def test_build_app_entry_captures_relay_advancement_metadata(self) -> None:
         class _RelayApp(_DummyApp):
@@ -4080,7 +4355,10 @@ class NodeApiTests(unittest.TestCase):
             manifest = NodeApiService().build_map_manifest(app)
 
         self.assertEqual(manifest.initial_world_name, "minecraft_nether")
-        self.assertEqual([world.name for world in manifest.worlds], ["minecraft_nether", "minecraft_overworld"])
+        self.assertEqual(
+            [world.name for world in manifest.worlds],
+            ["minecraft_nether", "minecraft_overworld"],
+        )
         self.assertEqual(manifest.icon_base_url, "./assets")
         self.assertEqual(get_mock.call_args.args[0], "http://localhost:8080/tiles/settings.json")
 
@@ -4157,7 +4435,10 @@ class NodeApiTests(unittest.TestCase):
                 manifest = NodeApiService().build_map_manifest(app)
 
         self.assertEqual(manifest.initial_world_name, "minecraft_nether")
-        self.assertEqual([world.name for world in manifest.worlds], ["minecraft_nether", "minecraft_overworld"])
+        self.assertEqual(
+            [world.name for world in manifest.worlds],
+            ["minecraft_nether", "minecraft_overworld"],
+        )
         get_mock.assert_not_called()
 
     def test_squaremap_proxy_response_reads_local_asset_when_available(self) -> None:
@@ -4185,7 +4466,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(response.media_type, "image/png")
         get_mock.assert_not_called()
 
-    def test_build_map_manifest_uses_cached_squaremap_settings_when_upstream_is_unavailable(self) -> None:
+    def test_build_map_manifest_uses_cached_squaremap_settings_when_upstream_is_unavailable(
+        self,
+    ) -> None:
         class _MappedApp(_DummyApp):
             @property
             def public_map_url(self) -> str | None:
@@ -4209,9 +4492,14 @@ class NodeApiTests(unittest.TestCase):
                 cached_manifest = service.build_map_manifest(app)
 
         self.assertEqual(cached_manifest.initial_world_name, "minecraft_nether")
-        self.assertEqual([world.name for world in cached_manifest.worlds], ["minecraft_nether", "minecraft_overworld"])
+        self.assertEqual(
+            [world.name for world in cached_manifest.worlds],
+            ["minecraft_nether", "minecraft_overworld"],
+        )
 
-    def test_squaremap_proxy_response_uses_cached_world_settings_when_upstream_is_unavailable(self) -> None:
+    def test_squaremap_proxy_response_uses_cached_world_settings_when_upstream_is_unavailable(
+        self,
+    ) -> None:
         class _MappedApp(_DummyApp):
             @property
             def public_map_url(self) -> str | None:
@@ -4244,7 +4532,11 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(cached_response.is_stale)
         self.assertEqual(
             json.loads(cached_response.content.decode("utf-8")),
-            {"spawn": {"x": 0, "z": 0}, "zoom": {"def": 1, "max": 4, "extra": 2}, "player_tracker": {"enabled": True}},
+            {
+                "spawn": {"x": 0, "z": 0},
+                "zoom": {"def": 1, "max": 4, "extra": 2},
+                "player_tracker": {"enabled": True},
+            },
         )
         self.assertIsNotNone(cached_response.cache_updated_at_unix_ms)
 
@@ -4299,7 +4591,7 @@ class NodeApiTests(unittest.TestCase):
         app = _build_app(Mock())
         service = NodeApiService()
         service.set_manager(cast(Any, SimpleNamespace(apps={app.name: app})))
-        service._remember_app_transition_state(app.name, NodeAppTransitionState.STARTING)
+        service._app_mutations.remember_transition_state(app.name, NodeAppTransitionState.STARTING)
 
         entries = asyncio.run(service.list_apps())
 
@@ -4453,7 +4745,10 @@ class NodeApiTests(unittest.TestCase):
             def __init__(self) -> None:
                 self._messages = iter(
                     (
-                        {"type": "websocket.receive", "text": json.dumps({"type": "ping", "sample_id": "sample-1"})},
+                        {
+                            "type": "websocket.receive",
+                            "text": json.dumps({"type": "ping", "sample_id": "sample-1"}),
+                        },
                         {"type": "websocket.disconnect"},
                     )
                 )
@@ -4494,7 +4789,10 @@ class NodeApiTests(unittest.TestCase):
             def __init__(self) -> None:
                 self._messages = iter(
                     (
-                        {"type": "websocket.receive", "text": json.dumps({"type": "node_latencies"})},
+                        {
+                            "type": "websocket.receive",
+                            "text": json.dumps({"type": "node_latencies"}),
+                        },
                         {"type": "websocket.disconnect"},
                     )
                 )
@@ -4515,7 +4813,11 @@ class NodeApiTests(unittest.TestCase):
         portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
         with (
             patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile),
-            patch.object(service, "portal_node_latencies_async", new=AsyncMock(return_value={"yuki": 12, "erin": 34})),
+            patch.object(
+                service,
+                "portal_node_latencies_async",
+                new=AsyncMock(return_value={"yuki": 12, "erin": 34}),
+            ),
         ):
             asyncio.run(service._serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
 
@@ -4531,7 +4833,9 @@ class NodeApiTests(unittest.TestCase):
             ],
         )
 
-    def test_serve_presence_stream_ignores_disconnect_while_closing_websocket(self) -> None:
+    def test_serve_presence_stream_ignores_disconnect_while_closing_websocket(
+        self,
+    ) -> None:
         class _DisconnectingWebSocket:
             async def accept(self) -> None:
                 return None
@@ -4549,7 +4853,9 @@ class NodeApiTests(unittest.TestCase):
 
         asyncio.run(service._serve_presence_stream(websocket=cast(Any, _DisconnectingWebSocket())))
 
-    def test_build_chat_room_snapshot_counts_discord_guilds_as_separate_endpoints(self) -> None:
+    def test_build_chat_room_snapshot_counts_discord_guilds_as_separate_endpoints(
+        self,
+    ) -> None:
         app = _build_app(Mock())
         app.am_receiver = _DummyReceiver()
         app.chat_relay_outbound = True
@@ -4593,7 +4899,9 @@ class NodeApiTests(unittest.TestCase):
             [f"Game: {app.friendly}", "Discord: Friends", "Discord: Builders"],
         )
 
-    def test_build_chat_room_snapshot_omits_game_endpoint_when_app_is_stopped(self) -> None:
+    def test_build_chat_room_snapshot_omits_game_endpoint_when_app_is_stopped(
+        self,
+    ) -> None:
         app = _build_app(Mock())
         app.am_receiver = _DummyReceiver()
         app.chat_relay_outbound = True
@@ -4626,9 +4934,14 @@ class NodeApiTests(unittest.TestCase):
             hub.clear_room(app.name)
 
         self.assertEqual(snapshot.endpoint_count, 1)
-        self.assertEqual([summary.label for summary in snapshot.endpoint_summaries], ["Discord: Friends"])
+        self.assertEqual(
+            [summary.label for summary in snapshot.endpoint_summaries],
+            ["Discord: Friends"],
+        )
 
-    def test_update_setting_allows_blank_string_for_freeform_text_settings(self) -> None:
+    def test_update_setting_allows_blank_string_for_freeform_text_settings(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             settings_pointer = root / "settings.json"
@@ -4658,7 +4971,9 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(getattr(raised.exception, "status_code"), 403)
 
-    def test_actor_level_requirement_returns_forbidden_for_insufficient_level(self) -> None:
+    def test_actor_level_requirement_returns_forbidden_for_insufficient_level(
+        self,
+    ) -> None:
         service = NodeApiService()
         acl = Access_Control(pointer=Path("missing-users.json"))
         acl._roles = {42: Power_Level.sudo}  # type: ignore[attr-defined]
@@ -4688,9 +5003,14 @@ class NodeApiTests(unittest.TestCase):
     def test_factorio_mod_settings_access_requires_sudo(self) -> None:
         self.assertEqual(FACTORIO_MOD_SETTINGS_ACCESS_LEVEL, Power_Level.sudo)
 
-    def test_required_mod_mutation_level_allows_admin_toggle_for_regular_mods(self) -> None:
+    def test_required_mod_mutation_level_allows_admin_toggle_for_regular_mods(
+        self,
+    ) -> None:
         self.assertEqual(required_mod_mutation_level(NodeModMutationAction.ENABLE), Power_Level.admin)
-        self.assertEqual(required_mod_mutation_level(NodeModMutationAction.DISABLE), Power_Level.admin)
+        self.assertEqual(
+            required_mod_mutation_level(NodeModMutationAction.DISABLE),
+            Power_Level.admin,
+        )
         self.assertEqual(
             required_mod_mutation_level(NodeModMutationAction.ENABLE, is_protected=True),
             Power_Level.sudo,
@@ -4707,10 +5027,13 @@ class NodeApiTests(unittest.TestCase):
             client_mod_path = root / "client-mods" / "example.jar"
             mod = _TestMod(Mod_Config(name=mod_path.name, directory=mods_dir, client_path=client_mod_path))
 
-            entry = NodeApiService._mod_entry(mod)
+            entry = NodeModService._mod_entry(mod)
 
         self.assertEqual(entry.client_path, str(client_mod_path))
-        self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()).client_path, str(client_mod_path))
+        self.assertEqual(
+            NodeModEntry.from_mapping(entry.to_mapping()).client_path,
+            str(client_mod_path),
+        )
 
     def test_mod_entry_includes_launcher_description(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -4736,7 +5059,7 @@ class NodeApiTests(unittest.TestCase):
                 )
             )
 
-            entry = NodeApiService._mod_entry(mod)
+            entry = NodeModService._mod_entry(mod)
 
         self.assertEqual(entry.description, "Example launcher description.")
         self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()).description, entry.description)
@@ -4752,7 +5075,7 @@ class NodeApiTests(unittest.TestCase):
             mod_path.write_bytes(b"mod-data")
             mod = _DescriptionMod(Mod_Config(name="example.jar", directory=mods_dir))
 
-            entry = NodeApiService._mod_entry(mod)
+            entry = NodeModService._mod_entry(mod)
 
         self.assertEqual(entry.description, "Example local description.")
         self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()).description, entry.description)
@@ -4772,7 +5095,7 @@ class NodeApiTests(unittest.TestCase):
                 )
             )
 
-            entry = NodeApiService._mod_entry(mod)
+            entry = NodeModService._mod_entry(mod)
 
         self.assertIs(entry.placement, ModPlacement.CLIENT_ONLY)
         self.assertFalse(entry.server_loadable)
@@ -4781,7 +5104,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.source_path, str(client_path))
         self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()), entry)
 
-    def test_mod_entry_marks_server_disabled_mod_as_client_pack_ineligible(self) -> None:
+    def test_mod_entry_marks_server_disabled_mod_as_client_pack_ineligible(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             mods_dir = Path(temp_dir)
             disabled_path = mods_dir / "example.jar.disabled"
@@ -4794,7 +5119,7 @@ class NodeApiTests(unittest.TestCase):
                 )
             )
 
-            entry = NodeApiService._mod_entry(mod)
+            entry = NodeModService._mod_entry(mod)
 
         self.assertFalse(entry.client_pack_eligible)
         self.assertFalse(NodeModEntry.from_mapping(entry.to_mapping()).client_pack_eligible)
@@ -4833,10 +5158,20 @@ class NodeApiTests(unittest.TestCase):
             mod_path = Path(temp_dir) / "example.jar"
             mod_path.write_bytes(b"mod-data")
             mod = _TestMod(
-                Mod_Config(name="example.jar", directory=Path(temp_dir), enabled=False, mod_type=ModType.COREMOD)
+                Mod_Config(
+                    name="example.jar",
+                    directory=Path(temp_dir),
+                    enabled=False,
+                    mod_type=ModType.COREMOD,
+                )
             )
             updated = _TestMod(
-                Mod_Config(name="example.jar", directory=Path(temp_dir), enabled=True, mod_type=ModType.COREMOD)
+                Mod_Config(
+                    name="example.jar",
+                    directory=Path(temp_dir),
+                    enabled=True,
+                    mod_type=ModType.COREMOD,
+                )
             )
             manager = Mock()
             manager.reload_mods = AsyncMock()
@@ -5046,7 +5381,7 @@ class NodeApiTests(unittest.TestCase):
             )
 
             with patch(
-                "node_api.resolve_launcher_metadata_resolution",
+                "node_api_mod_service.resolve_launcher_metadata_resolution",
                 new=AsyncMock(return_value=expected),
             ) as resolve_metadata:
                 result = asyncio.run(
@@ -5099,7 +5434,9 @@ class NodeApiTests(unittest.TestCase):
         manager.reload_mods.assert_awaited_once_with()
         acl.perm_check.assert_not_awaited()
 
-    def test_resolve_mod_launcher_metadata_uses_effective_pages_without_mutating_mod(self) -> None:
+    def test_resolve_mod_launcher_metadata_uses_effective_pages_without_mutating_mod(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             mod_path = Path(temp_dir) / "example.jar"
             mod_path.write_bytes(b"mod-data")
@@ -5122,7 +5459,7 @@ class NodeApiTests(unittest.TestCase):
             expected = LauncherMetadataDiscovery()
 
             with patch(
-                "node_api.discover_launcher_metadata",
+                "node_api_mod_service.discover_launcher_metadata",
                 new=AsyncMock(return_value=expected),
             ) as discover_metadata:
                 result = asyncio.run(
@@ -5174,7 +5511,7 @@ class NodeApiTests(unittest.TestCase):
             expected = ModPageDiscovery()
 
             with patch(
-                "node_api.discover_mod_pages",
+                "node_api_mod_service.discover_mod_pages",
                 new=AsyncMock(return_value=expected),
             ) as discover_pages:
                 result = asyncio.run(
@@ -5204,7 +5541,9 @@ class NodeApiTests(unittest.TestCase):
         )
         manager.update_properties.assert_not_called()
 
-    def test_bulk_metadata_discovery_uses_all_non_builtin_mods_without_mutating(self) -> None:
+    def test_bulk_metadata_discovery_uses_all_non_builtin_mods_without_mutating(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             mod_path = Path(temp_dir) / "example.jar"
             mod_path.write_bytes(b"mod-data")
@@ -5220,7 +5559,7 @@ class NodeApiTests(unittest.TestCase):
             expected = BulkLauncherMetadataDiscovery()
 
             with patch(
-                "node_api.discover_bulk_launcher_metadata",
+                "node_api_mod_service.discover_bulk_launcher_metadata",
                 new=AsyncMock(return_value=expected),
             ) as discover_metadata:
                 result = asyncio.run(
@@ -5238,7 +5577,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(targets[0].mod_name, mod.name)
         manager.apply_discovered_launcher_metadata.assert_not_called()
 
-    def test_bulk_metadata_apply_uses_cached_exact_matches_without_provider_requests(self) -> None:
+    def test_bulk_metadata_apply_uses_cached_exact_matches_without_provider_requests(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             exact_path = Path(temp_dir) / "exact.jar"
             unmatched_path = Path(temp_dir) / "unmatched.jar"
@@ -5280,20 +5621,25 @@ class NodeApiTests(unittest.TestCase):
             )
             discovery = BulkLauncherMetadataDiscovery(entries=(exact_entry, unmatched_entry))
             discovery_operation_id = uuid.UUID("c50f39cb-acde-441f-ab92-3fd507c7b294")
-            service._cache_bulk_metadata_discovery(
-                app_name=app.name,
-                operation_id=discovery_operation_id,
-                discovery=discovery,
-            )
 
             with (
                 patch(
-                    "node_api.discover_bulk_launcher_metadata",
-                    new=AsyncMock(),
+                    "node_api_mod_service.discover_bulk_launcher_metadata",
+                    new=AsyncMock(return_value=discovery),
                 ) as discover_metadata,
                 patch.object(service, "_invalidate_client_pack_content"),
                 patch.object(service, "_invalidate_mod_inventory"),
             ):
+                asyncio.run(
+                    service.discover_bulk_mod_metadata(
+                        app=app,
+                        discovery_request=NodeBulkLauncherMetadataRequest(
+                            operation_id=discovery_operation_id,
+                            mod_names=(exact_mod.name, unmatched_mod.name),
+                        ),
+                        actor_user_id=42,
+                    )
+                )
                 result = asyncio.run(
                     service.apply_bulk_mod_metadata(
                         app=app,
@@ -5308,7 +5654,7 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(result.applied_mod_names, (exact_mod.name,))
         self.assertEqual(result.applied_type_mod_names, (exact_mod.name,))
-        discover_metadata.assert_not_awaited()
+        discover_metadata.assert_awaited_once()
         manager.apply_discovered_launcher_metadata.assert_awaited_once_with(
             exact_mod.name,
             exact_entry,
@@ -5336,7 +5682,7 @@ class NodeApiTests(unittest.TestCase):
                 return BulkLauncherMetadataDiscovery()
 
             operation_task = asyncio.create_task(
-                service._run_bulk_metadata_operation(
+                service.run_bulk_metadata_operation(
                     app_name="minecraft_alpha",
                     operation_id=operation_id,
                     action=action,
@@ -5345,7 +5691,7 @@ class NodeApiTests(unittest.TestCase):
             await action_started.wait()
 
             self.assertTrue(
-                service._cancel_bulk_metadata_operation(
+                service.cancel_bulk_metadata_operation(
                     app_name="minecraft_alpha",
                     operation_id=operation_id,
                 )
@@ -5353,7 +5699,7 @@ class NodeApiTests(unittest.TestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await operation_task
             self.assertFalse(
-                service._cancel_bulk_metadata_operation(
+                service.cancel_bulk_metadata_operation(
                     app_name="minecraft_alpha",
                     operation_id=operation_id,
                 )
@@ -5361,7 +5707,9 @@ class NodeApiTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_update_client_pack_config_uses_admin_access_and_single_bulk_write(self) -> None:
+    def test_update_client_pack_config_uses_admin_access_and_single_bulk_write(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             alpha = _TestMod(Mod_Config(name="alpha.jar", directory=Path(temp_dir)))
             beta = _TestMod(Mod_Config(name="beta.jar", directory=Path(temp_dir)))
@@ -5378,7 +5726,7 @@ class NodeApiTests(unittest.TestCase):
             acl.perm_check = AsyncMock()
             service = NodeApiService()
             service.set_acl(cast(Any, acl))
-            service._app_entries_cache = cast(Any, object())
+            service._app_state_cache._app_entries = cast(Any, object())
             persisted_overrides: list[dict[str, object]] = []
             app.set_instance_config_change_handler(
                 lambda changed_app: persisted_overrides.append(dict(changed_app.instance_config_overrides))
@@ -5405,9 +5753,11 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(app.cfg.client_pack_content_dirty)
         self.assertEqual(app.cfg.client_pack_published_version, "2026-07-03")
         self.assertTrue(persisted_overrides[-1]["client_pack_content_dirty"])
-        self.assertIsNone(service._app_entries_cache)
+        self.assertIsNone(service._app_state_cache._app_entries)
 
-    def test_update_client_pack_config_persists_minecraft_kubejs_exclusions(self) -> None:
+    def test_update_client_pack_config_persists_minecraft_kubejs_exclusions(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             instance_directory = Path(temp_dir)
             script_directory = instance_directory / "kubejs" / "server_scripts"
@@ -5468,7 +5818,9 @@ class NodeApiTests(unittest.TestCase):
         app.invalidate_client_pack_content.assert_called_once_with()
         app.persist_instance_config_overrides.assert_called_once_with()
 
-    def test_minecraft_client_pack_entries_generate_servers_dat_and_filter_options_txt(self) -> None:
+    def test_minecraft_client_pack_entries_generate_servers_dat_and_filter_options_txt(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             overrides = root / "client-overrides"
@@ -5508,9 +5860,9 @@ class NodeApiTests(unittest.TestCase):
 
             with (
                 patch.object(NodeApiService, "node_name", new=property(lambda _service: "erin")),
-                patch.object(NodeApiService, "_known_bot_snapshots", return_value=()),
+                patch.object(NodeClientPackService, "_known_bot_snapshots", return_value=()),
             ):
-                entries = service._client_pack_entries(
+                entries = service._client_packs.entries(
                     ClientPackSelection(),
                     app=cast(App, app),
                     include_kubejs_scripts=True,
@@ -5529,7 +5881,9 @@ class NodeApiTests(unittest.TestCase):
             (_ServersDatEntry(name="ErinServer", ip="play.example.test:25565"),),
         )
 
-    def test_minecraft_client_pack_entries_prefer_direct_join_address_for_servers_dat(self) -> None:
+    def test_minecraft_client_pack_entries_prefer_direct_join_address_for_servers_dat(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "required.jar").write_bytes(b"required")
@@ -5563,11 +5917,11 @@ class NodeApiTests(unittest.TestCase):
 
             with (
                 patch.object(NodeApiService, "node_name", new=property(lambda _service: "erin")),
-                patch.object(NodeApiService, "_known_bot_snapshots", return_value=()),
+                patch.object(NodeClientPackService, "_known_bot_snapshots", return_value=()),
                 patch.object(config, "PUBLIC_ADDR", "play.example.test"),
                 patch.object(config, "PUBLIC_IP", "203.0.113.10"),
             ):
-                entries = service._client_pack_entries(
+                entries = service._client_packs.entries(
                     ClientPackSelection(),
                     app=cast(App, app),
                     include_kubejs_scripts=False,
@@ -5618,7 +5972,7 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
 
-            entries = NodeApiService()._client_pack_entries(
+            entries = NodeApiService()._client_packs.entries(
                 ClientPackSelection(),
                 app=cast(App, app),
                 include_kubejs_scripts=True,
@@ -5638,11 +5992,8 @@ class NodeApiTests(unittest.TestCase):
             features=SimpleNamespace(mod_web=SimpleNamespace(node_name="yuki")),
         )
 
-        with (
-            patch.object(NodeApiService, "node_name", new=property(lambda _service: "yuki")),
-            patch.object(NodeApiService, "_known_bot_snapshots", return_value=(snapshot,)),
-        ):
-            server_name = service._minecraft_servers_dat_server_name(service._client_pack_node_label())
+        with patch.object(NodeClientPackService, "_known_bot_snapshots", return_value=(snapshot,)):
+            server_name = service._client_packs._minecraft_servers_dat_server_name(service._client_packs._node_label())
 
         self.assertEqual(server_name, "YokoServer")
 
@@ -5666,7 +6017,7 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
-        archive_name = NodeApiService()._archive_name(
+        archive_name = NodeApiService()._client_packs.archive_name(
             app=cast(App, app),
             entries=(),
             request=NodeDownloadRequest(
@@ -5694,7 +6045,9 @@ class NodeApiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires a changelog"):
             NodeClientPackPublishRequest(changelog="   ")
 
-    def test_publish_client_pack_config_saves_default_pack_without_downloading(self) -> None:
+    def test_publish_client_pack_config_saves_default_pack_without_downloading(
+        self,
+    ) -> None:
         manager = Mock()
         manager.reload_mods = AsyncMock()
         app = _build_app(manager)
@@ -5706,18 +6059,19 @@ class NodeApiTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             app.directory = Path(temp_dir)
             with (
-                patch("node_api.build_client_pack_entries", return_value=(Mock(),)),
+                patch(
+                    "node_api_client_pack.build_client_pack_entries",
+                    return_value=(Mock(),),
+                ),
                 patch.object(
-                    service,
-                    "_client_pack_content_hash",
+                    service._client_packs,
+                    "content_hash",
                     new=AsyncMock(return_value="a" * 64),
                 ),
                 patch.object(
-                    service,
-                    "_default_client_pack_mod_snapshots",
-                    return_value=(
-                        ClientPackModSnapshot(name="alpha.jar", friendly="Alpha", version="1.0.0"),
-                    ),
+                    service._client_packs,
+                    "default_mod_snapshots",
+                    return_value=(ClientPackModSnapshot(name="alpha.jar", friendly="Alpha", version="1.0.0"),),
                 ),
                 patch("apps._app.next_client_pack_version", return_value="2026-07-04"),
             ):
@@ -5743,7 +6097,9 @@ class NodeApiTests(unittest.TestCase):
         )
         self.assertFalse(app.cfg.client_pack_content_dirty)
 
-    def test_publish_client_pack_keeps_version_when_content_hash_is_unchanged(self) -> None:
+    def test_publish_client_pack_keeps_version_when_content_hash_is_unchanged(
+        self,
+    ) -> None:
         app = _build_app(Mock())
         app.cfg.client_pack_published_hash = "a" * 64
         app.cfg.client_pack_published_version = "2026-07-04"
@@ -5764,7 +6120,9 @@ class NodeApiTests(unittest.TestCase):
         )
         self.assertFalse(app.cfg.client_pack_content_dirty)
 
-    def test_publish_client_pack_rejects_duplicate_mod_snapshots_before_persisting(self) -> None:
+    def test_publish_client_pack_rejects_duplicate_mod_snapshots_before_persisting(
+        self,
+    ) -> None:
         app = _build_app(Mock())
         app.cfg.client_pack_content_dirty = True
 
@@ -5805,7 +6163,9 @@ class NodeApiTests(unittest.TestCase):
             ],
         )
 
-    def test_client_pack_releases_reconciles_current_release_into_incomplete_history(self) -> None:
+    def test_client_pack_releases_reconciles_current_release_into_incomplete_history(
+        self,
+    ) -> None:
         app = _build_app(Mock())
         app.cfg.client_pack_published_version = "2026-07-04.3"
         app.cfg.client_pack_published_changelog = "Current changes."
@@ -5828,14 +6188,16 @@ class NodeApiTests(unittest.TestCase):
             ],
         )
 
-    def test_missing_client_overrides_directory_creates_logged_yukibot_fallback(self) -> None:
+    def test_missing_client_overrides_directory_creates_logged_yukibot_fallback(
+        self,
+    ) -> None:
         app = _build_app(Mock())
         with TemporaryDirectory() as temp_dir:
             app.directory = Path(temp_dir)
             app.cfg.client_overrides_dir = Path(temp_dir) / "client-overrides"
 
-            with self.assertLogs("node_api", level="WARNING") as captured:
-                resolved = NodeApiService._client_overrides_dir_for_pack(app)
+            with self.assertLogs("node_api_client_pack", level="WARNING") as captured:
+                resolved = NodeClientPackService.overrides_dir(app)
 
             self.assertEqual(resolved, Path(temp_dir) / ".yukibot" / "client-overrides")
             self.assertTrue(resolved.is_dir())
@@ -6093,7 +6455,9 @@ class NodeApiTests(unittest.TestCase):
         details = manager.update_app_details.call_args.args[1]
         self.assertFalse(details.relay_advancements_enabled)
 
-    def test_mutate_app_update_details_passes_generic_relay_notice_toggles(self) -> None:
+    def test_mutate_app_update_details_passes_generic_relay_notice_toggles(
+        self,
+    ) -> None:
         class _RelayNoticeApp(_DummyApp):
             relay_notice_player_session_supported = True
             relay_notice_player_death_supported = True
@@ -6157,7 +6521,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertFalse(details.relay_notice_player_death)
         self.assertFalse(details.relay_notice_progress)
 
-    def test_mutate_app_update_details_allows_single_resource_startup_override(self) -> None:
+    def test_mutate_app_update_details_allows_single_resource_startup_override(
+        self,
+    ) -> None:
         app = _build_app(Mock())
         manager = Mock()
         manager.start_blocker = Mock(return_value=None)
@@ -6391,7 +6757,9 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
-    def test_mutate_node_disk_settings_requires_root_and_returns_secondary_disk_state(self) -> None:
+    def test_mutate_node_disk_settings_requires_root_and_returns_secondary_disk_state(
+        self,
+    ) -> None:
         preferences = config.PersistedDiskPreferences(
             activity_mounts=["/mnt/data"],
             labels={"/mnt/data": "Data"},
@@ -6503,7 +6871,9 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
-    def test_mutate_discord_settings_requires_root_when_refresh_interval_changes(self) -> None:
+    def test_mutate_discord_settings_requires_root_when_refresh_interval_changes(
+        self,
+    ) -> None:
         manager = Mock()
         manager.discord_settings = Mock(
             return_value=config.DiscordSettings(
@@ -6572,7 +6942,11 @@ class NodeApiTests(unittest.TestCase):
         )
 
         async def _run_test() -> NodeAppMutationResult:
-            with patch.object(service, "build_live_app_runtime_summary", new=AsyncMock(return_value=runtime_summary)):
+            with patch.object(
+                service,
+                "build_live_app_runtime_summary",
+                new=AsyncMock(return_value=runtime_summary),
+            ):
                 result = await service.mutate_app(
                     app=app,
                     action=NodeAppMutationAction.START,
@@ -6583,7 +6957,7 @@ class NodeApiTests(unittest.TestCase):
             self.assertFalse(allow_launch_finish.is_set())
             self.assertEqual(result.message, "Start requested for Minecraft Alpha.")
             self.assertEqual(result.app_stats, runtime_summary)
-            pending_task = service._app_mutation_tasks.get(app.name.casefold())
+            pending_task = service._app_mutations._tasks.get(app.name.casefold())
             self.assertIsNotNone(pending_task)
             allow_launch_finish.set()
             if pending_task is not None:
@@ -6594,7 +6968,7 @@ class NodeApiTests(unittest.TestCase):
 
         manager.launch.assert_awaited_once_with(app)
         self.assertEqual(result.action, NodeAppMutationAction.START)
-        self.assertNotIn(app.name.casefold(), service._app_mutation_tasks)
+        self.assertNotIn(app.name.casefold(), service._app_mutations._tasks)
 
     def test_mutate_app_stop_uses_manager_end_and_live_summary(self) -> None:
         app = _build_app(Mock())
@@ -6621,16 +6995,21 @@ class NodeApiTests(unittest.TestCase):
         )
 
         with (
-            patch.object(service, "build_live_app_runtime_summary", new=AsyncMock(return_value=runtime_summary)),
+            patch.object(
+                service,
+                "build_live_app_runtime_summary",
+                new=AsyncMock(return_value=runtime_summary),
+            ),
             patch.object(service, "build_app_runtime_summary", new=AsyncMock()) as full_summary_mock,
         ):
+
             async def _run_test() -> NodeAppMutationResult:
                 result = await service.mutate_app(
                     app=app,
                     action=NodeAppMutationAction.STOP,
                     actor_user_id=42,
                 )
-                pending_task = service._app_mutation_tasks.get(app.name.casefold())
+                pending_task = service._app_mutations._tasks.get(app.name.casefold())
                 self.assertIsNotNone(pending_task)
                 if pending_task is not None:
                     await pending_task
@@ -6673,13 +7052,14 @@ class NodeApiTests(unittest.TestCase):
                 )
             ),
         ):
+
             async def _run_test() -> NodeAppMutationResult:
                 result = await service.mutate_app(
                     app=app,
                     action=NodeAppMutationAction.KILL,
                     actor_user_id=42,
                 )
-                pending_task = service._app_mutation_tasks.get(app.name.casefold())
+                pending_task = service._app_mutations._tasks.get(app.name.casefold())
                 self.assertIsNotNone(pending_task)
                 if pending_task is not None:
                     await pending_task
@@ -6724,6 +7104,7 @@ class NodeApiTests(unittest.TestCase):
                 patch.object(NodeApiService, "_app_footprint_size_bytes", return_value=8),
             ):
                 service = NodeApiService()
+
                 async def build_twice() -> tuple[NodeModList, NodeModList]:
                     return await service.build_mod_list(app), await service.build_mod_list(app)
 
@@ -6804,7 +7185,7 @@ class NodeApiTests(unittest.TestCase):
                     "_build_app_entries",
                     new=AsyncMock(side_effect=((), RuntimeError("temporary failure"))),
                 ) as build_entries,
-                patch("node_api._NODE_APP_ENTRY_CACHE_TTL_SECONDS", 0),
+                patch.object(service._app_state_cache, "_app_entry_ttl_seconds", 0),
             ):
                 first = await service.list_apps()
                 second = await service.list_apps()
@@ -6897,7 +7278,9 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(summary.runtime_fault, app.runtime_fault)
 
-    def test_build_live_app_runtime_summary_includes_activity_provider_values(self) -> None:
+    def test_build_live_app_runtime_summary_includes_activity_provider_values(
+        self,
+    ) -> None:
         class _ActivityProvider(AppActivityProvider):
             metadata = AppActivityProviderMetadata(provider_id="day", label="Day Counter")
 
@@ -6923,11 +7306,18 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
-    def test_subscribe_local_app_runtime_notifies_initial_and_changed_state(self) -> None:
+    def test_subscribe_local_app_runtime_notifies_initial_and_changed_state(
+        self,
+    ) -> None:
         async def exercise() -> None:
             app = _build_app(Mock())
             service = NodeApiService()
-            service.set_manager(cast(Any, SimpleNamespace(apps={app.name: app}, get=Mock(return_value=app))))
+            service.set_manager(
+                cast(
+                    Any,
+                    SimpleNamespace(apps={app.name: app}, get=Mock(return_value=app)),
+                )
+            )
             first_summary = NodeAppRuntimeSummary(
                 running=False,
                 enabled=True,
@@ -6961,8 +7351,16 @@ class NodeApiTests(unittest.TestCase):
                     second_notification.set()
 
             with (
-                patch.object(service, "build_live_app_runtime_summary", side_effect=build_live_summary),
-                patch("node_api._LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS", 0.01),
+                patch.object(
+                    service,
+                    "build_live_app_runtime_summary",
+                    side_effect=build_live_summary,
+                ),
+                patch.object(
+                    service._app_state_subscriptions,
+                    "_app_runtime_interval_seconds",
+                    0.01,
+                ),
             ):
                 unsubscribe = service.subscribe_local_app_runtime(app.name, on_update)
                 try:
@@ -6985,7 +7383,12 @@ class NodeApiTests(unittest.TestCase):
         async def exercise() -> None:
             app = _build_app(Mock())
             service = NodeApiService()
-            service.set_manager(cast(Any, SimpleNamespace(apps={app.name: app}, get=Mock(return_value=app))))
+            service.set_manager(
+                cast(
+                    Any,
+                    SimpleNamespace(apps={app.name: app}, get=Mock(return_value=app)),
+                )
+            )
             runtime_summary = NodeAppRuntimeSummary(
                 running=False,
                 enabled=True,
@@ -7029,8 +7432,16 @@ class NodeApiTests(unittest.TestCase):
                     second_notification.set()
 
             with (
-                patch.object(service, "build_live_app_runtime_summary", side_effect=build_live_summary),
-                patch("node_api._LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS", 0.01),
+                patch.object(
+                    service,
+                    "build_live_app_runtime_summary",
+                    side_effect=build_live_summary,
+                ),
+                patch.object(
+                    service._app_state_subscriptions,
+                    "_app_runtime_interval_seconds",
+                    0.01,
+                ),
             ):
                 unsubscribe = service.subscribe_local_app_runtime(
                     app.name,
@@ -7062,7 +7473,9 @@ class NodeApiTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_subscribe_local_node_state_notifies_initial_and_changed_state(self) -> None:
+    def test_subscribe_local_node_state_notifies_initial_and_changed_state(
+        self,
+    ) -> None:
         async def exercise() -> None:
             node_name = config.MOD_WEB_SERVER.node_name
             app_entry = NodeAppEntry(
@@ -7114,7 +7527,7 @@ class NodeApiTests(unittest.TestCase):
             service.list_apps = list_apps  # type: ignore[method-assign]
             service.build_system_summary = build_system_summary  # type: ignore[method-assign]
 
-            with patch("node_api._LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS", 0.01):
+            with patch.object(service._app_state_subscriptions, "_node_state_interval_seconds", 0.01):
                 unsubscribe = service.subscribe_local_node_state(on_update)
                 try:
                     await asyncio.wait_for(second_notification.wait(), timeout=0.2)
@@ -7194,7 +7607,11 @@ class NodeApiTests(unittest.TestCase):
 
             service = NodeApiService()
             with (
-                patch.object(service, "_calculate_app_footprint_size_bytes", side_effect=[123, 456]) as calculate_size,
+                patch.object(
+                    service,
+                    "_calculate_app_footprint_size_bytes",
+                    side_effect=[123, 456],
+                ) as calculate_size,
                 patch("node_api.time.time", side_effect=[100.0, 120.0]),
             ):
                 first = service._app_footprint_size_bytes(app)
@@ -7354,7 +7771,9 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(NodeSystemHistory.from_mapping(history.to_mapping()), history)
 
-    def test_portal_node_has_an_empty_app_inventory_without_an_app_manager(self) -> None:
+    def test_portal_node_has_an_empty_app_inventory_without_an_app_manager(
+        self,
+    ) -> None:
         async def exercise() -> None:
             portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
             with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
@@ -7405,7 +7824,10 @@ class NodeApiTests(unittest.TestCase):
             portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
             with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
                 capabilities = service.system_capabilities()
-                self.assertEqual(capabilities, NodeSystemCapabilities(actions=(NodeSystemAction.RESTART_PROCESS,)))
+                self.assertEqual(
+                    capabilities,
+                    NodeSystemCapabilities(actions=(NodeSystemAction.RESTART_PROCESS,)),
+                )
                 self.assertFalse(capabilities.supports_app_auto_restart)
                 self.assertFalse(capabilities.supports_silent_restart)
                 with self.assertRaises(HTTPException) as raised:
@@ -7444,10 +7866,16 @@ class NodeApiTests(unittest.TestCase):
 
                     state = service.read_restart_schedules()
                     self.assertEqual(NodeRestartScheduleState.from_mapping(state.to_mapping()), state)
-                    self.assertEqual([entry.target for entry in state.schedules], [RestartTarget.BOT, RestartTarget.SYSTEM])
+                    self.assertEqual(
+                        [entry.target for entry in state.schedules],
+                        [RestartTarget.BOT, RestartTarget.SYSTEM],
+                    )
                     self.assertTrue(state.schedules[0].enabled)
                     self.assertEqual(state.schedules[0].interval_minutes, 90)
-                    self.assertEqual(state.schedules[0].last_triggered_timestamp, int(triggered_at.timestamp()))
+                    self.assertEqual(
+                        state.schedules[0].last_triggered_timestamp,
+                        int(triggered_at.timestamp()),
+                    )
 
                     updated = await service.update_restart_schedule(
                         target=RestartTarget.SYSTEM,
@@ -7475,7 +7903,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 503)
         maintenance.reload.assert_called_once_with()
 
-    def test_restart_state_uses_process_sentinel_and_optional_voice_record(self) -> None:
+    def test_restart_state_uses_process_sentinel_and_optional_voice_record(
+        self,
+    ) -> None:
         service = NodeApiService()
         with (
             patch("node_api.psutil.Process") as process_cls,
@@ -7502,7 +7932,9 @@ class NodeApiTests(unittest.TestCase):
         )
         self.assertEqual(NodeRestartState.from_mapping(state.to_mapping()), state)
 
-    def test_skip_restart_schedule_requires_sudo_and_advances_next_restart(self) -> None:
+    def test_skip_restart_schedule_requires_sudo_and_advances_next_restart(
+        self,
+    ) -> None:
         async def exercise() -> None:
             with TemporaryDirectory() as temp_dir:
                 config_path = Path(temp_dir) / "configuration.json"
@@ -7528,7 +7960,10 @@ class NodeApiTests(unittest.TestCase):
                     entry = updated.schedules[0]
                     self.assertEqual(entry.skipped_through_timestamp, anchor_timestamp)
                     self.assertEqual(entry.next_restart_timestamp, anchor_timestamp + 90 * 60)
-                    self.assertEqual(NodeRestartScheduleState.from_mapping(updated.to_mapping()), updated)
+                    self.assertEqual(
+                        NodeRestartScheduleState.from_mapping(updated.to_mapping()),
+                        updated,
+                    )
 
         asyncio.run(exercise())
 
@@ -7739,7 +8174,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertFalse(state.file_exists)
         self.assertIsNone(state.size_bytes)
 
-    def test_sync_factorio_generation_from_running_world_uses_bridge_map_exchange_string(self) -> None:
+    def test_sync_factorio_generation_from_running_world_uses_bridge_map_exchange_string(
+        self,
+    ) -> None:
         app = cast(Any, object.__new__(Factorio))
         app.name = "factorio_lab"
         app.friendly = "Factorio Lab"
@@ -7748,7 +8185,10 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
 
         with (
-            patch("node_api._import_factorio_map_exchange_string", new=AsyncMock()) as import_map_exchange_string,
+            patch(
+                "apps.factorio.node_api.import_factorio_map_exchange_string",
+                new=AsyncMock(),
+            ) as import_map_exchange_string,
             patch.object(service, "_invalidate_state_caches") as invalidate_state_caches,
             patch.object(service, "factorio_generation_state", return_value=expected_state),
         ):
@@ -7779,7 +8219,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsNotNone(state.size_text)
         self.assertIsNotNone(state.modified_at)
 
-    def test_delete_factorio_mod_settings_removes_file_and_reports_missing(self) -> None:
+    def test_delete_factorio_mod_settings_removes_file_and_reports_missing(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             app_dir = Path(temp_dir)
             settings_path = app_dir / "mods" / "mod-settings.dat"
@@ -7845,16 +8287,27 @@ class NodeApiTests(unittest.TestCase):
             mod = _TestMod(Mod_Config(name=mod_path.name, directory=mod_path.parent))
             app = _build_app(Mock(get=Mock(return_value=mod), reload_mods=AsyncMock()))
 
-            with patch("node_api.compress_mod_archive_entries", new=AsyncMock(return_value=archive_path)) as compress:
-                service = NodeApiService()
-                download = asyncio.run(service._single_mod_download_file(app=app, mod=mod))
+            with patch(
+                "node_api_client_pack.compress_mod_archive_entries",
+                new=AsyncMock(return_value=archive_path),
+            ) as compress:
+                download = asyncio.run(
+                    NodeClientPackService(
+                        node_name=lambda: "yuki",
+                        invalidate_app_state=lambda _app_name: None,
+                        invalidate_mod_inventory=lambda _app_name: None,
+                    ).single_mod_download_file(app=app, mod=mod, http_exception=node_api._http_exception)
+                )
 
         self.assertTrue(download.is_archive)
         self.assertEqual(download.filename, "Minecraft_Alpha_DirectoryMod.zip")
         self.assertEqual(download.path, archive_path)
         archive_entries, archive_name = compress.await_args.args
         self.assertEqual(tuple(entry.source_path for entry in archive_entries), (mod_path,))
-        self.assertEqual(tuple(entry.archive_path.as_posix() for entry in archive_entries), ("DirectoryMod",))
+        self.assertEqual(
+            tuple(entry.archive_path.as_posix() for entry in archive_entries),
+            ("DirectoryMod",),
+        )
         self.assertEqual(archive_name, "Minecraft_Alpha_DirectoryMod.zip")
 
     def test_single_disabled_file_mod_download_uses_logical_filename(self) -> None:
@@ -7871,7 +8324,13 @@ class NodeApiTests(unittest.TestCase):
             )
             app = _build_app(Mock(get=Mock(return_value=mod), reload_mods=AsyncMock()))
 
-            download = asyncio.run(NodeApiService()._single_mod_download_file(app=app, mod=mod))
+            download = asyncio.run(
+                NodeClientPackService(
+                    node_name=lambda: "yuki",
+                    invalidate_app_state=lambda _app_name: None,
+                    invalidate_mod_inventory=lambda _app_name: None,
+                ).single_mod_download_file(app=app, mod=mod, http_exception=node_api._http_exception)
+            )
 
         self.assertFalse(download.is_archive)
         self.assertEqual(download.path, disabled_path)
@@ -7889,10 +8348,16 @@ class NodeApiTests(unittest.TestCase):
             second = _TestMod(Mod_Config(name=second_path.name, directory=second_path.parent))
             mod_manager = Mock()
             mod_manager.reload_mods = AsyncMock()
-            mod_manager.get.side_effect = {"first.jar": first, "second.jar": second}.__getitem__
+            mod_manager.get.side_effect = {
+                "first.jar": first,
+                "second.jar": second,
+            }.__getitem__
             app = _build_app(mod_manager)
 
-            with patch("node_api.compress_mod_archive_entries", new=AsyncMock(return_value=archive_path)) as compress:
+            with patch(
+                "node_api_client_pack.compress_mod_archive_entries",
+                new=AsyncMock(return_value=archive_path),
+            ) as compress:
                 service = NodeApiService()
                 response = asyncio.run(
                     service.build_mod_download_response(
@@ -7903,7 +8368,10 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(Path(response.path), archive_path)
         archive_entries, archive_name = compress.await_args.args
-        self.assertEqual(tuple(entry.source_path for entry in archive_entries), (first_path, second_path))
+        self.assertEqual(
+            tuple(entry.source_path for entry in archive_entries),
+            (first_path, second_path),
+        )
         self.assertEqual(
             tuple(entry.archive_path.as_posix() for entry in archive_entries),
             ("first.jar", "second.jar"),
@@ -7927,7 +8395,10 @@ class NodeApiTests(unittest.TestCase):
             mod_manager.list_mods.return_value = mods
             app = _build_app(mod_manager)
 
-            with patch("node_api.compress_mod_archive_entries", new=AsyncMock(return_value=archive_path)) as compress:
+            with patch(
+                "node_api_client_pack.compress_mod_archive_entries",
+                new=AsyncMock(return_value=archive_path),
+            ) as compress:
                 response = asyncio.run(
                     NodeApiService().build_mod_download_response(
                         app=app,
@@ -7958,8 +8429,13 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock(get=Mock(return_value=mod), reload_mods=AsyncMock()))
 
             with patch.object(config, "DIR_ZIPS", zips_path):
-                service = NodeApiService()
-                download = asyncio.run(service._single_mod_download_file(app=app, mod=mod))
+                download = asyncio.run(
+                    NodeClientPackService(
+                        node_name=lambda: "yuki",
+                        invalidate_app_state=lambda _app_name: None,
+                        invalidate_mod_inventory=lambda _app_name: None,
+                    ).single_mod_download_file(app=app, mod=mod, http_exception=node_api._http_exception)
+                )
                 with zipfile.ZipFile(download.path) as archive:
                     self.assertEqual(sorted(archive.namelist()), ["DirectoryMod/mod.txt"])
 
@@ -7980,7 +8456,10 @@ class NodeApiTests(unittest.TestCase):
             second = _TestMod(Mod_Config(name=second_path.name, directory=second_path.parent))
             mod_manager = Mock()
             mod_manager.reload_mods = AsyncMock()
-            mod_manager.get.side_effect = {first.name: first, second.name: second}.__getitem__
+            mod_manager.get.side_effect = {
+                first.name: first,
+                second.name: second,
+            }.__getitem__
             app = _build_app(mod_manager)
 
             with patch.object(config, "DIR_ZIPS", zips_path):
@@ -7994,7 +8473,11 @@ class NodeApiTests(unittest.TestCase):
                 with zipfile.ZipFile(Path(response.path)) as archive:
                     self.assertEqual(
                         sorted(archive.namelist()),
-                        ["mod_folder_A/config.json", "mod_folder_B/Resources/", "mod_folder_B/Resources/payload.xml"],
+                        [
+                            "mod_folder_A/config.json",
+                            "mod_folder_B/Resources/",
+                            "mod_folder_B/Resources/payload.xml",
+                        ],
                     )
 
     def test_selected_mixed_mod_download_preserves_file_and_folder_layout(self) -> None:
@@ -8011,7 +8494,10 @@ class NodeApiTests(unittest.TestCase):
             folder_mod = _TestMod(Mod_Config(name=folder_path.name, directory=folder_path.parent))
             mod_manager = Mock()
             mod_manager.reload_mods = AsyncMock()
-            mod_manager.get.side_effect = {file_mod.name: file_mod, folder_mod.name: folder_mod}.__getitem__
+            mod_manager.get.side_effect = {
+                file_mod.name: file_mod,
+                folder_mod.name: folder_mod,
+            }.__getitem__
             app = _build_app(mod_manager)
 
             with patch.object(config, "DIR_ZIPS", zips_path):
@@ -8023,7 +8509,10 @@ class NodeApiTests(unittest.TestCase):
                     )
                 )
                 with zipfile.ZipFile(Path(response.path)) as archive:
-                    self.assertEqual(sorted(archive.namelist()), ["alpha.jar", "mod_folder_B/ModInfo.xml"])
+                    self.assertEqual(
+                        sorted(archive.namelist()),
+                        ["alpha.jar", "mod_folder_B/ModInfo.xml"],
+                    )
 
     def test_marker_backed_mods_archive_with_logical_names(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -8049,7 +8538,10 @@ class NodeApiTests(unittest.TestCase):
             )
             mod_manager = Mock()
             mod_manager.reload_mods = AsyncMock()
-            mod_manager.get.side_effect = {disabled.name: disabled, client.name: client}.__getitem__
+            mod_manager.get.side_effect = {
+                disabled.name: disabled,
+                client.name: client,
+            }.__getitem__
             app = _build_app(mod_manager)
 
             with patch.object(config, "DIR_ZIPS", zips_path):
@@ -8218,7 +8710,11 @@ class NodeApiTests(unittest.TestCase):
             mod_path = temp_path / "client.jar.client"
             mod_path.write_bytes(b"published")
             client = _TestMod(
-                Mod_Config(name="client.jar", directory=temp_path, placement=ModPlacement.CLIENT_ONLY)
+                Mod_Config(
+                    name="client.jar",
+                    directory=temp_path,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
             )
             mod_manager = Mock()
             mod_manager.reload_mods = AsyncMock()
@@ -8248,7 +8744,9 @@ class NodeApiTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.status_code, 409)
 
-    def test_client_pack_download_blocks_while_configuration_is_dirty_even_when_hash_matches(self) -> None:
+    def test_client_pack_download_blocks_while_configuration_is_dirty_even_when_hash_matches(
+        self,
+    ) -> None:
         manager = Mock()
         manager.reload_mods = AsyncMock()
         app = _build_app(manager)

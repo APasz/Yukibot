@@ -2,29 +2,20 @@
 
 from __future__ import annotations
 
-from importlib import import_module
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, cast
 
-from apps._node_api import (
-    optional_int as _optional_int,
-    required_int as _required_int,
-    required_string as _required_string,
-)
-from chat_hub import ChatEvent
 from pydantic import BaseModel, field_validator, model_validator
 from pydantic.config import ConfigDict
 
-class _RuntimeSummary(Protocol):
-    def to_mapping(self) -> dict[str, object]: ...
-
-
-def _runtime_summary_from_mapping(payload: Mapping[str, object]) -> _RuntimeSummary:
-    """Resolve the runtime summary after the node API module has initialized."""
-    runtime_summary_type = getattr(import_module("node_api"), "NodeAppRuntimeSummary")
-    return cast(_RuntimeSummary, runtime_summary_type.from_mapping(payload))
+from apps._node_api import (
+    optional_int,
+    required_int,
+    required_string,
+)
+from chat_hub import ChatEvent
+from node_api_app_state import NodeAppRuntimeSummary
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +24,7 @@ class NodeChatEndpointSummary:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeChatEndpointSummary":
-        return cls(label=_required_string(payload, "label"))
+        return cls(label=required_string(payload, "label"))
 
     def to_mapping(self) -> dict[str, object]:
         return {"label": self.label}
@@ -70,11 +61,11 @@ class NodeChatRoomSnapshot:
                 raise ValueError("endpoint_summaries are invalid.")
             endpoint_summaries.append(NodeChatEndpointSummary.from_mapping(raw_summary))
         return cls(
-            room_id=_required_string(payload, "room_id"),
-            endpoint_count=_required_int(payload, "endpoint_count"),
+            room_id=required_string(payload, "room_id"),
+            endpoint_count=required_int(payload, "endpoint_count"),
             endpoint_summaries=tuple(endpoint_summaries),
             events=tuple(events),
-            revision=_optional_int(payload, "revision") or 0,
+            revision=optional_int(payload, "revision") or 0,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -117,7 +108,7 @@ class NodeChatStreamEvent:
     kind: NodeChatStreamEventKind
     room_id: str
     snapshot: NodeChatRoomSnapshot | None = None
-    app_stats: _RuntimeSummary | None = None
+    app_stats: NodeAppRuntimeSummary | None = None
     events: tuple[ChatEvent, ...] = ()
     revision: int = 0
 
@@ -133,7 +124,7 @@ class NodeChatStreamEvent:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeChatStreamEvent":
-        raw_kind = _required_string(payload, "kind")
+        raw_kind = required_string(payload, "kind")
         try:
             kind = NodeChatStreamEventKind(raw_kind)
         except ValueError as xcp:
@@ -154,11 +145,11 @@ class NodeChatStreamEvent:
             events.append(ChatEvent.from_mapping(raw_event))
         return cls(
             kind=kind,
-            room_id=_required_string(payload, "room_id"),
+            room_id=required_string(payload, "room_id"),
             snapshot=NodeChatRoomSnapshot.from_mapping(raw_snapshot) if raw_snapshot is not None else None,
-            app_stats=_runtime_summary_from_mapping(raw_app_stats) if raw_app_stats is not None else None,
+            app_stats=NodeAppRuntimeSummary.from_mapping(raw_app_stats) if raw_app_stats is not None else None,
             events=tuple(events),
-            revision=_optional_int(payload, "revision") or 0,
+            revision=optional_int(payload, "revision") or 0,
         )
 
     def to_mapping(self) -> dict[str, object]:

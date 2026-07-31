@@ -1,10 +1,9 @@
-# pyright: reportImportCycles=false
 """HTTP registration for app summaries, runtime state, and app control."""
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from fastapi import HTTPException, Request, WebSocket, WebSocketException
 from fastapi.responses import Response
@@ -12,11 +11,17 @@ from fastapi.responses import Response
 from _async_utils import run_blocking
 from apps._app import App
 from apps.minecraft.node_api import NodeMinecraftRecipeMutationRequest
-from node_api_route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
+from node_api_app_state import (
+    NodeAppMutationAction,
+    NodeAppMutationRequest,
+    required_app_mutation_scope,
+)
+from node_api_route_contracts import (
+    HttpExceptionFactory,
+    MappingResponse,
+    NodeAuthenticatedRouteService,
+)
 from node_auth import NodeApiScope
-
-if TYPE_CHECKING:
-    from node_api import NodeAppMutationAction, NodeAppMutationRequest
 
 
 class NodeAppRouteService(NodeAuthenticatedRouteService, Protocol):
@@ -93,8 +98,6 @@ def register_app_routes(
     traffic_log: logging.Logger,
 ) -> None:
     """Register app catalogue extensions, runtime, and app-control endpoints."""
-    # These request models remain in the composition module during the staged domain split.
-    from node_api import NodeAppMutationRequest, required_app_mutation_scope
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/mods")
     async def _list_mods(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
@@ -109,7 +112,11 @@ def register_app_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API runtime summary request: node=%s app=%s", service.node_name, app_name)
+        traffic_log.info(
+            "Node API runtime summary request: node=%s app=%s",
+            service.node_name,
+            app_name,
+        )
         service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         app = service._resolve_app(app_name)
         return (await service.build_cached_app_runtime_summary(app)).to_mapping()
@@ -120,7 +127,11 @@ def register_app_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API 7D2D sandbox options request: node=%s app=%s", service.node_name, app_name)
+        traffic_log.info(
+            "Node API 7D2D sandbox options request: node=%s app=%s",
+            service.node_name,
+            app_name,
+        )
         service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         app = service._resolve_app(app_name)
         return service.build_sevendays_sandbox_options_state(app).to_mapping()
@@ -131,7 +142,11 @@ def register_app_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API Minecraft recipe workspace request: node=%s app=%s", service.node_name, app_name)
+        traffic_log.info(
+            "Node API Minecraft recipe workspace request: node=%s app=%s",
+            service.node_name,
+            app_name,
+        )
         service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         app = service._resolve_app(app_name)
         return service.build_minecraft_recipe_workspace_state(app).to_mapping()
@@ -143,7 +158,11 @@ def register_app_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API Minecraft recipe mutation request: node=%s app=%s", service.node_name, app_name)
+        traffic_log.info(
+            "Node API Minecraft recipe mutation request: node=%s app=%s",
+            service.node_name,
+            app_name,
+        )
         grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.APP_MANAGE,))
         actor_user_id = service._request_actor_user_id(
             request=request,
@@ -187,7 +206,11 @@ def register_app_routes(
         app_name: str,
         access_token: str | None = None,
     ) -> None:
-        traffic_log.info("Node API app state stream request: node=%s app=%s", service.node_name, app_name)
+        traffic_log.info(
+            "Node API app state stream request: node=%s app=%s",
+            service.node_name,
+            app_name,
+        )
         service._require_websocket_token_access(
             websocket=websocket,
             access_token=access_token,

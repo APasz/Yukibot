@@ -6,19 +6,15 @@ import json
 import logging
 import math
 import mimetypes
-import struct
-import tempfile
 import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
-from datetime import datetime
-from enum import StrEnum
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import psutil
@@ -34,36 +30,23 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
-from modmux.models import Provider
-from pydantic import BaseModel, Field, field_validator, model_validator
-from pydantic.config import ConfigDict
 from starlette.middleware.cors import CORSMiddleware
 
+import apps._node_api as app_node_api
+import apps.factorio.node_api as factorio_node_api
+import apps.minecraft.node_api as minecraft_node_api
+import apps.sevendays.node_api as sevendays_node_api
 import config
+import node_api_app_state
+import node_api_client_pack
+import node_api_mod
+import node_api_mod_service
+import node_api_relay
+import node_api_system
 from _async_utils import run_blocking
 from _audit import audit_log
-from _authority import AuthorityResource, read_json_object
 from _file import File_Utils
-from _manager import App_Manager, AppDetailsUpdate, app_scope_from_name
-from _mod_ops import (
-    ArchiveDataEntry,
-    ArchiveEntry,
-    ClientPackSelection,
-    ClientPackValidationError,
-    ModArchiveEntry,
-    NonDownloadableModError,
-    RunningAppModMutationError,
-    build_admin_pack_entries,
-    build_client_pack_entries,
-    build_server_pack_entries,
-    client_pack_content_hash,
-    compress_mod_archive_entries,
-    require_app_stopped_for_mod_mutation,
-    require_downloadable,
-)
-from _mod_ops import (
-    download_entries as build_mod_download_entries,
-)
+from _manager import App_Manager, app_scope_from_name
 from _security import Access_Control, Power_Level
 from _sys import Stats_System, StatsDiskSnapshot, StatsSystemSnapshot
 from _utils import Utilities
@@ -77,30 +60,12 @@ from apps._blueprint_files import (
     classify_blueprint_upload_filenames,
 )
 from apps._config import (
-    CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     AppTitleFont,
     BulkLauncherMetadataDiscovery,
-    BulkLauncherMetadataEntry,
-    BulkLauncherMetadataStatus,
-    ClientPackConfig,
-    ClientPackKubeJsScript,
-    ClientPackMetadataConfig,
-    ClientPackModSnapshot,
-    KnownModPageProvider,
     LauncherMetadataDiscovery,
     LauncherMetadataResolution,
-    LauncherProviderUrls,
-    ModDownloadBlockReason,
-    ModMetadataOverrides,
     ModPageDiscovery,
-    ModPageLink,
     ModPlacement,
-    ModPlatformMetadata,
-    ModType,
-    is_client_pack_candidate,
-    known_mod_page_provider_for_url,
-    normalise_activity_provider_ids,
-    normalise_client_pack_changelog,
 )
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
 from apps._console import (
@@ -109,104 +74,18 @@ from apps._console import (
     ConsoleActionResult,
     execute_console_action,
 )
-from apps._launcher_metadata import (
-    BulkLauncherMetadataTarget,
-    discover_bulk_launcher_metadata,
-    discover_launcher_metadata,
-    discover_mod_pages,
-    resolve_launcher_metadata,
-    resolve_launcher_metadata_resolution,
-)
-from apps._mod import Mod, Mod_Manager
-from apps._node_api import NodeModUploadSource
-from apps._node_api import (
-    optional_string as _optional_string,
-)
-from apps._node_api import (
-    required_bool as _required_bool,
-)
-from apps._node_api import (
-    required_int as _required_int,
-)
-from apps._node_api import (
-    required_string as _required_string,
-)
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
-from apps._updater import AppUpdateInfo, AppUpdateStatus
 from apps.factorio import (
     Factorio,
-    FactorioModPortalCandidate,
-    FactorioVanillaMod,
     factorio_mod_settings_path,
 )
 from apps.factorio.node_api import (
-    FactorioModUpdateApplyResult,
     NodeFactorioGenerationState,
     NodeFactorioGenerationUpdateRequest,
     NodeFactorioMapExchangeImportRequest,
     NodeFactorioMapExchangeString,
     NodeFactorioModSettings,
-    NodeModDependencyResolutionResult,
-    NodeModPortalInstallRequest,  # pyright: ignore[reportUnusedImport]
-    NodeModPortalVersionList,
-    NodeModUpdateCheckResult,
-    NodeModUpdateDependency,
-    NodeModUpdateRequest,  # pyright: ignore[reportUnusedImport]
-)
-from apps.factorio.node_api import (
-    build_factorio_generation_state as _build_factorio_generation_state,
-)
-from apps.factorio.node_api import (
-    build_factorio_mod_settings_download_response as _build_factorio_mod_settings_download_response,
-)
-from apps.factorio.node_api import (
-    build_factorio_mod_settings_state as _build_factorio_mod_settings_state,
-)
-from apps.factorio.node_api import (
-    check_factorio_mod_update as _check_factorio_mod_update,
-)
-from apps.factorio.node_api import (
-    check_mod_update as _check_factorio_mod_update_by_name,
-)
-from apps.factorio.node_api import (
-    factorio_dependency_update_entry as _factorio_dependency_update_entry,
-)
-from apps.factorio.node_api import (
-    factorio_dependency_update_summary as _factorio_dependency_update_summary,
-)
-from apps.factorio.node_api import (
-    factorio_installed_mods_by_id as _factorio_installed_mods_by_id,
-)
-from apps.factorio.node_api import (
-    factorio_mod_update_page_url as _factorio_mod_update_page_url,
-)
-from apps.factorio.node_api import (
-    factorio_mod_versions as _factorio_mod_versions,
-)
-from apps.factorio.node_api import (
-    factorio_vanilla_mods_by_id as _factorio_vanilla_mods,
-)
-from apps.factorio.node_api import (
-    import_factorio_map_exchange_string as _import_factorio_map_exchange_string,
-)
-from apps.factorio.node_api import (
-    install_mod_from_link as _install_factorio_mod_from_link,
-)
-from apps.factorio.node_api import (
-    list_installed_mod_versions as _list_installed_factorio_mod_versions,
-)
-from apps.factorio.node_api import (
-    list_mod_link_versions as _list_factorio_mod_link_versions,
-)
-from apps.factorio.node_api import (
-    resolve_mod_link_dependencies as _resolve_factorio_mod_link_dependencies,
-)
-from apps.factorio.node_api import (
-    update_mod as _update_factorio_mod,
-)
-from apps.factorio.node_api import (
-    write_factorio_generation_settings as _write_factorio_generation_settings,
 )
 from apps.minecraft import (
     Minecraft,
@@ -218,27 +97,6 @@ from apps.minecraft.node_api import (
     NodeMinecraftRecipeMutationResult,
     NodeMinecraftRecipeWorkspaceState,
 )
-from apps.minecraft.node_api import (
-    apply_minecraft_recipe_mutation as _apply_minecraft_recipe_mutation,
-)
-from apps.minecraft.node_api import (
-    build_minecraft_item_icon_response as _build_minecraft_item_icon_response,
-)
-from apps.minecraft.node_api import (
-    build_minecraft_recipe_workspace_state as _build_minecraft_recipe_workspace_state,
-)
-from apps.minecraft.node_api import (
-    minecraft_item_icon_placeholder_svg as _minecraft_item_icon_placeholder_svg,
-)
-from apps.minecraft.pack_export import (
-    MinecraftPackExportError,
-    MinecraftPackSpec,
-    PackFormat,
-    PackPurpose,
-    client_pack_kubejs_entries,
-    discover_client_pack_kubejs_scripts,
-    export_minecraft_pack,
-)
 from apps.satisfactory.node_api import (
     NodeBlueprintEntry,
     NodeBlueprintFileEntry,
@@ -249,10 +107,14 @@ from apps.sevendays import SevenDays
 from apps.sevendays.node_api import (
     NodeSevenDaysSandboxOptionsState,
 )
-from apps.sevendays.node_api import (
-    build_sevendays_sandbox_options_state as _build_sevendays_sandbox_options_state,
+from chat_hub import (
+    ChatEndpoint,
+    ChatEndpointId,
+    ChatEndpointKind,
+    ChatEvent,
+    ChatHub,
+    ChatRoomUpdate,
 )
-from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub, ChatRoomUpdate
 from font_assets import font_assets
 from maintenance import MaintenanceService
 from map_annotations import (
@@ -265,35 +127,27 @@ from map_annotations import (
 )
 from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
 from mod_web_auth import ModWebAuthService, ModWebUser
-from node_api_chat import (
-    NodeChatEndpointSummary,
-    NodeChatRoomSnapshot,
-    NodeChatStreamEvent,
-    NodeChatStreamEventKind,
-    NodeWebChatRequest,
-)
 from node_api_app_routes import register_app_routes
 from node_api_app_state import (
-    ClientPackFilePreview,
+    _ALL_NODE_STATE_TOPICS,
     NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppFootprintSnapshot,
     NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
-    NodeAppTransitionSnapshot,
     NodeAppTransitionState,
     NodeStateStreamEvent,
     NodeStateTopic,
-    _ALL_NODE_STATE_TOPICS,
     _NodeAppPlayerSnapshot,
-    _NodeLocalAppRuntimeSubscription,
-    _NodeLocalAppRuntimeWatchState,
-    _NodeLocalNodeStateSubscription,
-    _NodeLocalNodeStateWatchState,
-    _TimedAppRuntimeSummary,
-    _TimedNodeAppEntries,
     _TimedNodeSystemSummary,
+)
+from node_api_chat import (
+    NodeChatEndpointSummary,
+    NodeChatRoomSnapshot,
+    NodeChatStreamEvent,
+    NodeChatStreamEventKind,
+    NodeWebChatRequest,
 )
 from node_api_chat_routes import register_chat_routes
 from node_api_console import (
@@ -321,12 +175,6 @@ from node_api_map_routes import register_map_routes
 from node_api_mod_routes import register_mod_routes
 from node_api_node_routes import register_node_management_routes
 from node_api_relay import (
-    NodeRelayTTSRequest as _NodeRelayTTSRequest,
-)
-from node_api_relay import (
-    NodeRelayTTSResult as _NodeRelayTTSResult,
-)
-from node_api_relay import (
     RelayTTSQueue,
 )
 from node_api_settings import (
@@ -336,15 +184,8 @@ from node_api_settings import (
     NodeSettingMutationResult,
     NodeSettingsActionResult,
 )
-from node_api_system import (
-    SYSTEM_ACTION_LABELS as _NODE_SYSTEM_ACTION_LABELS,
-)
-from node_api_system import (
-    SYSTEM_HISTORY_INTERVAL_SECONDS as _NODE_SYSTEM_HISTORY_INTERVAL_SECONDS,
-)
-from node_api_system import (
-    SYSTEM_HISTORY_RETENTION_SECONDS as _NODE_SYSTEM_HISTORY_RETENTION_SECONDS,
-)
+from node_api_settings_routes import register_settings_routes
+from node_api_storage_routes import register_storage_routes
 from node_api_system import (
     NodeRestartRecord,
     NodeRestartScheduleEntry,
@@ -363,9 +204,14 @@ from node_api_system import (
     NodeSystemSummary,
 )
 from node_api_system_routes import register_system_routes
-from node_api_settings_routes import register_settings_routes
-from node_api_storage_routes import register_storage_routes
-from node_auth import NodeAccessGrant, NodeApiScope, NodeTokenError, issue_node_token, verify_node_token
+from node_api_upload import persist_upload_to_temp
+from node_auth import (
+    NodeAccessGrant,
+    NodeApiScope,
+    NodeTokenError,
+    issue_node_token,
+    verify_node_token,
+)
 from restart_state import (
     read_process_restart_record,
     read_voice_restart_record,
@@ -374,6 +220,11 @@ from restart_targets import RestartTarget
 
 if TYPE_CHECKING:
     from _manager import App_Manager
+    from apps.factorio.node_api import (
+        NodeModDependencyResolutionResult,
+        NodeModPortalVersionList,
+        NodeModUpdateCheckResult,
+    )
 
 _NODE_API_PREFIX = "/api/node"
 _NODE_TOKEN_TTL_SECONDS = 15 * 60
@@ -386,12 +237,11 @@ _NODE_APP_ENTRY_CACHE_TTL_SECONDS = 5.0
 _NODE_SYSTEM_SUMMARY_CACHE_TTL_SECONDS = 1.0
 _LIVE_APP_RUNTIME_CACHE_TTL_SECONDS = 0.5
 _FULL_APP_RUNTIME_CACHE_TTL_SECONDS = 2.0
-_MOD_INVENTORY_CACHE_TTL_SECONDS = 5.0
-_BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS = 60.0 * 60.0
-_BULK_METADATA_DISCOVERY_CACHE_MAX_ENTRIES = 64
 _LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS = 0.75
 _LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS = 2.0
-_NODE_SYSTEM_HISTORY_MAX_SAMPLES = _NODE_SYSTEM_HISTORY_RETENTION_SECONDS // int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS)
+_NODE_SYSTEM_HISTORY_MAX_SAMPLES = node_api_system.SYSTEM_HISTORY_RETENTION_SECONDS // int(
+    node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS
+)
 _NODE_SYSTEM_LOG_MAX_LINES = 500
 _LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
@@ -450,7 +300,6 @@ def _normalised_auth_url(raw: str) -> str:
     )
 
 
-
 class WebChatRelayPublisher(Protocol):
     async def publish_web_chat(
         self,
@@ -468,632 +317,6 @@ class WebChatRelayPublisher(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class NodeModSummary:
-    total_count: int
-    enabled_count: int
-    disabled_count: int
-    coremod_count: int
-    downloadable_count: int
-    non_downloadable_count: int
-    client_only_count: int = 0
-    client_pack_eligible_count: int = 0
-
-    @property
-    def server_enabled_count(self) -> int:
-        return self.enabled_count
-
-    @property
-    def server_disabled_count(self) -> int:
-        return self.disabled_count
-
-    @property
-    def server_loadable_count(self) -> int:
-        return self.server_enabled_count + self.server_disabled_count
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeModSummary:
-        values: dict[str, int] = {}
-        for key in (
-            "total_count",
-            "enabled_count",
-            "disabled_count",
-            "coremod_count",
-            "downloadable_count",
-            "non_downloadable_count",
-        ):
-            value: object | None = payload.get(key)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"Node mod summary {key} is invalid.")
-            values[key] = value
-        raw_client_only_count: object = payload.get("client_only_count", 0)
-        if isinstance(raw_client_only_count, bool) or not isinstance(raw_client_only_count, int):
-            raise ValueError("Node mod summary client_only_count is invalid.")
-        raw_client_pack_eligible_count: object = payload.get(
-            "client_pack_eligible_count",
-            values["downloadable_count"],
-        )
-        if isinstance(raw_client_pack_eligible_count, bool) or not isinstance(raw_client_pack_eligible_count, int):
-            raise ValueError("Node mod summary client_pack_eligible_count is invalid.")
-        return cls(
-            **values,
-            client_only_count=raw_client_only_count,
-            client_pack_eligible_count=raw_client_pack_eligible_count,
-        )
-
-    def to_mapping(self) -> dict[str, int]:
-        return {
-            "total_count": self.total_count,
-            "enabled_count": self.enabled_count,
-            "disabled_count": self.disabled_count,
-            "coremod_count": self.coremod_count,
-            "downloadable_count": self.downloadable_count,
-            "non_downloadable_count": self.non_downloadable_count,
-            "server_enabled_count": self.server_enabled_count,
-            "server_disabled_count": self.server_disabled_count,
-            "server_loadable_count": self.server_loadable_count,
-            "client_only_count": self.client_only_count,
-            "client_pack_eligible_count": self.client_pack_eligible_count,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeModEntry:
-    name: str
-    friendly: str
-    enabled: bool
-    mod_type: ModType
-    coremod: bool
-    downloadable: bool
-    download_block_reason: str | None
-    download_block_label: str | None
-    origin: str
-    version: str | None
-    added: str
-    size_bytes: int
-    size_text: str
-    placement: ModPlacement
-    server_loadable: bool
-    client_pack_eligible: bool
-    archive_name: str
-    source_path: str
-    description: str | None = None
-    notes: str | None = None
-    client_path: str | None = None
-    mod_pages: tuple[ModPageLink, ...] = ()
-    metadata_overrides: ModMetadataOverrides = field(default_factory=ModMetadataOverrides)
-    client_pack: ClientPackConfig = field(default_factory=ClientPackConfig)
-    platforms: ModPlatformMetadata = field(default_factory=ModPlatformMetadata)
-
-    @property
-    def added_at(self) -> datetime:
-        try:
-            return datetime.fromisoformat(self.added)
-        except ValueError as xcp:
-            raise ValueError(f"Node mod {self.name!r} has an invalid added timestamp: {self.added!r}") from xcp
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeModEntry:
-        name: str = _required_string(payload, "name")
-        friendly: str = _required_string(payload, "friendly")
-        client_path: str | None = _optional_string(payload, "client_path")
-        enabled: bool = _required_bool(payload, "enabled")
-        coremod: bool = _required_bool(payload, "coremod")
-        raw_mod_type: str | None = _optional_string(payload, "mod_type")
-        downloadable: bool = _required_bool(payload, "downloadable")
-        download_block_reason: str | None = _optional_string(payload, "download_block_reason")
-        origin: str = _required_string(payload, "origin")
-        added: str = _required_string(payload, "added")
-        size_bytes: int = _required_int(payload, "size_bytes")
-        size_text: str = _required_string(payload, "size_text")
-        raw_client_pack: object | None = payload.get("client_pack")
-        if raw_client_pack is not None and not isinstance(raw_client_pack, Mapping):
-            raise ValueError("Node mod client_pack is invalid.")
-        raw_metadata_overrides: object | None = payload.get("metadata_overrides")
-        if raw_metadata_overrides is not None and not isinstance(raw_metadata_overrides, Mapping):
-            raise ValueError("Node mod metadata overrides are invalid.")
-        raw_mod_pages: object = payload.get("mod_pages", ())
-        if not isinstance(raw_mod_pages, (list, tuple)):
-            raise ValueError("Node mod pages are invalid.")
-        raw_platforms: object | None = payload.get("platforms")
-        if raw_platforms is not None and not isinstance(raw_platforms, Mapping):
-            raise ValueError("Node mod platform metadata is invalid.")
-        if raw_mod_type is not None:
-            mod_type: ModType = ModType(raw_mod_type)
-        elif download_block_reason == ModDownloadBlockReason.BUILTIN.value:
-            mod_type = ModType.BUILTIN
-        elif coremod:
-            mod_type = ModType.COREMOD
-        else:
-            mod_type = ModType.REGULAR
-        client_pack_payload: dict[Any, object] = {} if raw_client_pack is None else dict(raw_client_pack)
-        client_pack_payload.setdefault(
-            "included_in_client",
-            mod_type.included_in_client_by_default,
-        )
-        client_pack: ClientPackConfig = ClientPackConfig.model_validate(client_pack_payload)
-        raw_placement: str | None = _optional_string(payload, "placement")
-        placement: ModPlacement = (
-            (ModPlacement.SERVER_ENABLED if enabled else ModPlacement.SERVER_DISABLED)
-            if raw_placement is None
-            else ModPlacement(raw_placement)
-        )
-        if raw_placement is not None and enabled is not placement.enabled:
-            raise ValueError("Node mod enabled state conflicts with placement.")
-        raw_server_loadable: object | None = payload.get("server_loadable")
-        server_loadable: bool = (
-            placement.server_loadable if raw_server_loadable is None else _required_bool(payload, "server_loadable")
-        )
-        if server_loadable is not placement.server_loadable:
-            raise ValueError("Node mod server_loadable conflicts with placement.")
-        raw_client_pack_eligible: object | None = payload.get("client_pack_eligible")
-        expected_client_pack_eligible: bool = (
-            is_client_pack_candidate(placement, mod_type.side) and client_pack.included_in_client and downloadable
-        )
-        client_pack_eligible: bool = (
-            expected_client_pack_eligible
-            if raw_client_pack_eligible is None
-            else _required_bool(payload, "client_pack_eligible")
-        )
-        if client_pack_eligible is not expected_client_pack_eligible:
-            raise ValueError("Node mod client_pack_eligible conflicts with classification.")
-        return cls(
-            name=name,
-            friendly=friendly,
-            client_path=client_path,
-            enabled=enabled,
-            mod_type=mod_type,
-            coremod=coremod,
-            downloadable=downloadable,
-            download_block_reason=download_block_reason,
-            download_block_label=_optional_string(payload, "download_block_label"),
-            origin=origin,
-            version=_optional_string(payload, "version"),
-            added=added,
-            size_bytes=size_bytes,
-            size_text=size_text,
-            placement=placement,
-            server_loadable=server_loadable,
-            client_pack_eligible=client_pack_eligible,
-            archive_name=_optional_string(payload, "archive_name") or name,
-            source_path=_optional_string(payload, "source_path") or client_path or name,
-            description=_optional_string(payload, "description"),
-            notes=_optional_string(payload, "notes"),
-            mod_pages=tuple(
-                ModPageLink.model_validate(page) for page in cast(list[object] | tuple[object, ...], raw_mod_pages)
-            ),
-            metadata_overrides=(
-                ModMetadataOverrides()
-                if raw_metadata_overrides is None
-                else ModMetadataOverrides.model_validate(dict(raw_metadata_overrides))
-            ),
-            client_pack=client_pack,
-            platforms=(
-                ModPlatformMetadata()
-                if raw_platforms is None
-                else ModPlatformMetadata.model_validate(dict(raw_platforms))
-            ),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "name": self.name,
-            "friendly": self.friendly,
-            "client_path": self.client_path,
-            "enabled": self.enabled,
-            "mod_type": self.mod_type.value,
-            "coremod": self.coremod,
-            "downloadable": self.downloadable,
-            "download_block_reason": self.download_block_reason,
-            "download_block_label": self.download_block_label,
-            "origin": self.origin,
-            "version": self.version,
-            "added": self.added,
-            "size_bytes": self.size_bytes,
-            "size_text": self.size_text,
-            "placement": self.placement.value,
-            "server_loadable": self.server_loadable,
-            "client_pack_eligible": self.client_pack_eligible,
-            "archive_name": self.archive_name,
-            "source_path": self.source_path,
-            "description": self.description,
-            "notes": self.notes,
-            "mod_pages": [page.model_dump(mode="json") for page in self.mod_pages],
-            "metadata_overrides": self.metadata_overrides.model_dump(mode="json"),
-            "client_pack": self.client_pack.model_dump(mode="json"),
-            "platforms": self.platforms.model_dump(mode="json"),
-        }
-
-
-class NodeModMutationAction(StrEnum):
-    ENABLE = "enable"
-    DISABLE = "disable"
-    TOGGLE_COREMOD = "toggle_coremod"
-    TOGGLE_DOWNLOAD_BLOCK = "toggle_download_block"
-    UPDATE_PROPERTIES = "update_properties"
-    UPDATE_NOTES = "update_notes"
-    DELETE = "delete"
-
-
-def _get_mod_or_404(manager: Mod_Manager, mod_name: str) -> Mod:
-    try:
-        return manager.get(mod_name)
-    except ModuleNotFoundError as xcp:
-        raise _http_exception(404, str(xcp)) from xcp
-
-
-def required_mod_mutation_level(
-    action: NodeModMutationAction,
-    *,
-    is_protected: bool = False,
-) -> Power_Level:
-    if action in {NodeModMutationAction.ENABLE, NodeModMutationAction.DISABLE}:
-        return Power_Level.sudo if is_protected else Power_Level.admin
-    if action in {
-        NodeModMutationAction.TOGGLE_COREMOD,
-        NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK,
-        NodeModMutationAction.UPDATE_PROPERTIES,
-        NodeModMutationAction.DELETE,
-    }:
-        return Power_Level.sudo
-    if action is NodeModMutationAction.UPDATE_NOTES:
-        return Power_Level.admin
-    raise ValueError(f"Unsupported mod mutation action: {action}")
-
-
-class NodeModMutationRequest(BaseModel):
-    action: NodeModMutationAction
-
-
-class NodeModPropertiesUpdateRequest(BaseModel):
-    mod_type: ModType
-    download_block_reason: ModDownloadBlockReason | None
-    metadata_overrides: ModMetadataOverrides
-    mod_pages: tuple[ModPageLink, ...] | None = None
-    client_pack: ClientPackConfig | None = None
-    launcher_urls: LauncherProviderUrls = Field(default_factory=LauncherProviderUrls)
-
-
-class NodeModNotesUpdateRequest(BaseModel):
-    notes: str | None = None
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-
-class NodeLauncherProviderSelectionRequest(BaseModel):
-    providers: tuple[Provider, ...] | None = None
-
-    model_config = ConfigDict(extra="forbid")
-
-
-class NodeModMetadataFetchRequest(NodeLauncherProviderSelectionRequest):
-    launcher_urls: LauncherProviderUrls
-
-
-class NodeModMetadataResolveRequest(NodeLauncherProviderSelectionRequest):
-    mod_pages: tuple[ModPageLink, ...]
-    existing_launcher_urls: LauncherProviderUrls = Field(default_factory=LauncherProviderUrls)
-
-
-class NodeModPageResolveRequest(NodeLauncherProviderSelectionRequest):
-    mod_pages: tuple[ModPageLink, ...]
-
-
-class NodeBulkLauncherMetadataRequest(BaseModel):
-    operation_id: uuid.UUID = Field(default_factory=uuid.uuid4)
-    mod_names: tuple[str, ...] = ()
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    @field_validator("mod_names", mode="before")
-    @classmethod
-    def validate_mod_names(cls, raw: object) -> object:
-        if not isinstance(raw, (list, tuple)):
-            raise TypeError("bulk launcher metadata mod names must be a list")
-        return raw
-
-    @model_validator(mode="after")
-    def validate_unique_mod_names(self) -> NodeBulkLauncherMetadataRequest:
-        if any(not name for name in self.mod_names):
-            raise ValueError("bulk launcher metadata mod names must not be blank")
-        if len(self.mod_names) != len(set(self.mod_names)):
-            raise ValueError("bulk launcher metadata mod names must be unique")
-        return self
-
-
-class NodeBulkLauncherMetadataApplyRequest(NodeBulkLauncherMetadataRequest):
-    discovery_operation_id: uuid.UUID
-    apply_suggested_type_mod_names: tuple[str, ...] = ()
-
-    @field_validator("apply_suggested_type_mod_names", mode="before")
-    @classmethod
-    def validate_apply_suggested_type_mod_names(cls, raw: object) -> object:
-        if not isinstance(raw, (list, tuple)):
-            raise TypeError("bulk launcher metadata type selections must be a list")
-        return raw
-
-    @model_validator(mode="after")
-    def validate_type_selections(self) -> NodeBulkLauncherMetadataApplyRequest:
-        selected_names = self.apply_suggested_type_mod_names
-        if any(not name for name in selected_names):
-            raise ValueError("bulk launcher metadata type selection names must not be blank")
-        if len(selected_names) != len(set(selected_names)):
-            raise ValueError("bulk launcher metadata type selection names must be unique")
-        if not set(selected_names).issubset(self.mod_names):
-            raise ValueError("bulk launcher metadata type selections must be selected for apply")
-        return self
-
-
-class NodeBulkLauncherMetadataApplyResult(BaseModel):
-    discovery: BulkLauncherMetadataDiscovery
-    applied_mod_names: tuple[str, ...] = ()
-    applied_type_mod_names: tuple[str, ...] = ()
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class NodeClientPackModConfigUpdate(BaseModel):
-    mod_name: str = Field(min_length=1)
-    client_pack: ClientPackConfig
-
-
-class NodeClientPackConfigUpdateRequest(BaseModel):
-    mods: tuple[NodeClientPackModConfigUpdate, ...]
-    kubejs_scripts: tuple[ClientPackKubeJsScript, ...] | None = None
-    metadata: ClientPackMetadataConfig | None = None
-
-    @model_validator(mode="after")
-    def validate_unique_mod_names(self) -> NodeClientPackConfigUpdateRequest:
-        mod_names = tuple(update.mod_name for update in self.mods)
-        if len(mod_names) != len(set(mod_names)):
-            raise ValueError("client-pack configuration contains duplicate mod names")
-        if self.kubejs_scripts is not None:
-            script_paths = tuple(script.relative_path for script in self.kubejs_scripts)
-            if len(script_paths) != len(set(script_paths)):
-                raise ValueError("client-pack configuration contains duplicate KubeJS script paths")
-        return self
-
-
-class NodeClientPackPublishRequest(BaseModel):
-    changelog: str = Field(min_length=1, max_length=CLIENT_PACK_CHANGELOG_MAX_LENGTH)
-
-    @field_validator("changelog", mode="before")
-    @classmethod
-    def validate_changelog(cls, value: object) -> str:
-        changelog = normalise_client_pack_changelog(value, required=True)
-        assert changelog is not None
-        return changelog
-
-
-@dataclass(frozen=True, slots=True)
-class NodeModMutationResult:
-    app_name: str
-    app_friendly: str
-    node: str
-    mod_name: str
-    action: NodeModMutationAction
-    message: str
-    mod: NodeModEntry | None
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModMutationResult":
-        app_name = _required_string(payload, "app_name")
-        app_friendly = _required_string(payload, "app_friendly")
-        node = _required_string(payload, "node")
-        mod_name = _required_string(payload, "mod_name")
-        message = _required_string(payload, "message")
-        raw_action = _required_string(payload, "action")
-        try:
-            action = NodeModMutationAction(raw_action)
-        except ValueError as xcp:
-            raise ValueError("Node mod mutation action is invalid.") from xcp
-        raw_mod = payload.get("mod")
-        if raw_mod is not None and not isinstance(raw_mod, Mapping):
-            raise ValueError("Node mod mutation mod is invalid.")
-        return cls(
-            app_name=app_name,
-            app_friendly=app_friendly,
-            node=node,
-            mod_name=mod_name,
-            action=action,
-            message=message,
-            mod=NodeModEntry.from_mapping(raw_mod) if raw_mod is not None else None,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "mod_name": self.mod_name,
-            "action": self.action.value,
-            "message": self.message,
-            "mod": self.mod.to_mapping() if self.mod is not None else None,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeModUploadResult:
-    app_name: str
-    app_friendly: str
-    node: str
-    message: str
-    mod: NodeModEntry
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModUploadResult":
-        raw_mod = payload.get("mod")
-        if not isinstance(raw_mod, Mapping):
-            raise ValueError("Node mod upload mod is invalid.")
-        mod_payload = cast(Mapping[str, object], raw_mod)
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            message=_required_string(payload, "message"),
-            mod=NodeModEntry.from_mapping(mod_payload),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "message": self.message,
-            "mod": self.mod.to_mapping(),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeModUploadBatchResult:
-    app_name: str
-    app_friendly: str
-    node: str
-    message: str
-    mods: tuple[NodeModEntry, ...]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModUploadBatchResult":
-        raw_mods = payload.get("mods")
-        if isinstance(raw_mods, str) or not isinstance(raw_mods, Sequence):
-            raise ValueError("Node mod upload mods are invalid.")
-        mods: list[NodeModEntry] = []
-        for raw_mod in raw_mods:
-            if not isinstance(raw_mod, Mapping):
-                raise ValueError("Node mod upload mods are invalid.")
-            mods.append(NodeModEntry.from_mapping(cast(Mapping[str, object], raw_mod)))
-        if not mods:
-            raise ValueError("Node mod upload mods are invalid.")
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            message=_required_string(payload, "message"),
-            mods=tuple(mods),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "message": self.message,
-            "mods": [mod.to_mapping() for mod in self.mods],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class _ResolvedModUploadFile:
-    upload: UploadFile
-    upload_name: str
-
-
-class NodeAppMutationAction(StrEnum):
-    START = "start"
-    STOP = "stop"
-    KILL = "kill"
-    ENABLE = "enable"
-    DISABLE = "disable"
-    RENAME = "rename"
-    UPDATE_DETAILS = "update_details"
-    UPDATE = "update"
-    VERIFY = "verify"
-    SELECT_UPDATE_BRANCH = "select_update_branch"
-
-
-def required_app_mutation_level(action: NodeAppMutationAction) -> Power_Level:
-    if action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP}:
-        return Power_Level.user
-    if action in {
-        NodeAppMutationAction.KILL,
-        NodeAppMutationAction.ENABLE,
-        NodeAppMutationAction.DISABLE,
-        NodeAppMutationAction.RENAME,
-        NodeAppMutationAction.UPDATE_DETAILS,
-        NodeAppMutationAction.UPDATE,
-        NodeAppMutationAction.VERIFY,
-        NodeAppMutationAction.SELECT_UPDATE_BRANCH,
-    }:
-        return Power_Level.sudo
-    raise ValueError(f"Unsupported app mutation action: {action}")
-
-
-def required_app_mutation_scope(action: NodeAppMutationAction) -> NodeApiScope:
-    if action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP}:
-        return NodeApiScope.APP_CONTROL
-    if action in {
-        NodeAppMutationAction.KILL,
-        NodeAppMutationAction.ENABLE,
-        NodeAppMutationAction.DISABLE,
-        NodeAppMutationAction.RENAME,
-        NodeAppMutationAction.UPDATE_DETAILS,
-        NodeAppMutationAction.UPDATE,
-        NodeAppMutationAction.VERIFY,
-        NodeAppMutationAction.SELECT_UPDATE_BRANCH,
-    }:
-        return NodeApiScope.APP_MANAGE
-    raise ValueError(f"Unsupported app mutation action: {action}")
-
-
-class NodeAppMutationRequest(BaseModel):
-    action: NodeAppMutationAction
-    friendly_name: str | None = None
-    title_font_preset: str | None = None
-    notes: str | None = None
-    lifecycle_notice_started: bool | None = None
-    lifecycle_notice_stopped: bool | None = None
-    lifecycle_notice_crashed: bool | None = None
-    relay_notice_player_session: bool | None = None
-    relay_notice_player_death: bool | None = None
-    relay_notice_progress: bool | None = None
-    relay_advancements_enabled: bool | None = None
-    factorio_chat_relay_use_shout: bool | None = None
-    rcon_requires_online_players: bool | None = None
-    disabled_activity_provider_ids: tuple[str, ...] | None = None
-    running_cpu_points: int | None = None
-    running_ram_points: int | None = None
-    startup_cpu_points: int | None = None
-    startup_ram_points: int | None = None
-    steam_update_enabled: bool | None = None
-    steam_update_selected_branch: str | None = None
-    update_branch_id: str | None = None
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    @field_validator("disabled_activity_provider_ids", mode="before")
-    @classmethod
-    def _validate_disabled_activity_provider_ids(cls, raw: object) -> tuple[str, ...] | None:
-        if raw is None:
-            return None
-        return normalise_activity_provider_ids(raw)
-
-    @model_validator(mode="after")
-    def _validate_payload(self) -> "NodeAppMutationRequest":
-        if self.action is NodeAppMutationAction.SELECT_UPDATE_BRANCH:
-            if self.update_branch_id is None or not self.update_branch_id.strip():
-                raise ValueError("Update branch id is required for branch-selection requests.")
-            return self
-        if self.action is not NodeAppMutationAction.RENAME:
-            if self.action is not NodeAppMutationAction.UPDATE_DETAILS:
-                return self
-            if self.friendly_name is None or not self.friendly_name:
-                raise ValueError("Friendly name is required for update-details requests.")
-            if self.lifecycle_notice_started is None:
-                raise ValueError("Started lifecycle notice flag is required for update-details requests.")
-            if self.lifecycle_notice_stopped is None:
-                raise ValueError("Stopped lifecycle notice flag is required for update-details requests.")
-            if self.lifecycle_notice_crashed is None:
-                raise ValueError("Crash lifecycle notice flag is required for update-details requests.")
-            if self.running_cpu_points is None:
-                raise ValueError("Running CPU points are required for update-details requests.")
-            if self.running_ram_points is None:
-                raise ValueError("Running RAM points are required for update-details requests.")
-            return self
-        if self.friendly_name is None or not self.friendly_name:
-            raise ValueError("Friendly name is required for rename requests.")
-        return self
-
-
-@dataclass(frozen=True, slots=True)
 class NodeCapacityMutationResult:
     node: str
     message: str
@@ -1105,8 +328,8 @@ class NodeCapacityMutationResult:
         if not isinstance(raw_capacity, Mapping):
             raise ValueError("Node capacity mutation capacity is invalid.")
         return cls(
-            node=_required_string(payload, "node"),
-            message=_required_string(payload, "message"),
+            node=app_node_api.required_string(payload, "node"),
+            message=app_node_api.required_string(payload, "message"),
             capacity=config.NodeCapacityProfile.model_validate(raw_capacity),
         )
 
@@ -1134,12 +357,12 @@ class NodeDiskEntry:
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeDiskEntry":
         return cls(
-            mountpoint=_required_string(payload, "mountpoint"),
-            display_name=_required_string(payload, "display_name"),
-            is_activity=_required_bool(payload, "is_activity"),
-            is_primary=_required_bool(payload, "is_primary"),
-            is_secondary=_required_bool(payload, "is_secondary"),
-            is_bot_disk=_required_bool(payload, "is_bot_disk"),
+            mountpoint=app_node_api.required_string(payload, "mountpoint"),
+            display_name=app_node_api.required_string(payload, "display_name"),
+            is_activity=app_node_api.required_bool(payload, "is_activity"),
+            is_primary=app_node_api.required_bool(payload, "is_primary"),
+            is_secondary=app_node_api.required_bool(payload, "is_secondary"),
+            is_bot_disk=app_node_api.required_bool(payload, "is_bot_disk"),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -1173,7 +396,7 @@ class NodeDiskManagementState:
         if not isinstance(raw_preferences, Mapping):
             raise ValueError("Node disk management preferences are invalid.")
         return cls(
-            node=_required_string(payload, "node"),
+            node=app_node_api.required_string(payload, "node"),
             disks=tuple(disks),
             preferences=config.PersistedDiskPreferences.model_validate(raw_preferences),
         )
@@ -1198,8 +421,8 @@ class NodeDiskSettingsMutationResult:
         if not isinstance(raw_settings, Mapping):
             raise ValueError("Node disk settings mutation settings are invalid.")
         return cls(
-            node=_required_string(payload, "node"),
-            message=_required_string(payload, "message"),
+            node=app_node_api.required_string(payload, "node"),
+            message=app_node_api.required_string(payload, "message"),
             settings=NodeDiskManagementState.from_mapping(raw_settings),
         )
 
@@ -1223,8 +446,8 @@ class NodeFontSourceSettingsMutationResult:
         if not isinstance(raw_settings, Mapping):
             raise ValueError("Node font source settings mutation settings are invalid.")
         return cls(
-            node=_required_string(payload, "node"),
-            message=_required_string(payload, "message"),
+            node=app_node_api.required_string(payload, "node"),
+            message=app_node_api.required_string(payload, "message"),
             settings=config.NodeFontSourceSettings.model_validate(raw_settings),
         )
 
@@ -1248,8 +471,8 @@ class NodeDiscordSettingsMutationResult:
         if not isinstance(raw_settings, Mapping):
             raise ValueError("Node Discord settings mutation settings are invalid.")
         return cls(
-            node=_required_string(payload, "node"),
-            message=_required_string(payload, "message"),
+            node=app_node_api.required_string(payload, "node"),
+            message=app_node_api.required_string(payload, "message"),
             settings=config.DiscordSettings.model_validate(raw_settings),
         )
 
@@ -1262,154 +485,12 @@ class NodeDiscordSettingsMutationResult:
 
 
 @dataclass(frozen=True, slots=True)
-class NodeAppMutationResult:
-    app_name: str
-    app_friendly: str
-    node: str
-    action: NodeAppMutationAction
-    message: str
-    app_stats: NodeAppRuntimeSummary | None
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppMutationResult":
-        app_name = _required_string(payload, "app_name")
-        app_friendly = _required_string(payload, "app_friendly")
-        node = _required_string(payload, "node")
-        message = _required_string(payload, "message")
-        raw_action = _required_string(payload, "action")
-        try:
-            action = NodeAppMutationAction(raw_action)
-        except ValueError as xcp:
-            raise ValueError("Node app mutation action is invalid.") from xcp
-        raw_app_stats = payload.get("app_stats")
-        if raw_app_stats is not None and not isinstance(raw_app_stats, Mapping):
-            raise ValueError("Node app mutation app_stats are invalid.")
-        return cls(
-            app_name=app_name,
-            app_friendly=app_friendly,
-            node=node,
-            action=action,
-            message=message,
-            app_stats=NodeAppRuntimeSummary.from_mapping(raw_app_stats) if raw_app_stats is not None else None,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "action": self.action.value,
-            "message": self.message,
-            "app_stats": self.app_stats.to_mapping() if self.app_stats is not None else None,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class _SquaremapProxyResponse:
     content: bytes
     media_type: str | None
     headers: tuple[tuple[str, str], ...] = ()
     is_stale: bool = False
     cache_updated_at_unix_ms: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _TimedModInventory:
-    captured_at_seconds: float
-    summary: NodeModSummary
-    mods: tuple[NodeModEntry, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _CachedBulkMetadataDiscovery:
-    captured_at_seconds: float
-    discovery: BulkLauncherMetadataDiscovery
-
-
-@dataclass(frozen=True, slots=True)
-class NodeModList:
-    app_name: str
-    app_friendly: str
-    node: str
-    summary: NodeModSummary
-    mods: tuple[NodeModEntry, ...]
-    app_stats: NodeAppRuntimeSummary | None = None
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeModList:
-        app_name = _required_string(payload, "app_name")
-        app_friendly = _required_string(payload, "app_friendly")
-        node = _required_string(payload, "node")
-        raw_summary = payload.get("summary")
-        raw_app_stats = payload.get("app_stats")
-        if not isinstance(raw_summary, Mapping):
-            raise ValueError("Node mod list summary is invalid.")
-        if raw_app_stats is not None and not isinstance(raw_app_stats, Mapping):
-            raise ValueError("Node mod list app_stats are invalid.")
-        raw_mods = payload.get("mods")
-        if not isinstance(raw_mods, Sequence) or isinstance(raw_mods, (str, bytes)):
-            raise ValueError("Node mod list mods are invalid.")
-        mods: list[NodeModEntry] = []
-        for raw_mod in raw_mods:
-            if not isinstance(raw_mod, Mapping):
-                raise ValueError("Node mod list contains an invalid mod entry.")
-            mods.append(NodeModEntry.from_mapping(raw_mod))
-        return cls(
-            app_name=app_name,
-            app_friendly=app_friendly,
-            node=node,
-            summary=NodeModSummary.from_mapping(raw_summary),
-            mods=tuple(mods),
-            app_stats=NodeAppRuntimeSummary.from_mapping(raw_app_stats) if raw_app_stats is not None else None,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "summary": self.summary.to_mapping(),
-            "mods": [mod.to_mapping() for mod in self.mods],
-            "app_stats": self.app_stats.to_mapping() if self.app_stats is not None else None,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeDownloadRequest:
-    enabled_only: bool = False
-    mod_name: str | None = None
-    mod_names: tuple[str, ...] = ()
-    selected_only: bool = False
-    excluded_only: bool = False
-    client_pack: bool = False
-    pack_purpose: PackPurpose | None = None
-    pack_format: PackFormat = PackFormat.GENERIC_ZIP
-    publish_client_pack: bool = False
-    publish_changelog: str | None = None
-    include_kubejs_scripts: bool = True
-    include_servers_dat: bool = True
-    include_options_txt: bool = True
-
-    @property
-    def resolved_pack_purpose(self) -> PackPurpose | None:
-        if self.pack_purpose is not None:
-            return self.pack_purpose
-        if self.client_pack or self.pack_format is not PackFormat.GENERIC_ZIP:
-            return PackPurpose.CLIENT
-        return None
-
-
-@dataclass(frozen=True, slots=True)
-class NodeDownloadFile:
-    path: Path
-    filename: str
-    is_archive: bool
-
-
-@dataclass(frozen=True, slots=True)
-class NodeModDownloadForm:
-    action_url: str
-    access_token: str | None
 
 
 _BulkMetadataOperationResult = TypeVar("_BulkMetadataOperationResult")
@@ -1428,136 +509,49 @@ class NodeApiService:
         self._pending_system_action: NodeSystemAction | None = None
         self._system_action_lock = threading.RLock()
         self._app_footprint_cache: dict[str, NodeAppFootprintSnapshot] = {}
-        self._app_transition_cache: dict[str, NodeAppTransitionSnapshot] = {}
-        self._app_entries_cache: _TimedNodeAppEntries | None = None
-        self._app_entries_cache_lock = asyncio.Lock()
+        self._app_state_cache = node_api_app_state.NodeAppStateCache(
+            app_entry_ttl_seconds=_NODE_APP_ENTRY_CACHE_TTL_SECONDS,
+            live_runtime_ttl_seconds=_LIVE_APP_RUNTIME_CACHE_TTL_SECONDS,
+            full_runtime_ttl_seconds=_FULL_APP_RUNTIME_CACHE_TTL_SECONDS,
+        )
         self._system_summary_cache: _TimedNodeSystemSummary | None = None
         self._system_summary_cache_lock = threading.RLock()
         self._system_history: deque[NodeSystemSample] = deque(maxlen=_NODE_SYSTEM_HISTORY_MAX_SAMPLES)
         self._system_history_lock = threading.RLock()
         self._system_history_task: asyncio.Task[None] | None = None
-        self._live_runtime_cache: dict[str, _TimedAppRuntimeSummary] = {}
-        self._live_runtime_cache_locks: dict[str, asyncio.Lock] = {}
-        self._full_runtime_cache: dict[str, _TimedAppRuntimeSummary] = {}
-        self._full_runtime_cache_locks: dict[str, asyncio.Lock] = {}
-        self._mod_inventory_cache: dict[str, _TimedModInventory] = {}
-        self._mod_inventory_cache_locks: dict[str, asyncio.Lock] = {}
-        self._app_mutation_tasks: dict[str, asyncio.Task[None]] = {}
-        self._bulk_metadata_tasks: dict[tuple[str, uuid.UUID], asyncio.Task[object]] = {}
-        self._bulk_metadata_discoveries: dict[
-            tuple[str, uuid.UUID], _CachedBulkMetadataDiscovery
-        ] = {}
-        self._local_runtime_watchers: dict[str, _NodeLocalAppRuntimeWatchState] = {}
-        self._local_runtime_watch_lock = threading.RLock()
-        self._local_node_state_watcher = _NodeLocalNodeStateWatchState()
-        self._local_node_state_watch_lock = threading.RLock()
+        self._app_mutations = node_api_app_state.NodeAppMutationService(
+            node_name=lambda: self.node_name,
+            invalidate_state_caches=lambda app_name: self._invalidate_state_caches(app_name=app_name),
+            build_runtime_summary=lambda app: self.build_app_runtime_summary(app),
+            build_live_runtime_summary=lambda app: self.build_live_app_runtime_summary(app),
+            transition_ttl_seconds=_APP_TRANSITION_TTL_SECONDS,
+        )
+        self._app_state_subscriptions = node_api_app_state.NodeAppStateSubscriptionService(
+            node_name=lambda: self.node_name,
+            is_shutting_down=lambda: self._shutting_down,
+            resolve_app=lambda app_name: self._resolve_app(app_name),
+            build_live_runtime_summary=lambda app: self.build_live_app_runtime_summary(app),
+            list_apps=lambda: self.list_apps(),
+            build_system_summary=lambda: self.build_system_summary(),
+            stream_system_summary=self._stream_system_summary,
+            app_runtime_interval_seconds=_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS,
+            node_state_interval_seconds=_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS,
+        )
+        self._client_packs = node_api_client_pack.NodeClientPackService(
+            node_name=lambda: self.node_name,
+            invalidate_app_state=lambda app_name: self._invalidate_state_caches(app_name=app_name),
+            invalidate_mod_inventory=self._invalidate_mod_inventory,
+        )
+        self._mod_service = node_api_mod_service.NodeModService(
+            node_name=lambda: self.node_name,
+            require_acl=self._require_acl,
+            build_runtime_summary=lambda app: self.build_cached_app_runtime_summary(app),
+            invalidate_client_pack_content=self._invalidate_client_pack_content,
+            invalidate_mod_inventory=self._invalidate_mod_inventory,
+            upload_mod_paths=self._upload_mod_paths_for_mod_service,
+        )
         self._routes_registered = False
         self._shutting_down = False
-
-    async def _run_bulk_metadata_operation(
-        self,
-        *,
-        app_name: str,
-        operation_id: uuid.UUID,
-        action: Callable[[], Awaitable[_BulkMetadataOperationResult]],
-    ) -> _BulkMetadataOperationResult:
-        task = asyncio.current_task()
-        if task is None:
-            raise RuntimeError("Bulk metadata operation is not running in an asyncio task.")
-        key = (app_name, operation_id)
-        existing = self._bulk_metadata_tasks.get(key)
-        if existing is not None and not existing.done():
-            raise _http_exception(409, f"Bulk metadata operation {operation_id} is already running.")
-        self._bulk_metadata_tasks[key] = cast(asyncio.Task[object], task)
-        log.info(
-            "Bulk mod metadata operation started: node=%s app=%s operation=%s",
-            self.node_name,
-            app_name,
-            operation_id,
-        )
-        try:
-            return await action()
-        except asyncio.CancelledError:
-            log.info(
-                "Bulk mod metadata operation cancelled: node=%s app=%s operation=%s",
-                self.node_name,
-                app_name,
-                operation_id,
-            )
-            raise
-        finally:
-            if self._bulk_metadata_tasks.get(key) is task:
-                self._bulk_metadata_tasks.pop(key, None)
-
-    def _cancel_bulk_metadata_operation(
-        self,
-        *,
-        app_name: str,
-        operation_id: uuid.UUID,
-    ) -> bool:
-        task = self._bulk_metadata_tasks.get((app_name, operation_id))
-        if task is None or task.done():
-            return False
-        task.cancel()
-        log.info(
-            "Bulk mod metadata cancellation requested: node=%s app=%s operation=%s",
-            self.node_name,
-            app_name,
-            operation_id,
-        )
-        return True
-
-    def _cache_bulk_metadata_discovery(
-        self,
-        *,
-        app_name: str,
-        operation_id: uuid.UUID,
-        discovery: BulkLauncherMetadataDiscovery,
-    ) -> None:
-        now = time.monotonic()
-        expired_keys = tuple(
-            key
-            for key, cached in self._bulk_metadata_discoveries.items()
-            if now - cached.captured_at_seconds
-            >= _BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS
-        )
-        for key in expired_keys:
-            self._bulk_metadata_discoveries.pop(key, None)
-        cache_key = (app_name, operation_id)
-        if (
-            cache_key not in self._bulk_metadata_discoveries
-            and len(self._bulk_metadata_discoveries)
-            >= _BULK_METADATA_DISCOVERY_CACHE_MAX_ENTRIES
-        ):
-            oldest_key = min(
-                self._bulk_metadata_discoveries,
-                key=lambda key: self._bulk_metadata_discoveries[key].captured_at_seconds,
-            )
-            self._bulk_metadata_discoveries.pop(oldest_key, None)
-        self._bulk_metadata_discoveries[cache_key] = (
-            _CachedBulkMetadataDiscovery(
-                captured_at_seconds=now,
-                discovery=discovery,
-            )
-        )
-
-    def _cached_bulk_metadata_discovery(
-        self,
-        *,
-        app_name: str,
-        operation_id: uuid.UUID,
-    ) -> BulkLauncherMetadataDiscovery:
-        key = (app_name, operation_id)
-        cached = self._bulk_metadata_discoveries.get(key)
-        if cached is None:
-            raise _http_exception(409, "Bulk metadata discovery is unavailable; run discovery again.")
-        if (
-            time.monotonic() - cached.captured_at_seconds
-            >= _BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS
-        ):
-            self._bulk_metadata_discoveries.pop(key, None)
-            raise _http_exception(409, "Bulk metadata discovery expired; run discovery again.")
-        return cached.discovery
 
     @property
     def node_name(self) -> str:
@@ -1572,18 +566,27 @@ class NodeApiService:
         self._invalidate_state_caches()
 
     def _invalidate_state_caches(self, *, app_name: str | None = None) -> None:
-        self._app_entries_cache = None
+        self._app_state_cache.invalidate(app_name)
         with self._system_summary_cache_lock:
             self._system_summary_cache = None
-        if app_name is None:
-            self._live_runtime_cache.clear()
-            self._full_runtime_cache.clear()
-        else:
-            self._live_runtime_cache.pop(app_name.casefold(), None)
-            self._full_runtime_cache.pop(app_name.casefold(), None)
 
     def _invalidate_mod_inventory(self, app_name: str) -> None:
-        self._mod_inventory_cache.pop(app_name.casefold(), None)
+        self._mod_service.invalidate_inventory(app_name)
+
+    async def _upload_mod_paths_for_mod_service(
+        self,
+        *,
+        app: App,
+        upload_sources: Sequence[app_node_api.NodeModUploadSource],
+        actor_user_id: int,
+        placement: ModPlacement,
+    ) -> node_api_mod.NodeModUploadBatchResult:
+        return await self.upload_mod_paths(
+            app=app,
+            upload_sources=upload_sources,
+            actor_user_id=actor_user_id,
+            placement=placement,
+        )
 
     def set_acl(self, acl: Access_Control) -> None:
         self._acl = acl
@@ -1612,22 +615,10 @@ class NodeApiService:
         self._shutting_down = True
         history_task = self._system_history_task
         self._system_history_task = None
-        app_mutation_tasks = tuple(self._app_mutation_tasks.values())
-        self._app_mutation_tasks.clear()
-        with self._local_runtime_watch_lock:
-            tasks = tuple(state.task for state in self._local_runtime_watchers.values() if state.task is not None)
-            self._local_runtime_watchers.clear()
-        with self._local_node_state_watch_lock:
-            node_task = self._local_node_state_watcher.task
-            self._local_node_state_watcher = _NodeLocalNodeStateWatchState()
-        for task in app_mutation_tasks:
-            task.cancel()
+        self._app_mutations.cancel_pending()
+        self._app_state_subscriptions.close()
         if history_task is not None:
             history_task.cancel()
-        for task in tasks:
-            task.cancel()
-        if node_task is not None:
-            node_task.cancel()
 
     def start_background_tasks(self) -> None:
         self._shutting_down = False
@@ -1642,7 +633,7 @@ class NodeApiService:
                     self.build_system_summary(force_refresh=True)
                 except Exception:
                     log.exception("Node API system history sample failed: node=%s", self.node_name)
-                await asyncio.sleep(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS)
+                await asyncio.sleep(node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
 
@@ -1737,43 +728,23 @@ class NodeApiService:
         @nicegui_app.get(f"{_NODE_API_PREFIX}/{{missing_path:path}}")
         async def _missing_node_api_route(missing_path: str) -> dict[str, object]:
             if self._should_log_missing_route_warning(missing_path):
-                log.warning("Node API route not found: /%s/%s", _NODE_API_PREFIX.strip("/"), missing_path)
-            raise _http_exception(404, f"Unknown node API route: /{_NODE_API_PREFIX.strip('/')}/{missing_path}")
+                log.warning(
+                    "Node API route not found: /%s/%s",
+                    _NODE_API_PREFIX.strip("/"),
+                    missing_path,
+                )
+            raise _http_exception(
+                404,
+                f"Unknown node API route: /{_NODE_API_PREFIX.strip('/')}/{missing_path}",
+            )
 
         self._routes_registered = True
 
     async def list_apps(self) -> tuple[NodeAppEntry, ...]:
-        now = time.monotonic()
-        cached = self._app_entries_cache
-        if cached is not None and now - cached.captured_at_seconds < _NODE_APP_ENTRY_CACHE_TTL_SECONDS:
-            return cached.entries
-        if cached is not None and self._app_entries_cache_lock.locked():
-            return cached.entries
-        async with self._app_entries_cache_lock:
-            now = time.monotonic()
-            cached = self._app_entries_cache
-            if cached is not None and now - cached.captured_at_seconds < _NODE_APP_ENTRY_CACHE_TTL_SECONDS:
-                return cached.entries
-            try:
-                entries = await self._build_app_entries()
-            except Exception as xcp:
-                if cached is None:
-                    raise
-                self._app_entries_cache = _TimedNodeAppEntries(
-                    captured_at_seconds=time.monotonic(),
-                    entries=cached.entries,
-                )
-                log.warning(
-                    "Node API app entry refresh failed; serving stale entries: node=%s error=%s",
-                    self.node_name,
-                    xcp,
-                )
-                return cached.entries
-            self._app_entries_cache = _TimedNodeAppEntries(
-                captured_at_seconds=time.monotonic(),
-                entries=entries,
-            )
-            return entries
+        return await self._app_state_cache.list_entries(
+            build_entries=lambda: self._build_app_entries(),
+            node_name=self.node_name,
+        )
 
     async def _build_app_entries(self) -> tuple[NodeAppEntry, ...]:
         manager = self._manager
@@ -1785,20 +756,13 @@ class NodeApiService:
         return tuple(await asyncio.gather(*(self._build_live_app_entry(app) for app in apps)))
 
     async def build_live_app_entry(self, app: App) -> NodeAppEntry:
-        now = time.monotonic()
-        cached = self._app_entries_cache
-        if cached is not None and now - cached.captured_at_seconds < _NODE_APP_ENTRY_CACHE_TTL_SECONDS:
-            app_key = app.name.casefold()
-            for entry in cached.entries:
-                if entry.name.casefold() == app_key:
-                    return entry
-        return await self._build_live_app_entry(app)
+        return await self._app_state_cache.app_entry(app, build_entry=lambda app: self._build_live_app_entry(app))
 
     async def _build_live_app_entry(self, app: App) -> NodeAppEntry:
         player_snapshot = await self._app_player_snapshot(app)
         return self.build_app_entry(
             app,
-            transition_state=self._cached_app_transition_state(app.name),
+            transition_state=self._app_mutations.transition_state(app.name),
             player_count=None if player_snapshot is None else player_snapshot.player_count,
             player_capacity=None if player_snapshot is None else player_snapshot.player_capacity,
             connected_player_names=() if player_snapshot is None else player_snapshot.connected_player_names,
@@ -1837,7 +801,7 @@ class NodeApiService:
             supports_configs=app.supports_config_files,
             scope=app_scope if isinstance(app_scope, str) else app_scope_from_name(app.name),
             transition_state=(
-                self._cached_app_transition_state(app.name) if transition_state is None else transition_state
+                self._app_mutations.transition_state(app.name) if transition_state is None else transition_state
             ),
             player_count=player_count,
             player_capacity=player_capacity,
@@ -1856,10 +820,10 @@ class NodeApiService:
             client_pack_next_version=app.next_client_pack_version,
             client_pack_published_changelog=app.cfg.client_pack_published_changelog,
             client_pack_releases=app.client_pack_releases,
-            client_pack_kubejs_scripts=self._client_pack_kubejs_scripts(app),
-            client_pack_metadata=self._client_pack_metadata(app),
-            client_pack_file_previews=self._client_pack_file_previews(app),
-            client_pack_automated_changelog=self._client_pack_automated_changelog(app),
+            client_pack_kubejs_scripts=self._client_packs.kubejs_scripts(app),
+            client_pack_metadata=self._client_packs.metadata(app),
+            client_pack_file_previews=self._client_packs.file_previews(app),
+            client_pack_automated_changelog=self._client_packs.automated_changelog(app),
             runtime_fault=getattr(app, "runtime_fault", None),
             update_info=update_info,
             update_status=update_status,
@@ -1905,24 +869,24 @@ class NodeApiService:
     def build_minecraft_recipe_workspace_state(self, app: App) -> NodeMinecraftRecipeWorkspaceState:
         if not isinstance(app, Minecraft):
             raise _http_exception(404, f"App {app.name!r} does not expose Minecraft recipe data.")
-        return _build_minecraft_recipe_workspace_state(app)
+        return minecraft_node_api.build_minecraft_recipe_workspace_state(app)
 
     def build_sevendays_sandbox_options_state(self, app: App) -> NodeSevenDaysSandboxOptionsState:
         if not isinstance(app, SevenDays):
             raise _http_exception(404, f"App {app.name!r} does not expose 7D2D sandbox options.")
-        return _build_sevendays_sandbox_options_state(app)
+        return sevendays_node_api.build_sevendays_sandbox_options_state(app)
 
     def build_minecraft_item_icon_response(self, app: App, *, item_id: str) -> Response:
         if not isinstance(app, Minecraft):
             raise _http_exception(404, f"App {app.name!r} does not expose Minecraft recipe item icons.")
         try:
-            return _build_minecraft_item_icon_response(app, item_id=item_id)
+            return minecraft_node_api.build_minecraft_item_icon_response(app, item_id=item_id)
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
 
     @staticmethod
     def minecraft_item_icon_placeholder_svg(item_id: str) -> str:
-        return _minecraft_item_icon_placeholder_svg(item_id)
+        return minecraft_node_api.minecraft_item_icon_placeholder_svg(item_id)
 
     async def append_minecraft_recipe_mutation(
         self,
@@ -1952,7 +916,7 @@ class NodeApiService:
             raise _http_exception(404, f"App {app.name!r} does not expose Minecraft recipe data.")
         await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
         try:
-            _apply_minecraft_recipe_mutation(
+            minecraft_node_api.apply_minecraft_recipe_mutation(
                 app=app,
                 mutation_request=mutation_request,
                 actor_user_id=actor_user_id,
@@ -1983,89 +947,6 @@ class NodeApiService:
             message=f"Saved Minecraft recipe change for {app.friendly}.",
             workspace=self.build_minecraft_recipe_workspace_state(app),
         )
-
-    def _cached_app_transition_state(self, app_name: str) -> NodeAppTransitionState:
-        key = app_name.casefold()
-        snapshot = self._app_transition_cache.get(key)
-        if snapshot is None:
-            return NodeAppTransitionState.NONE
-        task = self._app_mutation_tasks.get(key)
-        if task is not None and task.done():
-            self._app_mutation_tasks.pop(key, None)
-            task = None
-        if task is not None:
-            return snapshot.state
-        if time.monotonic() - snapshot.requested_at_seconds >= _APP_TRANSITION_TTL_SECONDS:
-            self._app_transition_cache.pop(key, None)
-            return NodeAppTransitionState.NONE
-        return snapshot.state
-
-    def _remember_app_transition_state(self, app_name: str, state: NodeAppTransitionState) -> None:
-        key = app_name.casefold()
-        if state is NodeAppTransitionState.NONE:
-            self._app_transition_cache.pop(key, None)
-            return
-        self._app_transition_cache[key] = NodeAppTransitionSnapshot(
-            state=state,
-            requested_at_seconds=time.monotonic(),
-        )
-
-    def _track_app_mutation_task(
-        self,
-        *,
-        app_name: str,
-        action: NodeAppMutationAction,
-        state: NodeAppTransitionState,
-        task: asyncio.Task[None],
-    ) -> None:
-        key = app_name.casefold()
-        self._remember_app_transition_state(app_name, state)
-        self._app_mutation_tasks[key] = task
-
-        def _finalise_task(completed_task: asyncio.Task[None]) -> None:
-            self._finish_app_mutation_task(app_name=app_name, action=action, task=completed_task)
-
-        task.add_done_callback(_finalise_task)
-
-    def _finish_app_mutation_task(
-        self,
-        *,
-        app_name: str,
-        action: NodeAppMutationAction,
-        task: asyncio.Task[None],
-    ) -> None:
-        key = app_name.casefold()
-        tracked_task = self._app_mutation_tasks.get(key)
-        if tracked_task is task:
-            self._app_mutation_tasks.pop(key, None)
-            self._remember_app_transition_state(app_name, NodeAppTransitionState.NONE)
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            log.info("Node API app mutation task cancelled: node=%s app=%s action=%s", self.node_name, app_name, action)
-        except Exception:
-            log.exception("Node API app mutation failed: node=%s app=%s action=%s", self.node_name, app_name, action)
-
-    async def _run_app_mutation_task(
-        self,
-        *,
-        manager: App_Manager,
-        app: App,
-        action: NodeAppMutationAction,
-    ) -> None:
-        try:
-            if action is NodeAppMutationAction.START:
-                await manager.launch(app)
-                return
-            if action is NodeAppMutationAction.STOP:
-                await manager.end(app.name)
-                return
-            if action is NodeAppMutationAction.KILL:
-                await manager.kill(app.name)
-                return
-            raise ValueError(f"Unsupported app runtime mutation action: {action}")
-        finally:
-            self._invalidate_state_caches(app_name=app.name)
 
     @staticmethod
     def app_color_hex(color: int | None) -> str | None:
@@ -2116,7 +997,7 @@ class NodeApiService:
                 elapsed = sample.captured_at_epoch_seconds - previous.captured_at_epoch_seconds
                 if elapsed < 0:
                     self._system_history.clear()
-                elif elapsed < _NODE_SYSTEM_HISTORY_INTERVAL_SECONDS:
+                elif elapsed < node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS:
                     return
             self._system_history.append(sample)
 
@@ -2124,8 +1005,8 @@ class NodeApiService:
         with self._system_history_lock:
             samples = tuple(self._system_history)
         return NodeSystemHistory(
-            retention_seconds=_NODE_SYSTEM_HISTORY_RETENTION_SECONDS,
-            sample_interval_seconds=int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS),
+            retention_seconds=node_api_system.SYSTEM_HISTORY_RETENTION_SECONDS,
+            sample_interval_seconds=int(node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS),
             samples=samples,
         )
 
@@ -2153,7 +1034,12 @@ class NodeApiService:
                 buffer[:0] = chunk
                 newline_count = buffer.count(b"\n")
 
-        lines = tuple(deque(buffer.decode(config.STR_ENCODE, errors="replace").splitlines(), maxlen=max_lines))
+        lines = tuple(
+            deque(
+                buffer.decode(config.STR_ENCODE, errors="replace").splitlines(),
+                maxlen=max_lines,
+            )
+        )
         return lines, position > 0 or newline_count > max_lines
 
     @staticmethod
@@ -2166,7 +1052,10 @@ class NodeApiService:
 
         candidates = sorted(
             (candidate for candidate in log_root.rglob("*") if candidate.is_file()),
-            key=lambda candidate: (len(candidate.relative_to(log_root).parts), candidate.as_posix().casefold()),
+            key=lambda candidate: (
+                len(candidate.relative_to(log_root).parts),
+                candidate.as_posix().casefold(),
+            ),
         )
         entries_by_target: dict[Path, tuple[NodeSystemLogEntry, Path]] = {}
         for candidate in candidates:
@@ -2192,7 +1081,10 @@ class NodeApiService:
                 ),
             )
         return tuple(
-            sorted(entries_by_target.values(), key=lambda item: item[0].relative_path.casefold())
+            sorted(
+                entries_by_target.values(),
+                key=lambda item: item[0].relative_path.casefold(),
+            )
         )
 
     def build_system_log_catalog(self) -> NodeSystemLogCatalog:
@@ -2205,8 +1097,7 @@ class NodeApiService:
         if max_lines < 1 or max_lines > _NODE_SYSTEM_LOG_MAX_LINES:
             raise ValueError(f"System log line limit must be between 1 and {_NODE_SYSTEM_LOG_MAX_LINES}.")
         path_by_relative_path = {
-            entry.relative_path: (entry, path)
-            for entry, path in self._system_log_entries_with_paths()
+            entry.relative_path: (entry, path) for entry, path in self._system_log_entries_with_paths()
         }
         resolved = path_by_relative_path.get(log_path)
         if resolved is None:
@@ -2273,7 +1164,11 @@ class NodeApiService:
         try:
             bot_uptime_seconds = max(0, int(time.time() - psutil.Process().create_time()))
         except Exception as xcp:
-            log.warning("Node API bot uptime probe failed: node=%s error=%s", self.node_name, xcp)
+            log.warning(
+                "Node API bot uptime probe failed: node=%s error=%s",
+                self.node_name,
+                xcp,
+            )
         try:
             uptime_seconds = max(0, int(time.time() - psutil.boot_time()))
         except Exception as xcp:
@@ -2283,7 +1178,11 @@ class NodeApiService:
                 capacity = self._manager.node_capacity()
                 usage = self._manager.active_resource_point_usage()
             except Exception as xcp:
-                log.warning("Node API resource point summary failed: node=%s error=%s", self.node_name, xcp)
+                log.warning(
+                    "Node API resource point summary failed: node=%s error=%s",
+                    self.node_name,
+                    xcp,
+                )
             else:
                 cpu_points_capacity = capacity.cpu_points_available
                 ram_points_capacity = capacity.ram_points_available
@@ -2295,7 +1194,10 @@ class NodeApiService:
                     app.friendly,
                     app.scope if isinstance(getattr(app, "scope", None), str) else app_scope_from_name(app.name) or "",
                 )
-                for app in sorted(self._manager.apps.values(), key=lambda item: item.friendly.casefold())
+                for app in sorted(
+                    self._manager.apps.values(),
+                    key=lambda item: item.friendly.casefold(),
+                )
                 if app.check_running()
             )
             running_names = tuple(app_friendly for _app_name, app_friendly, _app_scope in running_apps)
@@ -2303,8 +1205,12 @@ class NodeApiService:
             running_app_scopes = tuple(app_scope for _app_name, _app_friendly, app_scope in running_apps)
             start_blocked_app_ids = tuple(
                 app.name
-                for app in sorted(self._manager.apps.values(), key=lambda item: item.friendly.casefold())
-                if not app.check_running() and self._manager.start_blocker(app, include_current_activity=False) is not None
+                for app in sorted(
+                    self._manager.apps.values(),
+                    key=lambda item: item.friendly.casefold(),
+                )
+                if not app.check_running()
+                and self._manager.start_blocker(app, include_current_activity=False) is not None
             )
 
         return NodeSystemSummary(
@@ -2464,7 +1370,7 @@ class NodeApiService:
     def _discord_endpoint_channel_id(endpoint_id: ChatEndpointId) -> int | None:
         try:
             return int(endpoint_id.value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
 
     def _discord_channel_cache_entry(self, channel_id: int | None) -> object | None:
@@ -2517,7 +1423,9 @@ class NodeApiService:
             raise _http_exception(503, "Chat relay is not available on this node.")
         return await self._chat_relay.publish_chat_event(event=event)
 
-    async def queue_relay_tts(self, relay_request: _NodeRelayTTSRequest) -> _NodeRelayTTSResult:
+    async def queue_relay_tts(
+        self, relay_request: node_api_relay.NodeRelayTTSRequest
+    ) -> node_api_relay.NodeRelayTTSResult:
         if self._relay_tts_service is None:
             log.warning(
                 "Node API relay TTS unavailable: node=%s source_app=%s player=%s",
@@ -2547,7 +1455,7 @@ class NodeApiService:
                 relay_request.message_id,
                 reason,
             )
-            return _NodeRelayTTSResult(queued=False, reason=reason)
+            return node_api_relay.NodeRelayTTSResult(queued=False, reason=reason)
 
         traffic_log.info(
             "Node API relay TTS queued: node=%s source_app=%s player=%s guild=%s channel=%s message_id=%s queue_size=%s",
@@ -2559,64 +1467,7 @@ class NodeApiService:
             relay_request.message_id,
             queue_size,
         )
-        return _NodeRelayTTSResult(queued=True, spoken=spoken, queue_size=queue_size)
-
-    async def build_mod_list(self, app: App) -> NodeModList:
-        inventory, app_stats = await asyncio.gather(
-            self._cached_mod_inventory(app),
-            self.build_cached_app_runtime_summary(app),
-        )
-        traffic_log.info(
-            "Node API built mod list: node=%s app=%s mods=%s",
-            self.node_name,
-            app.name,
-            len(inventory.mods),
-        )
-        return NodeModList(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            summary=inventory.summary,
-            mods=inventory.mods,
-            app_stats=app_stats,
-        )
-
-    async def _cached_mod_inventory(self, app: App) -> _TimedModInventory:
-        app_key = app.name.casefold()
-        now = time.monotonic()
-        cached = self._mod_inventory_cache.get(app_key)
-        if cached is not None and now - cached.captured_at_seconds < _MOD_INVENTORY_CACHE_TTL_SECONDS:
-            return cached
-        lock = self._mod_inventory_cache_locks.setdefault(app_key, asyncio.Lock())
-        async with lock:
-            now = time.monotonic()
-            cached = self._mod_inventory_cache.get(app_key)
-            if cached is not None and now - cached.captured_at_seconds < _MOD_INVENTORY_CACHE_TTL_SECONDS:
-                return cached
-            await app.has_mod_manager.reload_mods()
-            mods = tuple(app.has_mod_manager.list_mods())
-            inventory = _TimedModInventory(
-                captured_at_seconds=time.monotonic(),
-                summary=NodeModSummary(
-                    total_count=len(mods),
-                    enabled_count=sum(
-                        1 for mod in mods if mod.cfg.placement is ModPlacement.SERVER_ENABLED
-                    ),
-                    disabled_count=sum(
-                        1 for mod in mods if mod.cfg.placement is ModPlacement.SERVER_DISABLED
-                    ),
-                    coremod_count=sum(1 for mod in mods if mod.counts_as_coremod),
-                    downloadable_count=sum(1 for mod in mods if mod.downloadable),
-                    non_downloadable_count=sum(1 for mod in mods if not mod.downloadable),
-                    client_only_count=sum(
-                        1 for mod in mods if mod.cfg.placement is ModPlacement.CLIENT_ONLY
-                    ),
-                    client_pack_eligible_count=sum(1 for mod in mods if mod.client_pack_eligible),
-                ),
-                mods=tuple(self._mod_entry(mod) for mod in mods),
-            )
-            self._mod_inventory_cache[app_key] = inventory
-            return inventory
+        return node_api_relay.NodeRelayTTSResult(queued=True, spoken=spoken, queue_size=queue_size)
 
     async def build_app_runtime_summary(
         self,
@@ -2633,7 +1484,7 @@ class NodeApiService:
             player_count = player_snapshot.player_count
             player_capacity = player_snapshot.player_capacity
             connected_player_names = player_snapshot.connected_player_names
-        transition_state = self._cached_app_transition_state(app.name)
+        transition_state = self._app_mutations.transition_state(app.name)
 
         storage_percent: int | None = None
         storage_free_bytes: int | None = None
@@ -2645,7 +1496,12 @@ class NodeApiService:
                 system_stats = Stats_System()
                 storage_disk = system_stats.disk_snapshot_for_path(app.directory, refresh=True)
             except Exception as xcp:
-                log.warning("Node API storage stats failed: node=%s app=%s error=%s", self.node_name, app.name, xcp)
+                log.warning(
+                    "Node API storage stats failed: node=%s app=%s error=%s",
+                    self.node_name,
+                    app.name,
+                    xcp,
+                )
             else:
                 if storage_disk is not None:
                     storage_percent = storage_disk.percent
@@ -2656,7 +1512,12 @@ class NodeApiService:
                 footprint_bytes = await run_blocking(self._app_footprint_size_bytes, app)
             except Exception as xcp:
                 if not (config.IS_SHUTTINGDOWN and _is_executor_shutdown_error(xcp)):
-                    log.warning("Node API footprint stats failed: node=%s app=%s error=%s", self.node_name, app.name, xcp)
+                    log.warning(
+                        "Node API footprint stats failed: node=%s app=%s error=%s",
+                        self.node_name,
+                        app.name,
+                        xcp,
+                    )
         try:
             activity_providers = tuple(
                 NodeAppActivityProviderEntry(
@@ -2669,7 +1530,12 @@ class NodeApiService:
                 for entry in await app.activity_provider_entries_with_values()
             )
         except Exception as xcp:
-            log.warning("Node API activity provider snapshot failed: node=%s app=%s error=%s", self.node_name, app.name, xcp)
+            log.warning(
+                "Node API activity provider snapshot failed: node=%s app=%s error=%s",
+                self.node_name,
+                app.name,
+                xcp,
+            )
 
         version = app.version_display
         if version == "none":
@@ -2693,45 +1559,32 @@ class NodeApiService:
             activity_providers=activity_providers,
         )
 
+    async def _build_runtime_summary_for_state_cache(
+        self,
+        app: App,
+        *,
+        include_storage: bool = True,
+        include_footprint: bool = True,
+    ) -> NodeAppRuntimeSummary:
+        if include_storage and include_footprint:
+            return await self.build_app_runtime_summary(app)
+        return await self.build_app_runtime_summary(
+            app,
+            include_storage=include_storage,
+            include_footprint=include_footprint,
+        )
+
     async def build_cached_app_runtime_summary(self, app: App) -> NodeAppRuntimeSummary:
-        app_key = app.name.casefold()
-        now = time.monotonic()
-        cached = self._full_runtime_cache.get(app_key)
-        if cached is not None and now - cached.captured_at_seconds < _FULL_APP_RUNTIME_CACHE_TTL_SECONDS:
-            return cached.summary
-        lock = self._full_runtime_cache_locks.setdefault(app_key, asyncio.Lock())
-        async with lock:
-            now = time.monotonic()
-            cached = self._full_runtime_cache.get(app_key)
-            if cached is not None and now - cached.captured_at_seconds < _FULL_APP_RUNTIME_CACHE_TTL_SECONDS:
-                return cached.summary
-            summary = await self.build_app_runtime_summary(app)
-            timed_summary = _TimedAppRuntimeSummary(
-                captured_at_seconds=time.monotonic(),
-                summary=summary,
-            )
-            self._full_runtime_cache[app_key] = timed_summary
-            self._live_runtime_cache[app_key] = timed_summary
-            return summary
+        return await self._app_state_cache.full_runtime_summary(
+            app,
+            build_summary=self._build_runtime_summary_for_state_cache,
+        )
 
     async def build_live_app_runtime_summary(self, app: App) -> NodeAppRuntimeSummary:
-        app_key = app.name.casefold()
-        now = time.monotonic()
-        cached = self._live_runtime_cache.get(app_key)
-        if cached is not None and now - cached.captured_at_seconds < _LIVE_APP_RUNTIME_CACHE_TTL_SECONDS:
-            return cached.summary
-        lock = self._live_runtime_cache_locks.setdefault(app_key, asyncio.Lock())
-        async with lock:
-            now = time.monotonic()
-            cached = self._live_runtime_cache.get(app_key)
-            if cached is not None and now - cached.captured_at_seconds < _LIVE_APP_RUNTIME_CACHE_TTL_SECONDS:
-                return cached.summary
-            summary = await self.build_app_runtime_summary(app, include_storage=False, include_footprint=False)
-            self._live_runtime_cache[app_key] = _TimedAppRuntimeSummary(
-                captured_at_seconds=time.monotonic(),
-                summary=summary,
-            )
-            return summary
+        return await self._app_state_cache.live_runtime_summary(
+            app,
+            build_summary=self._build_runtime_summary_for_state_cache,
+        )
 
     def build_map_manifest(self, app: App) -> MapManifest:
         manifest, _ = self._build_map_manifest_result(app)
@@ -2832,7 +1685,9 @@ class NodeApiService:
         return None
 
     @staticmethod
-    def _squaremap_passthrough_headers(response: requests.Response) -> tuple[tuple[str, str], ...]:
+    def _squaremap_passthrough_headers(
+        response: requests.Response,
+    ) -> tuple[tuple[str, str], ...]:
         allowed_names = ("Cache-Control", "ETag", "Last-Modified", "Expires")
         headers: list[tuple[str, str]] = []
         for name in allowed_names:
@@ -2970,13 +1825,19 @@ class NodeApiService:
             log.exception("Map cache for %s is invalid at %s", app.friendly, app.map_cache_path)
             return None
 
-    def _remember_squaremap_cache_entry(self, app: App, relative_path: str, proxy_response: _SquaremapProxyResponse) -> None:
+    def _remember_squaremap_cache_entry(
+        self, app: App, relative_path: str, proxy_response: _SquaremapProxyResponse
+    ) -> None:
         if not self._should_cache_squaremap_path(relative_path):
             return
         try:
             content_text = proxy_response.content.decode("utf-8")
         except UnicodeDecodeError:
-            log.warning("Skipping map cache write for %s because %s was not UTF-8 JSON.", app.friendly, relative_path)
+            log.warning(
+                "Skipping map cache write for %s because %s was not UTF-8 JSON.",
+                app.friendly,
+                relative_path,
+            )
             return
         try:
             self._map_json_cache_store(app).save_entry(
@@ -2986,7 +1847,11 @@ class NodeApiService:
                 headers=proxy_response.headers,
             )
         except ValueError:
-            log.exception("Failed to update map cache for %s at %s", app.friendly, app.map_cache_path)
+            log.exception(
+                "Failed to update map cache for %s at %s",
+                app.friendly,
+                app.map_cache_path,
+            )
 
     @staticmethod
     def _should_cache_squaremap_path(relative_path: str) -> bool:
@@ -3019,7 +1884,9 @@ class NodeApiService:
         return cast(Mapping[str, object], payload)
 
     @staticmethod
-    def _squaremap_world_summaries(payload: Mapping[str, object]) -> tuple[MapWorldSummary, ...]:
+    def _squaremap_world_summaries(
+        payload: Mapping[str, object],
+    ) -> tuple[MapWorldSummary, ...]:
         raw_worlds = payload.get("worlds")
         if isinstance(raw_worlds, (str, bytes)) or not isinstance(raw_worlds, Sequence):
             raise _http_exception(502, "Squaremap world list is invalid.")
@@ -3036,7 +1903,16 @@ class NodeApiService:
                     order=NodeApiService._mapping_int(raw_world, "order", default=index),
                 )
             )
-        return tuple(sorted(worlds, key=lambda world: (world.order, world.display_name.casefold(), world.name.casefold())))
+        return tuple(
+            sorted(
+                worlds,
+                key=lambda world: (
+                    world.order,
+                    world.display_name.casefold(),
+                    world.name.casefold(),
+                ),
+            )
+        )
 
     @staticmethod
     def _mapping_text(
@@ -3072,27 +1948,11 @@ class NodeApiService:
         *,
         include_update_state: bool = False,
     ) -> Callable[[], None]:
-        if not app_name.strip():
-            raise ValueError("App name is required for local runtime subscriptions.")
-        app_key = app_name.casefold()
-        subscription_id = uuid.uuid4().hex
-        loop = asyncio.get_running_loop()
-        with self._local_runtime_watch_lock:
-            state = self._local_runtime_watchers.get(app_key)
-            if state is None:
-                state = _NodeLocalAppRuntimeWatchState()
-                self._local_runtime_watchers[app_key] = state
-            state.callbacks[subscription_id] = _NodeLocalAppRuntimeSubscription(
-                callback=callback,
-                include_update_state=include_update_state,
-            )
-            if state.task is None or state.task.done():
-                state.task = loop.create_task(self._watch_local_app_runtime(app_name, app_key))
-
-        def _unsubscribe() -> None:
-            self._unsubscribe_local_app_runtime(app_key, subscription_id)
-
-        return _unsubscribe
+        return self._app_state_subscriptions.subscribe_app_runtime(
+            app_name,
+            callback,
+            include_update_state=include_update_state,
+        )
 
     def subscribe_local_node_state(
         self,
@@ -3100,211 +1960,7 @@ class NodeApiService:
         *,
         topics: frozenset[NodeStateTopic] = _ALL_NODE_STATE_TOPICS,
     ) -> Callable[[], None]:
-        if not topics:
-            raise ValueError("Local node state subscriptions require at least one topic.")
-        subscription_id = uuid.uuid4().hex
-        loop = asyncio.get_running_loop()
-        with self._local_node_state_watch_lock:
-            self._local_node_state_watcher.subscriptions[subscription_id] = _NodeLocalNodeStateSubscription(
-                callback=callback,
-                topics=topics,
-            )
-            task = self._local_node_state_watcher.task
-            if task is None or task.done():
-                self._local_node_state_watcher.task = loop.create_task(self._watch_local_node_state())
-
-        def _unsubscribe() -> None:
-            self._unsubscribe_local_node_state(subscription_id)
-
-        return _unsubscribe
-
-    def _unsubscribe_local_app_runtime(self, app_key: str, subscription_id: str) -> None:
-        task_to_cancel: asyncio.Task[None] | None = None
-        with self._local_runtime_watch_lock:
-            state = self._local_runtime_watchers.get(app_key)
-            if state is None:
-                return
-            state.callbacks.pop(subscription_id, None)
-            if state.callbacks:
-                return
-            task_to_cancel = state.task
-            self._local_runtime_watchers.pop(app_key, None)
-        if task_to_cancel is not None and not task_to_cancel.done():
-            task_to_cancel.cancel()
-
-    def _unsubscribe_local_node_state(self, subscription_id: str) -> None:
-        task_to_cancel: asyncio.Task[None] | None = None
-        with self._local_node_state_watch_lock:
-            self._local_node_state_watcher.subscriptions.pop(subscription_id, None)
-            if self._local_node_state_watcher.subscriptions:
-                return
-            task_to_cancel = self._local_node_state_watcher.task
-            self._local_node_state_watcher.task = None
-        if task_to_cancel is not None and not task_to_cancel.done():
-            task_to_cancel.cancel()
-
-    async def _watch_local_app_runtime(self, app_name: str, app_key: str) -> None:
-        current_task = asyncio.current_task()
-        last_summary: NodeAppRuntimeSummary | None = None
-        has_summary = False
-        last_update_info: AppUpdateInfo | None = None
-        last_update_status: AppUpdateStatus | None = None
-        has_update_state = False
-        try:
-            while not self._shutting_down:
-                with self._local_runtime_watch_lock:
-                    state = self._local_runtime_watchers.get(app_key)
-                    if state is None or not state.callbacks:
-                        return
-                    subscriptions = tuple(state.callbacks.values())
-                callbacks = tuple(subscription.callback for subscription in subscriptions)
-                include_update_state = any(subscription.include_update_state for subscription in subscriptions)
-                try:
-                    app = self._resolve_app(app_name)
-                    summary = await self.build_live_app_runtime_summary(app)
-                    update_info = app.update_info if include_update_state else None
-                    update_status = app.update_status if include_update_state else None
-                except asyncio.CancelledError:
-                    raise
-                except Exception as xcp:
-                    log.warning(
-                        "Node API local runtime watch failed: node=%s app=%s error=%s",
-                        self.node_name,
-                        app_name,
-                        xcp,
-                    )
-                    await asyncio.sleep(_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS)
-                    continue
-                runtime_changed = (not has_summary) or summary != last_summary
-                update_changed = include_update_state and (
-                    (not has_update_state) or update_info != last_update_info or update_status != last_update_status
-                )
-                if (not has_summary) or runtime_changed or update_changed:
-                    event_update_info = update_info if update_changed or not has_summary else None
-                    event_update_status = update_status if update_changed or not has_summary else None
-                    update = (
-                        NodeAppStateStreamEvent.initial(
-                            app_name=app_name,
-                            app_stats=summary,
-                            update_info=event_update_info,
-                            update_status=event_update_status,
-                        )
-                        if not has_summary
-                        else NodeAppStateStreamEvent(
-                            app_name=app_name,
-                            runtime_changed=runtime_changed,
-                            update_changed=update_changed,
-                            app_stats=summary if runtime_changed else None,
-                            update_info=event_update_info if update_changed else None,
-                            update_status=event_update_status if update_changed else None,
-                        )
-                    )
-                    for callback in callbacks:
-                        try:
-                            callback(update)
-                        except Exception:
-                            log.exception(
-                                "Node API local runtime subscriber callback failed: node=%s app=%s",
-                                self.node_name,
-                                app_name,
-                            )
-                    last_summary = summary
-                    has_summary = True
-                    if include_update_state:
-                        last_update_info = update_info
-                        last_update_status = update_status
-                        has_update_state = True
-                await asyncio.sleep(_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS)
-        except asyncio.CancelledError:
-            raise
-        finally:
-            with self._local_runtime_watch_lock:
-                state = self._local_runtime_watchers.get(app_key)
-                if state is not None and state.task is current_task:
-                    state.task = None
-                if state is not None and not state.callbacks:
-                    self._local_runtime_watchers.pop(app_key, None)
-
-    async def _watch_local_node_state(self) -> None:
-        current_task = asyncio.current_task()
-        last_entries: tuple[NodeAppEntry, ...] | None = None
-        last_system_summary: NodeSystemSummary | None = None
-        has_state = False
-        try:
-            while not self._shutting_down:
-                with self._local_node_state_watch_lock:
-                    subscriptions = tuple(self._local_node_state_watcher.subscriptions.values())
-                    if not subscriptions:
-                        return
-                try:
-                    needs_apps = any(NodeStateTopic.APPS in subscription.topics for subscription in subscriptions)
-                    needs_system = any(NodeStateTopic.SYSTEM in subscription.topics for subscription in subscriptions)
-                    app_entries = await self.list_apps() if needs_apps else last_entries
-                    system_summary = (
-                        self._stream_system_summary(self.build_system_summary())
-                        if needs_system
-                        else last_system_summary
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as xcp:
-                    log.warning("Node API local node state watch failed: node=%s error=%s", self.node_name, xcp)
-                    await asyncio.sleep(_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS)
-                    continue
-
-                apps_changed = app_entries is not None and ((not has_state) or app_entries != last_entries)
-                system_changed = system_summary is not None and (
-                    (not has_state) or system_summary != last_system_summary
-                )
-                for subscription in subscriptions:
-                    include_apps = NodeStateTopic.APPS in subscription.topics
-                    include_system = NodeStateTopic.SYSTEM in subscription.topics
-                    event: NodeStateStreamEvent | None = None
-                    if not subscription.initial_sent:
-                        event = NodeStateStreamEvent.initial(
-                            node_name=self.node_name,
-                            app_entries=app_entries if include_apps else None,
-                            system_summary=system_summary if include_system else None,
-                        )
-                    elif include_apps and apps_changed and include_system and system_changed:
-                        if app_entries is None or system_summary is None:
-                            raise RuntimeError("Combined node state update is incomplete.")
-                        event = NodeStateStreamEvent.both(
-                            node_name=self.node_name,
-                            app_entries=app_entries,
-                            system_summary=system_summary,
-                        )
-                    elif include_apps and apps_changed:
-                        if app_entries is None:
-                            raise RuntimeError("App node state update is incomplete.")
-                        event = NodeStateStreamEvent.apps(node_name=self.node_name, app_entries=app_entries)
-                    elif include_system and system_changed:
-                        if system_summary is None:
-                            raise RuntimeError("System node state update is incomplete.")
-                        event = NodeStateStreamEvent.system(
-                            node_name=self.node_name,
-                            system_summary=system_summary,
-                        )
-                    if event is None:
-                        continue
-                    try:
-                        subscription.callback(event)
-                        subscription.initial_sent = True
-                    except Exception:
-                        log.exception("Node API local node state subscriber callback failed: node=%s", self.node_name)
-                if needs_apps:
-                    last_entries = app_entries
-                if needs_system:
-                    last_system_summary = system_summary
-                has_state = True
-
-                await asyncio.sleep(_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS)
-        except asyncio.CancelledError:
-            raise
-        finally:
-            with self._local_node_state_watch_lock:
-                if self._local_node_state_watcher.task is current_task:
-                    self._local_node_state_watcher.task = None
+        return self._app_state_subscriptions.subscribe_node_state(callback, topics=topics)
 
     @staticmethod
     def _stream_system_summary(summary: NodeSystemSummary) -> NodeSystemSummary:
@@ -3420,7 +2076,10 @@ class NodeApiService:
 
         async def _send_stream_event(event: NodeChatStreamEvent) -> None:
             app_stats = event.app_stats
-            if event.kind in {NodeChatStreamEventKind.INITIAL, NodeChatStreamEventKind.RUNTIME_CHANGED}:
+            if event.kind in {
+                NodeChatStreamEventKind.INITIAL,
+                NodeChatStreamEventKind.RUNTIME_CHANGED,
+            }:
                 if app_stats is None:
                     app_stats = await self.build_live_app_runtime_summary(app)
             await websocket.send_json(
@@ -3515,7 +2174,11 @@ class NodeApiService:
                         }
                     )
                     continue
-                response: dict[str, object] = {"type": "pong", "node": self.node_name, "sample_id": sample_id}
+                response: dict[str, object] = {
+                    "type": "pong",
+                    "node": self.node_name,
+                    "sample_id": sample_id,
+                }
                 discord_latency_ms = self._discord_heartbeat_latency_ms()
                 if discord_latency_ms is not None:
                     response["discord_latency_ms"] = discord_latency_ms
@@ -3526,7 +2189,10 @@ class NodeApiService:
             await self._close_websocket_quietly(websocket)
 
     def _discord_heartbeat_latency_ms(self) -> int | None:
-        if config.ACTIVE_BOT_PROFILE.name not in {config.BotProfileName.YUKI, config.BotProfileName.ERIN}:
+        if config.ACTIVE_BOT_PROFILE.name not in {
+            config.BotProfileName.YUKI,
+            config.BotProfileName.ERIN,
+        }:
             return None
         manager = self._manager
         if manager is None or manager.bot is None:
@@ -3549,13 +2215,19 @@ class NodeApiService:
     def _portal_node_latency_targets() -> tuple[tuple[str, str], ...]:
         targets: dict[str, tuple[str, str]] = {}
         for snapshot in config.load_known_bot_snapshots():
-            if snapshot.profile.bot_profile not in {config.BotProfileName.YUKI, config.BotProfileName.ERIN}:
+            if snapshot.profile.bot_profile not in {
+                config.BotProfileName.YUKI,
+                config.BotProfileName.ERIN,
+            }:
                 continue
             mod_web = snapshot.features.mod_web
             if mod_web is None:
                 continue
             node_name = mod_web.node_name
-            targets.setdefault(node_name.casefold(), (node_name, f"{mod_web.node_api_base_url.rstrip('/')}/ping"))
+            targets.setdefault(
+                node_name.casefold(),
+                (node_name, f"{mod_web.node_api_base_url.rstrip('/')}/ping"),
+            )
         return tuple(targets.values())
 
     @staticmethod
@@ -3871,9 +2543,18 @@ class NodeApiService:
                 app.player_count(), timeout=_APP_PLAYER_COUNT_TIMEOUT_SECONDS
             )
         except asyncio.TimeoutError:
-            log.debug("Node API player count timed out: node=%s app=%s", self.node_name, app.name)
+            log.debug(
+                "Node API player count timed out: node=%s app=%s",
+                self.node_name,
+                app.name,
+            )
         except Exception as xcp:
-            log.warning("Node API player count failed: node=%s app=%s error=%s", self.node_name, app.name, xcp)
+            log.warning(
+                "Node API player count failed: node=%s app=%s error=%s",
+                self.node_name,
+                app.name,
+                xcp,
+            )
         else:
             if count_snapshot is None:
                 return None
@@ -3905,7 +2586,7 @@ class NodeApiService:
         self,
         *,
         app: App,
-        action: NodeAppMutationAction,
+        action: node_api_app_state.NodeAppMutationAction,
         actor_user_id: int,
         friendly_name: str | None = None,
         title_font_preset: str | None = None,
@@ -3927,150 +2608,34 @@ class NodeApiService:
         steam_update_enabled: bool | None = None,
         steam_update_selected_branch: str | None = None,
         update_branch_id: str | None = None,
-    ) -> NodeAppMutationResult:
-        await self._require_acl().perm_check(actor_user_id, required_app_mutation_level(action))
-        manager: App_Manager = self._require_manager()
-        if action is NodeAppMutationAction.START:
-            blocker = manager.start_blocker(app)
-            if blocker is not None:
-                raise _http_exception(409, blocker.message)
-            self._track_app_mutation_task(
-                app_name=app.name,
-                action=action,
-                state=NodeAppTransitionState.STARTING,
-                task=asyncio.create_task(self._run_app_mutation_task(manager=manager, app=app, action=action)),
-            )
-            message = f"Start requested for {app.friendly}."
-        elif action is NodeAppMutationAction.STOP:
-            self._track_app_mutation_task(
-                app_name=app.name,
-                action=action,
-                state=NodeAppTransitionState.STOPPING,
-                task=asyncio.create_task(self._run_app_mutation_task(manager=manager, app=app, action=action)),
-            )
-            message = f"Stop requested for {app.friendly}."
-        elif action is NodeAppMutationAction.KILL:
-            self._track_app_mutation_task(
-                app_name=app.name,
-                action=action,
-                state=NodeAppTransitionState.STOPPING,
-                task=asyncio.create_task(self._run_app_mutation_task(manager=manager, app=app, action=action)),
-            )
-            message = f"Kill requested for {app.friendly}."
-        elif action is NodeAppMutationAction.ENABLE:
-            manager.toggle(app.name, True)
-            message = f"Enabled {app.friendly}."
-        elif action is NodeAppMutationAction.DISABLE:
-            manager.toggle(app.name, False)
-            message: str = f"Disabled {app.friendly}."
-        elif action is NodeAppMutationAction.RENAME:
-            previous_friendly_name: str = app.friendly
-            if friendly_name is None or not friendly_name.strip():
-                raise ValueError("Friendly name must not be empty.")
-            next_friendly_name = manager.set_app_friendly_name(app, friendly_name)
-            if previous_friendly_name == next_friendly_name:
-                message = f"Friendly name already set to {next_friendly_name}."
-            else:
-                message = f"Renamed {previous_friendly_name} to {next_friendly_name}."
-        elif action is NodeAppMutationAction.UPDATE_DETAILS:
-            if friendly_name is None or not friendly_name.strip():
-                raise ValueError("Friendly name must not be empty.")
-            if lifecycle_notice_started is None:
-                raise ValueError("Started lifecycle notice flag must not be empty.")
-            if lifecycle_notice_stopped is None:
-                raise ValueError("Stopped lifecycle notice flag must not be empty.")
-            if lifecycle_notice_crashed is None:
-                raise ValueError("Crash lifecycle notice flag must not be empty.")
-            if running_cpu_points is None:
-                raise ValueError("Running CPU points must not be empty.")
-            if running_ram_points is None:
-                raise ValueError("Running RAM points must not be empty.")
-            manager.update_app_details(
-                app,
-                AppDetailsUpdate(
-                    friendly_name=friendly_name,
-                    title_font_preset=title_font_preset,
-                    notes=notes,
-                    lifecycle_notice_started=lifecycle_notice_started,
-                    lifecycle_notice_stopped=lifecycle_notice_stopped,
-                    lifecycle_notice_crashed=lifecycle_notice_crashed,
-                    relay_notice_player_session=relay_notice_player_session,
-                    relay_notice_player_death=relay_notice_player_death,
-                    relay_notice_progress=relay_notice_progress,
-                    relay_advancements_enabled=relay_advancements_enabled,
-                    factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
-                    rcon_requires_online_players=rcon_requires_online_players,
-                    disabled_activity_provider_ids=disabled_activity_provider_ids,
-                    running_cpu_points=running_cpu_points,
-                    running_ram_points=running_ram_points,
-                    startup_cpu_points=startup_cpu_points,
-                    startup_ram_points=startup_ram_points,
-                    steam_update_enabled=steam_update_enabled,
-                    steam_update_selected_branch=steam_update_selected_branch,
-                ),
-            )
-            message = f"Updated details for {app.friendly}."
-        elif action is NodeAppMutationAction.SELECT_UPDATE_BRANCH:
-            if app.updater is None:
-                raise ValueError(f"{app.friendly} does not support updates.")
-            if update_branch_id is None or not update_branch_id.strip():
-                raise ValueError("Update branch id must not be empty.")
-            log.info(
-                "Node API selecting update branch: node=%s app=%s branch=%s actor=%s",
-                self.node_name,
-                app.name,
-                update_branch_id,
-                actor_user_id,
-            )
-            update_info = app.updater.select_branch(update_branch_id)
-            message = f"Selected update branch {update_info.selected_branch_label} for {app.friendly}."
-        elif action is NodeAppMutationAction.UPDATE:
-            if app.updater is None:
-                raise ValueError(f"{app.friendly} does not support updates.")
-            log.info(
-                "Node API starting update: node=%s app=%s actor=%s branch=%s",
-                self.node_name,
-                app.name,
-                actor_user_id,
-                app.update_info.selected_branch_id if app.update_info is not None else None,
-            )
-            result = await app.updater.start_selected_update()
-            message = result.message
-        elif action is NodeAppMutationAction.VERIFY:
-            if app.updater is None:
-                raise ValueError(f"{app.friendly} does not support verification.")
-            log.info(
-                "Node API starting verify: node=%s app=%s actor=%s branch=%s",
-                self.node_name,
-                app.name,
-                actor_user_id,
-                app.update_info.selected_branch_id if app.update_info is not None else None,
-            )
-            result = await app.updater.start_selected_verify()
-            message = result.message
-        else:
-            raise ValueError(f"Unsupported app mutation action: {action}")
-
-        self._invalidate_state_caches(app_name=app.name)
-        app_stats: NodeAppRuntimeSummary
-        if action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP, NodeAppMutationAction.KILL}:
-            app_stats = await self.build_live_app_runtime_summary(app)
-        else:
-            app_stats = await self.build_app_runtime_summary(app)
-        traffic_log.info(
-            "Node API app mutated: node=%s app=%s action=%s actor=%s",
-            self.node_name,
-            app.name,
-            action.value,
-            actor_user_id,
-        )
-        return NodeAppMutationResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
+    ) -> node_api_app_state.NodeAppMutationResult:
+        return await self._app_mutations.mutate(
+            manager=self._require_manager(),
+            acl=self._require_acl(),
+            app=app,
             action=action,
-            message=message,
-            app_stats=app_stats,
+            actor_user_id=actor_user_id,
+            http_exception=_http_exception,
+            friendly_name=friendly_name,
+            title_font_preset=title_font_preset,
+            notes=notes,
+            lifecycle_notice_started=lifecycle_notice_started,
+            lifecycle_notice_stopped=lifecycle_notice_stopped,
+            lifecycle_notice_crashed=lifecycle_notice_crashed,
+            relay_notice_player_session=relay_notice_player_session,
+            relay_notice_player_death=relay_notice_player_death,
+            relay_notice_progress=relay_notice_progress,
+            relay_advancements_enabled=relay_advancements_enabled,
+            factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
+            rcon_requires_online_players=rcon_requires_online_players,
+            disabled_activity_provider_ids=disabled_activity_provider_ids,
+            running_cpu_points=running_cpu_points,
+            running_ram_points=running_ram_points,
+            startup_cpu_points=startup_cpu_points,
+            startup_ram_points=startup_ram_points,
+            steam_update_enabled=steam_update_enabled,
+            steam_update_selected_branch=steam_update_selected_branch,
+            update_branch_id=update_branch_id,
         )
 
     def read_node_capacity(self) -> config.NodeCapacityProfile:
@@ -4095,18 +2660,11 @@ class NodeApiService:
                     mountpoint=disk.mountpoint_text,
                     display_name=disk.display_name,
                     is_activity=disk.mountpoint_text in activity_mountpoints,
-                    is_primary=(
-                        primary_disk is not None
-                        and disk.mountpoint_text == primary_disk.mountpoint_text
-                    ),
+                    is_primary=(primary_disk is not None and disk.mountpoint_text == primary_disk.mountpoint_text),
                     is_secondary=(
-                        secondary_disk is not None
-                        and disk.mountpoint_text == secondary_disk.mountpoint_text
+                        secondary_disk is not None and disk.mountpoint_text == secondary_disk.mountpoint_text
                     ),
-                    is_bot_disk=(
-                        bot_disk is not None
-                        and disk.mountpoint_text == bot_disk.mountpoint_text
-                    ),
+                    is_bot_disk=(bot_disk is not None and disk.mountpoint_text == bot_disk.mountpoint_text),
                 )
                 for disk in stats.disks
             ),
@@ -4152,10 +2710,15 @@ class NodeApiService:
             except Exception:
                 with self._system_action_lock:
                     self._pending_system_action = None
-                log.exception("Node system action dispatch failed: node=%s action=%s", self.node_name, action.value)
+                log.exception(
+                    "Node system action dispatch failed: node=%s action=%s",
+                    self.node_name,
+                    action.value,
+                )
                 return
+
         asyncio.get_running_loop().call_later(_NODE_RESTART_DELAY_SECONDS, _dispatch)
-        action_label = _NODE_SYSTEM_ACTION_LABELS[action]
+        action_label = node_api_system.SYSTEM_ACTION_LABELS[action]
         return NodeSystemActionResult(
             node=self.node_name,
             action=action,
@@ -4361,622 +2924,276 @@ class NodeApiService:
             settings=updated_settings,
         )
 
-    async def build_mod_download_response(self, *, app: App, request: NodeDownloadRequest) -> FileResponse:
-        await app.has_mod_manager.reload_mods()
-
-        capabilities = app.mod_capabilities
-        pack_purpose = request.resolved_pack_purpose
-        if pack_purpose is PackPurpose.CLIENT:
-            if not capabilities.supports_client_pack:
-                raise _http_exception(400, f"{app.friendly} does not support client pack generation.")
-            if app.cfg.client_pack_content_dirty and not request.publish_client_pack:
-                raise _http_exception(409, "Client pack configuration has unpublished changes.")
-            if request.publish_client_pack and not (request.publish_changelog or "").strip():
-                raise _http_exception(
-                    400,
-                    "Client pack publication requires a changelog.",
-                )
-            if request.pack_format is not PackFormat.GENERIC_ZIP and not capabilities.supports_launcher_formats:
-                raise _http_exception(400, f"{app.friendly} does not support launcher pack formats.")
-        elif pack_purpose is None and not capabilities.supports_raw_download:
-            raise _http_exception(400, f"{app.friendly} does not support raw mod downloads.")
-
-        if request.mod_name is not None:
-            mod: Mod = app.has_mod_manager.get(request.mod_name)
-            try:
-                require_downloadable(mod)
-            except NonDownloadableModError as xcp:
-                log.warning("Node API blocked single mod download: app=%s mod=%s reason=%s", app.name, mod.name, xcp)
-                raise _http_exception(403, str(xcp)) from xcp
-            download: NodeDownloadFile = await self._single_mod_download_file(app=app, mod=mod)
-            traffic_log.info(
-                "Node API sending single mod: app=%s mod=%s path=%s archive=%s",
-                app.name,
-                mod.name,
-                download.path,
-                download.is_archive,
-            )
-            return FileResponse(path=download.path, filename=download.filename)
-
-        selected_mod_names: tuple[str, ...] | None = (
-            request.mod_names if request.selected_only or request.mod_names else None
-        )
-        if request.excluded_only:
-            if not request.selected_only:
-                raise _http_exception(400, "Excluded mod selection requires selected-only mode.")
-            if pack_purpose is not None:
-                raise _http_exception(400, "Excluded mod selection is only supported for raw mod downloads.")
-            excluded_names = frozenset(request.mod_names)
-            for excluded_name in excluded_names:
-                try:
-                    require_downloadable(app.has_mod_manager.get(excluded_name))
-                except (KeyError, ModuleNotFoundError, NonDownloadableModError) as xcp:
-                    raise _http_exception(400, f"Invalid excluded mod selection: {excluded_name}") from xcp
-            selected_mod_names = tuple(
-                mod.name
-                for mod in app.has_mod_manager.list_mods()
-                if mod.downloadable and mod.name not in excluded_names
-            )
-        entries: tuple[ArchiveEntry | ArchiveDataEntry, ...]
-        try:
-            if pack_purpose is PackPurpose.CLIENT:
-                entries = self._client_pack_entries(
-                    app=app,
-                    selection=ClientPackSelection(
-                        selected_mod_names=frozenset(selected_mod_names or ()),
-                        supplied=request.selected_only or bool(request.mod_names),
-                    ),
-                    include_kubejs_scripts=request.include_kubejs_scripts,
-                    include_servers_dat=request.include_servers_dat,
-                    include_options_txt=request.include_options_txt,
-                )
-            elif pack_purpose is PackPurpose.SERVER:
-                entries = build_server_pack_entries(app.has_mod_manager)
-            elif pack_purpose is PackPurpose.ADMIN:
-                entries = build_admin_pack_entries(app.has_mod_manager)
-            else:
-                entries = build_mod_download_entries(
-                    app.has_mod_manager,
-                    selected_mod_names,
-                    default_enabled_only=request.enabled_only,
-                )
-        except NonDownloadableModError as xcp:
-            raise _http_exception(403, str(xcp)) from xcp
-        except ClientPackValidationError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        except ModuleNotFoundError as xcp:
-            raise _http_exception(404, str(xcp)) from xcp
-        if not entries:
-            detail: str = self._empty_archive_detail(request)
-            log.warning(
-                "Node API archive request had no paths: app=%s enabled_only=%s selected=%s",
-                app.name,
-                request.enabled_only,
-                len(selected_mod_names) if selected_mod_names is not None else 0,
-            )
-            raise _http_exception(404, detail)
-
-        generated_pack_version: str | None = None
-        if pack_purpose is PackPurpose.CLIENT:
-            published_entries = self._client_pack_entries(
-                app=app,
-                selection=ClientPackSelection(),
-                include_kubejs_scripts=True,
-            )
-            current_hash = await self._client_pack_content_hash(app=app, entries=published_entries)
-            if app.cfg.client_pack_current_hash != current_hash:
-                app.record_client_pack_content_hash(current_hash)
-            if request.publish_client_pack:
-                generated_pack_version = app.publish_client_pack(
-                    current_hash,
-                    changelog=request.publish_changelog or "",
-                    mods=self._default_client_pack_mod_snapshots(app),
-                )
-                self._invalidate_state_caches(app_name=app.name)
-            elif app.cfg.client_pack_published_hash != current_hash:
-                raise _http_exception(409, "Client pack content has changed; publish or regenerate it before download.")
-            elif app.cfg.client_pack_published_version is None:
-                raise _http_exception(409, "Client pack version metadata is missing; publish the client pack again.")
-            else:
-                generated_pack_version = app.cfg.client_pack_published_version
-
-        archive_name = self._archive_name(
+    async def build_mod_download_response(
+        self,
+        *,
+        app: App,
+        request: node_api_mod.NodeDownloadRequest,
+    ) -> FileResponse:
+        return await self._client_packs.build_mod_download_response(
             app=app,
-            entries=entries,
             request=request,
-            client_pack_version=generated_pack_version,
+            http_exception=_http_exception,
         )
-        if pack_purpose is not None:
-            version = app.cfg.version
-            if version is None and request.pack_format is not PackFormat.GENERIC_ZIP:
-                raise _http_exception(400, "Minecraft version metadata is required for launcher pack exports.")
-            if version is None:
-                archive_path = await compress_mod_archive_entries(entries, archive_name)
-            else:
-                client_pack_metadata = (
-                    self._client_pack_metadata(app)
-                    if pack_purpose is PackPurpose.CLIENT
-                    else None
-                )
-                try:
-                    archive_path = await export_minecraft_pack(
-                        entries,
-                        MinecraftPackSpec(
-                            purpose=pack_purpose,
-                            format=request.pack_format,
-                            name=(client_pack_metadata.name if client_pack_metadata is not None else app.friendly),
-                            version_id=generated_pack_version or version.main,
-                            minecraft_version=version.main,
-                            loader=version.loader,
-                            loader_version=version.framework,
-                            author=getattr(app.cfg, "pack_author", "Yukibot"),
-                            summary=(
-                                client_pack_metadata.description or None
-                                if client_pack_metadata is not None
-                                else app.cfg.notes
-                            ),
-                        ),
-                        archive_name,
-                    )
-                except MinecraftPackExportError as xcp:
-                    raise _http_exception(400, str(xcp)) from xcp
-        else:
-            archive_path = await compress_mod_archive_entries(entries, archive_name)
-        traffic_log.info(
-            "Node API sending mod archive: app=%s enabled_only=%s selected=%s entries=%s archive=%s",
-            app.name,
-            request.enabled_only,
-            len(selected_mod_names) if selected_mod_names is not None else 0,
-            len(entries),
-            archive_path,
-        )
-        return FileResponse(path=archive_path, filename=archive_path.name)
 
-    async def _client_pack_content_hash(
+    async def run_bulk_metadata_operation(
+        self,
+        *,
+        app_name: str,
+        operation_id: uuid.UUID,
+        action: Callable[[], Awaitable[_BulkMetadataOperationResult]],
+    ) -> _BulkMetadataOperationResult:
+        return await self._mod_service.run_bulk_metadata_operation(
+            app_name=app_name,
+            operation_id=operation_id,
+            action=action,
+        )
+
+    def cancel_bulk_metadata_operation(self, *, app_name: str, operation_id: uuid.UUID) -> bool:
+        return self._mod_service.cancel_bulk_metadata_operation(
+            app_name=app_name,
+            operation_id=operation_id,
+        )
+
+    async def build_mod_list(self, app: App) -> node_api_mod.NodeModList:
+        return await self._mod_service.build_mod_list(app)
+
+    async def upload_mod_file(
         self,
         *,
         app: App,
-        entries: tuple[ArchiveEntry | ArchiveDataEntry, ...],
-    ) -> str:
-        version = app.cfg.version
-        metadata = self._client_pack_metadata(app)
-        hash_context_payload: dict[str, object] = {
-            "app_version": None if version is None else version.model_dump(mode="json", exclude_none=True),
-            "name": metadata.name if metadata is not None else app.friendly,
-            "summary": metadata.description if metadata is not None else app.cfg.notes,
-        }
-        if metadata is not None and app.cfg.client_pack_metadata is not None:
-            hash_context_payload["filename_template"] = metadata.filename_template
-            hash_context_payload["include_servers_dat"] = metadata.include_servers_dat
-            hash_context_payload["include_options_txt"] = metadata.include_options_txt
-        hash_context = json.dumps(hash_context_payload, sort_keys=True)
-        return await run_blocking(client_pack_content_hash, entries, format_name=hash_context)
-
-    @staticmethod
-    def _client_overrides_dir_for_pack(app: App) -> Path | None:
-        if not app.mod_capabilities.include_client_overrides:
-            return None
-        configured_dir = app.cfg.client_overrides_dir
-        if configured_dir is not None:
-            resolved_configured_dir = configured_dir.resolve()
-            if resolved_configured_dir.is_dir():
-                return resolved_configured_dir
-
-        fallback_dir = (app.directory / ".yukibot" / "client-overrides").resolve()
-        fallback_existed = fallback_dir.is_dir()
-        try:
-            fallback_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as xcp:
-            log.exception(
-                "Failed to create client overrides directory: app=%s path=%s",
-                app.name,
-                fallback_dir,
-            )
-            raise ClientPackValidationError(
-                f"Client overrides directory could not be created: {fallback_dir}"
-            ) from xcp
-        if not fallback_existed:
-            log.warning(
-                "Created fallback client overrides directory: app=%s configured_path=%s path=%s",
-                app.name,
-                configured_dir,
-                fallback_dir,
-            )
-        return fallback_dir
-
-    @staticmethod
-    def _client_pack_kubejs_scripts(app: App) -> tuple[ClientPackKubeJsScript, ...]:
-        if not isinstance(app, Minecraft):
-            return ()
-        return discover_client_pack_kubejs_scripts(
-            app.directory,
-            excluded_paths=frozenset(app.cfg.client_pack_excluded_kubejs_scripts),
-        )
-
-    @staticmethod
-    def _client_pack_metadata(app: App) -> ClientPackMetadataConfig | None:
-        if not isinstance(app, Minecraft):
-            return None
-        configured_metadata = app.cfg.client_pack_metadata
-        if configured_metadata is not None:
-            return configured_metadata
-        return ClientPackMetadataConfig(
-            name=app.friendly,
-            description=app.cfg.notes or "",
-        )
-
-    @staticmethod
-    def _client_pack_preview_overrides_dir(app: App) -> Path | None:
-        if not app.mod_capabilities.include_client_overrides:
-            return None
-        configured_dir = app.cfg.client_overrides_dir
-        if configured_dir is not None and configured_dir.is_dir():
-            return configured_dir.resolve()
-        fallback_dir = app.directory / ".yukibot" / "client-overrides"
-        if fallback_dir.is_dir():
-            return fallback_dir.resolve()
-        return None
-
-    @staticmethod
-    def _client_pack_options_txt_preview(app: App) -> str:
-        overrides_dir = NodeApiService._client_pack_preview_overrides_dir(app)
-        if overrides_dir is None:
-            return "No client overrides directory exists, so overrides/options.txt will not be added."
-        options_path = overrides_dir / "options.txt"
-        if not options_path.is_file():
-            return f"No options.txt file exists at {options_path}."
-        try:
-            return options_path.read_text(encoding="utf-8", errors="replace")
-        except OSError as xcp:
-            return f"Could not read {options_path}: {xcp}"
-
-    def _client_pack_file_previews(self, app: App) -> tuple[ClientPackFilePreview, ...]:
-        if not isinstance(app, Minecraft):
-            return ()
-        server_address = app.cfg.join_direct_ip_address or app.cfg.join_address
-        if server_address is None:
-            servers_dat_preview = "No join address is configured, so overrides/servers.dat will not be generated."
-        else:
-            server_name = self._minecraft_servers_dat_server_name(self._client_pack_node_label())
-            servers_dat_preview = (
-                "Minecraft servers.dat entry\n"
-                f"name={server_name}\n"
-                f"ip={server_address}\n"
-            )
-        return (
-            ClientPackFilePreview(
-                path="overrides/servers.dat",
-                display_name="servers.dat",
-                content_text=servers_dat_preview,
-            ),
-            ClientPackFilePreview(
-                path="overrides/options.txt",
-                display_name="options.txt",
-                content_text=self._client_pack_options_txt_preview(app),
-            ),
-        )
-
-    def _default_client_pack_mod_snapshots(self, app: App) -> tuple[ClientPackModSnapshot, ...]:
-        entries = self._client_pack_entries(
-            selection=ClientPackSelection(),
+        upload: UploadFile,
+        upload_name: str | None,
+        actor_user_id: int,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+    ) -> node_api_mod.NodeModUploadResult:
+        return await self._mod_service.upload_mod_file(
             app=app,
-            include_kubejs_scripts=False,
-            include_servers_dat=False,
-            include_options_txt=False,
-        )
-        snapshots: list[ClientPackModSnapshot] = []
-        for entry in entries:
-            if not isinstance(entry, ModArchiveEntry):
-                continue
-            mod = app.has_mod_manager.get(entry.mod_name)
-            snapshots.append(
-                ClientPackModSnapshot(
-                    name=mod.name,
-                    friendly=mod.friendly,
-                    version=mod.version,
-                )
-            )
-        return tuple(sorted(snapshots, key=lambda mod: mod.friendly.casefold()))
-
-    @staticmethod
-    def _client_pack_mod_snapshot_label(snapshot: ClientPackModSnapshot) -> str:
-        if snapshot.version is None:
-            return snapshot.friendly
-        return f"{snapshot.friendly} ({snapshot.version})"
-
-    @staticmethod
-    def _unique_client_pack_mods_by_friendly(
-        snapshots: Sequence[ClientPackModSnapshot],
-    ) -> dict[str, ClientPackModSnapshot]:
-        friendly_counts: dict[str, int] = {}
-        for snapshot in snapshots:
-            key = snapshot.friendly.casefold()
-            friendly_counts[key] = friendly_counts.get(key, 0) + 1
-        return {
-            snapshot.friendly.casefold(): snapshot
-            for snapshot in snapshots
-            if friendly_counts[snapshot.friendly.casefold()] == 1
-        }
-
-    @classmethod
-    def _client_pack_mod_update_label(cls, before: ClientPackModSnapshot, after: ClientPackModSnapshot) -> str:
-        changes: list[str] = []
-        if before.version != after.version:
-            changes.append(f"{before.version or 'unknown'} -> {after.version or 'unknown'}")
-        if before.name != after.name:
-            changes.append(f"file {before.name} -> {after.name}")
-        if before.friendly != after.friendly:
-            changes.append(f"name {before.friendly} -> {after.friendly}")
-        if not changes:
-            return cls._client_pack_mod_snapshot_label(after)
-        return f"{after.friendly}: {'; '.join(changes)}"
-
-    @classmethod
-    def _client_pack_automated_changelog_text(
-        cls,
-        *,
-        current: tuple[ClientPackModSnapshot, ...],
-        published: tuple[ClientPackModSnapshot, ...],
-        has_published_pack: bool,
-    ) -> str:
-        if not current and not published:
-            return "No automated client-pack changes detected."
-
-        current_by_name = {snapshot.name.casefold(): snapshot for snapshot in current}
-        published_by_name = {snapshot.name.casefold(): snapshot for snapshot in published}
-        matched_pairs: list[tuple[ClientPackModSnapshot, ClientPackModSnapshot]] = []
-        current_unmatched_keys = set(current_by_name)
-        published_unmatched_keys = set(published_by_name)
-
-        for key in sorted(current_unmatched_keys & published_unmatched_keys):
-            matched_pairs.append((published_by_name[key], current_by_name[key]))
-            current_unmatched_keys.remove(key)
-            published_unmatched_keys.remove(key)
-
-        current_unmatched = tuple(current_by_name[key] for key in current_unmatched_keys)
-        published_unmatched = tuple(published_by_name[key] for key in published_unmatched_keys)
-        current_by_friendly = cls._unique_client_pack_mods_by_friendly(current_unmatched)
-        published_by_friendly = cls._unique_client_pack_mods_by_friendly(published_unmatched)
-
-        for friendly_key in sorted(current_by_friendly.keys() & published_by_friendly.keys()):
-            before = published_by_friendly[friendly_key]
-            after = current_by_friendly[friendly_key]
-            matched_pairs.append((before, after))
-            current_unmatched_keys.remove(after.name.casefold())
-            published_unmatched_keys.remove(before.name.casefold())
-
-        added = tuple(
-            current_by_name[key]
-            for key in sorted(current_unmatched_keys, key=lambda item: current_by_name[item].friendly.casefold())
-        )
-        removed = tuple(
-            published_by_name[key]
-            for key in sorted(published_unmatched_keys, key=lambda item: published_by_name[item].friendly.casefold())
-        )
-        updated = tuple(
-            (before, after)
-            for before, after in sorted(matched_pairs, key=lambda item: item[1].friendly.casefold())
-            if before.version != after.version or before.name != after.name or before.friendly != after.friendly
+            upload=upload,
+            upload_name=upload_name,
+            actor_user_id=actor_user_id,
+            placement=placement,
         )
 
-        lines: list[str] = []
-        if not published and not has_published_pack:
-            lines.append("Initial client pack contents:")
-            lines.extend(f"- {cls._client_pack_mod_snapshot_label(snapshot)}" for snapshot in current)
-            return "\n".join(lines)
-        if not published and has_published_pack:
-            lines.append("Published mod snapshot will be tracked after the next publish.")
-            lines.append("Current default client pack contents:")
-            lines.extend(f"- {cls._client_pack_mod_snapshot_label(snapshot)}" for snapshot in current)
-            return "\n".join(lines)
-
-        if added:
-            lines.append("Added mods:")
-            lines.extend(f"- {cls._client_pack_mod_snapshot_label(snapshot)}" for snapshot in added)
-        if removed:
-            if lines:
-                lines.append("")
-            lines.append("Removed mods:")
-            lines.extend(f"- {cls._client_pack_mod_snapshot_label(snapshot)}" for snapshot in removed)
-        if updated:
-            if lines:
-                lines.append("")
-            lines.append("Updated mods:")
-            lines.extend(
-                f"- {cls._client_pack_mod_update_label(before, after)}"
-                for before, after in updated
-            )
-        return "\n".join(lines) if lines else "No automated client-pack changes detected."
-
-    def _client_pack_automated_changelog(self, app: App) -> str:
-        if not app.mod_capabilities.supports_client_pack:
-            return ""
-        try:
-            current = self._default_client_pack_mod_snapshots(app)
-        except Exception as xcp:
-            log.warning("Client-pack automated changelog failed: app=%s error=%s", app.name, xcp)
-            return f"Automated client-pack changelog is unavailable: {xcp}"
-        return self._client_pack_automated_changelog_text(
-            current=current,
-            published=app.cfg.client_pack_published_mods,
-            has_published_pack=app.cfg.client_pack_published_hash is not None,
-        )
-
-    @staticmethod
-    def _normalised_client_pack_node_label(node_name: str) -> str:
-        text = node_name.strip()
-        if not text:
-            return "Node"
-        if text.casefold() == text:
-            return text.title()
-        return text
-
-    def _client_pack_node_label(self) -> str:
-        node_key = self.node_name.casefold()
-        for snapshot in self._known_bot_snapshots():
-            mod_web = snapshot.features.mod_web
-            if mod_web is None or mod_web.node_name.casefold() != node_key:
-                continue
-            if snapshot.profile.label:
-                return snapshot.profile.label
-        if node_key == config.ACTIVE_BOT_PROFILE.name.value.casefold():
-            return config.ACTIVE_BOT_PROFILE.name.value.title()
-        return self._normalised_client_pack_node_label(self.node_name)
-
-    @staticmethod
-    def _known_bot_snapshots() -> tuple[config.BotMetadataSnapshot, ...]:
-        snapshots: list[config.BotMetadataSnapshot] = []
-        try:
-            snapshots.extend(config.load_bot_configuration(Path("configuration.json")).known_bots.values())
-        except Exception as xcp:
-            log.warning("Node API failed to load local bot registry: %s", xcp)
-
-        cache_path = config.authority_cache_path(AuthorityResource.BOTS)
-        if cache_path.exists():
-            try:
-                raw_cache = read_json_object(cache_path)
-                snapshots.extend(
-                    config.BotMetadataSnapshot.model_validate(snapshot)
-                    for snapshot in raw_cache.values()
-                    if isinstance(snapshot, dict)
-                )
-            except Exception as xcp:
-                log.warning("Node API failed to load cached bot registry: %s", xcp)
-
-        unique: dict[str, config.BotMetadataSnapshot] = {}
-        for snapshot in snapshots:
-            unique[snapshot.profile.id] = snapshot
-        return tuple(unique.values())
-
-    @staticmethod
-    def _minecraft_servers_dat_server_name(node_label: str) -> str:
-        base = "".join(character for character in node_label.strip() if character.isalnum())
-        if not base:
-            base = "Node"
-        return f"{base}Server"
-
-    @staticmethod
-    def _minecraft_servers_dat_content(*, server_name: str, server_address: str) -> bytes:
-        def tag_name(name: str) -> bytes:
-            encoded = name.encode("utf-8")
-            return struct.pack(">H", len(encoded)) + encoded
-
-        def string_tag(name: str, value: str) -> bytes:
-            encoded = value.encode("utf-8")
-            return b"\x08" + tag_name(name) + struct.pack(">H", len(encoded)) + encoded
-
-        server_compound = (
-            string_tag("name", server_name)
-            + string_tag("ip", server_address)
-            + b"\x00"
-        )
-        servers_list = b"\x09" + tag_name("servers") + b"\x0a" + struct.pack(">i", 1) + server_compound
-        return b"\x0a" + tag_name("") + servers_list + b"\x00"
-
-    def _minecraft_client_pack_extra_entries(
-        self,
-        *,
-        app: Minecraft,
-        metadata: ClientPackMetadataConfig,
-    ) -> tuple[ArchiveDataEntry, ...]:
-        if not metadata.include_servers_dat:
-            return ()
-        server_address = app.cfg.join_direct_ip_address or app.cfg.join_address
-        if server_address is None:
-            log.warning("Skipping generated servers.dat because %s has no join address.", app.name)
-            return ()
-        return (
-            ArchiveDataEntry(
-                archive_path=PurePosixPath("overrides/servers.dat"),
-                content=self._minecraft_servers_dat_content(
-                    server_name=self._minecraft_servers_dat_server_name(self._client_pack_node_label()),
-                    server_address=server_address,
-                ),
-            ),
-        )
-
-    def _client_override_entries_for_pack(
+    async def upload_mod_files(
         self,
         *,
         app: App,
-        metadata: ClientPackMetadataConfig | None,
-    ) -> tuple[ArchiveEntry, ...]:
-        overrides_dir = self._client_overrides_dir_for_pack(app)
-        if overrides_dir is None:
-            return ()
-        overrides_path = overrides_dir.resolve()
-        if not overrides_path.exists() or not overrides_path.is_dir():
-            raise ClientPackValidationError(f"Client overrides directory is missing: {overrides_path}")
-
-        excluded_paths: frozenset[PurePosixPath] = frozenset(
-            {PurePosixPath("options.txt")}
-            if metadata is not None and not metadata.include_options_txt
-            else ()
+        uploads: Sequence[UploadFile],
+        upload_names: Sequence[str] | None,
+        actor_user_id: int,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+    ) -> node_api_mod.NodeModUploadBatchResult:
+        return await self._mod_service.upload_mod_files(
+            app=app,
+            uploads=uploads,
+            upload_names=upload_names,
+            actor_user_id=actor_user_id,
+            placement=placement,
         )
-        entries: list[ArchiveEntry] = []
-        override_files = tuple(
-            sorted(
-                (path for path in overrides_path.rglob("*") if path.is_file()),
-                key=lambda path: path.as_posix(),
-            )
-        )
-        for file_path in override_files:
-            relative_path = PurePosixPath(file_path.relative_to(overrides_path).as_posix())
-            if relative_path in excluded_paths:
-                continue
-            entries.append(
-                ArchiveEntry(
-                    source_path=file_path,
-                    archive_path=PurePosixPath("overrides") / relative_path,
-                )
-            )
-        return tuple(entries)
 
-    def _client_pack_entries(
+    async def upload_mod_path(
         self,
-        selection: ClientPackSelection,
         *,
         app: App,
-        include_kubejs_scripts: bool,
-        include_servers_dat: bool | None = None,
-        include_options_txt: bool | None = None,
-    ) -> tuple[ArchiveEntry | ArchiveDataEntry, ...]:
-        metadata = self._client_pack_metadata(app)
-        if metadata is not None and (include_servers_dat is not None or include_options_txt is not None):
-            metadata = metadata.model_copy(
-                update={
-                    "include_servers_dat": metadata.include_servers_dat
-                    if include_servers_dat is None
-                    else include_servers_dat,
-                    "include_options_txt": metadata.include_options_txt
-                    if include_options_txt is None
-                    else include_options_txt,
-                }
-            )
-        entries = build_client_pack_entries(
-            app.has_mod_manager,
-            selection,
-            client_overrides_dir=None,
+        source_path: Path,
+        upload_name: str,
+        actor_user_id: int,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+    ) -> node_api_mod.NodeModUploadResult:
+        return await self._mod_service.upload_mod_path(
+            app=app,
+            source_path=source_path,
+            upload_name=upload_name,
+            actor_user_id=actor_user_id,
+            placement=placement,
         )
-        entries = (
-            *entries,
-            *self._client_override_entries_for_pack(app=app, metadata=metadata),
+
+    async def install_mod_from_link(
+        self,
+        *,
+        app: App,
+        url: str,
+        actor_user_id: int,
+        selected_mod_ids: Sequence[str] | None = None,
+        version: str | None = None,
+    ) -> node_api_mod.NodeModUploadBatchResult:
+        return await self._mod_service.install_mod_from_link(
+            app=app,
+            url=url,
+            actor_user_id=actor_user_id,
+            selected_mod_ids=selected_mod_ids,
+            version=version,
         )
-        if not isinstance(app, Minecraft):
-            return entries
-        if metadata is not None:
-            entries = (
-                *entries,
-                *self._minecraft_client_pack_extra_entries(app=app, metadata=metadata),
-            )
-        if not include_kubejs_scripts:
-            return entries
-        return (
-            *entries,
-            *client_pack_kubejs_entries(
-                app.directory,
-                excluded_paths=frozenset(app.cfg.client_pack_excluded_kubejs_scripts),
-            ),
+
+    async def resolve_mod_link_dependencies(
+        self,
+        *,
+        app: App,
+        url: str,
+        version: str | None = None,
+    ) -> NodeModDependencyResolutionResult:
+        return await self._mod_service.resolve_mod_link_dependencies(app=app, url=url, version=version)
+
+    async def list_mod_link_versions(self, *, app: App, url: str) -> NodeModPortalVersionList:
+        return await self._mod_service.list_mod_link_versions(app=app, url=url)
+
+    async def list_installed_mod_versions(self, *, app: App, mod_name: str) -> NodeModPortalVersionList:
+        return await self._mod_service.list_installed_mod_versions(app=app, mod_name=mod_name)
+
+    async def check_mod_update(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        version: str | None = None,
+    ) -> NodeModUpdateCheckResult:
+        return await self._mod_service.check_mod_update(app=app, mod_name=mod_name, version=version)
+
+    async def update_mod(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        actor_user_id: int,
+        version: str | None = None,
+    ) -> node_api_mod.NodeModUploadBatchResult:
+        return await self._mod_service.update_mod(
+            app=app,
+            mod_name=mod_name,
+            actor_user_id=actor_user_id,
+            version=version,
+        )
+
+    async def mutate_mod(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        action: node_api_mod.NodeModMutationAction,
+        actor_user_id: int,
+    ) -> node_api_mod.NodeModMutationResult:
+        return await self._mod_service.mutate_mod(
+            app=app,
+            mod_name=mod_name,
+            action=action,
+            actor_user_id=actor_user_id,
+        )
+
+    async def find_mod_pages(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        resolve_request: node_api_mod.NodeModPageResolveRequest,
+        actor_user_id: int,
+    ) -> ModPageDiscovery:
+        return await self._mod_service.find_mod_pages(
+            app=app,
+            mod_name=mod_name,
+            resolve_request=resolve_request,
+            actor_user_id=actor_user_id,
+        )
+
+    async def discover_bulk_mod_metadata(
+        self,
+        *,
+        app: App,
+        discovery_request: node_api_mod.NodeBulkLauncherMetadataRequest,
+        actor_user_id: int,
+    ) -> BulkLauncherMetadataDiscovery:
+        return await self._mod_service.discover_bulk_mod_metadata(
+            app=app,
+            discovery_request=discovery_request,
+            actor_user_id=actor_user_id,
+        )
+
+    async def apply_bulk_mod_metadata(
+        self,
+        *,
+        app: App,
+        apply_request: node_api_mod.NodeBulkLauncherMetadataApplyRequest,
+        actor_user_id: int,
+    ) -> node_api_mod.NodeBulkLauncherMetadataApplyResult:
+        return await self._mod_service.apply_bulk_mod_metadata(
+            app=app,
+            apply_request=apply_request,
+            actor_user_id=actor_user_id,
+        )
+
+    async def resolve_mod_launcher_metadata(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        resolve_request: node_api_mod.NodeModMetadataResolveRequest,
+        actor_user_id: int,
+    ) -> LauncherMetadataDiscovery:
+        return await self._mod_service.resolve_mod_launcher_metadata(
+            app=app,
+            mod_name=mod_name,
+            resolve_request=resolve_request,
+            actor_user_id=actor_user_id,
+        )
+
+    async def fetch_mod_launcher_metadata(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        fetch_request: node_api_mod.NodeModMetadataFetchRequest,
+        actor_user_id: int,
+    ) -> LauncherMetadataResolution:
+        return await self._mod_service.fetch_mod_launcher_metadata(
+            app=app,
+            mod_name=mod_name,
+            fetch_request=fetch_request,
+            actor_user_id=actor_user_id,
+        )
+
+    async def update_mod_properties(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        update: node_api_mod.NodeModPropertiesUpdateRequest,
+        actor_user_id: int,
+    ) -> node_api_mod.NodeModMutationResult:
+        return await self._mod_service.update_mod_properties(
+            app=app,
+            mod_name=mod_name,
+            update=update,
+            actor_user_id=actor_user_id,
+        )
+
+    async def update_mod_notes(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        notes: str | None,
+        actor_user_id: int,
+    ) -> node_api_mod.NodeModMutationResult:
+        return await self._mod_service.update_mod_notes(
+            app=app,
+            mod_name=mod_name,
+            notes=notes,
+            actor_user_id=actor_user_id,
+        )
+
+    async def upload_mod_paths(
+        self,
+        *,
+        app: App,
+        upload_sources: Sequence[app_node_api.NodeModUploadSource],
+        actor_user_id: int,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+    ) -> node_api_mod.NodeModUploadBatchResult:
+        return await self._mod_service.upload_mod_paths(
+            app=app,
+            upload_sources=upload_sources,
+            actor_user_id=actor_user_id,
+            placement=placement,
         )
 
     def build_config_list(self, app: App, *, actor_user_id: int | None = None) -> NodeConfigList:
@@ -4986,7 +3203,10 @@ class NodeApiService:
                 config_file for config_file in configs if self._acl.can(actor_user_id, config_file.read_power_level)
             )
         traffic_log.info(
-            "Node API built config list: node=%s app=%s configs=%s", self.node_name, app.name, len(configs)
+            "Node API built config list: node=%s app=%s configs=%s",
+            self.node_name,
+            app.name,
+            len(configs),
         )
         return NodeConfigList(
             app_name=app.name,
@@ -5011,7 +3231,12 @@ class NodeApiService:
             raise _http_exception(404, str(xcp)) from xcp
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
-        traffic_log.info("Node API wrote config file: node=%s app=%s config=%s", self.node_name, app.name, config_id)
+        traffic_log.info(
+            "Node API wrote config file: node=%s app=%s config=%s",
+            self.node_name,
+            app.name,
+            config_id,
+        )
         self._invalidate_client_pack_content(app)
         return self._config_content(app=app, content=updated)
 
@@ -5027,7 +3252,7 @@ class NodeApiService:
 
     def factorio_generation_state(self, *, app: App) -> NodeFactorioGenerationState:
         factorio_app = self._factorio_app(app)
-        return _build_factorio_generation_state(app=factorio_app, node_name=self.node_name)
+        return factorio_node_api.build_factorio_generation_state(app=factorio_app, node_name=self.node_name)
 
     def update_factorio_generation(
         self,
@@ -5037,14 +3262,18 @@ class NodeApiService:
     ) -> NodeFactorioGenerationState:
         factorio_app = self._factorio_app(app)
         try:
-            _write_factorio_generation_settings(
+            factorio_node_api.write_factorio_generation_settings(
                 app=factorio_app,
                 map_gen_settings=update.map_gen_settings,
                 map_settings=update.map_settings,
             )
         except (OSError, ValueError) as xcp:
             raise _http_exception(400, str(xcp)) from xcp
-        traffic_log.info("Node API updated Factorio generation settings: node=%s app=%s", self.node_name, app.name)
+        traffic_log.info(
+            "Node API updated Factorio generation settings: node=%s app=%s",
+            self.node_name,
+            app.name,
+        )
         self._invalidate_state_caches(app_name=app.name)
         return self.factorio_generation_state(app=app)
 
@@ -5056,13 +3285,17 @@ class NodeApiService:
     ) -> NodeFactorioGenerationState:
         factorio_app = self._factorio_app(app)
         try:
-            await _import_factorio_map_exchange_string(
+            await factorio_node_api.import_factorio_map_exchange_string(
                 app=factorio_app,
                 map_exchange_string=import_request.map_exchange_string,
             )
         except (OSError, ValueError, RuntimeError) as xcp:
             raise _http_exception(400, str(xcp)) from xcp
-        traffic_log.info("Node API imported Factorio map exchange string: node=%s app=%s", self.node_name, app.name)
+        traffic_log.info(
+            "Node API imported Factorio map exchange string: node=%s app=%s",
+            self.node_name,
+            app.name,
+        )
         self._invalidate_state_caches(app_name=app.name)
         return self.factorio_generation_state(app=app)
 
@@ -5070,7 +3303,7 @@ class NodeApiService:
         factorio_app = self._factorio_app(app)
         try:
             map_exchange_string = await factorio_app.running_map_exchange_string()
-            await _import_factorio_map_exchange_string(
+            await factorio_node_api.import_factorio_map_exchange_string(
                 app=factorio_app,
                 map_exchange_string=map_exchange_string,
             )
@@ -5095,14 +3328,14 @@ class NodeApiService:
     def factorio_mod_settings_state(self, *, app: App) -> NodeFactorioModSettings:
         self._require_factorio_app(app)
         try:
-            return _build_factorio_mod_settings_state(app=app, node_name=self.node_name)
+            return factorio_node_api.build_factorio_mod_settings_state(app=app, node_name=self.node_name)
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
 
     def build_factorio_mod_settings_download_response(self, *, app: App) -> FileResponse:
         self._require_factorio_app(app)
         try:
-            return _build_factorio_mod_settings_download_response(app=app)
+            return factorio_node_api.build_factorio_mod_settings_download_response(app=app)
         except FileNotFoundError as xcp:
             raise _http_exception(404, str(xcp)) from xcp
         except ValueError as xcp:
@@ -5121,14 +3354,18 @@ class NodeApiService:
         resolved_upload_name = self._validated_upload_filename(upload_name, kind="Factorio mod settings")
         if resolved_upload_name != "mod-settings.dat":
             raise _http_exception(400, "Factorio mod settings upload must be named mod-settings.dat.")
-        temp_path = await self._persist_upload_to_temp(upload)
+        temp_path = await persist_upload_to_temp(upload)
         try:
             target = factorio_mod_settings_path(app.directory)
             target.parent.mkdir(parents=True, exist_ok=True)
             await run_blocking(File_Utils.copy, temp_path, target, True)
         finally:
             temp_path.unlink(missing_ok=True)
-        traffic_log.info("Node API uploaded Factorio mod settings: node=%s app=%s", self.node_name, app.name)
+        traffic_log.info(
+            "Node API uploaded Factorio mod settings: node=%s app=%s",
+            self.node_name,
+            app.name,
+        )
         self._invalidate_state_caches(app_name=app.name)
         return self.factorio_mod_settings_state(app=app)
 
@@ -5138,7 +3375,11 @@ class NodeApiService:
         if pointer.exists() and not pointer.is_file():
             raise _http_exception(400, f"Factorio mod settings path is not a file: {pointer}")
         File_Utils.remove(pointer, silent=True, resolve=False)
-        traffic_log.info("Node API deleted Factorio mod settings: node=%s app=%s", self.node_name, app.name)
+        traffic_log.info(
+            "Node API deleted Factorio mod settings: node=%s app=%s",
+            self.node_name,
+            app.name,
+        )
         self._invalidate_state_caches(app_name=app.name)
         return self.factorio_mod_settings_state(app=app)
 
@@ -5158,8 +3399,10 @@ class NodeApiService:
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
 
-        if actor_user_id is not None and self._acl is not None and not self._acl.can(
-            actor_user_id, app.config_file_read_level_for_root(root_id)
+        if (
+            actor_user_id is not None
+            and self._acl is not None
+            and not self._acl.can(actor_user_id, app.config_file_read_level_for_root(root_id))
         ):
             raise _http_exception(403, f"Insufficient level for config root: {root.label}")
 
@@ -5181,14 +3424,21 @@ class NodeApiService:
         if not visible_configs:
             raise _http_exception(404, f"No downloadable config files found in root: {root.label}")
         if root_path.is_file():
-            traffic_log.info("Node API sending config file root: node=%s app=%s root=%s", self.node_name, app.name, root_id)
+            traffic_log.info(
+                "Node API sending config file root: node=%s app=%s root=%s",
+                self.node_name,
+                app.name,
+                root_id,
+            )
             return FileResponse(path=root_path, filename=root_path.name)
 
         paths: tuple[Path, ...] = tuple[Path, ...](
             app.resolve_config_file(config_file.id) for config_file in visible_configs
         )
         archive_path: Path = await File_Utils.compress(
-            paths, self._config_root_archive_name(app=app, root=root), arc_base=root_path
+            paths,
+            self._config_root_archive_name(app=app, root=root),
+            arc_base=root_path,
         )
         traffic_log.info(
             "Node API sending config root archive: node=%s app=%s root=%s files=%s archive=%s",
@@ -5203,7 +3453,12 @@ class NodeApiService:
     async def build_save_list(self, app: App) -> NodeSaveList:
         saves: tuple[AppSaveEntry, ...] = await app.list_save_files_async()
         save_can_delete: bool = bool(getattr(app, "supports_save_delete", False))
-        traffic_log.info("Node API built save list: node=%s app=%s saves=%s", self.node_name, app.name, len(saves))
+        traffic_log.info(
+            "Node API built save list: node=%s app=%s saves=%s",
+            self.node_name,
+            app.name,
+            len(saves),
+        )
         return replace(
             self.build_empty_save_list(app),
             saves=tuple[NodeSaveEntry, ...](self._save_entry(save, can_delete=save_can_delete) for save in saves),
@@ -5280,7 +3535,12 @@ class NodeApiService:
         if not save_path.exists():
             raise _http_exception(404, f"Save file does not exist: {save_path.name}")
         if save_path.is_file():
-            traffic_log.info("Node API sending save file: node=%s app=%s path=%s", self.node_name, app.name, save_path)
+            traffic_log.info(
+                "Node API sending save file: node=%s app=%s path=%s",
+                self.node_name,
+                app.name,
+                save_path,
+            )
             return FileResponse(path=save_path, filename=save_path.name)
         if not save_path.is_dir():
             raise _http_exception(404, f"Save path is unsupported: {save_path.name}")
@@ -5315,7 +3575,7 @@ class NodeApiService:
         if not resolved_upload_name:
             raise _http_exception(400, "Save upload filename is required.")
 
-        temp_path: Path = await self._persist_upload_to_temp(upload)
+        temp_path: Path = await persist_upload_to_temp(upload)
         try:
             return await self.upload_save_path(
                 app=app,
@@ -5371,291 +3631,6 @@ class NodeApiService:
             node=self.node_name,
             message=f"Uploaded save `{updated.label}` for {app.friendly}.",
             save=self._save_entry(updated, can_delete=save_can_delete),
-        )
-
-    async def upload_mod_file(
-        self,
-        *,
-        app: App,
-        upload: UploadFile,
-        upload_name: str | None,
-        actor_user_id: int,
-        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> NodeModUploadResult:
-        result = await self.upload_mod_files(
-            app=app,
-            uploads=[upload],
-            upload_names=None if upload_name is None else [upload_name],
-            actor_user_id=actor_user_id,
-            placement=placement,
-        )
-        return self._single_mod_upload_result(result)
-
-    async def upload_mod_files(
-        self,
-        *,
-        app: App,
-        uploads: Sequence[UploadFile],
-        upload_names: Sequence[str] | None,
-        actor_user_id: int,
-        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> NodeModUploadBatchResult:
-        upload_sources = self._resolve_mod_upload_requests(uploads=uploads, upload_names=upload_names)
-        temp_paths: list[Path] = []
-        try:
-            resolved_sources: list[NodeModUploadSource] = []
-            for upload_request in upload_sources:
-                temp_path = await self._persist_upload_to_temp(upload_request.upload)
-                temp_paths.append(temp_path)
-                resolved_sources.append(
-                    NodeModUploadSource(
-                        source_path=temp_path,
-                        upload_name=upload_request.upload_name,
-                    )
-                )
-            return await self.upload_mod_paths(
-                app=app,
-                upload_sources=resolved_sources,
-                actor_user_id=actor_user_id,
-                placement=placement,
-            )
-        finally:
-            for temp_path in temp_paths:
-                temp_path.unlink(missing_ok=True)
-
-    async def upload_mod_path(
-        self,
-        *,
-        app: App,
-        source_path: Path,
-        upload_name: str,
-        actor_user_id: int,
-        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> NodeModUploadResult:
-        result = await self.upload_mod_paths(
-            app=app,
-            upload_sources=[NodeModUploadSource(source_path=source_path, upload_name=upload_name)],
-            actor_user_id=actor_user_id,
-            placement=placement,
-        )
-        return self._single_mod_upload_result(result)
-
-    async def install_mod_from_link(
-        self,
-        *,
-        app: App,
-        url: str,
-        actor_user_id: int,
-        selected_mod_ids: Sequence[str] | None = None,
-        version: str | None = None,
-    ) -> NodeModUploadBatchResult:
-        return await _install_factorio_mod_from_link(
-            app=app,
-            url=url,
-            actor_user_id=actor_user_id,
-            upload_mod_paths=self.upload_mod_paths,
-            selected_mod_ids=selected_mod_ids,
-            version=version,
-        )
-
-    async def resolve_mod_link_dependencies(
-        self,
-        *,
-        app: App,
-        url: str,
-        version: str | None = None,
-    ) -> NodeModDependencyResolutionResult:
-        return await _resolve_factorio_mod_link_dependencies(
-            app=app,
-            node_name=self.node_name,
-            url=url,
-            version=version,
-        )
-
-    async def list_mod_link_versions(
-        self,
-        *,
-        app: App,
-        url: str,
-    ) -> NodeModPortalVersionList:
-        return await _list_factorio_mod_link_versions(app=app, node_name=self.node_name, url=url)
-
-    async def list_installed_mod_versions(
-        self,
-        *,
-        app: App,
-        mod_name: str,
-    ) -> NodeModPortalVersionList:
-        return await _list_installed_factorio_mod_versions(app=app, node_name=self.node_name, mod_name=mod_name)
-
-    async def _factorio_mod_versions(self, *, app: App, url: str) -> NodeModPortalVersionList:
-        return await _factorio_mod_versions(app=app, node_name=self.node_name, url=url)
-
-    @staticmethod
-    def _factorio_installed_mod_ids(app: App) -> frozenset[str]:
-        return frozenset(_factorio_installed_mods_by_id(app))
-
-    @staticmethod
-    def _factorio_vanilla_mods(app: App) -> Mapping[str, FactorioVanillaMod]:
-        return _factorio_vanilla_mods(app)
-
-    @staticmethod
-    def _factorio_installed_mods_by_id(app: App) -> Mapping[str, Mod]:
-        return _factorio_installed_mods_by_id(app)
-
-    async def check_mod_update(
-        self,
-        *,
-        app: App,
-        mod_name: str,
-        version: str | None = None,
-    ) -> NodeModUpdateCheckResult:
-        return await _check_factorio_mod_update_by_name(
-            app=app,
-            node_name=self.node_name,
-            mod_name=mod_name,
-            version=version,
-        )
-
-    async def update_mod(
-        self,
-        *,
-        app: App,
-        mod_name: str,
-        actor_user_id: int,
-        version: str | None = None,
-    ) -> NodeModUploadBatchResult:
-        update_result: FactorioModUpdateApplyResult = await _update_factorio_mod(
-            app=app,
-            node_name=self.node_name,
-            mod_name=mod_name,
-            version=version,
-        )
-        old_mod = update_result.old_mod
-        added_mods = update_result.added_mods
-        update_check = update_result.update_check
-        dependency_actions = update_result.dependency_actions
-
-        traffic_log.info(
-            "Node API mod updated: node=%s app=%s old_mod=%s new_mod=%s actor=%s",
-            self.node_name,
-            app.name,
-            old_mod.name,
-            ",".join(updated_mod.name for updated_mod in added_mods),
-            actor_user_id,
-        )
-        self._invalidate_client_pack_content(app)
-        self._invalidate_mod_inventory(app.name)
-        updated_entries = tuple(self._mod_entry(updated_mod) for updated_mod in added_mods)
-        dependency_change_count = len(dependency_actions)
-        dependency_suffix = (
-            ""
-            if dependency_change_count == 0
-            else f" Updated {dependency_change_count} required dependenc{'ies' if dependency_change_count != 1 else 'y'}."
-        )
-        return NodeModUploadBatchResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            message=(
-                f"Updated `{old_mod.friendly}` from {update_check.current_version} "
-                f"to {update_check.latest_version}.{dependency_suffix}"
-            ),
-            mods=updated_entries,
-        )
-
-    async def _check_factorio_mod_update(
-        self,
-        *,
-        app: App,
-        mod: Mod,
-        version: str | None = None,
-    ) -> NodeModUpdateCheckResult:
-        return await _check_factorio_mod_update(
-            app=app,
-            node_name=self.node_name,
-            mod=mod,
-            version=version,
-        )
-
-
-    @staticmethod
-    def _factorio_dependency_update_entry(
-        *,
-        candidate: FactorioModPortalCandidate,
-        installed_mod: Mod | None,
-        vanilla_mod: FactorioVanillaMod | None = None,
-    ) -> NodeModUpdateDependency:
-        return _factorio_dependency_update_entry(
-            candidate=candidate,
-            installed_mod=installed_mod,
-            vanilla_mod=vanilla_mod,
-        )
-
-    @staticmethod
-    def _factorio_dependency_update_summary(
-        dependencies: Iterable[NodeModUpdateDependency],
-    ) -> str | None:
-        return _factorio_dependency_update_summary(dependencies)
-
-    @staticmethod
-    def _factorio_mod_update_page_url(mod: Mod) -> str:
-        try:
-            return _factorio_mod_update_page_url(mod)
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-
-
-    async def upload_mod_paths(
-        self,
-        *,
-        app: App,
-        upload_sources: Sequence[NodeModUploadSource],
-        actor_user_id: int,
-        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> NodeModUploadBatchResult:
-        if app.mods is None:
-            raise _http_exception(409, f"{app.friendly} does not support mods.")
-        resolved_upload_sources: tuple[NodeModUploadSource, ...] = self._validated_mod_upload_sources(upload_sources)
-        try:
-            require_app_stopped_for_mod_mutation(app)
-            manager: Mod_Manager = app.has_mod_manager
-            await manager.reload_mods()
-            uploaded_mods: list[Mod] = []
-            with tempfile.TemporaryDirectory(prefix="yukibot-mod-upload-") as temp_dir:
-                for upload_source in resolved_upload_sources:
-                    staged_path: Path = Path(temp_dir) / upload_source.upload_name
-                    await run_blocking(File_Utils.copy, upload_source.source_path, staged_path, True)
-                    uploaded_mods.append(
-                        await manager.add(staged_path, atomic=True, placement=placement)
-                    )
-        except RunningAppModMutationError as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-        except FileNotFoundError as xcp:
-            raise _http_exception(404, str(xcp)) from xcp
-        except FileExistsError as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        except Exception as xcp:
-            raise _http_exception(500, f"Mod upload failed: {xcp}") from xcp
-
-        traffic_log.info(
-            "Node API mods uploaded: node=%s app=%s mods=%s actor=%s",
-            self.node_name,
-            app.name,
-            ",".join(mod.name for mod in uploaded_mods),
-            actor_user_id,
-        )
-        mod_entries: tuple[NodeModEntry, ...] = tuple(self._mod_entry(uploaded_mod) for uploaded_mod in uploaded_mods)
-        self._invalidate_client_pack_content(app)
-        self._invalidate_mod_inventory(app.name)
-        return NodeModUploadBatchResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            message=self._mod_upload_message(app=app, mods=mod_entries),
-            mods=mod_entries,
         )
 
     async def rename_save_file(
@@ -5811,7 +3786,7 @@ class NodeApiService:
         temp_paths: dict[str, Path] = {}
         try:
             for upload, resolved_name in zip(uploads, resolved_names, strict=True):
-                temp_paths[resolved_name] = await self._persist_upload_to_temp(upload)
+                temp_paths[resolved_name] = await persist_upload_to_temp(upload)
             config_source_path: Path | None = None
             if upload_pair.config_filename is not None:
                 config_source_path = temp_paths[upload_pair.config_filename]
@@ -5945,7 +3920,12 @@ class NodeApiService:
         acl: Access_Control = self._require_acl()
         settings_manager: Settings_Manager = self._require_settings_manager(app)
         entries: tuple[NodeSettingEntry, ...] = tuple[NodeSettingEntry, ...](
-            self._setting_entry(setting, acl=acl, actor_user_id=actor_user_id, settings_manager=settings_manager)
+            self._setting_entry(
+                setting,
+                acl=acl,
+                actor_user_id=actor_user_id,
+                settings_manager=settings_manager,
+            )
             for setting in settings
         )
         editable_count: int = sum(1 for setting in settings if acl.can(actor_user_id, setting.power_level))
@@ -6017,7 +3997,12 @@ class NodeApiService:
             settings_manager.save(actor_user_id)
         except Exception as xcp:
             raise _http_exception(500, f"Settings save failed: {xcp}") from xcp
-        traffic_log.info("Node API settings saved: node=%s app=%s actor=%s", self.node_name, app.name, actor_user_id)
+        traffic_log.info(
+            "Node API settings saved: node=%s app=%s actor=%s",
+            self.node_name,
+            app.name,
+            actor_user_id,
+        )
         return NodeSettingsActionResult(
             app_name=app.name,
             app_friendly=app.friendly,
@@ -6032,7 +4017,12 @@ class NodeApiService:
             settings_manager.load(actor_user_id)
         except Exception as xcp:
             raise _http_exception(500, f"Settings reload failed: {xcp}") from xcp
-        traffic_log.info("Node API settings reloaded: node=%s app=%s actor=%s", self.node_name, app.name, actor_user_id)
+        traffic_log.info(
+            "Node API settings reloaded: node=%s app=%s actor=%s",
+            self.node_name,
+            app.name,
+            actor_user_id,
+        )
         return NodeSettingsActionResult(
             app_name=app.name,
             app_friendly=app.friendly,
@@ -6132,579 +4122,35 @@ class NodeApiService:
             source=result.source,
         )
 
-    async def mutate_mod(
-        self,
-        *,
-        app: App,
-        mod_name: str,
-        action: NodeModMutationAction,
-        actor_user_id: int,
-    ) -> NodeModMutationResult:
-        try:
-            manager: Mod_Manager = app.has_mod_manager
-            await manager.reload_mods()
-            mod: Mod = _get_mod_or_404(manager, mod_name)
-            override_protected_mod: bool = mod.is_protected and action in {
-                NodeModMutationAction.ENABLE,
-                NodeModMutationAction.DISABLE,
-                NodeModMutationAction.DELETE,
-            }
-            await self._require_acl().perm_check(
-                actor_user_id,
-                required_mod_mutation_level(action, is_protected=override_protected_mod),
-            )
-            result_message: str
-            result_mod_entry: NodeModEntry | None
-
-            if action is NodeModMutationAction.ENABLE:
-                if not mod.server_loadable:
-                    raise _http_exception(409, f"Client-only mod cannot be enabled on the server: {mod.name}")
-                require_app_stopped_for_mod_mutation(app)
-                updated_mod: Mod = await manager.set_enabled(
-                    mod,
-                    True,
-                    override_coremod=override_protected_mod,
-                )
-                result_message = f"Enabled {updated_mod.friendly}."
-                result_mod_entry = self._mod_entry(updated_mod)
-            elif action is NodeModMutationAction.DISABLE:
-                if not mod.server_loadable:
-                    raise _http_exception(409, f"Client-only mod cannot be disabled on the server: {mod.name}")
-                require_app_stopped_for_mod_mutation(app)
-                updated_mod = await manager.set_enabled(
-                    mod,
-                    False,
-                    override_coremod=override_protected_mod,
-                )
-                result_message = f"Disabled {updated_mod.friendly}."
-                result_mod_entry = self._mod_entry(updated_mod)
-            elif action is NodeModMutationAction.TOGGLE_COREMOD:
-                if mod.is_builtin:
-                    raise _http_exception(409, "Built-in mods cannot be converted to or from coremods.")
-                updated_mod = await manager.set_coremod(mod, not mod.is_coremod_type)
-                coremod_text: Literal["enabled", "disabled"] = (
-                    "enabled" if updated_mod.is_coremod_type else "disabled"
-                )
-                result_message = f"Coremod {coremod_text} for {updated_mod.friendly}."
-                result_mod_entry = self._mod_entry(updated_mod)
-            elif action is NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
-                reason: ModDownloadBlockReason | None = (
-                    ModDownloadBlockReason.OTHER if mod.downloadable else mod.default_download_block_reason()
-                )
-                updated_mod = await manager.set_download_block_reason(mod, reason)
-                blocked_text: Literal["blocked from download", "download-enabled"] = (
-                    "blocked from download" if updated_mod.download_block_label is not None else "download-enabled"
-                )
-                result_message = f"{updated_mod.friendly} is now {blocked_text}."
-                result_mod_entry = self._mod_entry(updated_mod)
-            elif action is NodeModMutationAction.DELETE:
-                require_app_stopped_for_mod_mutation(app)
-                await manager.remove(
-                    mod,
-                    override_coremod=override_protected_mod,
-                )
-                result_message = f"Deleted {mod.friendly}."
-                result_mod_entry = None
-            else:
-                raise ValueError(f"Unsupported mod mutation action: {action}")
-        except RunningAppModMutationError as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-
-        traffic_log.info(
-            "Node API mod mutated: node=%s app=%s mod=%s action=%s actor=%s",
-            self.node_name,
-            app.name,
-            mod.name,
-            action.value,
-            actor_user_id,
-        )
-        self._invalidate_client_pack_content(app)
-        self._invalidate_mod_inventory(app.name)
-        return NodeModMutationResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            mod_name=mod.name,
-            action=action,
-            message=result_message,
-            mod=result_mod_entry,
-        )
-
-    async def find_mod_pages(
-        self,
-        *,
-        app: App,
-        mod_name: str,
-        resolve_request: NodeModPageResolveRequest,
-        actor_user_id: int,
-    ) -> ModPageDiscovery:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        mod: Mod = _get_mod_or_404(manager, mod_name)
-        await self._require_acl().perm_check(
-            actor_user_id,
-            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
-        )
-        version = app.cfg.version
-        try:
-            return await discover_mod_pages(
-                scope=app.scope,
-                existing_mod_pages=resolve_request.mod_pages,
-                local_path=mod.storage_path,
-                local_filename=mod.name,
-                friendly_name=mod.friendly,
-                detected_version=mod.version,
-                game_version=None if version is None else version.main,
-                loader=None if version is None else version.loader,
-                providers=resolve_request.providers,
-            )
-        except (OSError, ValueError) as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-
-    @staticmethod
-    def _bulk_launcher_metadata_targets(
-        *,
-        manager: Mod_Manager,
-        discovery_request: NodeBulkLauncherMetadataRequest,
-    ) -> tuple[BulkLauncherMetadataTarget, ...]:
-        mods = (
-            tuple(_get_mod_or_404(manager, mod_name) for mod_name in discovery_request.mod_names)
-            if discovery_request.mod_names
-            else tuple(manager.list_mods())
-        )
-        return tuple(
-            BulkLauncherMetadataTarget(
-                mod_name=mod.name,
-                friendly_name=mod.friendly,
-                local_path=mod.storage_path,
-                existing_mod_pages=mod.cfg.mod_pages,
-                existing_platforms=mod.cfg.platforms,
-            )
-            for mod in mods
-            if not mod.is_builtin
-            and (
-                mod.cfg.platforms.modrinth is None
-                or mod.cfg.platforms.curseforge is None
-                or (
-                    mod.cfg.platforms.modrinth is not None
-                    and not any(
-                        known_mod_page_provider_for_url(page.url)
-                        is KnownModPageProvider.MODRINTH
-                        for page in mod.cfg.mod_pages
-                    )
-                )
-                or (
-                    mod.cfg.platforms.curseforge is not None
-                    and mod.cfg.platforms.curseforge.page_url is not None
-                    and not any(
-                        known_mod_page_provider_for_url(page.url)
-                        is KnownModPageProvider.CURSEFORGE
-                        for page in mod.cfg.mod_pages
-                    )
-                )
-            )
-        )
-
-    async def discover_bulk_mod_metadata(
-        self,
-        *,
-        app: App,
-        discovery_request: NodeBulkLauncherMetadataRequest,
-        actor_user_id: int,
-    ) -> BulkLauncherMetadataDiscovery:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        await self._require_acl().perm_check(
-            actor_user_id,
-            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
-        )
-        targets = self._bulk_launcher_metadata_targets(
-            manager=manager,
-            discovery_request=discovery_request,
-        )
-        started_at = time.monotonic()
-        log.info(
-            "Bulk mod metadata discovery scanning: node=%s app=%s operation=%s targets=%s",
-            self.node_name,
-            app.name,
-            discovery_request.operation_id,
-            len(targets),
-        )
-        try:
-            discovery = await discover_bulk_launcher_metadata(scope=app.scope, targets=targets)
-        except (OSError, ValueError) as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-        exact_count = len(discovery.exact_entries)
-        log.info(
-            "Bulk mod metadata discovery completed: node=%s app=%s operation=%s exact=%s "
-            "unmatched=%s provider_errors=%s elapsed=%.2fs",
-            self.node_name,
-            app.name,
-            discovery_request.operation_id,
-            exact_count,
-            len(discovery.entries) - exact_count,
-            len(discovery.provider_errors),
-            time.monotonic() - started_at,
-        )
-        self._cache_bulk_metadata_discovery(
-            app_name=app.name,
-            operation_id=discovery_request.operation_id,
-            discovery=discovery,
-        )
-        return discovery
-
-    async def apply_bulk_mod_metadata(
-        self,
-        *,
-        app: App,
-        apply_request: NodeBulkLauncherMetadataApplyRequest,
-        actor_user_id: int,
-    ) -> NodeBulkLauncherMetadataApplyResult:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        await self._require_acl().perm_check(
-            actor_user_id,
-            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
-        )
-        started_at = time.monotonic()
-        type_selection_names = frozenset(apply_request.apply_suggested_type_mod_names)
-        discovery = self._cached_bulk_metadata_discovery(
-            app_name=app.name,
-            operation_id=apply_request.discovery_operation_id,
-        )
-        entries_by_name = {entry.mod_name: entry for entry in discovery.entries}
-        selected_entries: list[BulkLauncherMetadataEntry] = []
-        for mod_name in apply_request.mod_names:
-            entry = entries_by_name.get(mod_name)
-            if entry is None or entry.status is not BulkLauncherMetadataStatus.EXACT:
-                raise _http_exception(
-                    409,
-                    "Bulk metadata apply selections must be exact matches from the cached discovery.",
-                )
-            selected_entries.append(entry)
-        invalid_type_selection_names = tuple(
-            entry.mod_name
-            for entry in selected_entries
-            if entry.mod_name in type_selection_names
-            and (
-                entry.suggested_mod_type is None
-                or entry.suggested_mod_type is ModType.REGULAR
-            )
-        )
-        if invalid_type_selection_names:
-            raise _http_exception(
-                409,
-                "Bulk metadata type selections require cached non-Regular suggestions: "
-                + ", ".join(invalid_type_selection_names),
-            )
-        log.info(
-            "Bulk mod metadata apply using cached discovery: node=%s app=%s operation=%s "
-            "discovery_operation=%s targets=%s type_selections=%s",
-            self.node_name,
-            app.name,
-            apply_request.operation_id,
-            apply_request.discovery_operation_id,
-            len(selected_entries),
-            len(type_selection_names),
-        )
-        applied_mod_names: list[str] = []
-        applied_type_mod_names: list[str] = []
-        try:
-            for entry in selected_entries:
-                apply_suggested_mod_type = entry.mod_name in type_selection_names
-                await manager.apply_discovered_launcher_metadata(
-                    entry.mod_name,
-                    entry,
-                    apply_suggested_mod_type=apply_suggested_mod_type,
-                )
-                applied_mod_names.append(entry.mod_name)
-                if apply_suggested_mod_type:
-                    applied_type_mod_names.append(entry.mod_name)
-        except asyncio.CancelledError:
-            log.warning(
-                "Bulk mod metadata apply cancelled: node=%s app=%s operation=%s "
-                "applied_before_cancel=%s elapsed=%.2fs",
-                self.node_name,
-                app.name,
-                apply_request.operation_id,
-                len(applied_mod_names),
-                time.monotonic() - started_at,
-            )
-            raise
-        except (OSError, ValueError) as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-
-        if applied_mod_names:
-            self._invalidate_client_pack_content(app)
-            self._invalidate_mod_inventory(app.name)
-        traffic_log.info(
-            "Node API bulk mod metadata applied: node=%s app=%s count=%s actor=%s",
-            self.node_name,
-            app.name,
-            len(applied_mod_names),
-            actor_user_id,
-        )
-        log.info(
-            "Bulk mod metadata apply completed: node=%s app=%s operation=%s applied=%s "
-            "types_updated=%s elapsed=%.2fs",
-            self.node_name,
-            app.name,
-            apply_request.operation_id,
-            len(applied_mod_names),
-            len(applied_type_mod_names),
-            time.monotonic() - started_at,
-        )
-        self._bulk_metadata_discoveries.pop(
-            (app.name, apply_request.discovery_operation_id),
-            None,
-        )
-        return NodeBulkLauncherMetadataApplyResult(
-            discovery=discovery,
-            applied_mod_names=tuple(applied_mod_names),
-            applied_type_mod_names=tuple(applied_type_mod_names),
-        )
-
-    async def resolve_mod_launcher_metadata(
-        self,
-        *,
-        app: App,
-        mod_name: str,
-        resolve_request: NodeModMetadataResolveRequest,
-        actor_user_id: int,
-    ) -> LauncherMetadataDiscovery:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        mod: Mod = _get_mod_or_404(manager, mod_name)
-        await self._require_acl().perm_check(
-            actor_user_id,
-            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
-        )
-        version = app.cfg.version
-        try:
-            return await discover_launcher_metadata(
-                scope=app.scope,
-                mod_pages=resolve_request.mod_pages,
-                existing_urls=resolve_request.existing_launcher_urls,
-                local_path=mod.storage_path,
-                local_filename=mod.name,
-                game_version=None if version is None else version.main,
-                loader=None if version is None else version.loader,
-                providers=resolve_request.providers,
-            )
-        except (OSError, ValueError) as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-
-    async def fetch_mod_launcher_metadata(
-        self,
-        *,
-        app: App,
-        mod_name: str,
-        fetch_request: NodeModMetadataFetchRequest,
-        actor_user_id: int,
-    ) -> LauncherMetadataResolution:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        mod: Mod = _get_mod_or_404(manager, mod_name)
-        await self._require_acl().perm_check(
-            actor_user_id,
-            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
-        )
-        try:
-            return await resolve_launcher_metadata_resolution(
-                scope=app.scope,
-                urls=fetch_request.launcher_urls,
-                local_filename=mod.name,
-                local_path=mod.storage_path,
-                providers=fetch_request.providers,
-            )
-        except ValueError as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-
-    async def update_mod_properties(
-        self,
-        *,
-        app: App,
-        mod_name: str,
-        update: NodeModPropertiesUpdateRequest,
-        actor_user_id: int,
-    ) -> NodeModMutationResult:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        mod: Mod = _get_mod_or_404(manager, mod_name)
-        await self._require_acl().perm_check(
-            actor_user_id,
-            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
-        )
-        if mod.is_builtin:
-            raise _http_exception(409, "Built-in mod properties cannot be changed.")
-        try:
-            platforms = await resolve_launcher_metadata(
-                scope=app.scope,
-                urls=update.launcher_urls,
-                local_filename=mod.name,
-                local_path=mod.storage_path,
-            )
-            updated_mod = await manager.update_properties(
-                mod,
-                mod_type=update.mod_type,
-                download_block_reason=update.download_block_reason,
-                metadata_overrides=update.metadata_overrides,
-                mod_pages=update.mod_pages,
-                client_pack=update.client_pack or mod.cfg.client_pack,
-                platforms=platforms,
-            )
-        except ValueError as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-
-        traffic_log.info(
-            "Node API mod properties updated: node=%s app=%s mod=%s actor=%s",
-            self.node_name,
-            app.name,
-            mod.name,
-            actor_user_id,
-        )
-        self._invalidate_client_pack_content(app)
-        self._invalidate_mod_inventory(app.name)
-        return NodeModMutationResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            mod_name=mod.name,
-            action=NodeModMutationAction.UPDATE_PROPERTIES,
-            message=f"Updated properties for {updated_mod.friendly}.",
-            mod=self._mod_entry(updated_mod),
-        )
-
-    async def update_mod_notes(
-        self,
-        *,
-        app: App,
-        mod_name: str,
-        notes: str | None,
-        actor_user_id: int,
-    ) -> NodeModMutationResult:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        mod: Mod = _get_mod_or_404(manager, mod_name)
-        await self._require_acl().perm_check(actor_user_id, Power_Level.admin)
-        try:
-            updated_mod = await manager.update_notes(mod, notes=notes)
-        except ValueError as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-        self._invalidate_mod_inventory(app.name)
-        return NodeModMutationResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            mod_name=mod.name,
-            action=NodeModMutationAction.UPDATE_NOTES,
-            message=f"Updated notes for {updated_mod.friendly}.",
-            mod=self._mod_entry(updated_mod),
-        )
-
     async def update_client_pack_config(
         self,
         *,
         app: App,
-        update: NodeClientPackConfigUpdateRequest,
+        update: node_api_mod.NodeClientPackConfigUpdateRequest,
         actor_user_id: int,
     ) -> dict[str, object]:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        await self._require_acl().perm_check(actor_user_id, Power_Level.admin)
-        excluded_kubejs_scripts: tuple[str, ...] | None = None
-        if update.metadata is not None and not isinstance(app, Minecraft):
-            raise _http_exception(409, "Client-pack metadata is only supported for Minecraft apps.")
-        if update.kubejs_scripts is not None:
-            if not isinstance(app, Minecraft):
-                raise _http_exception(409, "KubeJS client-pack scripts are only supported for Minecraft apps.")
-            discovered_scripts = self._client_pack_kubejs_scripts(app)
-            discovered_paths = {script.relative_path for script in discovered_scripts}
-            submitted_paths = {script.relative_path for script in update.kubejs_scripts}
-            if submitted_paths != discovered_paths:
-                raise _http_exception(
-                    409,
-                    "KubeJS scripts changed since the client-pack configuration was loaded; reload and try again.",
-                )
-            excluded_kubejs_scripts = tuple(
-                sorted(
-                    (script.relative_path for script in update.kubejs_scripts if not script.included),
-                    key=str.casefold,
-                )
-            )
-        try:
-            updated_mods = await manager.update_client_pack_configs(
-                {item.mod_name: item.client_pack for item in update.mods}
-            )
-        except (ModuleNotFoundError, ValueError) as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-
-        if excluded_kubejs_scripts is not None:
-            app.cfg.client_pack_excluded_kubejs_scripts = tuple(
-                excluded_kubejs_scripts
-            )
-        if update.metadata is not None:
-            app.cfg.client_pack_metadata = update.metadata
-
-        traffic_log.info(
-            "Node API client-pack configuration updated: node=%s app=%s mods=%s actor=%s",
-            self.node_name,
-            app.name,
-            len(updated_mods),
-            actor_user_id,
+        return await self._client_packs.update_config(
+            app=app,
+            update=update,
+            actor_user_id=actor_user_id,
+            acl=self._require_acl(),
+            http_exception=_http_exception,
         )
-        self._invalidate_client_pack_content(app)
-        app.persist_instance_config_overrides()
-        self._invalidate_mod_inventory(app.name)
-        return {
-            "app_name": app.name,
-            "updated_count": len(updated_mods),
-            "message": f"Updated client-pack configuration for {len(updated_mods)} mods.",
-        }
 
     async def publish_client_pack_config(
         self,
         *,
         app: App,
-        update: NodeClientPackPublishRequest,
+        update: node_api_mod.NodeClientPackPublishRequest,
         actor_user_id: int,
     ) -> dict[str, object]:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.admin)
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        try:
-            entries = self._client_pack_entries(
-                app=app,
-                selection=ClientPackSelection(),
-                include_kubejs_scripts=True,
-            )
-        except (ClientPackValidationError, NonDownloadableModError, ModuleNotFoundError) as xcp:
-            log.warning(
-                "Client-pack configuration publish rejected: app=%s actor=%s error=%s",
-                app.name,
-                actor_user_id,
-                xcp,
-            )
-            raise _http_exception(409, str(xcp)) from xcp
-        if not entries:
-            log.warning(
-                "Client-pack configuration publish rejected because the pack is empty: app=%s actor=%s",
-                app.name,
-                actor_user_id,
-            )
-            raise _http_exception(409, "The default client pack contains no mods.")
-        content_hash = await self._client_pack_content_hash(app=app, entries=entries)
-        version = app.publish_client_pack(
-            content_hash,
-            changelog=update.changelog,
-            mods=self._default_client_pack_mod_snapshots(app),
+        return await self._client_packs.publish_config(
+            app=app,
+            update=update,
+            actor_user_id=actor_user_id,
+            acl=self._require_acl(),
+            http_exception=_http_exception,
         )
-        self._invalidate_state_caches(app_name=app.name)
-        return {
-            "app_name": app.name,
-            "published_version": version,
-            "message": f"Published client pack version {version}.",
-        }
 
     def _resolve_console_action(self, app: App, action_key: str) -> ConsoleAction:
         if not app.supports_console_actions:
@@ -6766,30 +4212,6 @@ class NodeApiService:
             recent_inputs=resolved_parameter.recent_inputs if include_recent_inputs else (),
         )
 
-    async def _single_mod_download_file(self, *, app: App, mod: Mod) -> NodeDownloadFile:
-        if not mod.path.exists():
-            log.warning("Node API single mod missing: app=%s mod=%s path=%s", app.name, mod.name, mod.path)
-            raise _http_exception(404, f"Mod file is missing: {mod.name}")
-        if mod.path.is_file():
-            return NodeDownloadFile(path=mod.path, filename=mod.name, is_archive=False)
-        if mod.path.is_dir():
-            archive_name: str = self._single_mod_archive_name(app=app, mod=mod)
-            archive_path: Path = await compress_mod_archive_entries(
-                (ModArchiveEntry.from_mod(mod),),
-                archive_name,
-            )
-            traffic_log.info(
-                "Node API zipped directory mod: app=%s mod=%s source=%s archive=%s",
-                app.name,
-                mod.name,
-                mod.path,
-                archive_path,
-            )
-            return NodeDownloadFile(path=archive_path, filename=archive_path.name, is_archive=True)
-
-        log.warning("Node API single mod path is unsupported: app=%s mod=%s path=%s", app.name, mod.name, mod.path)
-        raise _http_exception(404, f"Mod path is neither a file nor a directory: {mod.name}")
-
     def apps_url(self, *, subject: str = "web", base_url: str | None = None) -> str:
         token: str | None = self.issue_access_token(
             subject=subject,
@@ -6841,13 +4263,13 @@ class NodeApiService:
 
     def mod_download_form(
         self, app_name: str, *, subject: str = "web", base_url: str | None = None
-    ) -> NodeModDownloadForm:
+    ) -> node_api_mod.NodeModDownloadForm:
         token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_DOWNLOAD,),
         )
-        return NodeModDownloadForm(
+        return node_api_mod.NodeModDownloadForm(
             action_url=f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/mods/download",
             access_token=token,
         )
@@ -6947,7 +4369,10 @@ class NodeApiService:
             app_name=app_name,
             scopes=(NodeApiScope.SETTINGS_READ,),
         )
-        return self._with_access_token(f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/settings", token)
+        return self._with_access_token(
+            f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/settings",
+            token,
+        )
 
     def setting_url(
         self,
@@ -7021,14 +4446,24 @@ class NodeApiService:
             except NodeTokenError as xcp:
                 token_error = xcp
             else:
-                log.debug("Node API token access accepted: node=%s app=%s scopes=%s", self.node_name, app_name, scopes)
+                log.debug(
+                    "Node API token access accepted: node=%s app=%s scopes=%s",
+                    self.node_name,
+                    app_name,
+                    scopes,
+                )
                 return grant
 
         if self._require_web_session_access(request=request, app_name=app_name, scopes=scopes):
             return None
 
         if secret is None and (config.INDEV or config.ALLOW_UNAUTH_NODE_API):
-            log.debug("Node API auth disabled: node=%s app=%s scopes=%s", self.node_name, app_name, scopes)
+            log.debug(
+                "Node API auth disabled: node=%s app=%s scopes=%s",
+                self.node_name,
+                app_name,
+                scopes,
+            )
             return None
 
         reason: NodeTokenError = token_error or NodeTokenError("Node API authentication is not configured.")
@@ -7196,7 +4631,10 @@ class NodeApiService:
         for scope in scopes:
             level = _NODE_API_SCOPE_WEB_LEVELS.get(scope)
             if level is None:
-                raise _http_exception(403, f"Node API scope cannot be granted by a web session: {scope.value}.")
+                raise _http_exception(
+                    403,
+                    f"Node API scope cannot be granted by a web session: {scope.value}.",
+                )
             required_levels.append(level)
         return max(required_levels)
 
@@ -7243,74 +4681,6 @@ class NodeApiService:
         if resolved in {".", ".."} or PurePosixPath(resolved).name != resolved or "\\" in resolved:
             raise _http_exception(400, f"{kind} upload filename must not include directories.")
         return resolved
-
-    def _resolve_mod_upload_requests(
-        self,
-        *,
-        uploads: Sequence[UploadFile],
-        upload_names: Sequence[str] | None,
-    ) -> tuple[_ResolvedModUploadFile, ...]:
-        if not uploads:
-            raise _http_exception(400, "At least one mod upload is required.")
-        if upload_names is not None and len(upload_names) != len(uploads):
-            raise _http_exception(400, "Mod upload filenames must match the number of uploads.")
-        resolved_uploads: list[_ResolvedModUploadFile] = []
-        for index, upload in enumerate(uploads):
-            resolved_upload_name = self._validated_upload_filename(
-                (upload.filename or "") if upload_names is None else upload_names[index],
-                kind="Mod",
-            )
-            resolved_uploads.append(
-                _ResolvedModUploadFile(
-                    upload=upload,
-                    upload_name=resolved_upload_name,
-                )
-            )
-        return tuple(resolved_uploads)
-
-    def _validated_mod_upload_sources(
-        self,
-        upload_sources: Sequence[NodeModUploadSource],
-    ) -> tuple[NodeModUploadSource, ...]:
-        if not upload_sources:
-            raise _http_exception(400, "At least one mod upload is required.")
-        resolved_sources: list[NodeModUploadSource] = []
-        for upload_source in upload_sources:
-            resolved_sources.append(
-                NodeModUploadSource(
-                    source_path=upload_source.source_path,
-                    upload_name=self._validated_upload_filename(upload_source.upload_name, kind="Mod"),
-                )
-            )
-        return tuple(resolved_sources)
-
-    @staticmethod
-    def _mod_upload_message(*, app: App, mods: Sequence[NodeModEntry]) -> str:
-        if len(mods) == 1:
-            return f"Uploaded mod `{mods[0].friendly}` for {app.friendly}."
-        return f"Uploaded {len(mods)} mods for {app.friendly}."
-
-    @staticmethod
-    def _single_mod_upload_result(result: NodeModUploadBatchResult) -> NodeModUploadResult:
-        if len(result.mods) != 1:
-            raise ValueError("Exactly one uploaded mod is required.")
-        return NodeModUploadResult(
-            app_name=result.app_name,
-            app_friendly=result.app_friendly,
-            node=result.node,
-            message=result.message,
-            mod=result.mods[0],
-        )
-
-    @staticmethod
-    async def _persist_upload_to_temp(upload: UploadFile) -> Path:
-        suffix = Path(upload.filename or "save-upload").suffix
-        with tempfile.NamedTemporaryFile(prefix="yukibot-save-", suffix=suffix, delete=False) as handle:
-            temp_path = Path(handle.name)
-            while chunk := await upload.read(1024 * 1024):
-                handle.write(chunk)
-        await upload.close()
-        return temp_path
 
     def _running_blocker_name(self, app: App) -> str | None:
         manager = self._require_manager()
@@ -7472,38 +4842,6 @@ class NodeApiService:
         )
 
     @staticmethod
-    def _mod_entry(mod: Mod) -> NodeModEntry:
-        size_bytes = File_Utils.pointer_size(mod.path)
-        return NodeModEntry(
-            name=mod.name,
-            friendly=mod.friendly,
-            client_path=str(mod.client_path),
-            enabled=mod.cfg.enabled,
-            placement=mod.cfg.placement,
-            server_loadable=mod.server_loadable,
-            client_pack_eligible=mod.client_pack_eligible,
-            archive_name=mod.logical_archive_name,
-            source_path=str(mod.storage_path),
-            description=mod.description,
-            notes=mod.cfg.notes,
-            mod_type=mod.mod_type,
-            coremod=mod.is_coremod_type,
-            downloadable=mod.downloadable,
-            download_block_reason=mod.download_block_reason.value
-            if mod.download_block_reason is not None
-            else None,
-            download_block_label=mod.download_block_label,
-            origin=mod.origin,
-            version=mod.version,
-            added=mod.added.isoformat(sep=" ", timespec="seconds"),
-            size_bytes=size_bytes,
-            size_text=Utilities.humanise_bytes(size_bytes),
-            mod_pages=mod.cfg.mod_pages,
-            metadata_overrides=mod.cfg.metadata_overrides,
-            client_pack=mod.cfg.client_pack,
-            platforms=mod.cfg.platforms,
-        )
-
     @staticmethod
     def _config_entry(config_file: AppConfigFile) -> NodeConfigEntry:
         return NodeConfigEntry(
@@ -7605,71 +4943,6 @@ class NodeApiService:
             can_delete=main_file.can_delete and (config_file is None or config_file.can_delete),
             config_file=config_file,
         )
-
-    def _archive_name(
-        self,
-        *,
-        app: App,
-        entries: tuple[ArchiveEntry | ArchiveDataEntry, ...],
-        request: NodeDownloadRequest,
-        client_pack_version: str | None = None,
-    ) -> str:
-        if request.resolved_pack_purpose is PackPurpose.CLIENT:
-            metadata = self._client_pack_metadata(app)
-            version = app.cfg.version
-            if metadata is not None and version is not None:
-                pack_version = (
-                    client_pack_version
-                    or app.cfg.client_pack_published_version
-                    or version.main
-                )
-                format_name = {
-                    PackFormat.MODRINTH: "modrinth",
-                    PackFormat.CURSEFORGE: "curseforge",
-                    PackFormat.GENERIC_ZIP: "generic",
-                }[request.pack_format]
-                stem = metadata.filename_stem(
-                    app_name=app.name,
-                    version=pack_version,
-                    minecraft_version=version.main,
-                    format_name=format_name,
-                )
-                return f"{stem}{request.pack_format.suffix}"
-        if request.resolved_pack_purpose is not None:
-            suffix = f"{request.resolved_pack_purpose.value}_pack"
-        elif request.selected_only or request.mod_names:
-            suffix = "selected_mods" if len(entries) != 1 else "selected_mod"
-        elif request.enabled_only:
-            suffix = "enabled_mods" if len(entries) != 1 else "enabled_mod"
-        else:
-            suffix = "mods"
-        app_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in app.friendly.strip())
-        base_name = app_name.strip("_") or app.name
-        if request.resolved_pack_purpose is not None and request.pack_format is not PackFormat.GENERIC_ZIP:
-            suffix = f"{suffix}_{request.pack_format.value}"
-        return f"{base_name}_{suffix}{request.pack_format.suffix}"
-
-    @staticmethod
-    def _empty_archive_detail(request: NodeDownloadRequest) -> str:
-        if request.resolved_pack_purpose is PackPurpose.CLIENT:
-            return "No client-pack-eligible mods found."
-        if request.resolved_pack_purpose is PackPurpose.SERVER:
-            return "No enabled server-pack mods found."
-        if request.resolved_pack_purpose is PackPurpose.ADMIN:
-            return "No admin-pack mods found."
-        if request.selected_only or request.mod_names:
-            return "No selected downloadable mods found."
-        if request.enabled_only:
-            return "No enabled downloadable mods found."
-        return "No downloadable mods found."
-
-    @staticmethod
-    def _single_mod_archive_name(*, app: App, mod: Mod) -> str:
-        app_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in app.friendly.strip())
-        mod_name = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in mod.friendly.strip())
-        base_app_name = app_name.strip("_") or app.name
-        base_mod_name = mod_name.strip("_") or mod.name
-        return f"{base_app_name}_{base_mod_name}.zip"
 
     @staticmethod
     def _save_archive_name(*, app: App, save_path: Path) -> str:

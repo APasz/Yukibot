@@ -1,47 +1,216 @@
-# pyright: reportImportCycles=false
 """HTTP registration for mod inventory, mutation, and client-pack routes."""
 
 from __future__ import annotations
 
 import logging
 import uuid
-from typing import TYPE_CHECKING, Annotated, Any
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Annotated, Any, Protocol
 
 from fastapi import File, Form, Request, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from _audit import audit_log
 from _security import Power_Level
-from apps._config import ModPlacement
-from apps.factorio.node_api import NodeModPortalInstallRequest, NodeModUpdateRequest
+from apps._app import App
+from apps._config import (
+    BulkLauncherMetadataDiscovery,
+    LauncherMetadataDiscovery,
+    LauncherMetadataResolution,
+    ModPageDiscovery,
+    ModPlacement,
+)
+from apps.factorio.node_api import (
+    NodeModDependencyResolutionResult,
+    NodeModPortalInstallRequest,
+    NodeModPortalVersionList,
+    NodeModUpdateCheckResult,
+    NodeModUpdateRequest,
+)
 from apps.minecraft.pack_export import PackFormat, PackPurpose
+from node_api_mod import (
+    NodeBulkLauncherMetadataApplyRequest,
+    NodeBulkLauncherMetadataApplyResult,
+    NodeBulkLauncherMetadataRequest,
+    NodeClientPackConfigUpdateRequest,
+    NodeClientPackPublishRequest,
+    NodeDownloadRequest,
+    NodeModMetadataFetchRequest,
+    NodeModMetadataResolveRequest,
+    NodeModMutationAction,
+    NodeModMutationRequest,
+    NodeModMutationResult,
+    NodeModNotesUpdateRequest,
+    NodeModPageResolveRequest,
+    NodeModPropertiesUpdateRequest,
+    NodeModUploadBatchResult,
+)
+from node_api_route_contracts import NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
-if TYPE_CHECKING:
-    from node_api import NodeApiService
+
+class NodeModRouteService(NodeAuthenticatedRouteService, Protocol):
+    """Mod operations exposed through the HTTP API."""
+
+    def _resolve_app(self, app_name: str) -> App: ...
+
+    async def build_mod_download_response(self, *, app: App, request: NodeDownloadRequest) -> FileResponse: ...
+
+    async def upload_mod_files(
+        self,
+        *,
+        app: App,
+        uploads: Sequence[UploadFile],
+        upload_names: Sequence[str] | None,
+        actor_user_id: int,
+        placement: ModPlacement,
+    ) -> NodeModUploadBatchResult: ...
+
+    async def install_mod_from_link(
+        self,
+        *,
+        app: App,
+        url: str,
+        actor_user_id: int,
+        selected_mod_ids: Sequence[str] | None,
+        version: str | None,
+    ) -> NodeModUploadBatchResult: ...
+
+    async def resolve_mod_link_dependencies(
+        self,
+        *,
+        app: App,
+        url: str,
+        version: str | None,
+    ) -> NodeModDependencyResolutionResult: ...
+
+    async def list_mod_link_versions(self, *, app: App, url: str) -> NodeModPortalVersionList: ...
+
+    async def mutate_mod(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        action: NodeModMutationAction,
+        actor_user_id: int,
+    ) -> NodeModMutationResult: ...
+
+    async def check_mod_update(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        version: str | None,
+    ) -> NodeModUpdateCheckResult: ...
+
+    async def list_installed_mod_versions(self, *, app: App, mod_name: str) -> NodeModPortalVersionList: ...
+
+    async def update_mod(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        actor_user_id: int,
+        version: str | None,
+    ) -> NodeModUploadBatchResult: ...
+
+    async def update_mod_properties(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        update: NodeModPropertiesUpdateRequest,
+        actor_user_id: int,
+    ) -> NodeModMutationResult: ...
+
+    async def update_mod_notes(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        notes: str | None,
+        actor_user_id: int,
+    ) -> NodeModMutationResult: ...
+
+    async def fetch_mod_launcher_metadata(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        fetch_request: NodeModMetadataFetchRequest,
+        actor_user_id: int,
+    ) -> LauncherMetadataResolution: ...
+
+    async def resolve_mod_launcher_metadata(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        resolve_request: NodeModMetadataResolveRequest,
+        actor_user_id: int,
+    ) -> LauncherMetadataDiscovery: ...
+
+    async def find_mod_pages(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        resolve_request: NodeModPageResolveRequest,
+        actor_user_id: int,
+    ) -> ModPageDiscovery: ...
+
+    async def run_bulk_metadata_operation(
+        self,
+        *,
+        app_name: str,
+        operation_id: uuid.UUID,
+        action: Callable[[], Awaitable[BaseModel]],
+    ) -> BaseModel: ...
+
+    def cancel_bulk_metadata_operation(self, *, app_name: str, operation_id: uuid.UUID) -> bool: ...
+
+    async def discover_bulk_mod_metadata(
+        self,
+        *,
+        app: App,
+        discovery_request: NodeBulkLauncherMetadataRequest,
+        actor_user_id: int,
+    ) -> BulkLauncherMetadataDiscovery: ...
+
+    async def apply_bulk_mod_metadata(
+        self,
+        *,
+        app: App,
+        apply_request: NodeBulkLauncherMetadataApplyRequest,
+        actor_user_id: int,
+    ) -> NodeBulkLauncherMetadataApplyResult: ...
+
+    async def update_client_pack_config(
+        self,
+        *,
+        app: App,
+        update: NodeClientPackConfigUpdateRequest,
+        actor_user_id: int,
+    ) -> dict[str, object]: ...
+
+    async def publish_client_pack_config(
+        self,
+        *,
+        app: App,
+        update: NodeClientPackPublishRequest,
+        actor_user_id: int,
+    ) -> dict[str, object]: ...
 
 
 def register_mod_routes(
     nicegui_app: Any,
     *,
-    service: NodeApiService,
+    service: NodeModRouteService,
     api_prefix: str,
     traffic_log: logging.Logger,
 ) -> None:
     """Register all app-scoped mod and client-pack endpoints."""
-    from node_api import (
-        NodeBulkLauncherMetadataApplyRequest,
-        NodeBulkLauncherMetadataRequest,
-        NodeClientPackConfigUpdateRequest,
-        NodeClientPackPublishRequest,
-        NodeDownloadRequest,
-        NodeModMetadataFetchRequest,
-        NodeModMetadataResolveRequest,
-        NodeModMutationRequest,
-        NodeModNotesUpdateRequest,
-        NodeModPageResolveRequest,
-        NodeModPropertiesUpdateRequest,
-    )
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/mods/download")
     async def _download_mods(
@@ -102,8 +271,18 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> FileResponse:
-        traffic_log.info("Node API single mod request: node=%s app=%s mod=%s", service.node_name, app_name, mod_name)
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_DOWNLOAD,))
+        traffic_log.info(
+            "Node API single mod request: node=%s app=%s mod=%s",
+            service.node_name,
+            app_name,
+            mod_name,
+        )
+        service._require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_DOWNLOAD,),
+        )
         app = service._resolve_app(app_name)
         return await service.build_mod_download_response(
             app=app,
@@ -153,7 +332,11 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API mod link install request: node=%s app=%s", service.node_name, app_name)
+        traffic_log.info(
+            "Node API mod link install request: node=%s app=%s",
+            service.node_name,
+            app_name,
+        )
         grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         install_request = NodeModPortalInstallRequest.model_validate(payload)
         actor_user_id = service._request_actor_user_id(
@@ -188,7 +371,11 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API mod link resolve request: node=%s app=%s", service.node_name, app_name)
+        traffic_log.info(
+            "Node API mod link resolve request: node=%s app=%s",
+            service.node_name,
+            app_name,
+        )
         service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         resolve_request = NodeModPortalInstallRequest.model_validate(payload)
         app = service._resolve_app(app_name)
@@ -206,7 +393,11 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API mod link version list request: node=%s app=%s", service.node_name, app_name)
+        traffic_log.info(
+            "Node API mod link version list request: node=%s app=%s",
+            service.node_name,
+            app_name,
+        )
         service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         resolve_request = NodeModPortalInstallRequest.model_validate(payload)
         app = service._resolve_app(app_name)
@@ -221,7 +412,12 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API mod mutation request: node=%s app=%s mod=%s", service.node_name, app_name, mod_name)
+        traffic_log.info(
+            "Node API mod mutation request: node=%s app=%s mod=%s",
+            service.node_name,
+            app_name,
+            mod_name,
+        )
         grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         mutation_request = NodeModMutationRequest.model_validate(payload)
         actor_user_id = service._request_actor_user_id(
@@ -487,7 +683,7 @@ def register_mod_routes(
             verified_grant=grant,
         )
         discovery_request = NodeBulkLauncherMetadataRequest.model_validate(payload)
-        discovery = await service._run_bulk_metadata_operation(
+        discovery = await service.run_bulk_metadata_operation(
             app_name=app_name,
             operation_id=discovery_request.operation_id,
             action=lambda: service.discover_bulk_mod_metadata(
@@ -519,7 +715,7 @@ def register_mod_routes(
             verified_grant=grant,
         )
         apply_request = NodeBulkLauncherMetadataApplyRequest.model_validate(payload)
-        result = await service._run_bulk_metadata_operation(
+        result = await service.run_bulk_metadata_operation(
             app_name=app_name,
             operation_id=apply_request.operation_id,
             action=lambda: service.apply_bulk_mod_metadata(
@@ -552,7 +748,7 @@ def register_mod_routes(
             scopes=(NodeApiScope.MODS_WRITE,),
             verified_grant=grant,
         )
-        cancelled = service._cancel_bulk_metadata_operation(
+        cancelled = service.cancel_bulk_metadata_operation(
             app_name=app_name,
             operation_id=operation_id,
         )
