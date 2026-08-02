@@ -674,7 +674,7 @@ class ModWebNodeAppSection:
     node: ModWebNodeLink
     app_links: tuple[ModWebAppLink, ...]
     error: str | None = None
-    is_simulated_down: bool = False
+    is_connecting: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -682,7 +682,6 @@ class ModWebNodeStatus:
     node: ModWebNodeLink
     alive: bool
     detail: str | None = None
-    is_simulated_down: bool = False
     latency_ms: int | None = None
 
 

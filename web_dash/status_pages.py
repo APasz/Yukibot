@@ -466,10 +466,7 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
         show_api_actions: bool,
     ) -> None:
         self._apply_theme(ui=ui)
-        simulated_down_node_names: tuple[str, ...] = self._simulated_down_node_names(request)
-        node_statuses: tuple[ModWebNodeStatus, ...] = await self._login_node_statuses_async(
-            simulated_down_node_names=simulated_down_node_names
-        )
+        node_statuses: tuple[ModWebNodeStatus, ...] = await self._login_node_statuses_async()
         login_presence_badge_specs: list[_ModWebNodePresenceBadgeSpec] = []
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             with ui.card().classes(self._hero_card_classes()):
@@ -500,10 +497,14 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
                                             alive_text=f"{status.node.label}: Alive",
                                             down_text=f"{status.node.label}: Down",
                                             presence_stream_url=(
-                                                None if status.is_simulated_down else status.node.presence_stream_url
+                                                status.node.presence_stream_url
+                                                if status.node.is_current
+                                                else None
                                             ),
                                             presence_health_url=(
-                                                None if status.is_simulated_down else status.node.presence_health_url
+                                                status.node.presence_health_url
+                                                if status.node.is_current
+                                                else None
                                             ),
                                             pending_class_name=self._badge_class_name(
                                                 tone=self._login_node_status_badge_tone(status),

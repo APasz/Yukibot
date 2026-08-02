@@ -216,8 +216,9 @@ from web_dash.home import (
 from web_dash.links import current_node_app_url, mod_web_node_system_path
 from web_dash.nicegui_protocols import ModWebUi
 from web_dash.routes import _ModWebGZipMiddleware
+from web_dash.remote_node_monitor import RemoteNodeAvailability, RemoteNodeMonitor, RemoteNodeMonitorSnapshot
 from web_dash.service import ModWebService
-from web_dash.stream_broker import SharedAsyncStreamBroker
+from web_dash.stream_broker import RemoteNodeStreamKey, SharedAsyncStreamBroker
 from web_dash.types import (
     ModDownloadKind,
     ModWebAppLink,
@@ -1819,24 +1820,6 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(ModWebService._node_status_badge_text(section), "Erin: Down")
         self.assertEqual(ModWebService._node_status_badge_tone(section), "red")
 
-    def test_node_status_badge_marks_simulated_node_down(self) -> None:
-        section: ModWebNodeAppSection = ModWebNodeAppSection(
-            node=ModWebNodeLink(
-                node_name="erin",
-                label="Erin",
-                url="/mod-web/nodes/erin",
-                api_base_url="https://erin.example/api/node",
-                api_url="/api/node-proxy/erin/apps",
-                is_current=False,
-            ),
-            app_links=(),
-            error="This node is being simulated as unavailable in dev mode.",
-            is_simulated_down=True,
-        )
-
-        self.assertEqual(ModWebService._node_status_badge_text(section), "Erin: Simulated Down")
-        self.assertEqual(ModWebService._node_status_badge_tone(section), "warn")
-
     def test_home_node_latency_badges_javascript_embeds_presence_stream_urls(
         self,
     ) -> None:
@@ -1919,6 +1902,52 @@ class ModWebTests(unittest.TestCase):
         self.assertIn(r".join('\n')", script)
         self.assertIn("type: 'node_latencies'", script)
         self.assertIn("payload.type === 'node_latencies'", script)
+        self.assertIn("const samplePortalNodeLatency = async (nodeName) =>", script)
+        self.assertIn("payload.latencies[nodeName]", script)
+        self.assertIn("payload.discord_latencies?.[nodeName]", script)
+        self.assertIn("!spec.portal_node_latencies_url", script)
+
+    def test_home_node_latency_badge_proxies_remote_latency_through_portal(self) -> None:
+        service = ModWebService()
+        section = ModWebNodeAppSection(
+            node=ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+                presence_stream_url="https://erin.example/api/node/presence/stream",
+            ),
+            app_links=(),
+        )
+        portal_node = ModWebNodeLink(
+            node_name="portal",
+            label="Portal",
+            url="/mod-web/nodes/portal",
+            api_base_url="/api/node",
+            api_url="/api/node/apps",
+            is_current=True,
+            presence_health_url="/mod-web/health",
+            portal_node_latencies_url="/mod-web/portal-node-latencies",
+        )
+
+        with patch.object(ModWebService, "_current_node_link", return_value=portal_node):
+            badge_spec = service._home_node_latency_badge_spec(
+                badge_element=cast(Any, SimpleNamespace(id=100)),
+                text_element=cast(Any, SimpleNamespace(id=101)),
+                tooltip_element=cast(Any, SimpleNamespace(id=102)),
+                section=section,
+                extra_classes="mod-node-status-badge",
+            )
+
+        self.assertIsNotNone(badge_spec)
+        if badge_spec is None:
+            self.fail("Expected a Portal-proxied latency badge spec.")
+        self.assertIsNone(badge_spec.presence_stream_url)
+        self.assertIsNone(badge_spec.presence_health_url)
+        self.assertEqual(badge_spec.portal_node_latencies_url, "/mod-web/portal-node-latencies")
+        self.assertTrue(badge_spec.show_latency)
 
     def test_custom_node_names_preserve_portal_and_discord_badge_tooltips(self) -> None:
         portal_snapshot = config.BotMetadataSnapshot(
@@ -2044,12 +2073,12 @@ class ModWebTests(unittest.TestCase):
             patch.object(ModWebService, "_badge") as render_badge,
         ):
             returned_badge = service._interactive_badge(
-                ui=ui,
-                text="Erin: Down",
-                tone="red",
-                url="/mod-web?dev_node_down=erin",
-                tooltip_text="Simulate this node going down.",
-                extra_classes="mod-node-status-badge",
+            ui=ui,
+            text="Erin: Down",
+            tone="red",
+            url="/mod-web/nodes/erin",
+            tooltip_text="View Erin node.",
+            extra_classes="mod-node-status-badge",
             )
 
         self.assertIs(returned_badge, badge_element)
@@ -2057,9 +2086,9 @@ class ModWebTests(unittest.TestCase):
             ui=ui,
             text="Erin: Down",
             tone="red",
-            url="/mod-web?dev_node_down=erin",
+            url="/mod-web/nodes/erin",
             extra_classes="mod-node-status-badge",
-            tooltip_text="Simulate this node going down.",
+            tooltip_text="View Erin node.",
         )
         render_badge.assert_not_called()
         attach_text_tooltip.assert_not_called()
@@ -2255,46 +2284,6 @@ class ModWebTests(unittest.TestCase):
         self.assertFalse(status.alive)
         self.assertEqual(status.node, node)
         self.assertEqual(status.detail, "timeout")
-
-    def test_login_node_statuses_short_circuit_simulated_remote_nodes(self) -> None:
-        service: ModWebService = ModWebService()
-        local_node = ModWebNodeLink(
-            node_name="yuki",
-            label="Yuki",
-            url="/",
-            api_base_url="/api/node",
-            api_url="/api/node/apps",
-            is_current=True,
-        )
-        remote_node = ModWebNodeLink(
-            node_name="erin",
-            label="Erin",
-            url="/mod-web/nodes/erin",
-            api_base_url="https://erin.example/api/node",
-            api_url="/api/node-proxy/erin/apps",
-            is_current=False,
-        )
-
-        with (
-            patch.object(ModWebService, "_node_links", return_value=(local_node, remote_node)),
-            patch.object(ModWebService, "_probe_node_status_async", new=AsyncMock()) as probe_node_status,
-        ):
-            probe_node_status.side_effect = [ModWebNodeStatus(node=local_node, alive=True)]
-            statuses = asyncio.run(service._login_node_statuses_async(simulated_down_node_names=("erin",)))
-
-        self.assertEqual(
-            statuses,
-            (
-                ModWebNodeStatus(node=local_node, alive=True),
-                ModWebNodeStatus(
-                    node=remote_node,
-                    alive=False,
-                    detail="This node is being simulated as unavailable in dev mode.",
-                    is_simulated_down=True,
-                ),
-            ),
-        )
-        probe_node_status.assert_awaited_once_with(local_node)
 
     def test_login_node_statuses_probe_nodes_concurrently(self) -> None:
         async def exercise() -> tuple[ModWebNodeStatus, ...]:
@@ -2584,54 +2573,6 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(ModWebService._login_node_status_badge_text(status), "Yuki: Alive")
         self.assertEqual(ModWebService._login_node_status_badge_tone(status), "black")
-
-    def test_login_node_status_badge_marks_simulated_node_down(self) -> None:
-        status = ModWebNodeStatus(
-            node=ModWebNodeLink(
-                node_name="erin",
-                label="Erin",
-                url="/mod-web/nodes/erin",
-                api_base_url="https://erin.example/api/node",
-                api_url="/api/node-proxy/erin/apps",
-                is_current=False,
-            ),
-            alive=False,
-            detail="This node is being simulated as unavailable in dev mode.",
-            is_simulated_down=True,
-        )
-
-        self.assertEqual(ModWebService._login_node_status_badge_text(status), "Erin: Simulated Down")
-        self.assertEqual(ModWebService._login_node_status_badge_tone(status), "warn")
-
-    def test_login_node_statuses_can_simulate_current_node_down(self) -> None:
-        service = ModWebService()
-        local_node = ModWebNodeLink(
-            node_name="yuki",
-            label="Yuki",
-            url="/",
-            api_base_url="/api/node",
-            api_url="/api/node/apps",
-            is_current=True,
-        )
-
-        with (
-            patch.object(ModWebService, "_node_links", return_value=(local_node,)),
-            patch.object(ModWebService, "_probe_node_status_async", new=AsyncMock()) as probe_node_status,
-        ):
-            statuses = asyncio.run(service._login_node_statuses_async(simulated_down_node_names=("yuki",)))
-
-        self.assertEqual(
-            statuses,
-            (
-                ModWebNodeStatus(
-                    node=local_node,
-                    alive=False,
-                    detail="This node is being simulated as unavailable in dev mode.",
-                    is_simulated_down=True,
-                ),
-            ),
-        )
-        probe_node_status.assert_not_awaited()
 
     def test_build_system_title_stats_formats_cpu_ram_and_storage(self) -> None:
         title_stats: tuple[ModWebTitleStat, ...] = ModWebService._build_system_title_stats(
@@ -3096,25 +3037,55 @@ class ModWebTests(unittest.TestCase):
         )
 
     def test_node_system_deployment_text_identifies_the_current_node_release(self) -> None:
-        deployment_text = ModWebService._node_system_deployment_text(
-            NodeSystemSummary(
-                cpu_percent=None,
-                ram_percent=None,
-                ram_used_bytes=None,
-                ram_total_bytes=None,
-                storage_percent=None,
-                storage_free_bytes=None,
-                storage_total_bytes=None,
-                deployment_version="v2026.08.01.1",
-                deployment_revision="abcdef1234567890",
-                deployed_at_epoch_seconds=1_785_558_600,
-            )
+        summary = NodeSystemSummary(
+            cpu_percent=None,
+            ram_percent=None,
+            ram_used_bytes=None,
+            ram_total_bytes=None,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            deployment_version="v2026.08.01.1",
+            deployment_revision="abcdef1234567890",
+            deployed_at_epoch_seconds=1_785_558_600,
+        )
+        self.assertEqual(
+            ModWebService._node_system_deployment_identity_text(summary),
+            "abcdef1 | v2026.08.01.1",
+        )
+        self.assertEqual(ModWebService._node_system_deployment_badge_text(summary), "abcdef1")
+        self.assertEqual(
+            ModWebService._node_system_deployment_commit_url(summary),
+            "https://github.com/APasz/Yukibot/commit/abcdef1234567890",
+        )
+        self.assertEqual(
+            ModWebService._node_system_deployment_tooltip_markup(summary),
+            'abcdef1 | v2026.08.01.1<br>Deployed: '
+            '<time class="mod-system-deployment-time" data-deployed-at-epoch="1785558600">'
+            "2026-08-01 04:30 UTC</time>",
+        )
+        localization_javascript = ModWebService._node_system_deployment_local_time_javascript()
+        self.assertIn("data-deployed-at-epoch", localization_javascript)
+        self.assertIn("getFullYear()", localization_javascript)
+        self.assertIn("pad(deployedAt.getMinutes())", localization_javascript)
+        self.assertIn("MutationObserver", localization_javascript)
+
+    def test_node_system_deployment_commit_url_omits_missing_build(self) -> None:
+        summary = NodeSystemSummary(
+            cpu_percent=None,
+            ram_percent=None,
+            ram_used_bytes=None,
+            ram_total_bytes=None,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            deployment_version="indev",
         )
 
-        self.assertEqual(
-            deployment_text,
-            "v2026.08.01.1 · Build abcdef1 · deployed 01 Aug 2026, 04:30 UTC",
-        )
+        self.assertEqual(ModWebService._node_system_deployment_identity_text(summary), "indev")
+        self.assertEqual(ModWebService._node_system_deployment_badge_text(summary), "indev")
+        self.assertEqual(ModWebService._node_system_deployment_tooltip_markup(summary), "indev")
+        self.assertIsNone(ModWebService._node_system_deployment_commit_url(summary))
 
     def test_node_bot_avatar_markup_supports_system_hero_class(self) -> None:
         service = ModWebService()
@@ -3405,10 +3376,6 @@ class ModWebTests(unittest.TestCase):
                 ModWebNodeStatus(node=node, alive=True, detail="HTTP 204"),
             )
             self.assertEqual(render_dashboard.call_args.kwargs["initial_app_entries"], ())
-            self.assertEqual(
-                render_dashboard.call_args.kwargs["current_url"],
-                "/mod-web/nodes/erin/system",
-            )
             self.assertEqual(system_tab.restart_schedules, restart_schedules)
             self.assertEqual(system_tab.restart_state, restart_state)
             self.assertEqual(system_tab.system_capabilities, system_capabilities)
@@ -5288,7 +5255,7 @@ class ModWebTests(unittest.TestCase):
             [ModWebPageLoadWarning(title="Saves unavailable", detail="Satisfactory API is unavailable.")],
         )
 
-    def test_home_app_sections_format_remote_failures_for_people(self) -> None:
+    def test_home_app_sections_render_offline_monitor_state_for_people(self) -> None:
         service: ModWebService = ModWebService()
         user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
         local_node = ModWebNodeLink(
@@ -5315,12 +5282,24 @@ class ModWebTests(unittest.TestCase):
         except RuntimeError as xcp:
             remote_failure = xcp
 
+        snapshots = {
+            local_node.node_name: RemoteNodeMonitorSnapshot(
+                node=local_node,
+                availability=RemoteNodeAvailability.ONLINE,
+                app_entries=(),
+            ),
+            remote_node.node_name: RemoteNodeMonitorSnapshot(
+                node=remote_node,
+                availability=RemoteNodeAvailability.OFFLINE,
+                last_error=remote_failure,
+            ),
+        }
         with (
             patch.object(ModWebService, "_node_links", return_value=(local_node, remote_node)),
             patch.object(
                 ModWebService,
-                "_remote_app_links",
-                new=AsyncMock(side_effect=((), remote_failure)),
+                "_remote_node_monitor_snapshot",
+                side_effect=lambda *, node: snapshots[node.node_name],
             ),
         ):
             sections = asyncio.run(service._home_app_sections(user))
@@ -5332,7 +5311,7 @@ class ModWebTests(unittest.TestCase):
             "This node is unreachable right now. It may be offline or still waking up.",
         )
 
-    def test_home_app_sections_format_local_failures_for_people(self) -> None:
+    def test_home_app_sections_render_connecting_monitor_state_without_remote_request(self) -> None:
         service: ModWebService = ModWebService()
         user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
         local_node = ModWebNodeLink(
@@ -5344,17 +5323,15 @@ class ModWebTests(unittest.TestCase):
             is_current=True,
         )
 
-        try:
-            raise RuntimeError("Local node app listing failed")
-        except RuntimeError as xcp:
-            local_failure = xcp
-
         with (
             patch.object(ModWebService, "_node_links", return_value=(local_node,)),
             patch.object(
                 ModWebService,
-                "_remote_app_links",
-                new=AsyncMock(side_effect=local_failure),
+                "_remote_node_monitor_snapshot",
+                return_value=RemoteNodeMonitorSnapshot(
+                    node=local_node,
+                    availability=RemoteNodeAvailability.CONNECTING,
+                ),
             ),
         ):
             sections = asyncio.run(service._home_app_sections(user))
@@ -5365,83 +5342,11 @@ class ModWebTests(unittest.TestCase):
                 ModWebNodeAppSection(
                     node=local_node,
                     app_links=(),
-                    error="Yuki could not talk to this node right now. Refresh to try again in a moment.",
+                    error="Portal is connecting to this node.",
+                    is_connecting=True,
                 ),
             ),
         )
-
-    def test_home_app_sections_short_circuit_simulated_remote_nodes(self) -> None:
-        service: ModWebService = ModWebService()
-        user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
-        local_node = ModWebNodeLink(
-            node_name="yuki",
-            label="Yuki",
-            url="/",
-            api_base_url="/api/node",
-            api_url="/api/node/apps",
-            is_current=True,
-        )
-        remote_node = ModWebNodeLink(
-            node_name="erin",
-            label="Erin",
-            url="/mod-web/nodes/erin",
-            api_base_url="https://erin.example/api/node",
-            api_url="/api/node-proxy/erin/apps",
-            is_current=False,
-        )
-
-        with (
-            patch.object(ModWebService, "_node_links", return_value=(local_node, remote_node)),
-            patch.object(ModWebService, "_remote_app_links", new=AsyncMock()) as remote_app_links,
-        ):
-            sections = asyncio.run(service._home_app_sections(user, simulated_down_node_names=("erin",)))
-
-        self.assertEqual(len(sections), 2)
-        self.assertEqual(
-            sections[1],
-            ModWebNodeAppSection(
-                node=remote_node,
-                app_links=(),
-                error="This node is being simulated as unavailable in dev mode.",
-                is_simulated_down=True,
-            ),
-        )
-        remote_app_links.assert_awaited_once_with(
-            local_node,
-            user,
-            timeout=_REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
-        )
-
-    def test_home_app_sections_short_circuit_simulated_current_node(self) -> None:
-        service: ModWebService = ModWebService()
-        user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
-        local_node = ModWebNodeLink(
-            node_name="yuki",
-            label="Yuki",
-            url="/",
-            api_base_url="/api/node",
-            api_url="/api/node/apps",
-            is_current=True,
-        )
-
-        with (
-            patch.object(ModWebService, "_node_links", return_value=(local_node,)),
-            patch.object(ModWebService, "_remote_app_links", new=AsyncMock()) as remote_app_links,
-        ):
-            sections = asyncio.run(service._home_app_sections(user, simulated_down_node_names=("yuki",)))
-
-        self.assertEqual(
-            sections,
-            (
-                ModWebNodeAppSection(
-                    node=local_node,
-                    app_links=(),
-                    error="This node is being simulated as unavailable in dev mode.",
-                    is_simulated_down=True,
-                ),
-            ),
-        )
-        remote_app_links.assert_not_called()
 
     def test_home_app_card_target_uses_app_page_for_visitors(self) -> None:
         service: ModWebService = ModWebService()
@@ -6677,99 +6582,6 @@ class ModWebTests(unittest.TestCase):
             ModWebService._initial_page_mod_sort_order("/mod-web/mods/minecraft_alpha?tab=mods&mod_sort=invalid"),
             ModWebModSortOrder.NEWEST,
         )
-
-    def test_toggle_simulated_down_node_url_preserves_existing_query(self) -> None:
-        service = ModWebService()
-        current_node = ModWebNodeLink(
-            node_name="yuki",
-            label="Yuki",
-            url="/",
-            api_base_url="/api/node",
-            api_url="/api/node/apps",
-            is_current=True,
-        )
-        erin_node = ModWebNodeLink(
-            node_name="erin",
-            label="Erin",
-            url="/mod-web/nodes/erin",
-            api_base_url="https://erin.example/api/node",
-            api_url="/api/node-proxy/erin/apps",
-            is_current=False,
-        )
-        kousei_node = ModWebNodeLink(
-            node_name="kousei",
-            label="Kousei",
-            url="/mod-web/nodes/kousei",
-            api_base_url="https://kousei.example/api/node",
-            api_url="/api/node-proxy/kousei/apps",
-            is_current=False,
-        )
-
-        with patch.object(
-            ModWebService,
-            "_node_links",
-            return_value=(current_node, erin_node, kousei_node),
-        ):
-            enabled_url = service._toggle_simulated_down_node_url(
-                current_url="/mod-web?view=compact&dev_api=1&dev_node_down=erin",
-                node_name="kousei",
-                simulated_down_node_names=("erin",),
-            )
-            disabled_url = service._toggle_simulated_down_node_url(
-                current_url=enabled_url,
-                node_name="erin",
-                simulated_down_node_names=("erin", "kousei"),
-            )
-
-        self.assertEqual(
-            enabled_url,
-            "/mod-web?view=compact&dev_api=1&dev_node_down=erin&dev_node_down=kousei",
-        )
-        self.assertEqual(disabled_url, "/mod-web?view=compact&dev_api=1&dev_node_down=kousei")
-
-    def test_simulated_down_node_names_include_current_and_ignore_unknown_nodes(
-        self,
-    ) -> None:
-        service = ModWebService()
-        current_node = ModWebNodeLink(
-            node_name="yuki",
-            label="Yuki",
-            url="/",
-            api_base_url="/api/node",
-            api_url="/api/node/apps",
-            is_current=True,
-        )
-        erin_node = ModWebNodeLink(
-            node_name="erin",
-            label="Erin",
-            url="/mod-web/nodes/erin",
-            api_base_url="https://erin.example/api/node",
-            api_url="/api/node-proxy/erin/apps",
-            is_current=False,
-        )
-        kousei_node = ModWebNodeLink(
-            node_name="kousei",
-            label="Kousei",
-            url="/mod-web/nodes/kousei",
-            api_base_url="https://kousei.example/api/node",
-            api_url="/api/node-proxy/kousei/apps",
-            is_current=False,
-        )
-        request = SimpleNamespace(
-            query_params=_FakeQueryParams({"dev_node_down": (" ERIN ", "yuki", "unknown", "kousei")})
-        )
-
-        with (
-            patch.object(config, "INDEV", True),
-            patch.object(
-                ModWebService,
-                "_node_links",
-                return_value=(current_node, erin_node, kousei_node),
-            ),
-        ):
-            simulated_down_node_names = service._simulated_down_node_names(cast(Any, request))
-
-        self.assertEqual(simulated_down_node_names, ("yuki", "erin", "kousei"))
 
     def test_chat_event_time_markup_uses_client_local_time_element(self) -> None:
         event = ChatEvent(
@@ -10137,6 +9949,89 @@ class ModWebTests(unittest.TestCase):
                 app_entries=(app_entry,),
             ),
         )
+
+    def test_remote_node_monitor_retains_cached_apps_while_offline(self) -> None:
+        async def exercise() -> None:
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            app_entry = NodeAppEntry(
+                name="minecraft_alpha",
+                friendly="Minecraft Alpha",
+                node="erin",
+                running=True,
+                enabled=True,
+                supports_mods=True,
+                supports_configs=True,
+            )
+            state_processed = asyncio.Event()
+            wait_until_cancelled = asyncio.Event()
+
+            async def listener(
+                on_update: Callable[[NodeStateStreamEvent], None],
+                on_online: Callable[[], None],
+                on_offline: Callable[[Exception], None],
+            ) -> None:
+                on_online()
+                on_update(NodeStateStreamEvent.apps(node_name="erin", app_entries=(app_entry,)))
+                on_offline(ConnectionError("Erin is restarting."))
+                state_processed.set()
+                await wait_until_cancelled.wait()
+
+            monitor = RemoteNodeMonitor(node=node, listener=listener)
+            observed_availability: list[RemoteNodeAvailability] = []
+            unsubscribe = monitor.subscribe(lambda snapshot: observed_availability.append(snapshot.availability))
+            try:
+                monitor.start()
+                await asyncio.wait_for(state_processed.wait(), timeout=0.2)
+                snapshot = monitor.snapshot
+            finally:
+                unsubscribe()
+                await monitor.close()
+
+            self.assertEqual(snapshot.availability, RemoteNodeAvailability.OFFLINE)
+            self.assertEqual(snapshot.app_entries, (app_entry,))
+            self.assertIsInstance(snapshot.last_error, ConnectionError)
+            self.assertEqual(
+                observed_availability,
+                [
+                    RemoteNodeAvailability.CONNECTING,
+                    RemoteNodeAvailability.ONLINE,
+                    RemoteNodeAvailability.ONLINE,
+                    RemoteNodeAvailability.OFFLINE,
+                ],
+            )
+
+        asyncio.run(exercise())
+
+    def test_node_system_subscription_uses_a_dedicated_server_side_stream(self) -> None:
+        service = ModWebService()
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        callback: Callable[[NodeStateStreamEvent], None] = Mock()
+        unsubscribe: Callable[[], None] = Mock()
+        broker = Mock()
+        broker.subscribe.return_value = unsubscribe
+        service._remote_node_state_broker = broker  # type: ignore[method-assign]
+
+        result = service._create_remote_node_state_subscription(node=node, user=user, on_update=callback)
+
+        self.assertIs(result, unsubscribe)
+        self.assertEqual(broker.subscribe.call_args.kwargs["key"], RemoteNodeStreamKey(node=node))
+        self.assertIs(broker.subscribe.call_args.kwargs["callback"], callback)
+        self.assertTrue(callable(broker.subscribe.call_args.kwargs["listener_factory"]))
 
     def test_remote_node_state_stream_listener_falls_back_to_polling_after_unsupported_websocket(
         self,
@@ -14120,6 +14015,34 @@ class ModWebTests(unittest.TestCase):
             spec.unhealthy_class_name,
             "mod-badge red mod-app-corner-badge mod-app-node-badge",
         )
+
+    def test_app_page_node_presence_stream_url_is_same_node_only(self) -> None:
+        service = ModWebService()
+        local_node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="/api/node",
+            api_url="/api/node/apps",
+            is_current=True,
+            presence_stream_url="/api/node/presence/stream",
+        )
+        remote_node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+            presence_stream_url="https://erin.example/api/node/presence/stream",
+        )
+
+        with patch.object(ModWebService, "_remote_node_link", side_effect=(local_node, remote_node)):
+            self.assertEqual(
+                service._app_page_node_presence_stream_url(node_name="yuki"),
+                "/api/node/presence/stream",
+            )
+            self.assertIsNone(service._app_page_node_presence_stream_url(node_name="erin"))
 
     def test_register_timer_cleanup_cancels_timer_when_owner_is_deleted(self) -> None:
         service = ModWebService()
@@ -19241,12 +19164,14 @@ class ModWebTests(unittest.TestCase):
         metre_row = next(row for row in ui.tables[-1].rows if row["unit"] == "Metre (m)")
         self.assertEqual(metre_row["amount"], "2.5 m")
         ui.tables[-1].handlers["unit-filter"](SimpleNamespace(args="kilometre"))
+        unit_amount_input.trigger("update:model-value", "2.5")
         self.assertEqual(
             ui.tables[-1].rows,
             [{"unit": "Kilometre (km)", "system": "SI", "amount": "0.0025 km"}],
         )
         ui.tables[-1].handlers["unit-filter"](SimpleNamespace(args=""))
         ui.tables[-1].handlers["system-filter"](SimpleNamespace(args="US customary"))
+        unit_amount_input.trigger("update:model-value", "2.5")
         self.assertTrue(ui.tables[-1].rows)
         self.assertEqual({row["system"] for row in ui.tables[-1].rows}, {"US customary"})
         ui.tables[-1].handlers["system-filter"](SimpleNamespace(args=""))

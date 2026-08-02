@@ -1260,7 +1260,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
     async def _remote_apps_async(
         self,
         node: ModWebNodeLink,
-        user: ModWebUser,
+        user: ModWebUser | None,
         *,
         timeout: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> tuple[NodeAppEntry, ...]:
@@ -2032,7 +2032,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeAppRuntimeSummary.from_mapping(payload)
 
-    async def _remote_node_system_summary_async(self, node: ModWebNodeLink, user: ModWebUser) -> NodeSystemSummary:
+    async def _remote_node_system_summary_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser | None,
+    ) -> NodeSystemSummary:
         payload: dict[str, object] = await self._remote_json_async(
             node=node,
             app_name=None,
@@ -2086,7 +2090,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
     async def _remote_node_system_summary_or_none_async(
         self,
         node: ModWebNodeLink,
-        user: ModWebUser,
+        user: ModWebUser | None,
         *,
         error_context: str,
     ) -> NodeSystemSummary | None:
@@ -2107,6 +2111,19 @@ class ModWebModelsMixin(ModWebServiceSupport):
         if app_stats is not None and app_stats.running:
             return False
         return app_name in start_blocked_app_ids
+
+    async def _remote_node_monitor_snapshot_async(
+        self,
+        *,
+        node: ModWebNodeLink,
+    ) -> tuple[tuple[NodeAppEntry, ...], NodeSystemSummary]:
+        """Load the read-only state used by the Portal-owned node monitor."""
+
+        app_entries, system_summary = await asyncio.gather(
+            self._remote_apps_async(node, None),
+            self._remote_node_system_summary_async(node, None),
+        )
+        return app_entries, system_summary
 
     async def _remote_config_content_async(
         self,
@@ -2268,14 +2285,19 @@ class ModWebModelsMixin(ModWebServiceSupport):
         app_name: str | None,
         path: str,
         scopes: tuple[NodeApiScope, ...],
-        user: ModWebUser,
+        user: ModWebUser | None,
         method: Literal["GET", "PUT", "POST", "DELETE"] = "GET",
         json_payload: Mapping[str, object] | None = None,
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> dict[str, object]:
         if method == "GET":
             self._raise_if_remote_node_circuit_open(node)
-        token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
+        if user is None:
+            if method != "GET" or app_name is not None or scopes != (NodeApiScope.APPS_READ,):
+                raise ValueError("The Portal node monitor may perform only node-level app read requests.")
+            token: str = self._remote_node_monitor_token(node=node)
+        else:
+            token = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
         node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
         url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
         session = await self._remote_http_client()
@@ -2536,6 +2558,24 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 node=node.node_name,
                 app=app_name,
                 scopes=frozenset[NodeApiScope](scopes),
+                expires_at=int(time.time()) + _REMOTE_NODE_TOKEN_TTL_SECONDS,
+            ),
+        )
+
+    @staticmethod
+    def _remote_node_monitor_token(*, node: ModWebNodeLink) -> str:
+        """Issue the narrow read-only token used by Portal's node monitor."""
+
+        secret: str | None = config.MOD_WEB_SERVER.token_secret
+        if secret is None:
+            raise RuntimeError("NODE_API_TOKEN_SECRET or DATA_AUTHORITY_TOKEN is required to monitor remote nodes.")
+        return issue_node_token(
+            secret=secret,
+            grant=NodeAccessGrant(
+                subject="portal:node-monitor",
+                node=node.node_name,
+                app=None,
+                scopes=frozenset({NodeApiScope.APPS_READ}),
                 expires_at=int(time.time()) + _REMOTE_NODE_TOKEN_TTL_SECONDS,
             ),
         )

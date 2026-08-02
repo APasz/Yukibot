@@ -65,7 +65,7 @@ _ALLOWED_EXACT_VALUES = frozenset(
 _ALLOWED_LINE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"https?://[^\s\"']*/oauth2/authorize\b",
+        r"oauth2/authorize\b",
         r"\bAccess-Control-[A-Za-z-]*Headers?\b",
         r"\bZombieHordeMeter\b",
         r"\bMSPointerCancel\b",

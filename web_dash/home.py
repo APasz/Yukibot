@@ -7,12 +7,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import avatars as mod_web_avatars
 from .constants import (
     _APP_SECTION_QUERY_PARAM,
+    _MOD_WEB_REPOSITORY_URL,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
     log,
 )
 from .links import mod_web_node_system_path
 from .nicegui_protocols import ModWebUi, _value_as_bool, _value_as_text
+from .remote_node_monitor import RemoteNodeAvailability, RemoteNodeMonitorSnapshot
 from .runtime_imports import (
     MAX_RESTART_INTERVAL_MINUTES,
     MIN_RESTART_INTERVAL_MINUTES,
@@ -432,6 +434,36 @@ class ModWebHomeMixin(ModWebServiceSupport):
             return self._app_list_view_url(app.url, show_api_actions=show_api_actions)
         return None
 
+    def _home_section_from_monitor_snapshot(
+        self,
+        *,
+        snapshot: RemoteNodeMonitorSnapshot,
+        user: ModWebUser,
+        previous_app_links: tuple[ModWebAppLink, ...] = (),
+    ) -> ModWebNodeAppSection:
+        if snapshot.availability is RemoteNodeAvailability.OFFLINE:
+            error = snapshot.last_error or ConnectionError("Remote node state is unavailable.")
+            return ModWebNodeAppSection(
+                node=snapshot.node,
+                app_links=previous_app_links,
+                error=self._friendly_remote_node_error_text(error),
+            )
+        if snapshot.availability is RemoteNodeAvailability.CONNECTING or snapshot.app_entries is None:
+            return ModWebNodeAppSection(
+                node=snapshot.node,
+                app_links=previous_app_links,
+                error="Portal is connecting to this node.",
+                is_connecting=True,
+            )
+        app_links = tuple(
+            self._app_link_from_entry(entry=entry, user=user, node_name=snapshot.node.node_name)
+            for entry in snapshot.app_entries
+        )
+        return ModWebNodeAppSection(
+            node=snapshot.node,
+            app_links=self._mark_runtime_changes(previous_apps=previous_app_links, updated_apps=app_links),
+        )
+
     async def _render_home_page(
         self,
         *,
@@ -442,35 +474,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
     ) -> None:
         self._apply_theme_for_user(ui=ui, user=user)
         ModWebUiHelpersMixin._render_skip_link(ui=ui)
-        simulated_down_node_names: tuple[str, ...] = self._simulated_down_node_names(request)
-        simulated_down_keys = {node_name.casefold() for node_name in simulated_down_node_names}
-        summary_nodes = tuple(
-            node for node in self._node_links() if node.node_name.casefold() not in simulated_down_keys
-        )
-
-        async def _load_system_summary(node: ModWebNodeLink) -> NodeSystemSummary | None:
-            return await self._remote_node_system_summary_or_none_async(
-                node,
-                user,
-                error_context="Remote mod web home system summary failed",
-            )
-
-        summary_tasks = tuple(
-            asyncio.create_task(_load_system_summary(node))
-            for node in summary_nodes
-        )
-        try:
-            sections: tuple[ModWebNodeAppSection, ...] = await self._home_app_sections(
-                user, simulated_down_node_names=simulated_down_node_names
-            )
-            summary_values = await asyncio.gather(*summary_tasks)
-        except BaseException:
-            for summary_task in summary_tasks:
-                summary_task.cancel()
-            await asyncio.gather(*summary_tasks, return_exceptions=True)
-            raise
+        sections: tuple[ModWebNodeAppSection, ...] = await self._home_app_sections(user)
         system_summaries_by_node = {
-            node.node_name: summary for node, summary in zip(summary_nodes, summary_values, strict=True)
+            section.node.node_name: self._remote_node_monitor_snapshot(node=section.node).system_summary
+            for section in sections
         }
         home_node_summaries: tuple[ModWebHomeNodeSummary, ...] = await self._home_node_summaries(
             sections=sections,
@@ -566,7 +573,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         ) -> None:
                             app_links: tuple[ModWebAppLink, ...] = _app_links_for_sections(current_sections)
                             unavailable_count: int = sum(
-                                section.error is not None for section in current_sections
+                                section.error is not None and not section.is_connecting for section in current_sections
                             )
                             with ui.row().classes("mod-home-capability-badges"):
                                 for capability_badge in self._node_capability_badges(
@@ -617,41 +624,25 @@ class ModWebHomeMixin(ModWebServiceSupport):
             loop: AbstractEventLoop = asyncio.get_running_loop()
             unsubscribes: list[Callable[[], None]] = []
 
-            def _apply_node_update(node: ModWebNodeLink, event: NodeStateStreamEvent) -> None:
+            def _apply_node_update(snapshot: RemoteNodeMonitorSnapshot) -> None:
                 if page_closed:
                     return
+                node = snapshot.node
                 previous_sections: tuple[ModWebNodeAppSection, ...] = _current_sections(include_portal=True)
-                current_section = sections_by_node.get(
+                previous_section = sections_by_node.get(
                     node.node_name,
-                    ModWebNodeAppSection(node=node, app_links=(), error="Unavailable"),
+                    ModWebNodeAppSection(node=node, app_links=()),
                 )
-                if event.app_entries is not None:
-                    updated_app_links: tuple[ModWebAppLink, ...] = tuple[ModWebAppLink, ...](
-                        self._app_link_from_entry(entry=entry, user=user, node_name=node.node_name)
-                        for entry in event.app_entries
-                    )
-                    current_section: ModWebNodeAppSection = ModWebNodeAppSection(
-                        node=node,
-                        app_links=self._mark_runtime_changes(
-                            previous_apps=current_section.app_links,
-                            updated_apps=updated_app_links,
-                        ),
-                        error=None,
-                    )
+                current_section = self._home_section_from_monitor_snapshot(
+                    snapshot=snapshot,
+                    user=user,
+                    previous_app_links=previous_section.app_links,
+                )
                 sections_by_node[node.node_name] = current_section
-                existing_summary: ModWebHomeNodeSummary | None = summaries_by_node.get(node.node_name)
                 summaries_by_node[node.node_name] = ModWebHomeNodeSummary(
                     node=node,
                     app_count=len(current_section.app_links),
-                    system_summary=(
-                        event.system_summary
-                        if event.system_summary is not None
-                        else None
-                        if current_section.error is not None
-                        else None
-                        if existing_summary is None
-                        else existing_summary.system_summary
-                    ),
+                    system_summary=None if current_section.error is not None else snapshot.system_summary,
                 )
                 badge_sections = _current_sections(include_portal=True)
                 app_sections = _current_sections(include_portal=False)
@@ -662,18 +653,17 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     _render_home_sections.refresh(app_sections, app_summaries)
                 apply_home_node_stats(app_summaries)
 
-            def _node_state_callback(node: ModWebNodeLink) -> Callable[[NodeStateStreamEvent], None]:
-                def _handle_event(event: NodeStateStreamEvent) -> None:
-                    loop.call_soon_threadsafe(lambda: _apply_node_update(node, event))
+            def _node_state_callback(node: ModWebNodeLink) -> Callable[[RemoteNodeMonitorSnapshot], None]:
+                def _handle_event(snapshot: RemoteNodeMonitorSnapshot) -> None:
+                    if snapshot.node.node_name.casefold() != node.node_name.casefold():
+                        return
+                    loop.call_soon_threadsafe(lambda: _apply_node_update(snapshot))
 
                 return _handle_event
 
             for section in _current_sections(include_portal=True):
-                if section.is_simulated_down:
-                    continue
-                unsubscribe = self._create_remote_node_state_subscription(
+                unsubscribe = self._subscribe_remote_node_monitor(
                     node=section.node,
-                    user=user,
                     on_update=_node_state_callback(section.node),
                 )
                 unsubscribes.append(unsubscribe)
@@ -944,16 +934,72 @@ class ModWebHomeMixin(ModWebServiceSupport):
         return tuple(badges)
 
     @staticmethod
-    def _node_system_deployment_text(system_summary: NodeSystemSummary) -> str | None:
+    def _node_system_deployment_identity_text(system_summary: NodeSystemSummary) -> str | None:
         parts: list[str] = []
+        if system_summary.deployment_revision is not None:
+            parts.append(system_summary.deployment_revision[:7])
         if system_summary.deployment_version is not None:
             parts.append(system_summary.deployment_version)
+        return " | ".join(parts) or None
+
+    @staticmethod
+    def _node_system_deployment_badge_text(system_summary: NodeSystemSummary) -> str:
         if system_summary.deployment_revision is not None:
-            parts.append(f"Build {system_summary.deployment_revision[:7]}")
-        if system_summary.deployed_at_epoch_seconds is not None:
-            deployed_at = datetime.fromtimestamp(system_summary.deployed_at_epoch_seconds, ZoneInfo("UTC"))
-            parts.append(f"deployed {deployed_at.strftime('%d %b %Y, %H:%M UTC')}")
-        return " · ".join(parts) or None
+            return system_summary.deployment_revision[:7]
+        return system_summary.deployment_version or "Deployment"
+
+    @classmethod
+    def _node_system_deployment_tooltip_markup(cls, system_summary: NodeSystemSummary) -> str | None:
+        deployment_identity = cls._node_system_deployment_identity_text(system_summary)
+        deployed_at_epoch_seconds = system_summary.deployed_at_epoch_seconds
+        if deployment_identity is None and deployed_at_epoch_seconds is None:
+            return None
+        tooltip_lines = [escape(deployment_identity or "Deployment")]
+        if deployed_at_epoch_seconds is not None:
+            deployed_at = datetime.fromtimestamp(deployed_at_epoch_seconds, ZoneInfo("UTC"))
+            fallback_text = deployed_at.strftime("%Y-%m-%d %H:%M UTC")
+            tooltip_lines.append(
+                "Deployed: "
+                f'<time class="mod-system-deployment-time" data-deployed-at-epoch="{deployed_at_epoch_seconds}">'
+                f"{escape(fallback_text)}</time>"
+            )
+        return "<br>".join(tooltip_lines)
+
+    @staticmethod
+    def _node_system_deployment_local_time_javascript() -> str:
+        return """
+            (() => {
+                const pad = (value) => String(value).padStart(2, '0');
+                const selector = '.mod-system-deployment-time[data-deployed-at-epoch]';
+                const localizeDeploymentTime = (element) => {
+                    const deployedAtEpoch = Number(element.dataset.deployedAtEpoch);
+                    const deployedAt = new Date(deployedAtEpoch * 1000);
+                    if (!Number.isFinite(deployedAtEpoch) || Number.isNaN(deployedAt.getTime())) return;
+                    element.textContent = `${deployedAt.getFullYear()}-${pad(deployedAt.getMonth() + 1)}-${pad(deployedAt.getDate())} ${pad(deployedAt.getHours())}:${pad(deployedAt.getMinutes())}`;
+                };
+                const localizeDeploymentTimes = (root) => {
+                    if (root instanceof Element && root.matches(selector)) localizeDeploymentTime(root);
+                    root.querySelectorAll(selector).forEach(localizeDeploymentTime);
+                };
+                localizeDeploymentTimes(document);
+                if (window.modWebDeploymentTimeObserver || !document.body) return;
+                window.modWebDeploymentTimeObserver = new MutationObserver((mutations) => {
+                    for (const mutation of mutations) {
+                        for (const node of mutation.addedNodes) {
+                            if (node instanceof Element) localizeDeploymentTimes(node);
+                        }
+                    }
+                });
+                window.modWebDeploymentTimeObserver.observe(document.body, {childList: true, subtree: true});
+            })();
+        """
+
+    @staticmethod
+    def _node_system_deployment_commit_url(system_summary: NodeSystemSummary) -> str | None:
+        revision: str | None = system_summary.deployment_revision
+        if revision is None:
+            return None
+        return f"{_MOD_WEB_REPOSITORY_URL}/commit/{quote(revision, safe='')}"
 
     @classmethod
     def _node_system_operational_badges(
@@ -1318,7 +1364,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
         app_links: tuple[ModWebAppLink, ...] = tuple[ModWebAppLink, ...](
             app for section in sections for app in section.app_links
         )
-        has_unavailable_sections: bool = any(section.error is not None for section in sections)
+        has_unavailable_sections: bool = any(
+            section.error is not None and not section.is_connecting for section in sections
+        )
         if not app_links and not has_unavailable_sections:
             with ui.card().classes("mod-card mod-card-empty w-full"):
                 ui.label("No apps are currently available.").classes("p-8 text-lg mod-subtitle")
@@ -1360,9 +1408,17 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             ):
                                 self._badge_spec(ui=ui, badge=badge)
                             if section.error is not None:
-                                self._badge(ui=ui, text="Unavailable", tone="red")
+                                self._badge(
+                                    ui=ui,
+                                    text="Connecting" if section.is_connecting else "Unavailable",
+                                    tone="warn" if section.is_connecting else "red",
+                                )
                     if section.error is not None:
-                        self._render_node_unavailable_card(ui=ui, message=section.error)
+                        if section.is_connecting:
+                            with ui.card().classes("mod-card mod-card-empty w-full"):
+                                ui.label(section.error).classes("p-5 text-sm mod-subtitle")
+                        else:
+                            self._render_node_unavailable_card(ui=ui, message=section.error)
                     elif not section.app_links:
                         with ui.card().classes("mod-card mod-card-empty w-full"):
                             ui.label("No apps are currently available on this node.").classes("p-5 text-sm mod-subtitle")
@@ -1400,8 +1456,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
         initial_app_entries: tuple[NodeAppEntry, ...],
         initial_system_capabilities: NodeSystemCapabilities | None,
         load_system_tab: Callable[[str], Awaitable[ModWebNodeSystemTabLoadResult]],
-        current_url: str,
-        simulated_down_node_names: tuple[str, ...],
         subscribe_node_state_updates: Callable[
             [Callable[[NodeStateStreamEvent], None]],
             Callable[[], None],
@@ -1596,12 +1650,35 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             ui=ui,
                             initial_stats=self._build_node_system_overview_stats(initial_system_summary),
                         )
-                        deployment_text = self._node_system_deployment_text(initial_system_summary)
-                        if deployment_text is not None:
-                            with ui.card().classes("mod-card w-full"):
-                                with ui.column().classes("gap-1 p-4"):
-                                    ui.label("Current deployment").classes("text-lg font-black mod-title-small")
-                                    ui.label(deployment_text).classes("mod-subtitle text-sm")
+                        deployment_tooltip_markup = self._node_system_deployment_tooltip_markup(initial_system_summary)
+                        if deployment_tooltip_markup is not None:
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                ui.label("Deployment").classes("mod-subtitle text-xs")
+                                deployment_badge_text = self._node_system_deployment_badge_text(
+                                    initial_system_summary
+                                )
+                                deployment_commit_url = self._node_system_deployment_commit_url(
+                                    initial_system_summary
+                                )
+                                if deployment_commit_url is None:
+                                    deployment_badge = ui.label(deployment_badge_text).classes(
+                                        self._badge_class_name(tone="grey")
+                                    )
+                                else:
+                                    deployment_badge = ui.link(deployment_badge_text, deployment_commit_url).classes(
+                                        self._badge_class_name(
+                                            tone="grey",
+                                            extra_classes="mod-badge-link cursor-pointer",
+                                        )
+                                    ).props('target="_blank" rel="noopener noreferrer"')
+                                with deployment_badge:
+                                    with ui.tooltip().classes("whitespace-pre-line"):
+                                        ui.html(deployment_tooltip_markup)
+                            if initial_system_summary.deployed_at_epoch_seconds is not None:
+                                ui.run_javascript(
+                                    self._node_system_deployment_local_time_javascript(),
+                                    timeout=0.1,
+                                )
                         with ui.card().classes("mod-card w-full"):
                             with ui.column().classes("w-full gap-3 p-4"):
                                 with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
@@ -1657,8 +1734,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 initial_font_sources=loaded.node_font_sources,
                                 initial_disk_settings=loaded.node_disk_settings,
                                 initial_system_capabilities=loaded.system_capabilities,
-                                current_url=current_url,
-                                simulated_down_node_names=simulated_down_node_names,
                             )
                         case _ModWebNodeSystemTab.DISCORD:
                             self._render_node_system_discord_settings(
@@ -2191,8 +2266,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
         initial_font_sources: config.NodeFontSourceSettings | None,
         initial_disk_settings: NodeDiskManagementState | None,
         initial_system_capabilities: NodeSystemCapabilities | None,
-        current_url: str,
-        simulated_down_node_names: tuple[str, ...],
     ) -> None:
         field_inputs: dict[_ModWebNodeSettingsFieldKey, Input] = {}
         disk_activity_checkboxes: dict[str, Checkbox] = {}
@@ -2200,14 +2273,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
         primary_disk_select: Select | None = None
         secondary_disk_select: Select | None = None
         save_button: Button | None = None
-
-        async def _handle_toggle_simulated_down(_: object | None = None) -> None:
-            target_url = self._toggle_simulated_down_node_url(
-                current_url=current_url,
-                node_name=node.node_name,
-                simulated_down_node_names=simulated_down_node_names,
-            )
-            ui.navigate.to(target_url)
 
         with ui.card().classes("mod-card w-full"):
             with ui.column().classes("w-full gap-4 p-4"):
@@ -2498,19 +2563,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     if can_save_properties:
                         with ui.row().classes("w-full justify-end"):
                             save_button = ui.button("Save", on_click=_save_properties).classes("mod-list-button")
-
-                if config.INDEV and can_manage_node_configuration:
-                    with ui.column().classes("mod-app-details-section"):
-                        ui.label("Dev").classes("mod-stat-label")
-                        simulate_button_text = (
-                            "Restore Availability"
-                            if node.node_name.casefold()
-                            in {configured_name.casefold() for configured_name in simulated_down_node_names}
-                            else "Simulate Down"
-                        )
-                        ui.button(simulate_button_text, on_click=_handle_toggle_simulated_down).classes(
-                            "mod-list-button secondary"
-                        )
 
     def _render_node_system_discord_settings(
         self,
@@ -3253,8 +3305,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
     @staticmethod
     def _node_status_badge_text(section: ModWebNodeAppSection) -> str:
-        if section.is_simulated_down:
-            return f"{section.node.label}: Simulated Down"
+        if section.is_connecting:
+            return f"{section.node.label}: Connecting"
         return f"{section.node.label}: {'Alive' if section.error is None else 'Down'}"
 
     @staticmethod
@@ -3361,6 +3413,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
             raise RuntimeError(f"Healthy node badge text element is missing its id: {section.node.node_name}")
         if not isinstance(badge_element_id, int) or not isinstance(text_element_id, int):
             return None
+        portal_node_latencies_url = (
+            section.node.portal_node_latencies_url
+            if section.node.is_current
+            else self._current_node_link().portal_node_latencies_url
+        )
+        if not section.node.is_current and portal_node_latencies_url is None:
+            return None
         pending_text = self._home_node_badge_initial_text(section)
         return _ModWebNodePresenceBadgeSpec(
             node_name=section.node.node_name,
@@ -3370,11 +3429,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
             pending_text=pending_text,
             alive_text=f"{section.node.label}: Alive",
             down_text=f"{section.node.label}: Down",
-            presence_stream_url=section.node.presence_stream_url if section.error is None else None,
-            presence_health_url=section.node.presence_health_url if section.error is None else None,
-            portal_node_latencies_url=(
-                section.node.portal_node_latencies_url if section.error is None else None
+            presence_stream_url=(
+                section.node.presence_stream_url if section.node.is_current and section.error is None else None
             ),
+            presence_health_url=(
+                section.node.presence_health_url if section.node.is_current and section.error is None else None
+            ),
+            portal_node_latencies_url=portal_node_latencies_url if section.error is None else None,
             pending_class_name=ModWebUiHelpersMixin._badge_class_name(
                 tone=self._node_status_badge_tone(section),
                 extra_classes=extra_classes,
@@ -3418,7 +3479,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
     @staticmethod
     def _node_status_badge_tone(section: ModWebNodeAppSection) -> BadgeTone:
-        if section.is_simulated_down:
+        if section.is_connecting:
             return "warn"
         if section.error is not None:
             return "red"
@@ -3443,14 +3504,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
     @staticmethod
     def _login_node_status_badge_text(status: ModWebNodeStatus) -> str:
-        if status.is_simulated_down:
-            return f"{status.node.label}: Simulated Down"
         return f"{status.node.label}: {'Alive' if status.alive else 'Down'}"
 
     @staticmethod
     def _login_node_status_badge_tone(status: ModWebNodeStatus) -> BadgeTone:
-        if status.is_simulated_down:
-            return "warn"
         if not status.alive:
             return "red"
         return "black"

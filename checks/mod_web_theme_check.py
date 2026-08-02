@@ -260,6 +260,10 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("@keyframes mod-page-enter", css)
         self.assertIn("@keyframes mod-live-value-pulse-a", css)
         self.assertIn("@keyframes mod-live-value-pulse-b", css)
+        live_value_pulse_css = css.split("@keyframes mod-live-value-pulse-a", maxsplit=1)[1].split(
+            ".mod-card", maxsplit=1
+        )[0]
+        self.assertNotIn("translate:", live_value_pulse_css)
         self.assertIn("@keyframes mod-system-chart-draw", css)
         self.assertIn("@keyframes mod-console-output-pulse", css)
         self.assertIn("@keyframes mod-chat-entry-arrive", css)

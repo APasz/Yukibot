@@ -101,6 +101,14 @@ class _NamesStub:
         return default
 
 
+def _minecraft_player_notice_app() -> Minecraft:
+    app = cast(Any, object.__new__(Minecraft))
+    app.name = "minecraft_demo"
+    app.scope = "minecraft"
+    app.cfg = SimpleNamespace(relay_notice_player_session=True)
+    return app
+
+
 class _DummyReceiver(AM_Receiver):
     async def send(self, payload: App_Bound) -> None:
         return None
@@ -371,9 +379,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_reconcile_players_self_heals_join_and_leave_state(self) -> None:
-        app = cast(Any, object.__new__(Minecraft))
-        app.name = "minecraft_demo"
-        app.scope = "minecraft"
+        app = _minecraft_player_notice_app()
         players = Players(app)
         players._players = {"Alice", "Bob"}
 
@@ -389,9 +395,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1].args[0].player, "Carol")
 
     async def test_log_join_does_not_duplicate_reconcile_join_notice(self) -> None:
-        app = cast(Any, object.__new__(Minecraft))
-        app.name = "minecraft_demo"
-        app.scope = "minecraft"
+        app = _minecraft_player_notice_app()
         app._tail_machers = set()
         app._players = Players(app)
         matcher = Matchers(app)
@@ -403,9 +407,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         add_mock.assert_called_once()
 
     async def test_log_leave_does_not_duplicate_reconcile_leave_notice(self) -> None:
-        app = cast(Any, object.__new__(Minecraft))
-        app.name = "minecraft_demo"
-        app.scope = "minecraft"
+        app = _minecraft_player_notice_app()
         app._tail_machers = set()
         app._players = Players(app)
         app._players._players = {"Alice"}
@@ -418,9 +420,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         add_mock.assert_called_once()
 
     async def test_note_join_resolves_player_to_discord_mention_when_available(self) -> None:
-        app = cast(Any, object.__new__(Minecraft))
-        app.name = "minecraft_demo"
-        app.scope = "minecraft"
+        app = _minecraft_player_notice_app()
         app.name_cache = SimpleNamespace(
             resolve_name=Mock(return_value=config.NameResolutionResult(config.NameResolutionStatus.UNIQUE, 42))
         )
@@ -465,9 +465,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(relayed_message.notice.has_unpublished_pack_changes)
 
     async def test_note_leave_resolves_player_to_discord_mention_when_available(self) -> None:
-        app = cast(Any, object.__new__(Minecraft))
-        app.name = "minecraft_demo"
-        app.scope = "minecraft"
+        app = _minecraft_player_notice_app()
         app.name_cache = SimpleNamespace(
             resolve_name=Mock(return_value=config.NameResolutionResult(config.NameResolutionStatus.UNIQUE, 42))
         )
@@ -1556,7 +1554,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         await_args = target_send.await_args
         self.assertIsNotNone(await_args)
         assert await_args is not None
-        self.assertEqual(await_args.kwargs["content"], "<456> hello")
+        self.assertEqual(await_args.kwargs["content"], "<456>\nhello")
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].content, "hello")
 

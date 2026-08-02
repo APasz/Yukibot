@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from fastapi import Request, WebSocket, status
@@ -23,6 +23,8 @@ class NodeCoreRouteService(NodeAuthenticatedRouteService, Protocol):
     def _resolve_app(self, app_name: str) -> App: ...
 
     async def build_live_app_entry(self, app: App) -> MappingResponse: ...
+
+    def _node_ping_headers(self) -> Mapping[str, str]: ...
 
     def _require_websocket_token_access(
         self,
@@ -67,7 +69,7 @@ def register_core_routes(
 
     @nicegui_app.get(f"{api_prefix}/ping")
     async def _ping() -> Response:
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
+        return Response(status_code=status.HTTP_204_NO_CONTENT, headers=service._node_ping_headers())
 
     @nicegui_app.websocket(f"{api_prefix}/presence/stream")
     async def _presence_stream(websocket: WebSocket) -> None:

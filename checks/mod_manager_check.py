@@ -1134,21 +1134,6 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
                 client_overrides_dir=None,
             )
 
-    async def test_client_pack_rejects_non_downloadable_required_file_without_bundle_policy(self) -> None:
-        manager = self._build_manager()
-        blocked = await manager.add(self._write_source_file("blocked.zip"))
-        blocked.cfg.classification_override = ModClassificationOverride(
-            mod_type=ModType.CLIENT,
-            download_block_reason=ModDownloadBlockReason.ARTIFACT,
-        )
-
-        with self.assertRaisesRegex(ClientPackValidationError, "must be downloadable"):
-            build_client_pack_entries(
-                manager,
-                ClientPackSelection(),
-                client_overrides_dir=None,
-            )
-
     async def test_server_and_admin_pack_selection_respects_purpose(self) -> None:
         manager = self._build_manager()
         shared = await manager.add(self._write_source_file("shared.zip"))

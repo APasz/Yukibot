@@ -62,6 +62,7 @@ class _RecordingActivityManager:
 class _SevenDaysActivityAppStub:
     def __init__(self, activity_manager: _RecordingActivityManager) -> None:
         self.activity_manager = activity_manager
+        self.name = "sevendays_alpha"
         self._tail_matchers: set[object] = set()
         self.providers: list[object] = []
 
@@ -1313,6 +1314,7 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         app = cast(Any, object.__new__(SevenDays))
         app.name = "sevendays_demo"
         app.scope = "sevendays"
+        app.cfg = SimpleNamespace(relay_notice_player_death=True)
         app._tail_matchers = set()
         app._server_ready = asyncio.Event()
         matcher = Matchers(app)

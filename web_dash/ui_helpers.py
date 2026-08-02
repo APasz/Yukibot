@@ -6,7 +6,6 @@ from font_assets import font_assets
 
 from .constants import (
     _APP_LIST_API_QUERY_PARAM,
-    _DEV_SIMULATED_DOWN_NODE_QUERY_PARAM,
     _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
     _HOME_NODE_LATENCY_TIMEOUT_SECONDS,
     _NODE_PRESENCE_RECONNECT_DELAY_SECONDS,
@@ -26,7 +25,6 @@ from .runtime_imports import (
     Tooltip,
     apply_mod_web_theme,
     cast,
-    config,
     escape,
     json,
     mod_web_badge_class,
@@ -794,6 +792,35 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                     }}
                     delete controllerState.connectionsByNode[nodeName];
                 }};
+                const samplePortalNodeLatency = async (nodeName) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    const spec = getSpec(nodeName);
+                    if (!connection || !spec || !spec.portal_node_latencies_url) {{
+                        return null;
+                    }}
+                    try {{
+                        const response = await fetch(spec.portal_node_latencies_url, {{cache: 'no-store'}});
+                        if (!response.ok) {{
+                            return null;
+                        }}
+                        const payload = await response.json();
+                        if (!payload || typeof payload !== 'object' || !payload.latencies || typeof payload.latencies !== 'object') {{
+                            return null;
+                        }}
+                        connection.portalNodeLatencies = payload.latencies;
+                        const discordLatencyMs = payload.discord_latencies?.[nodeName];
+                        connection.discordLatencyMs = typeof discordLatencyMs === 'number' && Number.isFinite(discordLatencyMs)
+                            ? Math.max(0, Math.round(discordLatencyMs))
+                            : null;
+                        refreshTooltip(nodeName);
+                        const latencyMs = payload.latencies[nodeName];
+                        return typeof latencyMs === 'number' && Number.isFinite(latencyMs)
+                            ? Math.max(1, Math.round(latencyMs))
+                            : null;
+                    }} catch (_error) {{
+                        return null;
+                    }}
+                }};
                 const sampleLatencyMeasurement = async (nodeName) => {{
                     const connection = controllerState.connectionsByNode[nodeName];
                     const spec = getSpec(nodeName);
@@ -818,6 +845,9 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         }} finally {{
                             window.clearTimeout(timeoutHandle);
                         }}
+                    }}
+                    if (spec.portal_node_latencies_url && !spec.presence_stream_url) {{
+                        return await samplePortalNodeLatency(nodeName);
                     }}
                     if (!connection.socket || connection.socket.readyState !== WebSocket.OPEN) {{
                         return null;
@@ -947,7 +977,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         }}
                     }}
                     const summary = summariseLatencyMeasurements(measurements);
-                    if (spec.presence_health_url && summary === null) {{
+                    if ((spec.presence_health_url || spec.portal_node_latencies_url) && summary === null) {{
                         renderDownState(nodeName);
                         return;
                     }}
@@ -960,7 +990,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         return;
                     }}
                     const latency = await sampleLatencyMeasurement(nodeName);
-                    if (spec.presence_health_url && latency === null) {{
+                    if ((spec.presence_health_url || spec.portal_node_latencies_url) && latency === null) {{
                         renderDownState(nodeName);
                         return;
                     }}
@@ -985,7 +1015,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         closeConnection(nodeName);
                         return;
                     }}
-                    if (!spec.presence_stream_url && !spec.presence_health_url) {{
+                    if (!spec.presence_stream_url && !spec.presence_health_url && !spec.portal_node_latencies_url) {{
                         renderBadge(spec, spec.pending_text, spec.pending_class_name);
                         closeConnection(nodeName);
                         return;
@@ -1013,7 +1043,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                     }};
                     controllerState.connectionsByNode[nodeName] = connection;
                     renderBadge(spec, spec.pending_text, spec.pending_class_name);
-                    if (spec.presence_health_url) {{
+                    if (spec.presence_health_url || (spec.portal_node_latencies_url && !spec.presence_stream_url)) {{
                         if (spec.show_latency) {{
                             void runLatencyBootstrap(nodeName);
                             connection.latencyIntervalId = window.setInterval(() => {{
@@ -1161,50 +1191,6 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         if value is None:
             return False
         return value.strip().casefold() in {"1", "true", "yes", "on"}
-
-    def _simulated_down_node_names(self, request: Request) -> tuple[str, ...]:
-        if not config.INDEV:
-            return ()
-        requested_keys = {
-            raw_name.strip().casefold()
-            for raw_name in request.query_params.getlist(_DEV_SIMULATED_DOWN_NODE_QUERY_PARAM)
-            if raw_name.strip()
-        }
-        if not requested_keys:
-            return ()
-        return tuple(
-            node.node_name
-            for node in self._node_links()
-            if node.node_name.strip().casefold() in requested_keys
-        )
-
-    def _toggle_simulated_down_node_url(
-        self,
-        *,
-        current_url: str,
-        node_name: str,
-        simulated_down_node_names: tuple[str, ...],
-    ) -> str:
-        known_node_names = tuple(node.node_name for node in self._node_links())
-        known_node_name_keys = {known_name.casefold() for known_name in known_node_names}
-        node_key = node_name.strip().casefold()
-        if node_key not in known_node_name_keys:
-            raise ValueError(f"Cannot simulate unknown node as down: {node_name!r}")
-
-        updated_keys = {configured_name.casefold() for configured_name in simulated_down_node_names}
-        if node_key in updated_keys:
-            updated_keys.remove(node_key)
-        else:
-            updated_keys.add(node_key)
-
-        updated_node_names = tuple(
-            known_name for known_name in known_node_names if known_name.casefold() in updated_keys
-        )
-        return self._request_url_with_query_values(
-            current_url,
-            param_name=_DEV_SIMULATED_DOWN_NODE_QUERY_PARAM,
-            values=updated_node_names,
-        )
 
     @staticmethod
     def _app_list_view_url(url: str, *, show_api_actions: bool) -> str:

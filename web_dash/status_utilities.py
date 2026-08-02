@@ -1184,6 +1184,18 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
             current_conversions = initial_conversions
             unit_filter_text = ""
             system_filter_text = ""
+            filter_rows_handler = r"""() => {
+                const tableRoot = $el.closest('.q-table') || $el;
+                const table = tableRoot.matches('table') ? tableRoot : tableRoot.querySelector('table');
+                if (!table) return;
+                const unitFilter = (table.querySelector('.mod-unit-conversion-unit-filter input')?.value || '').trim().toLocaleLowerCase();
+                const systemFilter = (table.querySelector('.mod-unit-conversion-system-filter input')?.value || '').trim().toLocaleLowerCase();
+                Array.from(table.tBodies[0]?.rows || []).forEach((row) => {
+                    const unit = row.cells[0]?.textContent?.toLocaleLowerCase() || '';
+                    const system = row.cells[1]?.textContent?.toLocaleLowerCase() || '';
+                    row.style.display = unit.includes(unitFilter) && system.includes(systemFilter) ? '' : 'none';
+                });
+            }"""
             with ui.dialog() as unit_converter_dialog:
                 with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
                     with ui.column().classes("w-full gap-4 mod-app-details-layout"):
@@ -1242,21 +1254,23 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
                         )
                         conversion_table.add_slot(
                             "header-cell-unit",
-                            r"""
+                            f"""
                                 <q-th :props="props" class="mod-unit-conversion-filter-heading">
-                                    <q-input dense borderless clearable placeholder="Filter unit"
-                                             @click.stop
-                                             @update:model-value="$parent.$emit('unit-filter', $event)" />
+                                    <q-input dense borderless clearable placeholder="Filter unit" @click.stop
+                                             class="mod-unit-conversion-unit-filter"
+                                             @update:model-value="{filter_rows_handler}"
+                                             @blur="$parent.$emit('unit-filter', $event.target.value)" />
                                 </q-th>
                             """,
                         )
                         conversion_table.add_slot(
                             "header-cell-system",
-                            r"""
+                            f"""
                                 <q-th :props="props" class="mod-unit-conversion-filter-heading">
-                                    <q-input dense borderless clearable placeholder="Filter system"
-                                             @click.stop
-                                             @update:model-value="$parent.$emit('system-filter', $event)" />
+                                    <q-input dense borderless clearable placeholder="Filter system" @click.stop
+                                             class="mod-unit-conversion-system-filter"
+                                             @update:model-value="{filter_rows_handler}"
+                                             @blur="$parent.$emit('system-filter', $event.target.value)" />
                                 </q-th>
                             """,
                         )
@@ -1282,12 +1296,10 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
                         def _update_unit_filter(event: object | None = None) -> None:
                             nonlocal unit_filter_text
                             unit_filter_text = "" if event is None else _value_as_text(event)
-                            _update_table()
 
                         def _update_system_filter(event: object | None = None) -> None:
                             nonlocal system_filter_text
                             system_filter_text = "" if event is None else _value_as_text(event)
-                            _update_table()
 
                         def _set_conversion_summary(text: str) -> None:
                             table_columns[2]["summary"] = text

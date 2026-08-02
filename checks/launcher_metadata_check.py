@@ -1254,10 +1254,18 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unverified", captured.output[0])
 
     async def test_curseforge_reference_is_validated_when_api_key_is_available(self) -> None:
+        requested_paths: list[str] = []
+
         async def handle_request(request: httpx.Request) -> httpx.Response:
-            self.assertEqual(request.url.path, "/v1/mods/32274/files/5789363")
+            requested_paths.append(request.url.path)
             self.assertEqual(request.headers["x-api-key"], "curseforge-test-key")
-            return httpx.Response(200, json={"data": {"modId": 32274, "id": 5789363}})
+            match request.url.path:
+                case "/v1/mods/32274/files/5789363":
+                    return httpx.Response(200, json={"data": {"modId": 32274, "id": 5789363}})
+                case "/v1/mods/32274":
+                    return httpx.Response(200, json={"data": {"summary": "JourneyMap"}})
+                case unexpected_path:
+                    self.fail(f"Unexpected CurseForge request: {unexpected_path}")
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as http:
             with patch.object(config, "env_opt", return_value="curseforge-test-key"):
@@ -1277,7 +1285,9 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
         assert metadata.curseforge is not None
         self.assertEqual(metadata.curseforge.project_id, 32274)
         self.assertEqual(metadata.curseforge.file_id, 5789363)
+        self.assertEqual(metadata.curseforge.description, "JourneyMap")
         self.assertIsNone(metadata.curseforge.page_url)
+        self.assertEqual(requested_paths, ["/v1/mods/32274/files/5789363", "/v1/mods/32274"])
 
     async def test_curseforge_reference_rejects_mismatched_api_response(self) -> None:
         async def handle_request(request: httpx.Request) -> httpx.Response:

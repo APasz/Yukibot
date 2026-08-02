@@ -301,9 +301,11 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         async def _portal_node_latencies() -> dict[str, object]:
             if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
                 raise _http_exception(404, "Portal node latency measurements are only available on Portal.")
+            probes = await self._node_api.portal_node_latency_probes_async()
             return {
                 "node": config.MOD_WEB_SERVER.node_name,
-                "latencies": await self._node_api.portal_node_latencies_async(),
+                "latencies": {node_name: probe.latency_ms for node_name, probe in probes.items()},
+                "discord_latencies": {node_name: probe.discord_latency_ms for node_name, probe in probes.items()},
             }
 
         @nicegui_app.get("/mod-web/assets/toasts.js")

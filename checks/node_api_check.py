@@ -4783,6 +4783,29 @@ class NodeApiTests(unittest.TestCase):
         with patch.object(config, "ACTIVE_BOT_PROFILE", yuki_profile):
             self.assertEqual(service._discord_heartbeat_latency_ms(), 42)
 
+    def test_node_ping_headers_include_bot_discord_latency(self) -> None:
+        service = NodeApiService()
+        service._manager = cast(Any, SimpleNamespace(bot=SimpleNamespace(heartbeat_latency=0.042)))
+        yuki_profile = config.BOT_PROFILES[config.BotProfileName.YUKI]
+
+        with patch.object(config, "ACTIVE_BOT_PROFILE", yuki_profile):
+            headers = service._node_ping_headers()
+
+        self.assertEqual(headers, {"X-Yukibot-Discord-Latency-Ms": "42"})
+
+    def test_portal_latency_probe_reads_node_discord_latency_from_ping_header(self) -> None:
+        class _PingResponse:
+            headers = {"X-Yukibot-Discord-Latency-Ms": "42"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+        with patch("node_api.requests.get", return_value=_PingResponse()):
+            probe = NodeApiService._measure_node_latency_probe("https://erin.example/api/node/ping")
+
+        self.assertGreaterEqual(probe.latency_ms or 0, 1)
+        self.assertEqual(probe.discord_latency_ms, 42)
+
     def test_portal_node_latencies_are_returned_by_presence_stream(self) -> None:
         sent_payloads: list[object] = []
 
@@ -7698,6 +7721,7 @@ class NodeApiTests(unittest.TestCase):
             patch("node_api.psutil.boot_time", return_value=6_400),
             patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", None),
             patch.object(config, "MOD_WEB_BUILD_SHA", None),
+            patch.object(config, "INDEV", False),
         ):
             process_cls.return_value.create_time.return_value = 9_100
             summary = NodeApiService().build_system_summary()
@@ -7747,6 +7771,19 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(summary.deployment_revision, "abcdef1234567890")
         self.assertEqual(summary.deployed_at_epoch_seconds, 1_785_558_600)
         self.assertEqual(NodeSystemSummary.from_mapping(summary.to_mapping()), summary)
+
+    def test_system_summary_identifies_indev_nodes_without_deployment_metadata(self) -> None:
+        with (
+            patch("node_api.Stats_System", side_effect=RuntimeError("stats unavailable")),
+            patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", None),
+            patch.object(config, "MOD_WEB_BUILD_SHA", None),
+            patch.object(config, "INDEV", True),
+        ):
+            summary = NodeApiService().build_system_summary()
+
+        self.assertEqual(summary.deployment_version, "indev")
+        self.assertIsNone(summary.deployment_revision)
+        self.assertIsNone(summary.deployed_at_epoch_seconds)
 
     def test_system_log_catalog_and_tail_include_managed_files_only(self) -> None:
         with TemporaryDirectory() as directory:

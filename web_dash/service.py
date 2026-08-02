@@ -26,6 +26,7 @@ from .nicegui_protocols import (
     _cast_mod_web_route_ui,
 )
 from .page_handlers import ModWebPageHandlersMixin
+from .remote_node_monitor import RemoteNodeMonitor
 from .routes import ModWebRoutesMixin
 from .runtime_imports import (
     AbstractEventLoop,
@@ -92,6 +93,8 @@ class ModWebService(
         self._remote_sync_http_sessions_lock = threading.Lock()
         self._remote_node_circuit_lock = threading.Lock()
         self._remote_node_circuits: dict[str, RemoteNodeCircuitState] = {}
+        self._remote_node_monitors: dict[str, RemoteNodeMonitor] = {}
+        self._remote_node_monitors_lock = threading.RLock()
         self._remote_node_state_broker: SharedAsyncStreamBroker[RemoteNodeStreamKey, NodeStateStreamEvent] = (
             SharedAsyncStreamBroker()
         )

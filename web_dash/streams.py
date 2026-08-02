@@ -32,6 +32,7 @@ from .runtime_imports import (
 )
 from .service_base import ModWebServiceSupport
 from .stream_broker import ConsoleStreamKey, RemoteAppStreamKey, RemoteNodeStreamKey
+from .remote_node_monitor import RemoteNodeMonitor, RemoteNodeMonitorSnapshot
 from .types import ModWebNodeLink
 
 _LOCAL_CONSOLE_STDOUT_SUBSCRIPTION_INTERVAL_SECONDS = 0.5
@@ -105,6 +106,36 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                 on_update=publish,
             ),
         )
+
+    def _subscribe_remote_node_monitor(
+        self,
+        *,
+        node: ModWebNodeLink,
+        on_update: Callable[[RemoteNodeMonitorSnapshot], None],
+    ) -> Callable[[], None]:
+        return self._ensure_remote_node_monitor(node).subscribe(on_update)
+
+    def _remote_node_monitor_snapshot(self, *, node: ModWebNodeLink) -> RemoteNodeMonitorSnapshot:
+        return self._ensure_remote_node_monitor(node).snapshot
+
+    def _ensure_remote_node_monitor(self, node: ModWebNodeLink) -> RemoteNodeMonitor:
+        key = node.node_name.casefold()
+        with self._remote_node_monitors_lock:
+            monitor = self._remote_node_monitors.get(key)
+            if monitor is None:
+                monitor = RemoteNodeMonitor(
+                    node=node,
+                    listener=lambda on_state, on_online, on_offline: self._remote_node_state_stream_listener(
+                        node=node,
+                        user=None,
+                        on_update=on_state,
+                        on_online=on_online,
+                        on_offline=on_offline,
+                    ),
+                )
+                self._remote_node_monitors[key] = monitor
+            monitor.start()
+            return monitor
 
     def _subscribe_local_app_console_stdout(
         self,
@@ -411,16 +442,23 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         self,
         *,
         node: ModWebNodeLink,
-        user: ModWebUser,
+        user: ModWebUser | None,
         on_update: Callable[[NodeStateStreamEvent], None],
+        on_online: Callable[[], None] | None = None,
+        on_offline: Callable[[Exception], None] | None = None,
     ) -> None:
+        retry_delay_seconds = _REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS
         while True:
             try:
-                token = self._remote_token(
-                    node=node,
-                    app_name=None,
-                    scopes=(NodeApiScope.APPS_READ,),
-                    user=user,
+                token = (
+                    self._remote_node_monitor_token(node=node)
+                    if user is None
+                    else self._remote_token(
+                        node=node,
+                        app_name=None,
+                        scopes=(NodeApiScope.APPS_READ,),
+                        user=user,
+                    )
                 )
                 session = await self._remote_http_client()
                 async with session.ws_connect(
@@ -428,6 +466,9 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     headers={"Authorization": f"Bearer {token}"},
                     heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
                 ) as websocket:
+                    if on_online is not None:
+                        on_online()
+                    retry_delay_seconds = _REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS
                     async for message in websocket:
                         if message.type == aiohttp.WSMsgType.TEXT:
                             payload_text: object = cast(object, message.data)
@@ -451,6 +492,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                             break
                         if message.type == aiohttp.WSMsgType.ERROR:
                             raise RuntimeError(f"Remote node state stream websocket error: {websocket.exception()}")
+                    raise ConnectionError("Remote node state stream closed.")
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
@@ -464,34 +506,48 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                         node=node,
                         user=user,
                         on_update=on_update,
+                        on_online=on_online,
+                        on_offline=on_offline,
                     )
+                if on_offline is not None:
+                    on_offline(xcp)
                 log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
                 log_method(
                     "Remote node state stream disconnected; retrying: node=%s error=%s",
                     node.node_name,
                     xcp,
                 )
-            await asyncio.sleep(_REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS)
+            await asyncio.sleep(retry_delay_seconds)
+            retry_delay_seconds = min(retry_delay_seconds * 2, 30.0)
 
     async def _remote_node_state_polling_listener(
         self,
         *,
         node: ModWebNodeLink,
-        user: ModWebUser,
+        user: ModWebUser | None,
         on_update: Callable[[NodeStateStreamEvent], None],
+        on_online: Callable[[], None] | None = None,
+        on_offline: Callable[[Exception], None] | None = None,
     ) -> None:
         previous_app_entries: tuple[NodeAppEntry, ...] | None = None
         previous_system_summary: NodeSystemSummary | None = None
+        retry_delay_seconds = _APP_RUNTIME_REFRESH_INTERVAL_SECONDS
         while True:
             try:
-                app_entries, system_summary = await asyncio.gather(
-                    self._remote_apps_async(node, user),
-                    self._remote_node_system_summary_or_none_async(
-                        node,
-                        user,
-                        error_context="Remote node state polling system summary failed",
-                    ),
-                )
+                if user is None:
+                    app_entries, system_summary = await self._remote_node_monitor_snapshot_async(node=node)
+                else:
+                    app_entries, system_summary = await asyncio.gather(
+                        self._remote_apps_async(node, user),
+                        self._remote_node_system_summary_or_none_async(
+                            node,
+                            user,
+                            error_context="Remote node state polling system summary failed",
+                        ),
+                    )
+                if on_online is not None:
+                    on_online()
+                retry_delay_seconds = _APP_RUNTIME_REFRESH_INTERVAL_SECONDS
                 event = self._remote_polled_node_state_event(
                     node_name=node.node_name,
                     app_entries=app_entries,
@@ -507,12 +563,15 @@ class ModWebStreamsMixin(ModWebServiceSupport):
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
+                if on_offline is not None:
+                    on_offline(xcp)
                 log.warning(
                     "Remote node state polling failed: node=%s error=%s",
                     node.node_name,
                     xcp,
                 )
-            await asyncio.sleep(_APP_RUNTIME_REFRESH_INTERVAL_SECONDS)
+                retry_delay_seconds = min(retry_delay_seconds * 2, 30.0)
+            await asyncio.sleep(retry_delay_seconds)
 
     @staticmethod
     def _remote_polled_app_state_event(

@@ -1001,7 +1001,8 @@ class ModWebAppPageMixin(
         return "red"
 
     def _app_page_node_presence_stream_url(self, *, node_name: str) -> str | None:
-        return self._remote_node_link(node_name).presence_stream_url
+        node = self._remote_node_link(node_name)
+        return node.presence_stream_url if node.is_current else None
 
     @classmethod
     def _app_page_node_presence_badge_spec(

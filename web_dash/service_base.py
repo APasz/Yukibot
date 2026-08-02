@@ -83,6 +83,7 @@ from .stream_broker import (
     RemoteNodeStreamKey,
     SharedAsyncStreamBroker,
 )
+from .remote_node_monitor import RemoteNodeMonitor, RemoteNodeMonitorSnapshot
 from .types import (
     ModWebAppLink,
     ModWebAppTabDefinition,
@@ -130,6 +131,8 @@ class ModWebServiceSupport:
     _remote_node_circuits: dict[str, RemoteNodeCircuitState] = cast(
         dict[str, RemoteNodeCircuitState], cast(object, None)
     )
+    _remote_node_monitors: dict[str, RemoteNodeMonitor] = cast(dict[str, RemoteNodeMonitor], cast(object, None))
+    _remote_node_monitors_lock: threading.RLock = cast(threading.RLock, cast(object, None))
     _remote_node_state_broker: SharedAsyncStreamBroker[
         RemoteNodeStreamKey, NodeStateStreamEvent
     ] = cast(SharedAsyncStreamBroker[RemoteNodeStreamKey, NodeStateStreamEvent], cast(object, None))
@@ -377,6 +380,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_hero_header_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_home_section_from_monitor_snapshot"]) -> Callable[..., ModWebNodeAppSection]: ...
 
     @overload
     def __getattr__(self, name: Literal["_hero_header_main_classes"]) -> Callable[..., str]: ...
@@ -858,6 +864,23 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_token"]) -> Callable[..., str]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_remote_node_monitor_token"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_node_monitor_snapshot_async"]
+    ) -> Callable[..., Awaitable[tuple[tuple[NodeAppEntry, ...], NodeSystemSummary]]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_ensure_remote_node_monitor"]) -> Callable[..., RemoteNodeMonitor]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_node_monitor_snapshot"]) -> Callable[..., RemoteNodeMonitorSnapshot]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_subscribe_remote_node_monitor"]) -> Callable[..., Callable[[], None]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_render_app_node_badge"]) -> Callable[..., None]: ...
 
     @overload
@@ -1050,9 +1073,6 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_framework_http_error_config"]) -> Callable[..., _ModWebStatusPageConfig]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_simulated_down_node_names"]) -> Callable[..., tuple[str, ...]]: ...
-
-    @overload
     def __getattr__(self, name: Literal["_start_download"]) -> Callable[..., Awaitable[None]]: ...
 
     @overload
@@ -1084,9 +1104,6 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_tab_section_body_classes"]) -> Callable[..., str]: ...
-
-    @overload
-    def __getattr__(self, name: Literal["_toggle_simulated_down_node_url"]) -> Callable[..., str]: ...
 
     @overload
     def __getattr__(self, name: Literal["_upload_mods"]) -> Callable[..., Awaitable[NodeModUploadBatchResult]]: ...

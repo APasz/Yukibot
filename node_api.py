@@ -231,6 +231,7 @@ _NODE_TOKEN_TTL_SECONDS = 15 * 60
 _NODE_RESTART_DELAY_SECONDS = 0.25
 _APP_PLAYER_COUNT_TIMEOUT_SECONDS = 1.5
 _PORTAL_NODE_LATENCY_TIMEOUT_SECONDS = 4.0
+_NODE_DISCORD_HEARTBEAT_LATENCY_HEADER = "X-Yukibot-Discord-Latency-Ms"
 _APP_FOOTPRINT_CACHE_TTL_SECONDS = 60.0
 _APP_TRANSITION_TTL_SECONDS = 15.0
 _NODE_APP_ENTRY_CACHE_TTL_SECONDS = 5.0
@@ -243,6 +244,14 @@ _NODE_SYSTEM_HISTORY_MAX_SAMPLES = node_api_system.SYSTEM_HISTORY_RETENTION_SECO
     node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS
 )
 _NODE_SYSTEM_LOG_MAX_LINES = 500
+
+
+@dataclass(frozen=True, slots=True)
+class PortalNodeLatencyProbe:
+    """Portal's current HTTP and Discord latency observations for one node."""
+
+    latency_ms: int | None
+    discord_latency_ms: int | None
 _LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
 _SQUAREMAP_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -1135,7 +1144,13 @@ class NodeApiService:
         running_app_scopes: tuple[str, ...] = ()
         start_blocked_app_ids: tuple[str, ...] = ()
         deployment_metadata: config.DeploymentMetadata | None = config.MOD_WEB_DEPLOYMENT_METADATA
-        deployment_version: str | None = None if deployment_metadata is None else deployment_metadata.version
+        deployment_version: str | None = (
+            deployment_metadata.version
+            if deployment_metadata is not None
+            else "indev"
+            if config.INDEV
+            else None
+        )
         deployment_revision: str | None = (
             config.MOD_WEB_BUILD_SHA if deployment_metadata is None else deployment_metadata.revision
         )
@@ -2213,14 +2228,28 @@ class NodeApiService:
             return None
         return round(latency_seconds * 1000)
 
-    async def portal_node_latencies_async(self) -> dict[str, int | None]:
+    def _node_ping_headers(self) -> dict[str, str]:
+        """Return non-sensitive node liveness metadata for the public ping route."""
+
+        discord_latency_ms = self._discord_heartbeat_latency_ms()
+        if discord_latency_ms is None:
+            return {}
+        return {_NODE_DISCORD_HEARTBEAT_LATENCY_HEADER: str(discord_latency_ms)}
+
+    async def portal_node_latency_probes_async(self) -> dict[str, PortalNodeLatencyProbe]:
+        """Measure the Portal-to-node and node-to-Discord latency for dashboard badges."""
+
         if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
             return {}
         targets = self._portal_node_latency_targets()
         measurements = await asyncio.gather(
-            *(run_blocking(self._measure_node_latency_ms, ping_url) for _, ping_url in targets)
+            *(run_blocking(self._measure_node_latency_probe, ping_url) for _, ping_url in targets)
         )
-        return {node_name: latency_ms for (node_name, _), latency_ms in zip(targets, measurements, strict=True)}
+        return {node_name: measurement for (node_name, _), measurement in zip(targets, measurements, strict=True)}
+
+    async def portal_node_latencies_async(self) -> dict[str, int | None]:
+        probes = await self.portal_node_latency_probes_async()
+        return {node_name: probe.latency_ms for node_name, probe in probes.items()}
 
     @staticmethod
     def _portal_node_latency_targets() -> tuple[tuple[str, str], ...]:
@@ -2242,14 +2271,24 @@ class NodeApiService:
         return tuple(targets.values())
 
     @staticmethod
-    def _measure_node_latency_ms(ping_url: str) -> int | None:
+    def _measure_node_latency_probe(ping_url: str) -> PortalNodeLatencyProbe:
         started_at = time.perf_counter()
         try:
             response = requests.get(ping_url, timeout=_PORTAL_NODE_LATENCY_TIMEOUT_SECONDS)
             response.raise_for_status()
         except requests.RequestException:
-            return None
-        return max(1, round((time.perf_counter() - started_at) * 1000))
+            return PortalNodeLatencyProbe(latency_ms=None, discord_latency_ms=None)
+        raw_discord_latency_ms = response.headers.get(_NODE_DISCORD_HEARTBEAT_LATENCY_HEADER)
+        try:
+            discord_latency_ms = int(raw_discord_latency_ms) if raw_discord_latency_ms is not None else None
+        except ValueError:
+            discord_latency_ms = None
+        if discord_latency_ms is not None and discord_latency_ms < 0:
+            discord_latency_ms = None
+        return PortalNodeLatencyProbe(
+            latency_ms=max(1, round((time.perf_counter() - started_at) * 1000)),
+            discord_latency_ms=discord_latency_ms,
+        )
 
     async def _serve_node_state_stream(self, *, websocket: WebSocket) -> None:
         await websocket.accept()

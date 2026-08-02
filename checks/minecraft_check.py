@@ -1242,6 +1242,7 @@ class MinecraftActivityTests(unittest.IsolatedAsyncioTestCase):
         app = SimpleNamespace(
             activity_manager=activity_manager,
             _cancel_background_task=cancel_background_task,
+            name="minecraft_alpha",
             providers=[],
         )
         app.set_activity_providers = lambda providers: setattr(app, "providers", list(providers))

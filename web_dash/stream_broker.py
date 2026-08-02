@@ -20,6 +20,8 @@ StreamListenerFactory = Callable[[Callable[[StreamEvent], None]], Awaitable[None
 
 @dataclass(frozen=True, slots=True)
 class RemoteNodeStreamKey:
+    """A per-node server-side stream used by the system monitoring page."""
+
     node: ModWebNodeLink
 
 

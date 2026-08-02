@@ -195,7 +195,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         log.info("Mod web startup event received")
 
     async def _on_shutdown(self) -> None:
+        with self._remote_node_monitors_lock:
+            monitors = tuple(self._remote_node_monitors.values())
+            self._remote_node_monitors.clear()
         await asyncio.gather(
+            *(monitor.close() for monitor in monitors),
             self._remote_node_state_broker.close(),
             self._remote_app_state_broker.close(),
             self._remote_chat_broker.close(),
@@ -220,57 +224,16 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
     async def _home_app_sections(
         self,
         user: ModWebUser,
-        *,
-        simulated_down_node_names: tuple[str, ...] = (),
     ) -> tuple[ModWebNodeAppSection, ...]:
         sections: list[ModWebNodeAppSection | None] = [None] * len(self._node_links())
-        remote_nodes: list[tuple[int, ModWebNodeLink]] = []
-        simulated_down_keys: set[str] = {node_name.casefold() for node_name in simulated_down_node_names}
         for index, node in enumerate(self._node_links()):
-            if node.node_name.casefold() in simulated_down_keys:
-                sections[index] = self._simulated_remote_node_section(node)
-                continue
-            remote_nodes.append((index, node))
-
-        async def _remote_section(index: int, node: ModWebNodeLink) -> tuple[int, ModWebNodeAppSection]:
-            if node.node_name.casefold() in simulated_down_keys:
-                return index, self._simulated_remote_node_section(node)
-            try:
-                return index, ModWebNodeAppSection(
-                    node=node,
-                    app_links=await self._remote_app_links(
-                        node,
-                        user,
-                        timeout=_REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
-                    ),
-                )
-            except Exception as xcp:
-                if not (self._shutting_down or config.IS_SHUTTINGDOWN):
-                    log.warning("Remote mod web home node unavailable: node=%s error=%s", node.node_name, xcp)
-                return index, ModWebNodeAppSection(
-                    node=node,
-                    app_links=(),
-                    error=self._friendly_remote_node_error_text(xcp),
-                )
-
-        for index, section in await asyncio.gather(*(_remote_section(index, node) for index, node in remote_nodes)):
-            sections[index] = section
+            snapshot = self._remote_node_monitor_snapshot(node=node)
+            sections[index] = self._home_section_from_monitor_snapshot(snapshot=snapshot, user=user)
         return tuple(cast(tuple[ModWebNodeAppSection, ...], tuple(sections)))
 
-    async def _login_node_statuses_async(
-        self,
-        *,
-        simulated_down_node_names: tuple[str, ...] = (),
-    ) -> tuple[ModWebNodeStatus, ...]:
+    async def _login_node_statuses_async(self) -> tuple[ModWebNodeStatus, ...]:
         nodes = self._node_links()
-        simulated_down_keys: set[str] = {node_name.casefold() for node_name in simulated_down_node_names}
-
-        async def _status(node: ModWebNodeLink) -> ModWebNodeStatus:
-            if node.node_name.casefold() in simulated_down_keys:
-                return self._simulated_remote_node_status(node)
-            return await self._probe_node_status_async(node)
-
-        return tuple(await asyncio.gather(*(_status(node) for node in nodes)))
+        return tuple(await asyncio.gather(*(self._probe_node_status_async(node) for node in nodes)))
 
     async def _probe_node_status_async(
         self,
@@ -296,28 +259,6 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
             return ModWebNodeStatus(node=node, alive=True, detail="HTTP 204", latency_ms=latency_ms)
         return ModWebNodeStatus(node=node, alive=False, detail=f"Unexpected HTTP {status_code}")
-
-    @staticmethod
-    def _simulated_remote_node_error_text() -> str:
-        return "This node is being simulated as unavailable in dev mode."
-
-    @classmethod
-    def _simulated_remote_node_section(cls, node: ModWebNodeLink) -> ModWebNodeAppSection:
-        return ModWebNodeAppSection(
-            node=node,
-            app_links=(),
-            error=cls._simulated_remote_node_error_text(),
-            is_simulated_down=True,
-        )
-
-    @classmethod
-    def _simulated_remote_node_status(cls, node: ModWebNodeLink) -> ModWebNodeStatus:
-        return ModWebNodeStatus(
-            node=node,
-            alive=False,
-            detail=cls._simulated_remote_node_error_text(),
-            is_simulated_down=True,
-        )
 
     async def _render_mods_page(self, *, ui: ModWebUi, app_name: str, request: Request) -> None:
         await self._render_node_mods_page(
@@ -662,8 +603,6 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             initial_app_entries=app_entries,
             initial_system_capabilities=initial_system_capabilities,
             load_system_tab=_load_system_tab,
-            current_url=self._request_path(request),
-            simulated_down_node_names=self._simulated_down_node_names(request),
             subscribe_node_state_updates=subscribe_node_state_updates,
         )
 

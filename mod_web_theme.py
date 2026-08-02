@@ -454,14 +454,14 @@ class ModWebTheme:
                     to {{ opacity: 1; translate: 0 0; }}
                 }}
                 @keyframes mod-live-value-pulse-a {{
-                    0% {{ color: #ffffff; filter: brightness(1.75); translate: 0 1px; }}
+                    0% {{ color: #ffffff; filter: brightness(1.75); }}
                     45% {{ text-shadow: 0 0 0.7rem var(--mod-accent-border); }}
-                    100% {{ filter: brightness(1); translate: 0 0; text-shadow: none; }}
+                    100% {{ filter: brightness(1); text-shadow: none; }}
                 }}
                 @keyframes mod-live-value-pulse-b {{
-                    0% {{ color: #ffffff; filter: brightness(1.75); translate: 0 1px; }}
+                    0% {{ color: #ffffff; filter: brightness(1.75); }}
                     45% {{ text-shadow: 0 0 0.7rem var(--mod-accent-border); }}
-                    100% {{ filter: brightness(1); translate: 0 0; text-shadow: none; }}
+                    100% {{ filter: brightness(1); text-shadow: none; }}
                 }}
                 .mod-card {{
                     border-radius: 0 !important;

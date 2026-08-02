@@ -270,6 +270,7 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         app.name = "satisfactory_alpha"
         app.friendly = "Satisfactory"
         app.scope = "satisfactory"
+        app.cfg = SimpleNamespace(relay_notice_player_session=True)
         return app
 
     def _console_app(self) -> Satisfactory:
