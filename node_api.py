@@ -1134,6 +1134,14 @@ class NodeApiService:
         running_app_ids: tuple[str, ...] = ()
         running_app_scopes: tuple[str, ...] = ()
         start_blocked_app_ids: tuple[str, ...] = ()
+        deployment_metadata: config.DeploymentMetadata | None = config.MOD_WEB_DEPLOYMENT_METADATA
+        deployment_version: str | None = None if deployment_metadata is None else deployment_metadata.version
+        deployment_revision: str | None = (
+            config.MOD_WEB_BUILD_SHA if deployment_metadata is None else deployment_metadata.revision
+        )
+        deployed_at_epoch_seconds: int | None = (
+            None if deployment_metadata is None else int(deployment_metadata.deployed_at.timestamp())
+        )
 
         try:
             system_stats: Stats_System = Stats_System()
@@ -1234,6 +1242,9 @@ class NodeApiService:
             running_app_scopes=running_app_scopes,
             start_blocked_app_ids=start_blocked_app_ids,
             captured_at_epoch_seconds=int(time.time()),
+            deployment_version=deployment_version,
+            deployment_revision=deployment_revision,
+            deployed_at_epoch_seconds=deployed_at_epoch_seconds,
         )
 
     @staticmethod
@@ -2672,8 +2683,7 @@ class NodeApiService:
         )
 
     def read_discord_settings(self) -> config.DiscordSettings:
-        manager = self._require_manager()
-        return manager.discord_settings()
+        return self._require_manager().discord_settings()
 
     async def schedule_system_action(
         self,
@@ -2730,16 +2740,25 @@ class NodeApiService:
         is_portal = config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL
         supports_app_auto_restart = not is_portal and manager is not None
         supports_silent_restart = not is_portal and manager is not None and manager.bot is not None
+        supports_node_capacity = manager is not None
+        supports_node_font_sources = manager is not None
+        supports_discord_settings = manager is not None and manager.bot is not None
         if is_portal:
             return NodeSystemCapabilities(
                 actions=(NodeSystemAction.RESTART_PROCESS,),
                 supports_app_auto_restart=supports_app_auto_restart,
                 supports_silent_restart=supports_silent_restart,
+                supports_node_capacity=supports_node_capacity,
+                supports_node_font_sources=supports_node_font_sources,
+                supports_discord_settings=supports_discord_settings,
             )
         return NodeSystemCapabilities(
             actions=(NodeSystemAction.RESTART_PROCESS, NodeSystemAction.REBOOT_HOST),
             supports_app_auto_restart=supports_app_auto_restart,
             supports_silent_restart=supports_silent_restart,
+            supports_node_capacity=supports_node_capacity,
+            supports_node_font_sources=supports_node_font_sources,
+            supports_discord_settings=supports_discord_settings,
         )
 
     def read_restart_state(self) -> NodeRestartState:
@@ -2908,7 +2927,7 @@ class NodeApiService:
         actor_user_id: int,
     ) -> NodeDiscordSettingsMutationResult:
         manager = self._require_manager()
-        current_settings = manager.discord_settings()
+        current_settings = self.read_discord_settings()
         required_level = (
             Power_Level.root
             if current_settings.activity.refresh_interval_seconds != settings.activity.refresh_interval_seconds

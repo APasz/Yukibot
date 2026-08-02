@@ -3902,12 +3902,18 @@ class ModWebTheme:
                     padding-top: 1.9rem !important;
                     padding-bottom: 0.75rem !important;
                 }}
+                .mod-system-hero-shell-visitor {{
+                    padding-top: 0.75rem !important;
+                }}
                 .mod-system-hero-header {{
                     display: grid;
                     grid-template-columns: minmax(0, 1fr) minmax(0, auto);
                     align-items: start;
                     gap: 0.5rem 1.5rem;
                     width: 100%;
+                }}
+                .mod-system-hero-shell-visitor .mod-system-hero-header {{
+                    grid-template-columns: minmax(0, 1fr);
                 }}
                 .mod-system-hero-identity {{
                     display: flex !important;
@@ -3947,6 +3953,9 @@ class ModWebTheme:
                 @container mod-app-hero (max-width: 34rem) {{
                     .mod-system-hero-shell {{
                         padding-top: 4.8rem !important;
+                    }}
+                    .mod-system-hero-shell-visitor {{
+                        padding-top: 0.75rem !important;
                     }}
                 }}
                 .mod-home-node-grid {{

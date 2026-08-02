@@ -56,6 +56,7 @@ _IGNORED_PYTHON_WARNING_MESSAGE_SNIPPETS: tuple[str, ...] = (
     "remove second argument of ws_handler",
 )
 _PROJECT_SOURCE_DIRECTORY: Path = Path(__file__).resolve().parent
+BOT_CONFIGURATION_PATH: Path = Path("configuration.json")
 LOGGER_TRAFFIC: str = "traffic"
 LOGGER_TTS: str = "tts"
 LOGGER_AUDIT: str = "audit"
@@ -1507,6 +1508,15 @@ def save_bot_configuration(path: Path, bot_config: BotConfiguration) -> None:
         json.dumps(bot_config.model_dump(mode="json", by_alias=True), sort_keys=True, indent=4),
         STR_ENCODE,
     )
+
+
+def save_discord_settings(path: Path, settings: DiscordSettings) -> DiscordSettings:
+    """Persist Discord activity settings while retaining the rest of a node configuration."""
+    bot_config = load_bot_configuration(path)
+    if bot_config.discord_settings == settings:
+        return settings
+    save_bot_configuration(path, bot_config.model_copy(update={"discord_settings": settings}))
+    return settings
 
 
 def upsert_known_bot_snapshot(path: Path, snapshot: BotMetadataSnapshot) -> BotConfiguration:

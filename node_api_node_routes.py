@@ -120,7 +120,7 @@ def register_node_management_routes(
     @nicegui_app.get(f"{api_prefix}/discord-settings")
     async def _discord_settings(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API Discord settings request: node=%s", service.node_name)
-        service._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+        service._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
         return service.read_discord_settings().model_dump(mode="json")
 
     @nicegui_app.post(f"{api_prefix}/discord-settings")
@@ -130,7 +130,7 @@ def register_node_management_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API Discord settings update request: node=%s", service.node_name)
-        actor_user_id = _actor_user_id(service, request=request, access_token=access_token, scope=NodeApiScope.NODE_MANAGE)
+        actor_user_id = _actor_user_id(service, request=request, access_token=access_token, scope=NodeApiScope.NODE_OPERATE)
         settings = config.DiscordSettings.model_validate(payload)
         return (await service.mutate_discord_settings(settings=settings, actor_user_id=actor_user_id)).to_mapping()
 

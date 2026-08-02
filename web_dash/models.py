@@ -2972,6 +2972,17 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
 
     @classmethod
+    def _build_node_system_overview_stats(cls, system_summary: NodeSystemSummary) -> tuple[ModWebTitleStat, ...]:
+        cpu_value, cpu_tone = cls._system_cpu_entry(system_summary)
+        ram_value, ram_tone = cls._system_ram_percent_entry(system_summary)
+        storage_value, storage_tone = cls._system_storage_percent_entry(system_summary)
+        return (
+            ModWebTitleStat(label="CPU", value=cpu_value, tone=cpu_tone),
+            ModWebTitleStat(label="RAM", value=ram_value, tone=ram_tone),
+            ModWebTitleStat(label="Storage", value=storage_value, tone=storage_tone),
+        )
+
+    @classmethod
     def _build_node_system_stats(cls, system_summary: NodeSystemSummary) -> tuple[ModWebTitleStat, ...]:
         cpu_value, cpu_tone = cls._system_cpu_entry(system_summary)
         ram_value, ram_tone = cls._system_ram_entry(system_summary)

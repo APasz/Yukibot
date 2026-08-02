@@ -208,7 +208,7 @@ def format_enabled_app_dump(apps: Sequence[ManagedApp]) -> str:
 
 
 class App_Manager(metaclass=config.Singleton):
-    _BOT_CONFIGURATION_PATH = Path("configuration.json")
+    _BOT_CONFIGURATION_PATH = config.BOT_CONFIGURATION_PATH
     activity_manager: "Activity_Manager | None" = None
     bot: hikari.GatewayBot | None = None
 
@@ -1081,10 +1081,7 @@ class App_Manager(metaclass=config.Singleton):
         return settings
 
     def set_discord_settings(self, settings: config.DiscordSettings) -> config.DiscordSettings:
-        bot_config = self._load_bot_configuration()
-        if bot_config.discord_settings != settings:
-            bot_config = bot_config.model_copy(update={"discord_settings": settings})
-            config.save_bot_configuration(self._bot_configuration_path, bot_config)
+        config.save_discord_settings(self._bot_configuration_path, settings)
         if self.activity_manager is not None:
             self.activity_manager.set_activity_settings(settings.activity)
         return settings

@@ -7,7 +7,7 @@ import unittest
 import uuid
 import zipfile
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -148,6 +148,7 @@ from chat_hub import (
     ChatEvent,
     ChatHub,
 )
+from deployment_metadata import DeploymentMetadata
 from maintenance import MaintenanceService
 from map_annotations import MapAnnotationDraft
 from node_api import (
@@ -7695,6 +7696,8 @@ class NodeApiTests(unittest.TestCase):
             patch("node_api.time.time", return_value=10_000),
             patch("node_api.psutil.Process") as process_cls,
             patch("node_api.psutil.boot_time", return_value=6_400),
+            patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", None),
+            patch.object(config, "MOD_WEB_BUILD_SHA", None),
         ):
             process_cls.return_value.create_time.return_value = 9_100
             summary = NodeApiService().build_system_summary()
@@ -7725,6 +7728,25 @@ class NodeApiTests(unittest.TestCase):
                 captured_at_epoch_seconds=10_000,
             ),
         )
+
+    def test_system_summary_exposes_current_node_deployment_metadata(self) -> None:
+        deployment = DeploymentMetadata(
+            revision="abcdef1234567890",
+            deployed_at=datetime(2026, 8, 1, 4, 30, tzinfo=timezone.utc),
+            target_name="erin",
+            version="v2026.08.01.1",
+        )
+        with (
+            patch("node_api.Stats_System", side_effect=RuntimeError("stats unavailable")),
+            patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", deployment),
+            patch.object(config, "MOD_WEB_BUILD_SHA", deployment.revision),
+        ):
+            summary = NodeApiService().build_system_summary()
+
+        self.assertEqual(summary.deployment_version, "v2026.08.01.1")
+        self.assertEqual(summary.deployment_revision, "abcdef1234567890")
+        self.assertEqual(summary.deployed_at_epoch_seconds, 1_785_558_600)
+        self.assertEqual(NodeSystemSummary.from_mapping(summary.to_mapping()), summary)
 
     def test_system_log_catalog_and_tail_include_managed_files_only(self) -> None:
         with TemporaryDirectory() as directory:
@@ -7826,10 +7848,17 @@ class NodeApiTests(unittest.TestCase):
                 capabilities = service.system_capabilities()
                 self.assertEqual(
                     capabilities,
-                    NodeSystemCapabilities(actions=(NodeSystemAction.RESTART_PROCESS,)),
+                    NodeSystemCapabilities(
+                        actions=(NodeSystemAction.RESTART_PROCESS,),
+                        supports_node_disk_settings=True,
+                    ),
                 )
                 self.assertFalse(capabilities.supports_app_auto_restart)
                 self.assertFalse(capabilities.supports_silent_restart)
+                self.assertFalse(capabilities.supports_node_capacity)
+                self.assertFalse(capabilities.supports_node_font_sources)
+                self.assertTrue(capabilities.supports_node_disk_settings)
+                self.assertFalse(capabilities.supports_discord_settings)
                 with self.assertRaises(HTTPException) as raised:
                     await service.schedule_system_action(
                         action=NodeSystemAction.REBOOT_HOST,
@@ -7842,6 +7871,18 @@ class NodeApiTests(unittest.TestCase):
             handler.assert_not_called()
 
         asyncio.run(exercise())
+
+    def test_discord_settings_capability_requires_an_attached_discord_bot(self) -> None:
+        service = NodeApiService()
+        manager = SimpleNamespace(bot=None)
+        service.set_manager(cast(Any, manager))
+
+        without_bot = service.system_capabilities()
+        manager.bot = object()
+        with_bot = service.system_capabilities()
+
+        self.assertFalse(without_bot.supports_discord_settings)
+        self.assertTrue(with_bot.supports_discord_settings)
 
     def test_restart_schedule_state_round_trip_and_sudo_update(self) -> None:
         async def exercise() -> None:

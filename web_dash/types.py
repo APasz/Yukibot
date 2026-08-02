@@ -31,15 +31,21 @@ from .runtime_imports import (
     NodeChatRoomSnapshot,
     NodeConfigList,
     NodeConsoleActionList,
+    NodeDiskManagementState,
     NodeFactorioGenerationState,
     NodeFactorioModSettings,
     NodeModList,
     NodeSaveList,
     NodeSettingList,
+    NodeRestartScheduleState,
+    NodeRestartState,
+    NodeSystemCapabilities,
+    NodeSystemLogCatalog,
     NodeSystemSummary,
     Power_Level,
     Protocol,
     TypeAlias,
+    config,
     dataclass,
     field,
 )
@@ -804,6 +810,18 @@ class ModWebOverviewPageModel(ModWebBasePageModel):
 class ModWebAppTabLoadResult:
     model: ModWebBasePageModel
     chat_surface: _ModWebChatSurfaceConfig | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebNodeSystemTabLoadResult:
+    restart_schedules: NodeRestartScheduleState | None = None
+    restart_state: NodeRestartState | None = None
+    system_capabilities: NodeSystemCapabilities | None = None
+    system_logs: NodeSystemLogCatalog | None = None
+    node_capacity: config.NodeCapacityProfile | None = None
+    node_font_sources: config.NodeFontSourceSettings | None = None
+    node_disk_settings: NodeDiskManagementState | None = None
+    discord_settings: config.DiscordSettings | None = None
 
 
 @dataclass(frozen=True, slots=True)

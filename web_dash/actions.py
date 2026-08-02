@@ -58,6 +58,7 @@ from .runtime_imports import (
     NodeCapacityMutationResult,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
+    NodeDiscordSettingsMutationResult,
     NodeFontSourceSettingsMutationResult,
     NodeMinecraftRecipeMutationAction,
     NodeMinecraftRecipeMutationResult,
@@ -420,6 +421,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return NodeDiskManagementState.from_mapping(payload)
 
+    async def _remote_discord_settings_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+    ) -> config.DiscordSettings:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/discord-settings",
+            scopes=(NodeApiScope.NODE_OPERATE,),
+            user=user,
+        )
+        return config.DiscordSettings.model_validate(payload)
+
     async def _remote_node_system_action_async(
         self,
         node: ModWebNodeLink,
@@ -588,6 +603,23 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload=settings.model_dump(mode="json"),
         )
         return NodeFontSourceSettingsMutationResult.from_mapping(payload)
+
+    async def _remote_update_discord_settings_async(
+        self,
+        node: ModWebNodeLink,
+        settings: config.DiscordSettings,
+        user: ModWebUser,
+    ) -> NodeDiscordSettingsMutationResult:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/discord-settings",
+            scopes=(NodeApiScope.NODE_OPERATE,),
+            user=user,
+            method="POST",
+            json_payload=settings.model_dump(mode="json"),
+        )
+        return NodeDiscordSettingsMutationResult.from_mapping(payload)
 
     async def _mutate_mod(
         self,
@@ -1138,6 +1170,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
         node = self._remote_node_link(node_name)
         return await self._remote_node_disk_settings_async(node, user)
 
+    async def _discord_settings(self, *, node_name: str, user: ModWebUser) -> config.DiscordSettings:
+        self._require_user_level(user=user, required_level=Power_Level.sudo)
+        node = self._remote_node_link(node_name)
+        return await self._remote_discord_settings_async(node, user)
+
     async def _update_node_capacity(
         self,
         *,
@@ -1170,6 +1207,17 @@ class ModWebActionsMixin(ModWebServiceSupport):
         self._require_user_level(user=user, required_level=Power_Level.root)
         node = self._remote_node_link(node_name)
         return await self._remote_update_node_disk_settings_async(node, preferences, user)
+
+    async def _update_discord_settings(
+        self,
+        *,
+        node_name: str,
+        user: ModWebUser,
+        settings: config.DiscordSettings,
+    ) -> NodeDiscordSettingsMutationResult:
+        self._require_user_level(user=user, required_level=Power_Level.sudo)
+        node = self._remote_node_link(node_name)
+        return await self._remote_update_discord_settings_async(node, settings, user)
 
     @staticmethod
     def _app_start_stop_action(model: ModWebBasePageModel) -> NodeAppMutationAction | None:

@@ -201,7 +201,7 @@ class StatsSystemSnapshot:
 
 
 class Stats_System(metaclass=Singleton):
-    _BOT_CONFIGURATION_PATH = Path("configuration.json")
+    _BOT_CONFIGURATION_PATH = config.BOT_CONFIGURATION_PATH
 
     def __init__(self):
         self._lock = threading.RLock()

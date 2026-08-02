@@ -37,6 +37,7 @@ from .runtime_imports import (
     NodeConsoleStdoutSnapshot,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
+    NodeDiscordSettingsMutationResult,
     NodeFactorioGenerationState,
     NodeFactorioMapExchangeString,
     NodeFactorioModSettings,
@@ -302,6 +303,11 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_build_node_system_stats"]) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_build_node_system_overview_stats"]
+    ) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_chat_player_count_badge"]) -> Callable[..., _ModWebBadgeSpec | None]: ...
 
     @overload
@@ -470,6 +476,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_node_disk_settings"]) -> Callable[..., Awaitable[NodeDiskManagementState]]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_discord_settings"]) -> Callable[..., Awaitable[config.DiscordSettings]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_node_font_sources"]) -> Callable[..., Awaitable[config.NodeFontSourceSettings]]: ...
 
     @overload
@@ -520,6 +529,11 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_update_node_disk_settings"]
     ) -> Callable[..., Awaitable[NodeDiskSettingsMutationResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_update_discord_settings"]
+    ) -> Callable[..., Awaitable[NodeDiscordSettingsMutationResult]]: ...
 
     @overload
     def __getattr__(

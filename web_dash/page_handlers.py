@@ -17,19 +17,15 @@ from .runtime_imports import (
     NodeBlueprintList,
     NodeConfigList,
     NodeConsoleActionList,
-    NodeDiskManagementState,
     NodeFactorioGenerationState,
     NodeFactorioModSettings,
     NodeModList,
     NodeModSummary,
-    NodeRestartScheduleState,
-    NodeRestartState,
     NodeSaveList,
     NodeSettingList,
     NodeStateStreamEvent,
     NodeSystemCapabilities,
     NodeSystemHistory,
-    NodeSystemLogCatalog,
     NodeSystemSummary,
     Power_Level,
     Request,
@@ -52,6 +48,7 @@ from .types import (
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebNodeStatus,
+    ModWebNodeSystemTabLoadResult,
     ModWebPageLoadWarning,
     ModWebPageModel,
     ModWebSevenDaysSandboxOptionsSummary,
@@ -494,7 +491,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         return ModWebAppTabLoadResult(model=loaded_model, chat_surface=chat_surface)
 
     async def _render_node_system_page(self, *, ui: ModWebUi, node_name: str, request: Request) -> None:
-        user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.sudo)
+        user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
         if user is None:
             return
 
@@ -506,63 +503,19 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 log_method("Remote mod web node system history unavailable: node=%s error=%s", node.node_name, xcp)
                 return NodeSystemHistory.empty()
 
-        async def _load_restart_schedules(node: ModWebNodeLink) -> NodeRestartScheduleState | None:
-            try:
-                return await self._remote_restart_schedules_async(node, user)
-            except Exception as xcp:
-                log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
-                log_method("Remote restart schedules unavailable: node=%s error=%s", node.node_name, xcp)
-                return None
+        async def _load_system_app_entries(node: ModWebNodeLink) -> tuple[NodeAppEntry, ...]:
+            if not self._user_has_level(user, Power_Level.sudo):
+                return ()
+            return await self._remote_apps_async(node, user)
 
-        async def _load_restart_state(node: ModWebNodeLink) -> NodeRestartState | None:
-            try:
-                return await self._remote_restart_state_async(node, user)
-            except Exception as xcp:
-                log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
-                log_method("Remote restart state unavailable: node=%s error=%s", node.node_name, xcp)
+        async def _load_initial_system_capabilities(node: ModWebNodeLink) -> NodeSystemCapabilities | None:
+            if not self._user_has_level(user, Power_Level.sudo):
                 return None
-
-        async def _load_system_capabilities(node: ModWebNodeLink) -> NodeSystemCapabilities | None:
             try:
                 return await self._remote_node_system_capabilities_async(node, user)
             except Exception as xcp:
                 log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
                 log_method("Remote node system capabilities unavailable: node=%s error=%s", node.node_name, xcp)
-                return None
-
-        async def _load_system_logs(node: ModWebNodeLink) -> NodeSystemLogCatalog | None:
-            try:
-                return await self._remote_node_system_log_catalog_async(node, user)
-            except Exception as xcp:
-                log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
-                log_method("Remote node system logs unavailable: node=%s error=%s", node.node_name, xcp)
-                return None
-
-        async def _load_node_capacity(node: ModWebNodeLink) -> config.NodeCapacityProfile | None:
-            if not self._user_has_level(user, Power_Level.root):
-                return None
-            try:
-                return await self._node_capacity(node_name=node.node_name, user=user)
-            except Exception as xcp:
-                log.warning("Remote node capacity unavailable: node=%s error=%s", node.node_name, xcp)
-                return None
-
-        async def _load_node_font_sources(node: ModWebNodeLink) -> config.NodeFontSourceSettings | None:
-            if not self._user_has_level(user, Power_Level.sudo):
-                return None
-            try:
-                return await self._node_font_sources(node_name=node.node_name, user=user)
-            except Exception as xcp:
-                log.warning("Remote node font sources unavailable: node=%s error=%s", node.node_name, xcp)
-                return None
-
-        async def _load_node_disk_settings(node: ModWebNodeLink) -> NodeDiskManagementState | None:
-            if not self._user_has_level(user, Power_Level.root):
-                return None
-            try:
-                return await self._node_disk_settings(node_name=node.node_name, user=user)
-            except Exception as xcp:
-                log.warning("Remote node disk settings unavailable: node=%s error=%s", node.node_name, xcp)
                 return None
 
         node: ModWebNodeLink | None = None
@@ -575,24 +528,12 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 system_summary,
                 system_history,
                 app_entries,
-                restart_schedules,
-                restart_state,
-                system_capabilities,
-                system_logs,
-                node_capacity,
-                node_font_sources,
-                node_disk_settings,
+                initial_system_capabilities,
             ) = await asyncio.gather(
                 self._remote_node_system_summary_async(node, user),
                 _load_system_history(node),
-                self._remote_apps_async(node, user),
-                _load_restart_schedules(node),
-                _load_restart_state(node),
-                _load_system_capabilities(node),
-                _load_system_logs(node),
-                _load_node_capacity(node),
-                _load_node_font_sources(node),
-                _load_node_disk_settings(node),
+                _load_system_app_entries(node),
+                _load_initial_system_capabilities(node),
             )
         except Exception as xcp:
             if not self._remote_node_error_is_transient(xcp):
@@ -634,6 +575,74 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         if node is None:
             raise RuntimeError("Resolved system node unexpectedly missing after successful page load.")
 
+        async def _load_system_tab(tab_id: str) -> ModWebNodeSystemTabLoadResult:
+            if not self._user_has_level(user, Power_Level.sudo):
+                raise PermissionError("Sudo access is required to load node system controls.")
+
+            async def _system_capabilities() -> NodeSystemCapabilities:
+                if initial_system_capabilities is not None:
+                    return initial_system_capabilities
+                return await self._remote_node_system_capabilities_async(node, user)
+
+            match tab_id:
+                case "system":
+                    restart_schedules, restart_state, system_capabilities = await asyncio.gather(
+                        self._remote_restart_schedules_async(node, user),
+                        self._remote_restart_state_async(node, user),
+                        _system_capabilities(),
+                    )
+                    return ModWebNodeSystemTabLoadResult(
+                        restart_schedules=restart_schedules,
+                        restart_state=restart_state,
+                        system_capabilities=system_capabilities,
+                    )
+                case "properties":
+                    system_capabilities = await _system_capabilities()
+                    can_manage_node_configuration = self._user_has_level(user, Power_Level.root)
+                    node_font_sources_job = (
+                        self._node_font_sources(node_name=node.node_name, user=user)
+                        if system_capabilities.supports_node_font_sources
+                        else asyncio.sleep(0, result=None)
+                    )
+                    node_capacity_job = (
+                        self._node_capacity(node_name=node.node_name, user=user)
+                        if can_manage_node_configuration and system_capabilities.supports_node_capacity
+                        else asyncio.sleep(0, result=None)
+                    )
+                    node_disk_settings_job = (
+                        self._node_disk_settings(node_name=node.node_name, user=user)
+                        if can_manage_node_configuration and system_capabilities.supports_node_disk_settings
+                        else asyncio.sleep(0, result=None)
+                    )
+                    node_font_sources, node_capacity, node_disk_settings = await asyncio.gather(
+                        node_font_sources_job,
+                        node_capacity_job,
+                        node_disk_settings_job,
+                    )
+                    return ModWebNodeSystemTabLoadResult(
+                        node_capacity=node_capacity,
+                        node_font_sources=node_font_sources,
+                        node_disk_settings=node_disk_settings,
+                        system_capabilities=system_capabilities,
+                    )
+                case "discord":
+                    system_capabilities = await _system_capabilities()
+                    discord_settings = (
+                        await self._discord_settings(node_name=node.node_name, user=user)
+                        if system_capabilities.supports_discord_settings
+                        else None
+                    )
+                    return ModWebNodeSystemTabLoadResult(
+                        discord_settings=discord_settings,
+                        system_capabilities=system_capabilities,
+                    )
+                case "logs":
+                    return ModWebNodeSystemTabLoadResult(
+                        system_logs=await self._remote_node_system_log_catalog_async(node, user),
+                    )
+                case _:
+                    raise ValueError(f"Unknown node system tab: {tab_id!r}")
+
         def subscribe_node_state_updates(
             on_update: Callable[[NodeStateStreamEvent], None],
         ) -> Callable[[], None]:
@@ -651,13 +660,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             initial_system_history=system_history,
             initial_node_status=status,
             initial_app_entries=app_entries,
-            initial_restart_schedules=restart_schedules,
-            initial_restart_state=restart_state,
-            initial_system_capabilities=system_capabilities,
-            initial_system_logs=system_logs,
-            initial_node_capacity=node_capacity,
-            initial_node_font_sources=node_font_sources,
-            initial_node_disk_settings=node_disk_settings,
+            initial_system_capabilities=initial_system_capabilities,
+            load_system_tab=_load_system_tab,
             current_url=self._request_path(request),
             simulated_down_node_names=self._simulated_down_node_names(request),
             subscribe_node_state_updates=subscribe_node_state_updates,

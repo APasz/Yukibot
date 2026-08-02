@@ -722,7 +722,7 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
             if deployment_text is not None:
                 with ui.card().classes("mod-card w-full"):
                     with ui.column().classes("gap-1 p-5"):
-                        ui.label("Current deployment").classes("text-xl font-bold mod-title-small")
+                        ui.label("Portal deployment").classes("text-xl font-bold mod-title-small")
                         ui.label(deployment_text).classes("text-sm mod-subtitle")
             with ui.card().classes("mod-card w-full"):
                 with ui.column().classes("gap-5 p-5"):

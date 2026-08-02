@@ -25,10 +25,6 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
         def _open_about_page() -> None:
             ui.navigate.to("/auth/about")
 
-        open_discord_settings = (
-            self._build_discord_settings_panel(ui=ui, user=user) if self._user_can_manage_discord_settings(user) else None
-        )
-
         def _simulate(kind: ModWebNotificationTrayItemKind) -> None:
             current_count: int = len(self._backend.user_transfer_items(user_id=user.discord_id))
             filename = (
@@ -73,8 +69,6 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
         action_specs.append(("Unit converter", open_unit_converter))
         action_specs.append(("Aliases", _open_alias_page))
         action_specs.append(("About", _open_about_page))
-        if open_discord_settings is not None:
-            action_specs.append(("Discord", open_discord_settings))
         action_specs.append(("Log out", lambda: ui.navigate.to("/auth/logout")))
 
         menu_factory = getattr(ui, "menu", None)

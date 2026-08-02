@@ -205,6 +205,7 @@ from web_dash.home import (
     _format_restart_hours_input,
     _format_restart_state_line,
     _format_restart_timestamp,
+    _ModWebNodeSystemTab,
     _ModWebNodeDiskChoice,
     _parse_restart_hours_input,
     _restart_anchor_timestamp,
@@ -2871,6 +2872,14 @@ class ModWebTests(unittest.TestCase):
                 ("1 app start blocked", "warn"),
             ],
         )
+        visitor_warning_badges = ModWebService._node_system_warning_badges(
+            summary,
+            include_operator_details=False,
+        )
+        self.assertEqual(
+            [(badge.text, badge.tone) for badge in visitor_warning_badges],
+            [("CPU 92%", "red"), ("RAM 78%", "warn"), ("Storage 91%", "red")],
+        )
 
     def test_node_system_current_usage_badges_report_overall_cpu_and_ram(self) -> None:
         badges = ModWebService()._node_system_current_usage_badges(
@@ -3050,6 +3059,63 @@ class ModWebTests(unittest.TestCase):
             ["purple", None, "purple", "purple"],
         )
 
+    def test_node_system_overview_stats_exclude_capacity_and_volume_detail(self) -> None:
+        stats = ModWebService._build_node_system_overview_stats(
+            NodeSystemSummary(
+                cpu_percent=31,
+                ram_percent=44,
+                ram_used_bytes=8 * 1024**3,
+                ram_total_bytes=16 * 1024**3,
+                storage_percent=55,
+                storage_free_bytes=100 * 1024**3,
+                storage_total_bytes=200 * 1024**3,
+            )
+        )
+
+        self.assertEqual(
+            [(stat.label, stat.value, stat.lines) for stat in stats],
+            [("CPU", "31%", ()), ("RAM", "44%", ()), ("Storage", "55%", ())],
+        )
+
+    def test_node_system_tabs_limit_overview_to_visitors(self) -> None:
+        self.assertEqual(_ModWebNodeSystemTab.OVERVIEW.required_level, Power_Level.visitor)
+        self.assertEqual(
+            tuple(tab.label for tab in _ModWebNodeSystemTab),
+            ("Overview", "System", "Properties", "Discord", "Logs"),
+        )
+        self.assertEqual(
+            tuple(tab.icon for tab in _ModWebNodeSystemTab),
+            ("dashboard", "autorenew", "tune", "settings", "article"),
+        )
+        self.assertTrue(
+            all(
+                tab.required_level is Power_Level.sudo
+                for tab in _ModWebNodeSystemTab
+                if tab is not _ModWebNodeSystemTab.OVERVIEW
+            )
+        )
+
+    def test_node_system_deployment_text_identifies_the_current_node_release(self) -> None:
+        deployment_text = ModWebService._node_system_deployment_text(
+            NodeSystemSummary(
+                cpu_percent=None,
+                ram_percent=None,
+                ram_used_bytes=None,
+                ram_total_bytes=None,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                deployment_version="v2026.08.01.1",
+                deployment_revision="abcdef1234567890",
+                deployed_at_epoch_seconds=1_785_558_600,
+            )
+        )
+
+        self.assertEqual(
+            deployment_text,
+            "v2026.08.01.1 · Build abcdef1 · deployed 01 Aug 2026, 04:30 UTC",
+        )
+
     def test_node_bot_avatar_markup_supports_system_hero_class(self) -> None:
         service = ModWebService()
         with patch.object(
@@ -3167,7 +3233,7 @@ class ModWebTests(unittest.TestCase):
             animated_markup,
         )
 
-    def test_render_node_system_page_requires_sudo_and_builds_live_page(self) -> None:
+    def test_render_node_system_page_allows_visitors_and_lazily_loads_privileged_tabs(self) -> None:
         async def exercise() -> None:
             service = ModWebService()
             node = ModWebNodeLink(
@@ -3201,6 +3267,9 @@ class ModWebTests(unittest.TestCase):
                     NodeSystemAction.RESTART_PROCESS,
                     NodeSystemAction.REBOOT_HOST,
                 ),
+                supports_node_capacity=True,
+                supports_node_font_sources=True,
+                supports_discord_settings=True,
             )
             capacity = config.NodeCapacityProfile(
                 cpu_points_total=12,
@@ -3223,6 +3292,21 @@ class ModWebTests(unittest.TestCase):
                 ),
                 preferences=config.PersistedDiskPreferences(),
             )
+            discord_settings = config.DiscordSettings(
+                activity=config.DiscordActivitySettings(
+                    fallback_text="Watching over Erin",
+                    fields=(config.DiscordActivityField.APP,),
+                )
+            )
+            remote_restart_schedules = AsyncMock(return_value=restart_schedules)
+            remote_restart_state = AsyncMock(return_value=restart_state)
+            remote_system_capabilities = AsyncMock(return_value=system_capabilities)
+            remote_system_logs = AsyncMock()
+            remote_capacity = AsyncMock(return_value=capacity)
+            remote_font_sources = AsyncMock(return_value=font_sources)
+            remote_disk_settings = AsyncMock(return_value=disk_settings)
+            remote_discord_settings = AsyncMock(return_value=discord_settings)
+            remote_apps = AsyncMock(return_value=())
             ui = cast(ModWebUi, cast(object, SimpleNamespace()))
             request = cast(
                 Any,
@@ -3249,34 +3333,36 @@ class ModWebTests(unittest.TestCase):
                     "_remote_node_system_history_async",
                     new=AsyncMock(return_value=history),
                 ),
-                patch.object(service, "_remote_apps_async", new=AsyncMock(return_value=())),
-                patch.object(service, "_user_has_level", return_value=True),
+                patch.object(service, "_remote_apps_async", new=remote_apps),
+                patch.object(service, "_user_has_level", return_value=False),
                 patch.object(
                     service,
                     "_remote_restart_schedules_async",
-                    new=AsyncMock(return_value=restart_schedules),
+                    new=remote_restart_schedules,
                 ),
                 patch.object(
                     service,
                     "_remote_restart_state_async",
-                    new=AsyncMock(return_value=restart_state),
+                    new=remote_restart_state,
                 ),
                 patch.object(
                     service,
                     "_remote_node_system_capabilities_async",
-                    new=AsyncMock(return_value=system_capabilities),
+                    new=remote_system_capabilities,
                 ),
-                patch.object(service, "_node_capacity", new=AsyncMock(return_value=capacity)),
+                patch.object(
+                    service,
+                    "_remote_node_system_log_catalog_async",
+                    new=remote_system_logs,
+                ),
+                patch.object(service, "_node_capacity", new=remote_capacity),
                 patch.object(
                     service,
                     "_node_font_sources",
-                    new=AsyncMock(return_value=font_sources),
+                    new=remote_font_sources,
                 ),
-                patch.object(
-                    service,
-                    "_node_disk_settings",
-                    new=AsyncMock(return_value=disk_settings),
-                ),
+                patch.object(service, "_node_disk_settings", new=remote_disk_settings),
+                patch.object(service, "_discord_settings", new=remote_discord_settings),
                 patch.object(service, "_render_node_system_dashboard", new=render_dashboard),
             ):
                 await service._render_node_system_page(
@@ -3284,11 +3370,32 @@ class ModWebTests(unittest.TestCase):
                     node_name="erin",
                     request=request,
                 )
+                remote_restart_schedules.assert_not_awaited()
+                remote_restart_state.assert_not_awaited()
+                remote_system_capabilities.assert_not_awaited()
+                remote_system_logs.assert_not_awaited()
+                remote_capacity.assert_not_awaited()
+                remote_font_sources.assert_not_awaited()
+                remote_disk_settings.assert_not_awaited()
+                remote_discord_settings.assert_not_awaited()
+                remote_apps.assert_not_awaited()
+
+                load_system_tab = render_dashboard.call_args.kwargs["load_system_tab"]
+                with patch.object(service, "_user_has_level", return_value=True):
+                    system_tab = await load_system_tab("system")
+                    properties_tab = await load_system_tab("properties")
+                    portal_properties_capabilities = NodeSystemCapabilities(
+                        actions=(NodeSystemAction.RESTART_PROCESS,),
+                    )
+                    remote_system_capabilities.return_value = portal_properties_capabilities
+                    portal_properties_tab = await load_system_tab("properties")
+                    remote_system_capabilities.return_value = system_capabilities
+                    discord_tab = await load_system_tab("discord")
 
             authorised_user.assert_awaited_once_with(
                 ui=ui,
                 request=request,
-                required_level=Power_Level.sudo,
+                required_level=Power_Level.visitor,
             )
             self.assertEqual(render_dashboard.call_args.kwargs["node"], node)
             self.assertEqual(render_dashboard.call_args.kwargs["initial_system_summary"], summary)
@@ -3299,30 +3406,26 @@ class ModWebTests(unittest.TestCase):
             )
             self.assertEqual(render_dashboard.call_args.kwargs["initial_app_entries"], ())
             self.assertEqual(
-                render_dashboard.call_args.kwargs["initial_restart_schedules"],
-                restart_schedules,
-            )
-            self.assertEqual(
-                render_dashboard.call_args.kwargs["initial_restart_state"],
-                restart_state,
-            )
-            self.assertEqual(
-                render_dashboard.call_args.kwargs["initial_system_capabilities"],
-                system_capabilities,
-            )
-            self.assertEqual(render_dashboard.call_args.kwargs["initial_node_capacity"], capacity)
-            self.assertEqual(
-                render_dashboard.call_args.kwargs["initial_node_font_sources"],
-                font_sources,
-            )
-            self.assertEqual(
-                render_dashboard.call_args.kwargs["initial_node_disk_settings"],
-                disk_settings,
-            )
-            self.assertEqual(
                 render_dashboard.call_args.kwargs["current_url"],
                 "/mod-web/nodes/erin/system",
             )
+            self.assertEqual(system_tab.restart_schedules, restart_schedules)
+            self.assertEqual(system_tab.restart_state, restart_state)
+            self.assertEqual(system_tab.system_capabilities, system_capabilities)
+            self.assertEqual(properties_tab.node_capacity, capacity)
+            self.assertEqual(properties_tab.node_font_sources, font_sources)
+            self.assertEqual(properties_tab.node_disk_settings, disk_settings)
+            self.assertEqual(properties_tab.system_capabilities, system_capabilities)
+            self.assertEqual(portal_properties_tab.system_capabilities, portal_properties_capabilities)
+            self.assertIsNone(portal_properties_tab.node_capacity)
+            self.assertIsNone(portal_properties_tab.node_font_sources)
+            self.assertEqual(portal_properties_tab.node_disk_settings, disk_settings)
+            self.assertEqual(discord_tab.discord_settings, discord_settings)
+            self.assertEqual(discord_tab.system_capabilities, system_capabilities)
+            self.assertEqual(remote_capacity.await_count, 1)
+            self.assertEqual(remote_font_sources.await_count, 1)
+            self.assertEqual(remote_disk_settings.await_count, 2)
+            remote_discord_settings.assert_awaited_once_with(node_name="erin", user=user)
 
         asyncio.run(exercise())
 
@@ -18425,7 +18528,7 @@ class ModWebTests(unittest.TestCase):
             ],
         )
 
-    def test_render_user_header_exposes_discord_settings_button_for_sudo_users(
+    def test_render_user_header_omits_discord_settings_for_sudo_users(
         self,
     ) -> None:
         class FakeContainer:
@@ -18574,21 +18677,8 @@ class ModWebTests(unittest.TestCase):
             service._render_user_header(ui=cast(ModWebUi, cast(object, ui)), user=user)
 
         self.assertIn("Aliases", [button.text for button in ui.buttons])
-        self.assertIn("Discord", [button.text for button in ui.buttons])
-        self.assertEqual(
-            [control.value for control in ui.inputs],
-            [
-                "Watching over Erin",
-                "3",
-                "2",
-                "50",
-                "",
-                " | ",
-                "",
-                "app, players",
-            ],
-        )
-        self.assertTrue(ui.inputs[1].disabled)
+        self.assertNotIn("Discord", [button.text for button in ui.buttons])
+        self.assertEqual(ui.inputs, [])
 
     def test_render_user_header_keeps_utility_menu_for_unprivileged_users(self) -> None:
         class FakeContainer:
@@ -18693,7 +18783,6 @@ class ModWebTests(unittest.TestCase):
             ),
             patch.object(service, "_user_level_label", return_value="Visitor"),
             patch.object(service, "_user_level_tone", return_value="grey"),
-            patch.object(service, "_user_can_manage_discord_settings", return_value=False),
             patch.object(service, "_user_can_use_fake_chat_preview", return_value=False),
         ):
             service._render_user_header(ui=cast(ModWebUi, cast(object, ui)), user=user)
@@ -18965,7 +19054,6 @@ class ModWebTests(unittest.TestCase):
         user = ModWebUser(discord_id=42, username="sudo", global_name="Finch", avatar_hash=None)
 
         with (
-            patch.object(service, "_user_can_manage_discord_settings", return_value=False),
             patch.object(service, "_user_can_use_fake_chat_preview", return_value=False),
             patch.object(
                 service,

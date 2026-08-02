@@ -12,7 +12,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import TypeVar, cast
 
-from apps._node_api import optional_int, required_bool, required_int, required_string
+from apps._node_api import optional_int, optional_string, required_bool, required_int, required_string
 from maintenance import MAX_RESTART_INTERVAL_MINUTES, MIN_RESTART_INTERVAL_MINUTES
 from restart_state import RestartKind
 from restart_targets import RestartTarget
@@ -126,6 +126,19 @@ class NodeSystemSummary:
     running_app_scopes: tuple[str, ...] = ()
     start_blocked_app_ids: tuple[str, ...] = ()
     captured_at_epoch_seconds: int | None = None
+    deployment_version: str | None = None
+    deployment_revision: str | None = None
+    deployed_at_epoch_seconds: int | None = None
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("deployment_version", self.deployment_version),
+            ("deployment_revision", self.deployment_revision),
+        ):
+            if value is not None and not value.strip():
+                raise ValueError(f"{field_name} must not be blank when provided.")
+        if self.deployed_at_epoch_seconds is not None and self.deployed_at_epoch_seconds < 0:
+            raise ValueError("deployed_at_epoch_seconds must not be negative.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeSystemSummary":
@@ -154,6 +167,9 @@ class NodeSystemSummary:
             running_app_scopes=_parsed_tuple(payload, "running_app_scopes", _non_empty_string),
             start_blocked_app_ids=_parsed_tuple(payload, "start_blocked_app_ids", _non_empty_string),
             captured_at_epoch_seconds=optional_int(payload, "captured_at_epoch_seconds"),
+            deployment_version=optional_string(payload, "deployment_version"),
+            deployment_revision=optional_string(payload, "deployment_revision"),
+            deployed_at_epoch_seconds=optional_int(payload, "deployed_at_epoch_seconds"),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -178,6 +194,9 @@ class NodeSystemSummary:
             "running_app_scopes": list(self.running_app_scopes),
             "start_blocked_app_ids": list(self.start_blocked_app_ids),
             "captured_at_epoch_seconds": self.captured_at_epoch_seconds,
+            "deployment_version": self.deployment_version,
+            "deployment_revision": self.deployment_revision,
+            "deployed_at_epoch_seconds": self.deployed_at_epoch_seconds,
         }
 
 
@@ -350,6 +369,10 @@ class NodeSystemCapabilities:
     actions: tuple[NodeSystemAction, ...]
     supports_app_auto_restart: bool = False
     supports_silent_restart: bool = False
+    supports_node_capacity: bool = False
+    supports_node_font_sources: bool = False
+    supports_node_disk_settings: bool = True
+    supports_discord_settings: bool = False
 
     def __post_init__(self) -> None:
         if not self.actions:
@@ -364,8 +387,22 @@ class NodeSystemCapabilities:
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeSystemCapabilities":
         raw_auto_restart = payload.get("supports_app_auto_restart", False)
         raw_silent_restart = payload.get("supports_silent_restart", False)
-        if not isinstance(raw_auto_restart, bool) or not isinstance(raw_silent_restart, bool):
-            raise ValueError("Node system restart capability is invalid.")
+        raw_node_capacity = payload.get("supports_node_capacity", False)
+        raw_node_font_sources = payload.get("supports_node_font_sources", False)
+        raw_node_disk_settings = payload.get("supports_node_disk_settings", True)
+        raw_discord_settings = payload.get("supports_discord_settings", False)
+        if not all(
+            isinstance(value, bool)
+            for value in (
+                raw_auto_restart,
+                raw_silent_restart,
+                raw_node_capacity,
+                raw_node_font_sources,
+                raw_node_disk_settings,
+                raw_discord_settings,
+            )
+        ):
+            raise ValueError("Node system capability is invalid.")
         try:
             actions = _parsed_tuple(
                 payload,
@@ -374,13 +411,25 @@ class NodeSystemCapabilities:
             )
         except ValueError as xcp:
             raise ValueError("Node system capability action is invalid.") from xcp
-        return cls(actions, raw_auto_restart, raw_silent_restart)
+        return cls(
+            actions=actions,
+            supports_app_auto_restart=cast(bool, raw_auto_restart),
+            supports_silent_restart=cast(bool, raw_silent_restart),
+            supports_node_capacity=cast(bool, raw_node_capacity),
+            supports_node_font_sources=cast(bool, raw_node_font_sources),
+            supports_node_disk_settings=cast(bool, raw_node_disk_settings),
+            supports_discord_settings=cast(bool, raw_discord_settings),
+        )
 
     def to_mapping(self) -> dict[str, object]:
         return {
             "actions": [action.value for action in self.actions],
             "supports_app_auto_restart": self.supports_app_auto_restart,
             "supports_silent_restart": self.supports_silent_restart,
+            "supports_node_capacity": self.supports_node_capacity,
+            "supports_node_font_sources": self.supports_node_font_sources,
+            "supports_node_disk_settings": self.supports_node_disk_settings,
+            "supports_discord_settings": self.supports_discord_settings,
         }
 
 

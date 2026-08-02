@@ -219,6 +219,10 @@ class ModWebThemeTests(unittest.TestCase):
             css,
             r"(?s)\.mod-system-native-tabs \{.*?display: inline-flex;.*?flex-wrap: wrap;",
         )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-hero-shell-visitor \{.*?padding-top: 0\.75rem !important;",
+        )
         self.assertIn(".mod-system-native-tab-active", css)
         self.assertRegex(
             css,

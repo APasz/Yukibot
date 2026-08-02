@@ -110,34 +110,43 @@ class _ModWebMachineLogEntry:
 
 
 class _ModWebNodeSystemTab(Enum):
-    STATS = "stats"
+    OVERVIEW = "overview"
     SYSTEM = "system"
     PROPERTIES = "properties"
+    DISCORD = "discord"
     LOGS = "logs"
 
     @property
     def label(self) -> str:
         match self:
-            case _ModWebNodeSystemTab.STATS:
-                return "Stats"
+            case _ModWebNodeSystemTab.OVERVIEW:
+                return "Overview"
             case _ModWebNodeSystemTab.SYSTEM:
                 return "System"
             case _ModWebNodeSystemTab.PROPERTIES:
                 return "Properties"
+            case _ModWebNodeSystemTab.DISCORD:
+                return "Discord"
             case _ModWebNodeSystemTab.LOGS:
                 return "Logs"
 
     @property
     def icon(self) -> str:
         match self:
-            case _ModWebNodeSystemTab.STATS:
-                return "bar_chart"
+            case _ModWebNodeSystemTab.OVERVIEW:
+                return "dashboard"
             case _ModWebNodeSystemTab.SYSTEM:
-                return "restart_alt"
+                return "autorenew"
             case _ModWebNodeSystemTab.PROPERTIES:
                 return "tune"
+            case _ModWebNodeSystemTab.DISCORD:
+                return "settings"
             case _ModWebNodeSystemTab.LOGS:
                 return "article"
+
+    @property
+    def required_level(self) -> Power_Level:
+        return Power_Level.visitor if self is _ModWebNodeSystemTab.OVERVIEW else Power_Level.sudo
 
 
 class _RestartWeekday(Enum):
@@ -244,6 +253,7 @@ from .types import (
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebNodeStatus,
+    ModWebNodeSystemTabLoadResult,
     ModWebTitleStat,
     _ModWebAppCardBadgeSpec,
     _ModWebAppRuntimeState,
@@ -472,7 +482,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         summaries_by_node: dict[str, ModWebHomeNodeSummary] = {
             summary.node.node_name: summary for summary in home_node_summaries
         }
-        can_view_node_system: bool = self._user_has_level(user, Power_Level.sudo)
+        can_view_node_system: bool = self._user_has_level(user, Power_Level.visitor)
         portal_node = self._portal_node_link()
         portal_system_url = (
             mod_web_node_system_path(portal_node.node_name)
@@ -933,6 +943,18 @@ class ModWebHomeMixin(ModWebServiceSupport):
             )
         return tuple(badges)
 
+    @staticmethod
+    def _node_system_deployment_text(system_summary: NodeSystemSummary) -> str | None:
+        parts: list[str] = []
+        if system_summary.deployment_version is not None:
+            parts.append(system_summary.deployment_version)
+        if system_summary.deployment_revision is not None:
+            parts.append(f"Build {system_summary.deployment_revision[:7]}")
+        if system_summary.deployed_at_epoch_seconds is not None:
+            deployed_at = datetime.fromtimestamp(system_summary.deployed_at_epoch_seconds, ZoneInfo("UTC"))
+            parts.append(f"deployed {deployed_at.strftime('%d %b %Y, %H:%M UTC')}")
+        return " · ".join(parts) or None
+
     @classmethod
     def _node_system_operational_badges(
         cls,
@@ -1034,7 +1056,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
         return tuple(badges) or (_ModWebBadgeSpec(text="Load trend unavailable", tone="grey"),)
 
     @staticmethod
-    def _node_system_warning_badges(system_summary: NodeSystemSummary) -> tuple[_ModWebBadgeSpec, ...]:
+    def _node_system_warning_badges(
+        system_summary: NodeSystemSummary,
+        *,
+        include_operator_details: bool = True,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
         warnings: list[_ModWebBadgeSpec] = []
         for label, percent in (
             ("CPU", system_summary.cpu_percent),
@@ -1050,20 +1076,21 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     tooltip_text=f"{label} usage is above the {_SYSTEM_WARNING_PERCENT}% warning threshold.",
                 )
             )
-        for label, available, capacity in (
-            ("CPU capacity", system_summary.cpu_points_available, system_summary.cpu_points_capacity),
-            ("RAM capacity", system_summary.ram_points_available, system_summary.ram_points_capacity),
-        ):
-            if available is None or capacity is None or capacity <= 0 or available * 4 > capacity:
-                continue
-            warnings.append(
-                _ModWebBadgeSpec(
-                    text=f"{label} {available}/{capacity}",
-                    tone="red" if available == 0 else "warn",
-                    tooltip_text=f"{label} has 25% or less headroom.",
+        if include_operator_details:
+            for label, available, capacity in (
+                ("CPU capacity", system_summary.cpu_points_available, system_summary.cpu_points_capacity),
+                ("RAM capacity", system_summary.ram_points_available, system_summary.ram_points_capacity),
+            ):
+                if available is None or capacity is None or capacity <= 0 or available * 4 > capacity:
+                    continue
+                warnings.append(
+                    _ModWebBadgeSpec(
+                        text=f"{label} {available}/{capacity}",
+                        tone="red" if available == 0 else "warn",
+                        tooltip_text=f"{label} has 25% or less headroom.",
+                    )
                 )
-            )
-        if system_summary.start_blocked_app_ids:
+        if include_operator_details and system_summary.start_blocked_app_ids:
             warnings.append(
                 _ModWebBadgeSpec(
                     text=f"{len(system_summary.start_blocked_app_ids)} app start blocked",
@@ -1371,13 +1398,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
         initial_system_history: NodeSystemHistory,
         initial_node_status: ModWebNodeStatus,
         initial_app_entries: tuple[NodeAppEntry, ...],
-        initial_restart_schedules: NodeRestartScheduleState | None,
-        initial_restart_state: NodeRestartState | None,
         initial_system_capabilities: NodeSystemCapabilities | None,
-        initial_system_logs: NodeSystemLogCatalog | None,
-        initial_node_capacity: config.NodeCapacityProfile | None,
-        initial_node_font_sources: config.NodeFontSourceSettings | None,
-        initial_node_disk_settings: NodeDiskManagementState | None,
+        load_system_tab: Callable[[str], Awaitable[ModWebNodeSystemTabLoadResult]],
         current_url: str,
         simulated_down_node_names: tuple[str, ...],
         subscribe_node_state_updates: Callable[
@@ -1392,31 +1414,39 @@ class ModWebHomeMixin(ModWebServiceSupport):
             initial_system_history,
             initial_system_summary,
         )
+        can_view_operator_signals = self._user_has_level(user, Power_Level.sudo)
+        include_resource_points = can_view_operator_signals and not self._node_is_portal(node)
+        operational_badge_bindings: list[tuple[Element, Label]] = []
+        current_usage_badge_bindings: list[tuple[Element, Label]] = []
+        load_trend_badge_bindings: list[tuple[Element, Label]] = []
+        warning_badge_bindings: list[tuple[Element, Label]] = []
+        system_hero_shell_classes = f"{self._hero_shell_classes()} mod-system-hero-shell"
+        if not can_view_operator_signals:
+            system_hero_shell_classes = f"{system_hero_shell_classes} mod-system-hero-shell-visitor"
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_user_header(ui=ui, user=user)
             with ui.card().classes(self._hero_card_classes()):
-                include_resource_points = not self._node_is_portal(node)
-                operational_badge_specs = self._node_system_operational_badges(
-                    initial_system_summary,
-                    include_resource_points=include_resource_points,
-                )
-                operational_badge_bindings: list[tuple[Element, Label]] = []
-                with ui.element("div").classes("mod-app-node-badge-wrap mod-system-edge-badge-wrap"):
-                    with ui.row().classes("mod-app-node-badge-row mod-system-edge-badge-row"):
-                        for badge in operational_badge_specs:
-                            if badge.icon is None:
-                                raise RuntimeError("System operational badges require icons.")
-                            operational_badge_bindings.append(
-                                ModWebUiHelpersMixin._badge_icon_parts(
-                                    ui=ui,
-                                    text=badge.text,
-                                    tone=badge.tone,
-                                    icon=badge.icon,
-                                    extra_classes="mod-app-corner-badge mod-system-corner-badge",
-                                    tooltip_text=badge.tooltip_text,
+                if can_view_operator_signals:
+                    operational_badge_specs = self._node_system_operational_badges(
+                        initial_system_summary,
+                        include_resource_points=include_resource_points,
+                    )
+                    with ui.element("div").classes("mod-app-node-badge-wrap mod-system-edge-badge-wrap"):
+                        with ui.row().classes("mod-app-node-badge-row mod-system-edge-badge-row"):
+                            for badge in operational_badge_specs:
+                                if badge.icon is None:
+                                    raise RuntimeError("System operational badges require icons.")
+                                operational_badge_bindings.append(
+                                    ModWebUiHelpersMixin._badge_icon_parts(
+                                        ui=ui,
+                                        text=badge.text,
+                                        tone=badge.tone,
+                                        icon=badge.icon,
+                                        extra_classes="mod-app-corner-badge mod-system-corner-badge",
+                                        tooltip_text=badge.tooltip_text,
+                                    )
                                 )
-                            )
-                with ui.column().classes(f"{self._hero_shell_classes()} mod-system-hero-shell"):
+                with ui.column().classes(system_hero_shell_classes):
                     with ui.element("div").classes("mod-system-hero-header"):
                         with ui.row().classes(
                             "mod-system-hero-identity items-center gap-3 flex-nowrap"
@@ -1434,130 +1464,280 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 if node_text_style is not None:
                                     node_title.style(node_text_style)
                                 ui.label("system monitoring").classes(self._hero_support_classes())
-                        with ui.column().classes("mod-system-scope-slot"):
+                        if can_view_operator_signals:
+                            with ui.column().classes("mod-system-scope-slot"):
 
-                            @ui.refreshable
-                            def _render_system_scope_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
-                                with ui.row().classes("mod-system-scope-badges"):
-                                    for badge in badges:
-                                        self._badge_spec(ui=ui, badge=badge)
+                                @ui.refreshable
+                                def _render_system_scope_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
+                                    with ui.row().classes("mod-system-scope-badges"):
+                                        for badge in badges:
+                                            self._badge_spec(ui=ui, badge=badge)
 
-                            current_scope_badges = self._node_system_scope_badges(current_app_entries)
-                            _render_system_scope_badges(current_scope_badges)
+                                current_scope_badges = self._node_system_scope_badges(current_app_entries)
+                                _render_system_scope_badges(current_scope_badges)
 
-                    current_usage_badges = self._node_system_current_usage_badges(current_system_summary)
-                    load_trend_badges = self._node_system_load_trend_badges(current_history)
-                    warning_badges = self._node_system_warning_badges(current_system_summary)
-                    current_usage_badge_bindings: list[tuple[Element, Label]] = []
-                    load_trend_badge_bindings: list[tuple[Element, Label]] = []
-                    warning_badge_bindings: list[tuple[Element, Label]] = []
-
-                    def _render_live_signal_badge(badge: _ModWebBadgeSpec) -> tuple[Element, Label]:
-                        if badge.icon is None:
-                            badge_label = self._badge_spec(ui=ui, badge=badge)
-                            return badge_label, cast(Label, badge_label)
-                        return ModWebUiHelpersMixin._badge_icon_parts(
-                            ui=ui,
-                            text=badge.text,
-                            tone=badge.tone,
-                            icon=badge.icon,
-                            tooltip_text=badge.tooltip_text,
+                    if can_view_operator_signals:
+                        current_usage_badges = self._node_system_current_usage_badges(current_system_summary)
+                        load_trend_badges = self._node_system_load_trend_badges(current_history)
+                        warning_badges = self._node_system_warning_badges(
+                            current_system_summary,
+                            include_operator_details=include_resource_points,
                         )
-
-                    def _apply_live_signal_badges(
-                        *,
-                        previous_badges: tuple[_ModWebBadgeSpec, ...],
-                        next_badges: tuple[_ModWebBadgeSpec, ...],
-                        bindings: list[tuple[Element, Label]],
-                        refresh_badges: Callable[[tuple[_ModWebBadgeSpec, ...]], None],
-                    ) -> tuple[_ModWebBadgeSpec, ...]:
-                        if next_badges == previous_badges:
-                            return previous_badges
-                        previous_structure = tuple(badge.icon is not None for badge in previous_badges)
-                        next_structure = tuple(badge.icon is not None for badge in next_badges)
-                        if next_structure != previous_structure:
-                            refresh_badges(next_badges)
-                            return next_badges
-                        for (badge_element, value_label), previous_badge, next_badge in zip(
-                            bindings,
-                            previous_badges,
-                            next_badges,
-                            strict=True,
-                        ):
-                            if previous_badge.text != next_badge.text:
-                                value_label.set_text(next_badge.text)
-                                self._pulse_live_value(value_label)
-                            if previous_badge.tone != next_badge.tone:
-                                extra_classes = "mod-badge-icon-label" if next_badge.icon is not None else ""
-                                badge_element.classes(
-                                    replace=self._badge_class_name(
-                                        tone=next_badge.tone,
-                                        extra_classes=extra_classes,
-                                    )
-                                )
-                        return next_badges
-
-                    with ui.column().classes("mod-system-operational-signals w-full gap-2"):
-                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                            ui.label("Current usage").classes("mod-subtitle text-xs shrink-0")
-
-                            @ui.refreshable
-                            def _render_current_usage_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
-                                current_usage_badge_bindings.clear()
-                                for badge in badges:
-                                    current_usage_badge_bindings.append(_render_live_signal_badge(badge))
-
-                            _render_current_usage_badges(current_usage_badges)
-                            self._badge_spec(
+                        def _render_live_signal_badge(badge: _ModWebBadgeSpec) -> tuple[Element, Label]:
+                            if badge.icon is None:
+                                badge_label = self._badge_spec(ui=ui, badge=badge)
+                                return badge_label, cast(Label, badge_label)
+                            return ModWebUiHelpersMixin._badge_icon_parts(
                                 ui=ui,
-                                badge=self._node_network_health_badge(initial_node_status),
+                                text=badge.text,
+                                tone=badge.tone,
+                                icon=badge.icon,
+                                tooltip_text=badge.tooltip_text,
                             )
-                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                            ui.label("10-minute load trend").classes("mod-subtitle text-xs shrink-0")
 
-                            @ui.refreshable
-                            def _render_load_trend_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
-                                load_trend_badge_bindings.clear()
-                                for badge in badges:
-                                    load_trend_badge_bindings.append(_render_live_signal_badge(badge))
+                        def _apply_live_signal_badges(
+                            *,
+                            previous_badges: tuple[_ModWebBadgeSpec, ...],
+                            next_badges: tuple[_ModWebBadgeSpec, ...],
+                            bindings: list[tuple[Element, Label]],
+                            refresh_badges: Callable[[tuple[_ModWebBadgeSpec, ...]], None],
+                        ) -> tuple[_ModWebBadgeSpec, ...]:
+                            if next_badges == previous_badges:
+                                return previous_badges
+                            previous_structure = tuple(badge.icon is not None for badge in previous_badges)
+                            next_structure = tuple(badge.icon is not None for badge in next_badges)
+                            if next_structure != previous_structure:
+                                refresh_badges(next_badges)
+                                return next_badges
+                            for (badge_element, value_label), previous_badge, next_badge in zip(
+                                bindings,
+                                previous_badges,
+                                next_badges,
+                                strict=True,
+                            ):
+                                if previous_badge.text != next_badge.text:
+                                    value_label.set_text(next_badge.text)
+                                    self._pulse_live_value(value_label)
+                                if previous_badge.tone != next_badge.tone:
+                                    extra_classes = "mod-badge-icon-label" if next_badge.icon is not None else ""
+                                    badge_element.classes(
+                                        replace=self._badge_class_name(
+                                            tone=next_badge.tone,
+                                            extra_classes=extra_classes,
+                                        )
+                                    )
+                            return next_badges
 
-                            _render_load_trend_badges(load_trend_badges)
-                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                            ui.label("Warnings").classes("mod-subtitle text-xs shrink-0")
+                        with ui.column().classes("mod-system-operational-signals w-full gap-2"):
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                ui.label("Current usage").classes("mod-subtitle text-xs shrink-0")
 
-                            @ui.refreshable
-                            def _render_warning_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
-                                warning_badge_bindings.clear()
-                                for badge in badges:
-                                    warning_badge_bindings.append(_render_live_signal_badge(badge))
+                                @ui.refreshable
+                                def _render_current_usage_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
+                                    current_usage_badge_bindings.clear()
+                                    for badge in badges:
+                                        current_usage_badge_bindings.append(_render_live_signal_badge(badge))
 
-                            _render_warning_badges(warning_badges)
+                                _render_current_usage_badges(current_usage_badges)
+                                self._badge_spec(
+                                    ui=ui,
+                                    badge=self._node_network_health_badge(initial_node_status),
+                                )
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                ui.label("10-minute load trend").classes("mod-subtitle text-xs shrink-0")
+
+                                @ui.refreshable
+                                def _render_load_trend_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
+                                    load_trend_badge_bindings.clear()
+                                    for badge in badges:
+                                        load_trend_badge_bindings.append(_render_live_signal_badge(badge))
+
+                                _render_load_trend_badges(load_trend_badges)
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                ui.label("Warnings").classes("mod-subtitle text-xs shrink-0")
+
+                                @ui.refreshable
+                                def _render_warning_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
+                                    warning_badge_bindings.clear()
+                                    for badge in badges:
+                                        warning_badge_bindings.append(_render_live_signal_badge(badge))
+
+                                _render_warning_badges(warning_badges)
+
+            system_tabs: tuple[_ModWebNodeSystemTab, ...] = tuple(
+                tab
+                for tab in _ModWebNodeSystemTab
+                if self._user_has_level(user, tab.required_level)
+                and (
+                    tab is not _ModWebNodeSystemTab.DISCORD
+                    or (
+                        initial_system_capabilities is not None
+                        and initial_system_capabilities.supports_discord_settings
+                    )
+                )
+            )
+            if not system_tabs or system_tabs[0] is not _ModWebNodeSystemTab.OVERVIEW:
+                raise RuntimeError("Node system pages must always provide the Visitor Overview tab.")
+            selected_system_tab = _ModWebNodeSystemTab.OVERVIEW
+            loaded_system_tabs: set[_ModWebNodeSystemTab] = {_ModWebNodeSystemTab.OVERVIEW}
+            loading_system_tabs: set[_ModWebNodeSystemTab] = set()
+            system_tab_buttons: dict[_ModWebNodeSystemTab, Element] = {}
+            system_tab_panels: dict[_ModWebNodeSystemTab, Element] = {}
+            apply_system_overview_stats: Callable[[tuple[ModWebTitleStat, ...]], None]
+            apply_system_detail_stats: Callable[[tuple[ModWebTitleStat, ...]], None] | None = None
+            chart: Html
+
+            def _render_overview(panel: Element) -> None:
+                nonlocal apply_system_overview_stats, chart
+                panel.clear()
+                with panel:
+                    with ui.column().classes("w-full gap-6"):
+                        apply_system_overview_stats = self._render_live_title_stats(
+                            ui=ui,
+                            initial_stats=self._build_node_system_overview_stats(initial_system_summary),
+                        )
+                        deployment_text = self._node_system_deployment_text(initial_system_summary)
+                        if deployment_text is not None:
+                            with ui.card().classes("mod-card w-full"):
+                                with ui.column().classes("gap-1 p-4"):
+                                    ui.label("Current deployment").classes("text-lg font-black mod-title-small")
+                                    ui.label(deployment_text).classes("mod-subtitle text-sm")
+                        with ui.card().classes("mod-card w-full"):
+                            with ui.column().classes("w-full gap-3 p-4"):
+                                with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
+                                    with ui.column().classes("gap-0"):
+                                        ui.label("Utilisation history").classes("text-lg font-black mod-title-small")
+                                        ui.label("One-hour rolling window · streamed live").classes(
+                                            "mod-subtitle text-xs"
+                                        )
+                                    self._badge(
+                                        ui=ui,
+                                        text=f"{initial_system_history.sample_interval_seconds}s samples",
+                                        tone="grey",
+                                    )
+                                chart = ui.html(self._node_system_history_svg(current_history, animate=True))
+                                chart.classes("mod-system-chart-shell w-full")
+
+            def _render_privileged_tab(
+                *,
+                tab: _ModWebNodeSystemTab,
+                panel: Element,
+                loaded: ModWebNodeSystemTabLoadResult,
+            ) -> None:
+                nonlocal apply_system_detail_stats
+                panel.clear()
+                with panel:
+                    match tab:
+                        case _ModWebNodeSystemTab.SYSTEM:
+                            with ui.card().classes("mod-card w-full"):
+                                with ui.column().classes("w-full gap-2 p-4"):
+                                    ui.label("System detail").classes("text-lg font-black mod-title-small")
+                                    ui.label("Per-core, memory, and disk detail for node operators.").classes(
+                                        "mod-subtitle text-xs"
+                                    )
+                                    apply_system_detail_stats = self._render_live_title_stats(
+                                        ui=ui,
+                                        initial_stats=self._build_node_system_stats(current_system_summary),
+                                    )
+                            self._render_node_system_actions(
+                                ui=ui,
+                                node=node,
+                                user=user,
+                                initial_restart_schedules=loaded.restart_schedules,
+                                initial_restart_state=loaded.restart_state,
+                                initial_system_capabilities=loaded.system_capabilities,
+                            )
+                        case _ModWebNodeSystemTab.PROPERTIES:
+                            self._render_node_system_properties(
+                                ui=ui,
+                                node=node,
+                                user=user,
+                                can_manage_node_configuration=self._user_has_level(user, Power_Level.root),
+                                initial_capacity=loaded.node_capacity,
+                                initial_font_sources=loaded.node_font_sources,
+                                initial_disk_settings=loaded.node_disk_settings,
+                                initial_system_capabilities=loaded.system_capabilities,
+                                current_url=current_url,
+                                simulated_down_node_names=simulated_down_node_names,
+                            )
+                        case _ModWebNodeSystemTab.DISCORD:
+                            self._render_node_system_discord_settings(
+                                ui=ui,
+                                node=node,
+                                user=user,
+                                initial_settings=loaded.discord_settings,
+                                initial_system_capabilities=loaded.system_capabilities,
+                            )
+                        case _ModWebNodeSystemTab.LOGS:
+                            self._render_node_system_logs(
+                                ui=ui,
+                                node=node,
+                                user=user,
+                                initial_catalog=loaded.system_logs,
+                            )
+                        case _:
+                            raise ValueError(f"Tab {tab.value!r} does not have privileged content.")
+
+            def _apply_system_tab_selection(tab: _ModWebNodeSystemTab) -> None:
+                nonlocal selected_system_tab
+                selected_system_tab = tab
+                for candidate in system_tabs:
+                    is_selected = candidate is selected_system_tab
+                    system_tab_buttons[candidate].classes(
+                        replace=(
+                            "mod-system-native-tab mod-system-native-tab-active"
+                            if is_selected
+                            else "mod-system-native-tab"
+                        )
+                    )
+                    system_tab_buttons[candidate].props(f"aria-selected={'true' if is_selected else 'false'}")
+                    system_tab_panels[candidate].set_visibility(is_selected)
+
+            async def _select_system_tab(tab: _ModWebNodeSystemTab) -> None:
+                _apply_system_tab_selection(tab)
+                if tab in loaded_system_tabs or tab in loading_system_tabs:
+                    return
+                target_panel = system_tab_panels[tab]
+                loading_system_tabs.add(tab)
+                target_panel.clear()
+                with target_panel:
+                    ui.label("Loading tab…").classes("mod-subtitle text-sm mod-tab-loading").props(
+                        "role=status aria-live=polite"
+                    )
+                try:
+                    loaded = await load_system_tab(tab.value)
+                    if not self._ui_client_is_alive(ui=ui):
+                        return
+                    _render_privileged_tab(tab=tab, panel=target_panel, loaded=loaded)
+                    loaded_system_tabs.add(tab)
+                except Exception as xcp:
+                    log.warning("Node system tab load failed: node=%s tab=%s error=%s", node.node_name, tab.value, xcp)
+                    if not self._ui_client_is_alive(ui=ui):
+                        return
+                    target_panel.clear()
+                    with target_panel:
+                        self._render_flat_tab_empty_state(
+                            ui=ui,
+                            title="Tab unavailable",
+                            description=f"Could not load this tab: {xcp}",
+                        )
+                finally:
+                    loading_system_tabs.discard(tab)
+
+            def _system_tab_click_handler(
+                target_tab: _ModWebNodeSystemTab,
+            ) -> Callable[[object | None], Awaitable[None]]:
+                async def _handle(_: object | None = None) -> None:
+                    await _select_system_tab(target_tab)
+
+                return _handle
 
             with ui.column().classes("mod-section-layout w-full"):
                 with ui.element("div").classes("mod-section-tabs-shell"):
-                    selected_system_tab = _ModWebNodeSystemTab.STATS
-                    system_tab_buttons: dict[_ModWebNodeSystemTab, Element] = {}
-                    system_tab_panels: dict[_ModWebNodeSystemTab, Element] = {}
-
-                    def _select_system_tab(tab: _ModWebNodeSystemTab) -> None:
-                        nonlocal selected_system_tab
-                        selected_system_tab = tab
-                        for candidate in _ModWebNodeSystemTab:
-                            is_selected = candidate is selected_system_tab
-                            system_tab_buttons[candidate].classes(
-                                replace=(
-                                    "mod-system-native-tab mod-system-native-tab-active"
-                                    if is_selected
-                                    else "mod-system-native-tab"
-                                )
-                            )
-                            system_tab_buttons[candidate].props(f"aria-selected={'true' if is_selected else 'false'}")
-                            system_tab_panels[candidate].set_visibility(is_selected)
-
                     with ui.element("div").classes("mod-system-native-tabs").props(
                         "role=tablist aria-label=Node system sections"
                     ):
-                        for tab in _ModWebNodeSystemTab:
+                        for tab in system_tabs:
                             tab_button = (
                                 ui.element("button")
                                 .classes(
@@ -1572,90 +1752,15 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             with tab_button:
                                 ui.icon(tab.icon).classes("mod-system-native-tab-icon")
                                 ui.label(tab.label).classes("mod-system-native-tab-label")
-                            tab_button.on("click", lambda _, target_tab=tab: _select_system_tab(target_tab))
+                            tab_button.on("click", _system_tab_click_handler(tab))
                             system_tab_buttons[tab] = tab_button
 
                 with ui.element("div").classes("mod-system-native-tab-content w-full"):
-                    stats_panel = ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
-                    system_tab_panels[_ModWebNodeSystemTab.STATS] = stats_panel
-                    with stats_panel:
-                        with ui.column().classes("w-full gap-6"):
-                            apply_system_stats: Callable[[tuple[ModWebTitleStat, ...]], None] = (
-                                self._render_live_title_stats(
-                                    ui=ui,
-                                    initial_stats=self._build_node_system_stats(initial_system_summary),
-                                )
-                            )
-                            with ui.card().classes("mod-card w-full"):
-                                with ui.column().classes("w-full gap-3 p-4"):
-                                    with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
-                                        with ui.column().classes("gap-0"):
-                                            ui.label("Utilisation history").classes(
-                                                "text-lg font-black mod-title-small"
-                                            )
-                                            ui.label("One-hour rolling window · streamed live").classes(
-                                                "mod-subtitle text-xs"
-                                            )
-                                        self._badge(
-                                            ui=ui,
-                                            text=f"{initial_system_history.sample_interval_seconds}s samples",
-                                            tone="grey",
-                                        )
-                                    chart: Html = ui.html(self._node_system_history_svg(current_history, animate=True))
-                                    chart.classes("mod-system-chart-shell w-full")
-                            with ui.card().classes("mod-card w-full"):
-                                with ui.column().classes("w-full gap-3 p-4"):
-                                    ui.label("Network").classes("text-lg font-black mod-title-small")
-                                    ui.label("Remote node API connectivity from this dashboard.").classes(
-                                        "mod-subtitle text-xs"
-                                    )
-                                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                                        self._badge_spec(
-                                            ui=ui,
-                                            badge=self._node_network_health_badge(initial_node_status),
-                                        )
-
-                    system_panel = (
-                        ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
-                    )
-                    system_tab_panels[_ModWebNodeSystemTab.SYSTEM] = system_panel
-                    with system_panel:
-                        self._render_node_system_actions(
-                            ui=ui,
-                            node=node,
-                            user=user,
-                            initial_restart_schedules=initial_restart_schedules,
-                            initial_restart_state=initial_restart_state,
-                            initial_system_capabilities=initial_system_capabilities,
+                    for tab in system_tabs:
+                        system_tab_panels[tab] = (
+                            ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
                         )
-
-                    properties_panel = (
-                        ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
-                    )
-                    system_tab_panels[_ModWebNodeSystemTab.PROPERTIES] = properties_panel
-                    with properties_panel:
-                        self._render_node_system_properties(
-                            ui=ui,
-                            node=node,
-                            user=user,
-                            can_manage_node_configuration=self._user_has_level(user, Power_Level.root),
-                            initial_capacity=initial_node_capacity,
-                            initial_font_sources=initial_node_font_sources,
-                            initial_disk_settings=initial_node_disk_settings,
-                            current_url=current_url,
-                            simulated_down_node_names=simulated_down_node_names,
-                        )
-
-                    logs_panel = ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
-                    system_tab_panels[_ModWebNodeSystemTab.LOGS] = logs_panel
-                    with logs_panel:
-                        self._render_node_system_logs(
-                            ui=ui,
-                            node=node,
-                            user=user,
-                            initial_catalog=initial_system_logs,
-                        )
-
+                    _render_overview(system_tab_panels[_ModWebNodeSystemTab.OVERVIEW])
                     for tab, panel in system_tab_panels.items():
                         panel.set_visibility(tab is selected_system_tab)
 
@@ -1663,12 +1768,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
             loop: AbstractEventLoop = asyncio.get_running_loop()
 
             def _apply_update(event: NodeStateStreamEvent) -> None:
-                nonlocal current_app_entries, current_history, current_scope_badges
-                nonlocal current_system_summary, operational_badge_specs
-                nonlocal current_usage_badges, load_trend_badges, warning_badges
+                nonlocal current_app_entries, current_history, current_system_summary
+                if can_view_operator_signals:
+                    nonlocal current_scope_badges, operational_badge_specs
+                    nonlocal current_usage_badges, load_trend_badges, warning_badges
                 if page_closed:
                     return
-                if event.app_entries is not None:
+                if can_view_operator_signals and event.app_entries is not None:
                     current_app_entries = event.app_entries
                     next_scope_badges = self._node_system_scope_badges(current_app_entries)
                     if next_scope_badges != current_scope_badges:
@@ -1677,49 +1783,56 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 if event.system_summary is None:
                     return
                 current_system_summary = event.system_summary
-                next_operational_badges = self._node_system_operational_badges(
-                    current_system_summary,
-                    include_resource_points=include_resource_points,
-                )
-                for index, (previous_badge, next_badge) in enumerate(
-                    zip(operational_badge_specs, next_operational_badges, strict=True)
-                ):
-                    badge_element, value_label = operational_badge_bindings[index]
-                    if previous_badge.text != next_badge.text:
-                        value_label.set_text(next_badge.text)
-                    if previous_badge.tone != next_badge.tone:
-                        badge_element.classes(
-                            replace=self._badge_class_name(
-                                tone=next_badge.tone,
-                                extra_classes=(
-                                    "mod-badge-icon-label mod-app-corner-badge mod-system-corner-badge"
-                                ),
+                if can_view_operator_signals:
+                    next_operational_badges = self._node_system_operational_badges(
+                        current_system_summary,
+                        include_resource_points=include_resource_points,
+                    )
+                    for index, (previous_badge, next_badge) in enumerate(
+                        zip(operational_badge_specs, next_operational_badges, strict=True)
+                    ):
+                        badge_element, value_label = operational_badge_bindings[index]
+                        if previous_badge.text != next_badge.text:
+                            value_label.set_text(next_badge.text)
+                        if previous_badge.tone != next_badge.tone:
+                            badge_element.classes(
+                                replace=self._badge_class_name(
+                                    tone=next_badge.tone,
+                                    extra_classes=(
+                                        "mod-badge-icon-label mod-app-corner-badge mod-system-corner-badge"
+                                    ),
+                                )
                             )
-                        )
-                operational_badge_specs = next_operational_badges
-                apply_system_stats(self._build_node_system_stats(current_system_summary))
+                    operational_badge_specs = next_operational_badges
+                apply_system_overview_stats(self._build_node_system_overview_stats(current_system_summary))
+                if apply_system_detail_stats is not None:
+                    apply_system_detail_stats(self._build_node_system_stats(current_system_summary))
                 next_history = self._append_node_system_history(current_history, current_system_summary)
                 if next_history != current_history:
                     current_history = next_history
                     chart.set_content(self._node_system_history_svg(current_history))
-                current_usage_badges = _apply_live_signal_badges(
-                    previous_badges=current_usage_badges,
-                    next_badges=self._node_system_current_usage_badges(current_system_summary),
-                    bindings=current_usage_badge_bindings,
-                    refresh_badges=_render_current_usage_badges.refresh,
-                )
-                load_trend_badges = _apply_live_signal_badges(
-                    previous_badges=load_trend_badges,
-                    next_badges=self._node_system_load_trend_badges(current_history),
-                    bindings=load_trend_badge_bindings,
-                    refresh_badges=_render_load_trend_badges.refresh,
-                )
-                warning_badges = _apply_live_signal_badges(
-                    previous_badges=warning_badges,
-                    next_badges=self._node_system_warning_badges(current_system_summary),
-                    bindings=warning_badge_bindings,
-                    refresh_badges=_render_warning_badges.refresh,
-                )
+                if can_view_operator_signals:
+                    current_usage_badges = _apply_live_signal_badges(
+                        previous_badges=current_usage_badges,
+                        next_badges=self._node_system_current_usage_badges(current_system_summary),
+                        bindings=current_usage_badge_bindings,
+                        refresh_badges=_render_current_usage_badges.refresh,
+                    )
+                    load_trend_badges = _apply_live_signal_badges(
+                        previous_badges=load_trend_badges,
+                        next_badges=self._node_system_load_trend_badges(current_history),
+                        bindings=load_trend_badge_bindings,
+                        refresh_badges=_render_load_trend_badges.refresh,
+                    )
+                    warning_badges = _apply_live_signal_badges(
+                        previous_badges=warning_badges,
+                        next_badges=self._node_system_warning_badges(
+                            current_system_summary,
+                            include_operator_details=include_resource_points,
+                        ),
+                        bindings=warning_badge_bindings,
+                        refresh_badges=_render_warning_badges.refresh,
+                    )
 
             def _handle_update(event: NodeStateStreamEvent) -> None:
                 loop.call_soon_threadsafe(lambda: _apply_update(event))
@@ -2077,6 +2190,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         initial_capacity: config.NodeCapacityProfile | None,
         initial_font_sources: config.NodeFontSourceSettings | None,
         initial_disk_settings: NodeDiskManagementState | None,
+        initial_system_capabilities: NodeSystemCapabilities | None,
         current_url: str,
         simulated_down_node_names: tuple[str, ...],
     ) -> None:
@@ -2085,6 +2199,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         disk_label_inputs: dict[str, Input] = {}
         primary_disk_select: Select | None = None
         secondary_disk_select: Select | None = None
+        save_button: Button | None = None
 
         async def _handle_toggle_simulated_down(_: object | None = None) -> None:
             target_url = self._toggle_simulated_down_node_url(
@@ -2100,11 +2215,31 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     ui.label("Properties").classes("text-lg font-black mod-title-small")
                     ui.label(f"Node-specific settings for {node.label}.").classes("mod-subtitle text-xs")
 
-                if initial_font_sources is None:
+                if initial_system_capabilities is None:
                     ui.label("Properties are unavailable. Reload the page to try again.").classes(
                         "mod-subtitle text-sm"
                     )
                 else:
+                    can_edit_title_fonts = (
+                        initial_system_capabilities.supports_node_font_sources
+                        and initial_font_sources is not None
+                    )
+                    can_edit_capacity = (
+                        can_manage_node_configuration and initial_system_capabilities.supports_node_capacity
+                    )
+                    can_edit_disks = (
+                        can_manage_node_configuration and initial_system_capabilities.supports_node_disk_settings
+                    )
+                    can_save_properties = (
+                        can_edit_title_fonts
+                        or (can_edit_capacity and initial_capacity is not None)
+                        or (
+                            can_edit_disks
+                            and initial_disk_settings is not None
+                            and bool(initial_disk_settings.disks)
+                        )
+                    )
+                    font_sources = initial_font_sources or config.NodeFontSourceSettings()
                     capacity_values: dict[_ModWebNodeSettingsFieldKey, int] | None = (
                         None
                         if initial_capacity is None
@@ -2117,7 +2252,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     )
                     with ui.column().classes("mod-app-details-section"):
                         capacity_section = ui.column().classes("mod-app-details-subsection")
-                        capacity_section.set_visibility(can_manage_node_configuration)
+                        capacity_section.set_visibility(can_edit_capacity)
                         with capacity_section:
                             ui.label("Capacity").classes("mod-stat-label")
                             ui.label("Adjust total capacity and reserved headroom for this node.").classes(
@@ -2138,7 +2273,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                                 .classes("mod-app-details-field mod-app-details-point-field")
                                             )
 
-                        with ui.column().classes("mod-app-details-subsection"):
+                        font_section = ui.column().classes("mod-app-details-subsection")
+                        font_section.set_visibility(can_edit_title_fonts)
+                        with font_section:
                             ui.label("Title Fonts").classes("mod-stat-label")
                             ui.label(
                                 "Add Google Fonts specimen or CSS URLs for app title fonts."
@@ -2150,7 +2287,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                         google_font_urls_input = (
                                             ui.textarea(
                                                 label="Google Font URLs",
-                                                value="\n".join(initial_font_sources.google_font_urls),
+                                                value="\n".join(font_sources.google_font_urls),
                                             )
                                             .props("filled square autogrow hide-bottom-space color=accent")
                                             .classes("mod-app-details-field mod-app-details-notes")
@@ -2164,7 +2301,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             )
 
                         disk_section = ui.column().classes("mod-app-details-subsection")
-                        disk_section.set_visibility(can_manage_node_configuration)
+                        disk_section.set_visibility(can_edit_disks)
                         with disk_section:
                             ui.label("Disks").classes("mod-stat-label")
                             ui.label(
@@ -2269,6 +2406,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                                 .classes("mod-app-details-field mod-system-disk-label-field")
                                             )
 
+                    if not can_save_properties:
+                        ui.label("No configurable properties are currently exposed by this node.").classes(
+                            "mod-subtitle text-sm"
+                        )
+
                     async def _save_properties(_: object | None = None) -> None:
                         try:
                             def _capacity_value(key: _ModWebNodeSettingsFieldKey) -> int:
@@ -2285,14 +2427,16 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                     cpu_points_reserved=_capacity_value(_ModWebNodeSettingsFieldKey.CPU_RESERVED),
                                     ram_points_reserved=_capacity_value(_ModWebNodeSettingsFieldKey.RAM_RESERVED),
                                 )
-                            font_sources = config.NodeFontSourceSettings(
-                                google_font_urls=config.normalise_google_font_source_urls(
-                                    _value_as_text(google_font_urls_input)
+                            updated_font_sources: config.NodeFontSourceSettings | None = None
+                            if can_edit_title_fonts:
+                                updated_font_sources = config.NodeFontSourceSettings(
+                                    google_font_urls=config.normalise_google_font_source_urls(
+                                        _value_as_text(google_font_urls_input)
+                                    )
                                 )
-                            )
                             disk_preferences: config.PersistedDiskPreferences | None = None
                             if (
-                                can_manage_node_configuration
+                                can_edit_disks
                                 and initial_disk_settings is not None
                                 and initial_disk_settings.disks
                             ):
@@ -2315,14 +2459,18 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         except (TypeError, ValueError) as xcp:
                             ui.notify(str(xcp), type="negative")
                             return
+                        if save_button is None:
+                            raise RuntimeError("Node properties save control is unavailable.")
                         save_button.disable()
                         try:
-                            font_source_result = await self._update_node_font_sources(
-                                node_name=node.node_name,
-                                user=user,
-                                settings=font_sources,
-                            )
-                            result_messages = [font_source_result.message]
+                            result_messages: list[str] = []
+                            if updated_font_sources is not None:
+                                font_source_result = await self._update_node_font_sources(
+                                    node_name=node.node_name,
+                                    user=user,
+                                    settings=updated_font_sources,
+                                )
+                                result_messages.append(font_source_result.message)
                             if capacity is not None:
                                 capacity_result = await self._update_node_capacity(
                                     node_name=node.node_name,
@@ -2337,6 +2485,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                     preferences=disk_preferences,
                                 )
                                 result_messages.append(disk_result.message)
+                            if not result_messages:
+                                raise RuntimeError("No node property changes are available.")
                         except Exception as xcp:
                             log.warning("Node properties update failed: node=%s error=%s", node.node_name, xcp)
                             ui.notify(f"Node properties update failed: {xcp}", type="negative")
@@ -2345,8 +2495,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         ui.notify(" ".join(result_messages), type="positive")
                         self._guarded_reload(ui=ui)
 
-                    with ui.row().classes("w-full justify-end"):
-                        save_button = ui.button("Save", on_click=_save_properties).classes("mod-list-button")
+                    if can_save_properties:
+                        with ui.row().classes("w-full justify-end"):
+                            save_button = ui.button("Save", on_click=_save_properties).classes("mod-list-button")
 
                 if config.INDEV and can_manage_node_configuration:
                     with ui.column().classes("mod-app-details-section"):
@@ -2360,6 +2511,173 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         ui.button(simulate_button_text, on_click=_handle_toggle_simulated_down).classes(
                             "mod-list-button secondary"
                         )
+
+    def _render_node_system_discord_settings(
+        self,
+        *,
+        ui: ModWebUi,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        initial_settings: config.DiscordSettings | None,
+        initial_system_capabilities: NodeSystemCapabilities | None,
+    ) -> None:
+        with ui.card().classes("mod-card w-full"):
+            with ui.column().classes("w-full gap-4 p-4"):
+                with ui.column().classes("gap-0"):
+                    ui.label("Discord Activity").classes("text-lg font-black mod-title-small")
+                    ui.label(
+                        "Configure how this node presents its Discord activity. Settings are retained when activity is offline."
+                    ).classes("mod-subtitle text-xs")
+
+                if initial_system_capabilities is None:
+                    ui.label("Discord settings are unavailable. Reload the page to try again.").classes(
+                        "mod-subtitle text-sm"
+                    )
+                    return
+                if not initial_system_capabilities.supports_discord_settings:
+                    ui.label("This node does not expose Discord activity settings.").classes("mod-subtitle text-sm")
+                    return
+                if initial_settings is None:
+                    ui.label("Discord settings could not be loaded. Reload the page to try again.").classes(
+                        "mod-subtitle text-sm"
+                    )
+                    return
+
+                activity_settings = initial_settings.activity
+                can_edit_refresh_rate = self._user_has_level(user, Power_Level.root)
+                available_fields_text = config.format_discord_activity_fields(config.DiscordActivityField)
+
+                with ui.column().classes("mod-app-details-section"):
+                    ui.label("Activity Status").classes("mod-stat-label")
+                    ui.label(
+                        f"Available segments: {available_fields_text}. Use a comma-separated order.",
+                    ).classes("mod-subtitle text-xs")
+                    fallback_text_input = (
+                        ui.input("Fallback text", value=activity_settings.fallback_text)
+                        .props("filled square dense clearable hide-bottom-space color=accent maxlength=80")
+                        .classes("mod-app-details-field")
+                    )
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        refresh_interval_input = (
+                            ui.input(
+                                "Tick duration",
+                                value=str(activity_settings.refresh_interval_seconds),
+                            )
+                            .props(
+                                "filled square dense hide-bottom-space color=accent "
+                                "type=number inputmode=numeric step=1 min=1 max=60"
+                            )
+                            .classes("mod-app-details-field mod-app-details-point-field")
+                        )
+                        units_per_app_input = (
+                            ui.input(
+                                "Ticks per app",
+                                value=str(activity_settings.units_per_app),
+                            )
+                            .props(
+                                "filled square dense hide-bottom-space color=accent "
+                                "type=number inputmode=numeric step=1 min=1 max=20"
+                            )
+                            .classes("mod-app-details-field mod-app-details-point-field")
+                        )
+                        alt_text_percentage_input = (
+                            ui.input(
+                                "Alt-text percentage",
+                                value=str(activity_settings.alt_text_percentage),
+                            )
+                            .props(
+                                "filled square dense hide-bottom-space color=accent "
+                                "type=number inputmode=numeric step=1 min=0 max=100"
+                            )
+                            .classes("mod-app-details-field mod-app-details-point-field")
+                        )
+                    if not can_edit_refresh_rate:
+                        refresh_interval_input.disable()
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        prefix_input = (
+                            ui.input("Prefix", value=activity_settings.prefix)
+                            .props("filled square dense clearable hide-bottom-space color=accent maxlength=40")
+                            .classes("mod-app-details-field")
+                        )
+                        separator_input = (
+                            ui.input("Separator", value=activity_settings.separator)
+                            .props("filled square dense clearable hide-bottom-space color=accent maxlength=16")
+                            .classes("mod-app-details-field")
+                        )
+                    suffix_input = (
+                        ui.input("Suffix", value=activity_settings.suffix)
+                        .props("filled square dense clearable hide-bottom-space color=accent maxlength=40")
+                        .classes("mod-app-details-field")
+                    )
+                    field_order_input = (
+                        ui.input(
+                            "Segment order",
+                            value=config.format_discord_activity_fields(activity_settings.fields),
+                        )
+                        .props("filled square dense hide-bottom-space color=accent")
+                        .classes("mod-app-details-field")
+                    )
+
+                def _parse_required_int_setting(*, raw_value: str, field_label: str) -> int:
+                    value = raw_value.strip()
+                    if not value:
+                        raise ValueError(f"{field_label} must not be empty.")
+                    try:
+                        return int(value)
+                    except ValueError as xcp:
+                        raise ValueError(f"{field_label} must be a whole number.") from xcp
+
+                async def _save_discord_settings(_: object | None = None) -> None:
+                    try:
+                        refresh_interval_seconds = (
+                            activity_settings.refresh_interval_seconds
+                            if not can_edit_refresh_rate
+                            else _parse_required_int_setting(
+                                raw_value=_value_as_text(refresh_interval_input),
+                                field_label="Tick duration",
+                            )
+                        )
+                        settings = config.DiscordSettings(
+                            activity=config.DiscordActivitySettings(
+                                fallback_text=_value_as_text(fallback_text_input).strip(),
+                                prefix=_value_as_text(prefix_input),
+                                separator=_value_as_text(separator_input),
+                                suffix=_value_as_text(suffix_input),
+                                refresh_interval_seconds=refresh_interval_seconds,
+                                units_per_app=_parse_required_int_setting(
+                                    raw_value=_value_as_text(units_per_app_input),
+                                    field_label="Ticks per app",
+                                ),
+                                alt_text_percentage=_parse_required_int_setting(
+                                    raw_value=_value_as_text(alt_text_percentage_input),
+                                    field_label="Alt-text percentage",
+                                ),
+                                fields=config.parse_discord_activity_fields(
+                                    _value_as_text(field_order_input),
+                                    source="Discord activity field order",
+                                ),
+                            )
+                        )
+                    except (TypeError, ValueError) as xcp:
+                        ui.notify(str(xcp), type="negative")
+                        return
+                    save_button.disable()
+                    try:
+                        result = await self._update_discord_settings(
+                            node_name=node.node_name,
+                            user=user,
+                            settings=settings,
+                        )
+                    except Exception as xcp:
+                        log.warning("Discord settings update failed: node=%s error=%s", node.node_name, xcp)
+                        ui.notify(f"Discord settings update failed: {xcp}", type="negative")
+                        save_button.enable()
+                        return
+                    ui.notify(result.message, type="positive")
+                    self._guarded_reload(ui=ui)
+
+                with ui.row().classes("w-full justify-end"):
+                    save_button = ui.button("Save", on_click=_save_discord_settings).classes("mod-list-button")
 
     def _render_node_system_actions(
         self,
