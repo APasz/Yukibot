@@ -3,21 +3,41 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from fastapi import Request
 
+from apps._app import App
+from node_api_route_contracts import MappingResponse, NodeAuthenticatedRouteService
 from node_api_settings import NodeSettingMutationResult, NodeSettingWriteRequest
 from node_auth import NodeAccessGrant, NodeApiScope
 
-if TYPE_CHECKING:
-    from node_api import NodeApiService
+
+class NodeSettingsRouteService(NodeAuthenticatedRouteService, Protocol):
+    """Settings operations required by the settings route registrar."""
+
+    def _resolve_app(self, app_name: str) -> App: ...
+
+    def build_setting_list(self, *, app: App, actor_user_id: int) -> MappingResponse: ...
+
+    async def update_setting(
+        self,
+        *,
+        app: App,
+        setting_key: str,
+        value: str,
+        actor_user_id: int,
+    ) -> NodeSettingMutationResult: ...
+
+    async def save_settings(self, *, app: App, actor_user_id: int) -> MappingResponse: ...
+
+    async def reload_settings(self, *, app: App, actor_user_id: int) -> MappingResponse: ...
 
 
 def register_settings_routes(
     nicegui_app: Any,
     *,
-    service: NodeApiService,
+    service: NodeSettingsRouteService,
     api_prefix: str,
     traffic_log: logging.Logger,
 ) -> None:
@@ -112,4 +132,3 @@ def register_settings_routes(
         )
         app = service._resolve_app(app_name)
         return (await service.reload_settings(app=app, actor_user_id=actor_user_id)).to_mapping()
-

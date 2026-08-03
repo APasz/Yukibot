@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import tempfile
-from collections.abc import Awaitable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -13,11 +13,12 @@ from pathlib import Path
 from typing import Final, Protocol, TypeAlias, TypeVar
 from urllib.parse import quote
 
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 from pydantic.config import ConfigDict
 
+from _async_utils import run_blocking
 from _file import File_Utils
 from _mod_ops import RunningAppModMutationError, require_app_stopped_for_mod_mutation
 from _utils import Utilities
@@ -42,6 +43,7 @@ from apps.factorio import (
     parse_factorio_mod_portal_url,
     resolve_factorio_mod_portal_candidates,
 )
+from node_api_upload import persist_upload_to_temp, validated_upload_filename
 
 log: Logger = logging.getLogger(__name__)
 _FACTORIO_SCOPE: Final[str] = "factorio"
@@ -529,6 +531,166 @@ def build_factorio_mod_settings_download_response(*, app: App) -> FileResponse:
         filename=pointer.name,
         media_type="application/octet-stream",
     )
+
+
+class FactorioNodeApiService:
+    """Owns Factorio-specific node API generation and mod-settings operations."""
+
+    def __init__(
+        self,
+        *,
+        node_name: Callable[[], str],
+        invalidate_app_state: Callable[[str], None],
+        http_exception: Callable[[int, str], Exception],
+        traffic_log: Logger,
+    ) -> None:
+        self._node_name = node_name
+        self._invalidate_app_state = invalidate_app_state
+        self._http_exception = http_exception
+        self._traffic_log = traffic_log
+
+    def generation_state(self, *, app: App) -> NodeFactorioGenerationState:
+        factorio_app = self._require_factorio_generation_app(app)
+        return build_factorio_generation_state(app=factorio_app, node_name=self._node_name())
+
+    def update_generation(
+        self,
+        *,
+        app: App,
+        update: NodeFactorioGenerationUpdateRequest,
+    ) -> NodeFactorioGenerationState:
+        factorio_app = self._require_factorio_generation_app(app)
+        try:
+            write_factorio_generation_settings(
+                app=factorio_app,
+                map_gen_settings=update.map_gen_settings,
+                map_settings=update.map_settings,
+            )
+        except (OSError, ValueError) as xcp:
+            raise self._http_exception(400, str(xcp)) from xcp
+        self._traffic_log.info(
+            "Node API updated Factorio generation settings: node=%s app=%s",
+            self._node_name(),
+            app.name,
+        )
+        self._invalidate_app_state(app.name)
+        return self.generation_state(app=app)
+
+    async def import_map_exchange_string(
+        self,
+        *,
+        app: App,
+        import_request: NodeFactorioMapExchangeImportRequest,
+    ) -> NodeFactorioGenerationState:
+        factorio_app = self._require_factorio_generation_app(app)
+        try:
+            await import_factorio_map_exchange_string(
+                app=factorio_app,
+                map_exchange_string=import_request.map_exchange_string,
+            )
+        except (OSError, ValueError, RuntimeError) as xcp:
+            raise self._http_exception(400, str(xcp)) from xcp
+        self._traffic_log.info(
+            "Node API imported Factorio map exchange string: node=%s app=%s",
+            self._node_name(),
+            app.name,
+        )
+        self._invalidate_app_state(app.name)
+        return self.generation_state(app=app)
+
+    async def sync_generation_from_running_world(self, *, app: App) -> NodeFactorioGenerationState:
+        factorio_app = self._require_factorio_generation_app(app)
+        try:
+            map_exchange_string = await factorio_app.running_map_exchange_string()
+            await import_factorio_map_exchange_string(
+                app=factorio_app,
+                map_exchange_string=map_exchange_string,
+            )
+        except (OSError, ValueError, RuntimeError) as xcp:
+            raise self._http_exception(400, str(xcp)) from xcp
+        self._traffic_log.info(
+            "Node API synchronized Factorio generation settings from running world: node=%s app=%s",
+            self._node_name(),
+            app.name,
+        )
+        self._invalidate_app_state(app.name)
+        return self.generation_state(app=app)
+
+    async def export_map_exchange_string(self, *, app: App) -> NodeFactorioMapExchangeString:
+        factorio_app = self._require_factorio_generation_app(app)
+        try:
+            map_exchange_string = await factorio_app.export_map_exchange_string()
+        except (OSError, ValueError, RuntimeError) as xcp:
+            raise self._http_exception(400, str(xcp)) from xcp
+        return NodeFactorioMapExchangeString(map_exchange_string=map_exchange_string)
+
+    def mod_settings_state(self, *, app: App) -> NodeFactorioModSettings:
+        self._require_factorio_mod_settings_app(app)
+        try:
+            return build_factorio_mod_settings_state(app=app, node_name=self._node_name())
+        except ValueError as xcp:
+            raise self._http_exception(400, str(xcp)) from xcp
+
+    def mod_settings_download_response(self, *, app: App) -> FileResponse:
+        self._require_factorio_mod_settings_app(app)
+        try:
+            return build_factorio_mod_settings_download_response(app=app)
+        except FileNotFoundError as xcp:
+            raise self._http_exception(404, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise self._http_exception(400, str(xcp)) from xcp
+
+    async def upload_mod_settings(
+        self,
+        *,
+        app: App,
+        upload: UploadFile,
+        upload_name: str,
+    ) -> NodeFactorioModSettings:
+        self._require_factorio_mod_settings_app(app)
+        try:
+            resolved_upload_name = validated_upload_filename(upload_name, kind="Factorio mod settings")
+        except ValueError as xcp:
+            raise self._http_exception(400, str(xcp)) from xcp
+        if resolved_upload_name != "mod-settings.dat":
+            raise self._http_exception(400, "Factorio mod settings upload must be named mod-settings.dat.")
+        temp_path = await persist_upload_to_temp(upload)
+        try:
+            target = factorio_mod_settings_path(app.directory)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await run_blocking(File_Utils.copy, temp_path, target, True)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        self._traffic_log.info(
+            "Node API uploaded Factorio mod settings: node=%s app=%s",
+            self._node_name(),
+            app.name,
+        )
+        self._invalidate_app_state(app.name)
+        return self.mod_settings_state(app=app)
+
+    def delete_mod_settings(self, *, app: App) -> NodeFactorioModSettings:
+        self._require_factorio_mod_settings_app(app)
+        pointer = factorio_mod_settings_path(app.directory)
+        if pointer.exists() and not pointer.is_file():
+            raise self._http_exception(400, f"Factorio mod settings path is not a file: {pointer}")
+        File_Utils.remove(pointer, silent=True, resolve=False)
+        self._traffic_log.info(
+            "Node API deleted Factorio mod settings: node=%s app=%s",
+            self._node_name(),
+            app.name,
+        )
+        self._invalidate_app_state(app.name)
+        return self.mod_settings_state(app=app)
+
+    def _require_factorio_mod_settings_app(self, app: App) -> None:
+        if app.scope != _FACTORIO_SCOPE:
+            raise self._http_exception(400, f"{app.friendly} does not support Factorio mod settings.")
+
+    def _require_factorio_generation_app(self, app: App) -> Factorio:
+        if not isinstance(app, Factorio):
+            raise self._http_exception(400, f"{app.friendly} does not support Factorio generation settings.")
+        return app
 
 
 @dataclass(frozen=True, slots=True)

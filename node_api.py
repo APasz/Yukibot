@@ -1,4 +1,3 @@
-# pyright: reportImportCycles=false
 from __future__ import annotations
 
 import asyncio
@@ -35,13 +34,16 @@ from starlette.middleware.cors import CORSMiddleware
 import apps._node_api as app_node_api
 import apps.factorio.node_api as factorio_node_api
 import apps.minecraft.node_api as minecraft_node_api
+import apps.satisfactory.node_api as satisfactory_node_api
 import apps.sevendays.node_api as sevendays_node_api
 import config
+import node_api_app_operations
 import node_api_app_state
 import node_api_client_pack
 import node_api_mod
 import node_api_mod_service
 import node_api_relay
+import node_api_storage_service
 import node_api_system
 from _async_utils import run_blocking
 from _audit import audit_log
@@ -50,15 +52,7 @@ from _manager import App_Manager, app_scope_from_name
 from _security import Access_Control, Power_Level
 from _sys import Stats_System, StatsDiskSnapshot, StatsSystemSnapshot
 from _utils import Utilities
-from apps._app import App, AppStdoutTail
-from apps._blueprint_files import (
-    AppBlueprintEntry,
-    AppBlueprintFileEntry,
-    AppBlueprintFileType,
-    BlueprintUploadPair,
-    blueprint_file_type_from_name,
-    classify_blueprint_upload_filenames,
-)
+from apps._app import App
 from apps._config import (
     AppTitleFont,
     BulkLauncherMetadataDiscovery,
@@ -67,19 +61,8 @@ from apps._config import (
     ModPageDiscovery,
     ModPlacement,
 )
-from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
-from apps._console import (
-    ConsoleAction,
-    ConsoleActionParameter,
-    ConsoleActionResult,
-    execute_console_action,
-)
+from apps._console import ConsoleAction
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
-from apps._settings import Setting, Settings_Manager
-from apps.factorio import (
-    Factorio,
-    factorio_mod_settings_path,
-)
 from apps.factorio.node_api import (
     NodeFactorioGenerationState,
     NodeFactorioGenerationUpdateRequest,
@@ -98,8 +81,6 @@ from apps.minecraft.node_api import (
     NodeMinecraftRecipeWorkspaceState,
 )
 from apps.satisfactory.node_api import (
-    NodeBlueprintEntry,
-    NodeBlueprintFileEntry,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
 )
@@ -151,10 +132,8 @@ from node_api_chat import (
 )
 from node_api_chat_routes import register_chat_routes
 from node_api_console import (
-    NodeConsoleActionEntry,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
-    NodeConsoleActionParameter,
     NodeConsoleStdoutSnapshot,
     NodeConsoleStdoutStreamEvent,
     NodeConsoleStdoutStreamEventKind,
@@ -163,7 +142,6 @@ from node_api_console_routes import register_console_routes
 from node_api_core_routes import register_core_routes
 from node_api_files import (
     NodeConfigContent,
-    NodeConfigEntry,
     NodeConfigList,
     NodeSaveEntry,
     NodeSaveList,
@@ -178,8 +156,6 @@ from node_api_relay import (
     RelayTTSQueue,
 )
 from node_api_settings import (
-    NodeSettingChoice,
-    NodeSettingEntry,
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
@@ -252,11 +228,11 @@ class PortalNodeLatencyProbe:
 
     latency_ms: int | None
     discord_latency_ms: int | None
+
+
 _LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
 _SQUAREMAP_REQUEST_TIMEOUT_SECONDS = 10.0
-FACTORIO_MOD_SETTINGS_ACCESS_LEVEL = Power_Level.sudo
-FACTORIO_GENERATION_ACCESS_LEVEL = Power_Level.sudo
 _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
     NodeApiScope.APPS_READ: Power_Level.visitor,
     NodeApiScope.MAP_READ: Power_Level.visitor,
@@ -550,6 +526,37 @@ class NodeApiService:
             node_name=lambda: self.node_name,
             invalidate_app_state=lambda app_name: self._invalidate_state_caches(app_name=app_name),
             invalidate_mod_inventory=self._invalidate_mod_inventory,
+        )
+        self._app_operations = node_api_app_operations.NodeAppOperationsService(
+            node_name=lambda: self.node_name,
+            require_acl=self._require_acl,
+            http_exception=_http_exception,
+            runtime_http_exception=self._runtime_http_exception,
+            traffic_log=traffic_log,
+        )
+        self._factorio = factorio_node_api.FactorioNodeApiService(
+            node_name=lambda: self.node_name,
+            invalidate_app_state=lambda app_name: self._invalidate_state_caches(app_name=app_name),
+            http_exception=_http_exception,
+            traffic_log=traffic_log,
+        )
+        self._satisfactory_blueprints = satisfactory_node_api.SatisfactoryBlueprintService(
+            node_name=lambda: self.node_name,
+            can_sudo=lambda actor_user_id: self._acl is not None and self._acl.can(actor_user_id, Power_Level.sudo),
+            require_sudo=lambda actor_user_id: self._require_acl().can(actor_user_id, Power_Level.sudo),
+            display_name_for_user=lambda user_id: config.Name_Cache().cached_display_name(
+                user_id,
+                f"User {user_id}",
+            ),
+            http_exception=_http_exception,
+            traffic_log=traffic_log,
+        )
+        self._storage = node_api_storage_service.NodeStorageService(
+            node_name=lambda: self.node_name,
+            current_acl=lambda: self._acl,
+            invalidate_client_pack_content=self._invalidate_client_pack_content,
+            http_exception=_http_exception,
+            traffic_log=traffic_log,
         )
         self._mod_service = node_api_mod_service.NodeModService(
             node_name=lambda: self.node_name,
@@ -3255,62 +3262,16 @@ class NodeApiService:
         )
 
     def build_config_list(self, app: App, *, actor_user_id: int | None = None) -> NodeConfigList:
-        configs: tuple[AppConfigFile, ...] = app.list_config_files()
-        if actor_user_id is not None and self._acl is not None:
-            configs = tuple[AppConfigFile, ...](
-                config_file for config_file in configs if self._acl.can(actor_user_id, config_file.read_power_level)
-            )
-        traffic_log.info(
-            "Node API built config list: node=%s app=%s configs=%s",
-            self.node_name,
-            app.name,
-            len(configs),
-        )
-        return NodeConfigList(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            configs=tuple[NodeConfigEntry, ...](self._config_entry(config_file) for config_file in configs),
-        )
+        return self._storage.build_config_list(app=app, actor_user_id=actor_user_id)
 
     def read_config_file(self, *, app: App, config_id: str) -> NodeConfigContent:
-        try:
-            content: AppConfigFileContent = app.read_config_file(config_id)
-        except FileNotFoundError as xcp:
-            raise _http_exception(404, str(xcp)) from xcp
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        return self._config_content(app=app, content=content)
+        return self._storage.read_config_file(app=app, config_id=config_id)
 
     def write_config_file(self, *, app: App, config_id: str, content: str) -> NodeConfigContent:
-        try:
-            updated: AppConfigFileContent = app.write_config_file(config_id, content)
-        except FileNotFoundError as xcp:
-            raise _http_exception(404, str(xcp)) from xcp
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        traffic_log.info(
-            "Node API wrote config file: node=%s app=%s config=%s",
-            self.node_name,
-            app.name,
-            config_id,
-        )
-        self._invalidate_client_pack_content(app)
-        return self._config_content(app=app, content=updated)
-
-    def _require_factorio_app(self, app: App) -> None:
-        if app.scope != config.AppScopes.factorio.value:
-            raise _http_exception(400, f"{app.friendly} does not support Factorio mod settings.")
-
-    @staticmethod
-    def _factorio_app(app: App) -> Factorio:
-        if not isinstance(app, Factorio):
-            raise _http_exception(400, f"{app.friendly} does not support Factorio generation settings.")
-        return app
+        return self._storage.write_config_file(app=app, config_id=config_id, content=content)
 
     def factorio_generation_state(self, *, app: App) -> NodeFactorioGenerationState:
-        factorio_app = self._factorio_app(app)
-        return factorio_node_api.build_factorio_generation_state(app=factorio_app, node_name=self.node_name)
+        return self._factorio.generation_state(app=app)
 
     def update_factorio_generation(
         self,
@@ -3318,22 +3279,7 @@ class NodeApiService:
         app: App,
         update: NodeFactorioGenerationUpdateRequest,
     ) -> NodeFactorioGenerationState:
-        factorio_app = self._factorio_app(app)
-        try:
-            factorio_node_api.write_factorio_generation_settings(
-                app=factorio_app,
-                map_gen_settings=update.map_gen_settings,
-                map_settings=update.map_settings,
-            )
-        except (OSError, ValueError) as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        traffic_log.info(
-            "Node API updated Factorio generation settings: node=%s app=%s",
-            self.node_name,
-            app.name,
-        )
-        self._invalidate_state_caches(app_name=app.name)
-        return self.factorio_generation_state(app=app)
+        return self._factorio.update_generation(app=app, update=update)
 
     async def import_factorio_map_exchange_string(
         self,
@@ -3341,63 +3287,19 @@ class NodeApiService:
         app: App,
         import_request: NodeFactorioMapExchangeImportRequest,
     ) -> NodeFactorioGenerationState:
-        factorio_app = self._factorio_app(app)
-        try:
-            await factorio_node_api.import_factorio_map_exchange_string(
-                app=factorio_app,
-                map_exchange_string=import_request.map_exchange_string,
-            )
-        except (OSError, ValueError, RuntimeError) as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        traffic_log.info(
-            "Node API imported Factorio map exchange string: node=%s app=%s",
-            self.node_name,
-            app.name,
-        )
-        self._invalidate_state_caches(app_name=app.name)
-        return self.factorio_generation_state(app=app)
+        return await self._factorio.import_map_exchange_string(app=app, import_request=import_request)
 
     async def sync_factorio_generation_from_running_world(self, *, app: App) -> NodeFactorioGenerationState:
-        factorio_app = self._factorio_app(app)
-        try:
-            map_exchange_string = await factorio_app.running_map_exchange_string()
-            await factorio_node_api.import_factorio_map_exchange_string(
-                app=factorio_app,
-                map_exchange_string=map_exchange_string,
-            )
-        except (OSError, ValueError, RuntimeError) as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        traffic_log.info(
-            "Node API synchronized Factorio generation settings from running world: node=%s app=%s",
-            self.node_name,
-            app.name,
-        )
-        self._invalidate_state_caches(app_name=app.name)
-        return self.factorio_generation_state(app=app)
+        return await self._factorio.sync_generation_from_running_world(app=app)
 
     async def export_factorio_map_exchange_string(self, *, app: App) -> NodeFactorioMapExchangeString:
-        factorio_app = self._factorio_app(app)
-        try:
-            map_exchange_string = await factorio_app.export_map_exchange_string()
-        except (OSError, ValueError, RuntimeError) as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        return NodeFactorioMapExchangeString(map_exchange_string=map_exchange_string)
+        return await self._factorio.export_map_exchange_string(app=app)
 
     def factorio_mod_settings_state(self, *, app: App) -> NodeFactorioModSettings:
-        self._require_factorio_app(app)
-        try:
-            return factorio_node_api.build_factorio_mod_settings_state(app=app, node_name=self.node_name)
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
+        return self._factorio.mod_settings_state(app=app)
 
     def build_factorio_mod_settings_download_response(self, *, app: App) -> FileResponse:
-        self._require_factorio_app(app)
-        try:
-            return factorio_node_api.build_factorio_mod_settings_download_response(app=app)
-        except FileNotFoundError as xcp:
-            raise _http_exception(404, str(xcp)) from xcp
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
+        return self._factorio.mod_settings_download_response(app=app)
 
     async def upload_factorio_mod_settings(
         self,
@@ -3408,38 +3310,14 @@ class NodeApiService:
         actor_user_id: int,
     ) -> NodeFactorioModSettings:
         del actor_user_id
-        self._require_factorio_app(app)
-        resolved_upload_name = self._validated_upload_filename(upload_name, kind="Factorio mod settings")
-        if resolved_upload_name != "mod-settings.dat":
-            raise _http_exception(400, "Factorio mod settings upload must be named mod-settings.dat.")
-        temp_path = await persist_upload_to_temp(upload)
-        try:
-            target = factorio_mod_settings_path(app.directory)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            await run_blocking(File_Utils.copy, temp_path, target, True)
-        finally:
-            temp_path.unlink(missing_ok=True)
-        traffic_log.info(
-            "Node API uploaded Factorio mod settings: node=%s app=%s",
-            self.node_name,
-            app.name,
+        return await self._factorio.upload_mod_settings(
+            app=app,
+            upload=upload,
+            upload_name=upload_name,
         )
-        self._invalidate_state_caches(app_name=app.name)
-        return self.factorio_mod_settings_state(app=app)
 
     def delete_factorio_mod_settings(self, *, app: App) -> NodeFactorioModSettings:
-        self._require_factorio_app(app)
-        pointer = factorio_mod_settings_path(app.directory)
-        if pointer.exists() and not pointer.is_file():
-            raise _http_exception(400, f"Factorio mod settings path is not a file: {pointer}")
-        File_Utils.remove(pointer, silent=True, resolve=False)
-        traffic_log.info(
-            "Node API deleted Factorio mod settings: node=%s app=%s",
-            self.node_name,
-            app.name,
-        )
-        self._invalidate_state_caches(app_name=app.name)
-        return self.factorio_mod_settings_state(app=app)
+        return self._factorio.delete_mod_settings(app=app)
 
     def _invalidate_client_pack_content(self, app: App) -> None:
         app.invalidate_client_pack_content()
@@ -3452,61 +3330,11 @@ class NodeApiService:
         root_id: str,
         actor_user_id: int | None = None,
     ) -> FileResponse:
-        try:
-            root: AppConfigFileRoot = app.resolve_config_root(root_id)
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-
-        if (
-            actor_user_id is not None
-            and self._acl is not None
-            and not self._acl.can(actor_user_id, app.config_file_read_level_for_root(root_id))
-        ):
-            raise _http_exception(403, f"Insufficient level for config root: {root.label}")
-
-        root_path: Path = root.resolved_path
-        if not root_path.exists():
-            raise _http_exception(404, f"Config root does not exist: {root.label}")
-        if not root_path.is_file() and not root_path.is_dir():
-            raise _http_exception(404, f"Config root is unsupported: {root.label}")
-
-        visible_configs: tuple[AppConfigFile, ...] = tuple[AppConfigFile, ...](
-            config_file for config_file in app.list_config_files() if config_file.root_id == root_id
+        return await self._storage.build_config_root_download_response(
+            app=app,
+            root_id=root_id,
+            actor_user_id=actor_user_id,
         )
-        if actor_user_id is not None and self._acl is not None:
-            visible_configs = tuple[AppConfigFile, ...](
-                config_file
-                for config_file in visible_configs
-                if self._acl.can(actor_user_id, config_file.read_power_level)
-            )
-        if not visible_configs:
-            raise _http_exception(404, f"No downloadable config files found in root: {root.label}")
-        if root_path.is_file():
-            traffic_log.info(
-                "Node API sending config file root: node=%s app=%s root=%s",
-                self.node_name,
-                app.name,
-                root_id,
-            )
-            return FileResponse(path=root_path, filename=root_path.name)
-
-        paths: tuple[Path, ...] = tuple[Path, ...](
-            app.resolve_config_file(config_file.id) for config_file in visible_configs
-        )
-        archive_path: Path = await File_Utils.compress(
-            paths,
-            self._config_root_archive_name(app=app, root=root),
-            arc_base=root_path,
-        )
-        traffic_log.info(
-            "Node API sending config root archive: node=%s app=%s root=%s files=%s archive=%s",
-            self.node_name,
-            app.name,
-            root_id,
-            len(paths),
-            archive_path,
-        )
-        return FileResponse(path=archive_path, filename=archive_path.name)
 
     async def build_save_list(self, app: App) -> NodeSaveList:
         saves: tuple[AppSaveEntry, ...] = await app.list_save_files_async()
@@ -3793,32 +3621,10 @@ class NodeApiService:
         return _http_exception(409, detail)
 
     def build_blueprint_list(self, app: App, *, actor_user_id: int) -> NodeBlueprintList:
-        if not app.supports_blueprints:
-            raise _http_exception(409, f"{app.friendly} does not support blueprint files.")
-        blueprints: tuple[AppBlueprintEntry, ...] = app.list_blueprint_files()
-        traffic_log.info(
-            "Node API built blueprint list: node=%s app=%s blueprints=%s",
-            self.node_name,
-            app.name,
-            len(blueprints),
-        )
-        return replace(
-            self.build_empty_blueprint_list(app),
-            blueprints=tuple[NodeBlueprintEntry, ...](
-                self._blueprint_entry(blueprint_file, actor_user_id=actor_user_id) for blueprint_file in blueprints
-            ),
-        )
+        return self._satisfactory_blueprints.build_list(app=app, actor_user_id=actor_user_id)
 
     def build_empty_blueprint_list(self, app: App) -> NodeBlueprintList:
-        if not app.supports_blueprints:
-            raise _http_exception(409, f"{app.friendly} does not support blueprint files.")
-        return NodeBlueprintList(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            blueprints=(),
-            default_session_name=app.default_blueprint_session_name,
-        )
+        return self._satisfactory_blueprints.build_empty_list(app=app)
 
     async def upload_blueprint_files(
         self,
@@ -3828,38 +3634,12 @@ class NodeApiService:
         uploads: list[UploadFile],
         actor_user_id: int,
     ) -> NodeBlueprintMutationResult:
-        if not app.supports_blueprints:
-            raise _http_exception(409, f"{app.friendly} does not support blueprint uploads.")
-        resolved_names: list[str] = []
-        for upload in uploads:
-            raw_upload_name: str = upload.filename or ""
-            if raw_upload_name != raw_upload_name.strip():
-                raise _http_exception(400, "Blueprint filenames must not start or end with spaces.")
-            resolved_names.append(self._validated_upload_filename(raw_upload_name, kind="Blueprint"))
-        try:
-            upload_pair: BlueprintUploadPair = classify_blueprint_upload_filenames(resolved_names)
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-
-        temp_paths: dict[str, Path] = {}
-        try:
-            for upload, resolved_name in zip(uploads, resolved_names, strict=True):
-                temp_paths[resolved_name] = await persist_upload_to_temp(upload)
-            config_source_path: Path | None = None
-            if upload_pair.config_filename is not None:
-                config_source_path = temp_paths[upload_pair.config_filename]
-            return self.upload_blueprint_path(
-                app=app,
-                session_name=session_name,
-                source_path=temp_paths[upload_pair.module_filename],
-                upload_name=upload_pair.module_filename,
-                actor_user_id=actor_user_id,
-                config_source_path=config_source_path,
-                config_upload_name=upload_pair.config_filename,
-            )
-        finally:
-            for temp_path in temp_paths.values():
-                temp_path.unlink(missing_ok=True)
+        return await self._satisfactory_blueprints.upload_files(
+            app=app,
+            session_name=session_name,
+            uploads=uploads,
+            actor_user_id=actor_user_id,
+        )
 
     def upload_blueprint_path(
         self,
@@ -3872,55 +3652,14 @@ class NodeApiService:
         config_source_path: Path | None = None,
         config_upload_name: str | None = None,
     ) -> NodeBlueprintMutationResult:
-        if not app.supports_blueprints:
-            raise _http_exception(409, f"{app.friendly} does not support blueprint uploads.")
-        if upload_name != upload_name.strip():
-            raise _http_exception(400, "Blueprint filenames must not start or end with spaces.")
-        if config_upload_name is not None and config_upload_name != config_upload_name.strip():
-            raise _http_exception(400, "Blueprint config filenames must not start or end with spaces.")
-        resolved_upload_names: list[str] = [self._validated_upload_filename(upload_name, kind="Blueprint")]
-        if config_upload_name is not None:
-            resolved_upload_names.append(self._validated_upload_filename(config_upload_name, kind="Blueprint"))
-        try:
-            upload_pair: BlueprintUploadPair = classify_blueprint_upload_filenames(resolved_upload_names)
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        try:
-            uploaded: AppBlueprintEntry = app.upload_blueprint_file(
-                session_name=session_name,
-                upload_name=upload_pair.module_filename,
-                source_path=source_path,
-                actor_user_id=actor_user_id,
-                config_upload_name=upload_pair.config_filename,
-                config_source_path=config_source_path,
-            )
-        except FileNotFoundError as xcp:
-            raise _http_exception(404, str(xcp)) from xcp
-        except FileExistsError as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        except Exception as xcp:
-            raise _http_exception(500, f"Blueprint upload failed: {xcp}") from xcp
-
-        traffic_log.info(
-            "Node API blueprint uploaded: node=%s app=%s blueprint=%s actor=%s",
-            self.node_name,
-            app.name,
-            uploaded.id,
-            actor_user_id,
-        )
-        message: str = f"Uploaded blueprint `{uploaded.label}` for {app.friendly}."
-        if upload_pair.config_filename is not None:
-            message = (
-                f"Uploaded blueprint `{uploaded.label}` with config `{upload_pair.config_filename}` for {app.friendly}."
-            )
-        return NodeBlueprintMutationResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            message=message,
-            blueprint=self._blueprint_entry(uploaded, actor_user_id=actor_user_id),
+        return self._satisfactory_blueprints.upload_path(
+            app=app,
+            session_name=session_name,
+            source_path=source_path,
+            upload_name=upload_name,
+            actor_user_id=actor_user_id,
+            config_source_path=config_source_path,
+            config_upload_name=config_upload_name,
         )
 
     def delete_blueprint_file(
@@ -3930,75 +3669,14 @@ class NodeApiService:
         blueprint_id: str,
         actor_user_id: int,
     ) -> NodeBlueprintMutationResult:
-        if not app.supports_blueprints:
-            raise _http_exception(409, f"{app.friendly} does not support blueprint deletion.")
-        actor_is_sudo: bool = self._require_acl().can(actor_user_id, Power_Level.sudo)
-        try:
-            deleted: AppBlueprintEntry = app.delete_blueprint_file(
-                file_id=blueprint_id,
-                actor_user_id=actor_user_id,
-                actor_is_sudo=actor_is_sudo,
-            )
-        except FileNotFoundError as xcp:
-            raise _http_exception(404, str(xcp)) from xcp
-        except PermissionError as xcp:
-            raise _http_exception(403, str(xcp)) from xcp
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        except Exception as xcp:
-            raise _http_exception(500, f"Blueprint delete failed: {xcp}") from xcp
-
-        delete_message: str = f"Deleted blueprint `{deleted.label}` from {app.friendly}."
-        try:
-            deleted_file_type = blueprint_file_type_from_name(PurePosixPath(blueprint_id).name)
-        except ValueError:
-            deleted_file_type = AppBlueprintFileType.MODULE
-        if deleted_file_type is AppBlueprintFileType.CONFIG:
-            delete_message = f"Deleted blueprint config `{PurePosixPath(blueprint_id).name}` from {app.friendly}."
-        elif deleted.config_file is not None:
-            delete_message = f"Deleted blueprint `{deleted.label}` and its matching config from {app.friendly}."
-
-        traffic_log.info(
-            "Node API blueprint deleted: node=%s app=%s blueprint=%s actor=%s",
-            self.node_name,
-            app.name,
-            blueprint_id,
-            actor_user_id,
-        )
-        return NodeBlueprintMutationResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            message=delete_message,
-            blueprint=self._blueprint_entry(deleted, actor_user_id=actor_user_id),
+        return self._satisfactory_blueprints.delete_file(
+            app=app,
+            blueprint_id=blueprint_id,
+            actor_user_id=actor_user_id,
         )
 
     def build_setting_list(self, *, app: App, actor_user_id: int) -> NodeSettingList:
-        settings: tuple[Setting[object], ...] = self._settings_for_app(app)
-        acl: Access_Control = self._require_acl()
-        settings_manager: Settings_Manager = self._require_settings_manager(app)
-        entries: tuple[NodeSettingEntry, ...] = tuple[NodeSettingEntry, ...](
-            self._setting_entry(
-                setting,
-                acl=acl,
-                actor_user_id=actor_user_id,
-                settings_manager=settings_manager,
-            )
-            for setting in settings
-        )
-        editable_count: int = sum(1 for setting in settings if acl.can(actor_user_id, setting.power_level))
-        return NodeSettingList(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            editable_count=editable_count,
-            restricted_count=len(settings) - editable_count,
-            has_pending_changes=settings_manager.has_pending_changes(actor_user_id),
-            pending_change_count=settings_manager.pending_change_count(actor_user_id),
-            required_save_level_name=settings_manager.required_save_level(actor_user_id).name,
-            required_reload_level_name=settings_manager.required_reload_level(actor_user_id).name,
-            settings=entries,
-        )
+        return self._app_operations.build_setting_list(app=app, actor_user_id=actor_user_id)
 
     async def update_setting(
         self,
@@ -4008,103 +3686,21 @@ class NodeApiService:
         value: str,
         actor_user_id: int,
     ) -> NodeSettingMutationResult:
-        setting: Setting[object] = self._resolve_setting(app=app, setting_key=setting_key)
-        await self._require_acl().perm_check(actor_user_id, setting.power_level)
-        settings_manager: Settings_Manager = self._require_settings_manager(app)
-
-        resolved_value: str = value.strip()
-        if not resolved_value and not setting.allows_blank_input:
-            raise _http_exception(400, "Setting value must not be empty.")
-
-        try:
-            settings_manager.update_setting(actor_user_id, setting, resolved_value, remember_input=True)
-        except (IndexError, ValueError) as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        except Exception as xcp:
-            raise _http_exception(500, f"Setting update failed: {xcp}") from xcp
-
-        traffic_log.info(
-            "Node API setting updated: node=%s app=%s setting=%s actor=%s",
-            self.node_name,
-            app.name,
-            setting.key,
-            actor_user_id,
-        )
-        return NodeSettingMutationResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            setting_key=setting.key,
-            message=(
-                f"{app.friendly} setting `{setting.label}` updated: "
-                f"{settings_manager.display_value(setting, actor_user_id)}. "
-                "Settings are saved on launch or via Save Settings."
-            ),
-            setting=self._setting_entry(
-                setting,
-                acl=self._require_acl(),
-                actor_user_id=actor_user_id,
-                settings_manager=settings_manager,
-            ),
+        return await self._app_operations.update_setting(
+            app=app,
+            setting_key=setting_key,
+            value=value,
+            actor_user_id=actor_user_id,
         )
 
     async def save_settings(self, *, app: App, actor_user_id: int) -> NodeSettingsActionResult:
-        settings_manager: Settings_Manager = self._require_settings_manager(app)
-        await self._require_acl().perm_check(actor_user_id, settings_manager.required_save_level(actor_user_id))
-        try:
-            settings_manager.save(actor_user_id)
-        except Exception as xcp:
-            raise _http_exception(500, f"Settings save failed: {xcp}") from xcp
-        traffic_log.info(
-            "Node API settings saved: node=%s app=%s actor=%s",
-            self.node_name,
-            app.name,
-            actor_user_id,
-        )
-        return NodeSettingsActionResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            message=f"Saved settings for {app.friendly}.",
-        )
+        return await self._app_operations.save_settings(app=app, actor_user_id=actor_user_id)
 
     async def reload_settings(self, *, app: App, actor_user_id: int) -> NodeSettingsActionResult:
-        settings_manager: Settings_Manager = self._require_settings_manager(app)
-        await self._require_acl().perm_check(actor_user_id, settings_manager.required_reload_level(actor_user_id))
-        try:
-            settings_manager.load(actor_user_id)
-        except Exception as xcp:
-            raise _http_exception(500, f"Settings reload failed: {xcp}") from xcp
-        traffic_log.info(
-            "Node API settings reloaded: node=%s app=%s actor=%s",
-            self.node_name,
-            app.name,
-            actor_user_id,
-        )
-        return NodeSettingsActionResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            message=f"{app.friendly} settings reloaded from disk.",
-        )
+        return await self._app_operations.reload_settings(app=app, actor_user_id=actor_user_id)
 
     def build_console_action_list(self, *, app: App, actor_user_id: int) -> NodeConsoleActionList:
-        acl: Access_Control = self._require_acl()
-        runtime_running: bool = app.check_running()
-        return NodeConsoleActionList(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            actions=tuple[NodeConsoleActionEntry, ...](
-                self._console_action_entry(
-                    action=action,
-                    actor_user_id=actor_user_id,
-                    acl=acl,
-                    runtime_running=runtime_running,
-                )
-                for action in app.console_actions
-            ),
-        )
+        return self._app_operations.build_console_action_list(app=app, actor_user_id=actor_user_id)
 
     async def read_console_stdout(
         self,
@@ -4113,8 +3709,11 @@ class NodeApiService:
         actor_user_id: int,
         max_lines: int = 200,
     ) -> NodeConsoleStdoutSnapshot:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.user)
-        return self.build_console_stdout_snapshot(app=app, max_lines=max_lines)
+        return await self._app_operations.read_console_stdout(
+            app=app,
+            actor_user_id=actor_user_id,
+            max_lines=max_lines,
+        )
 
     def build_console_stdout_snapshot(
         self,
@@ -4122,20 +3721,7 @@ class NodeApiService:
         app: App,
         max_lines: int = 200,
     ) -> NodeConsoleStdoutSnapshot:
-        try:
-            stdout_tail: AppStdoutTail = app.read_stdout_tail(max_lines=max_lines)
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        except Exception as xcp:
-            raise _http_exception(500, f"Console stdout read failed: {xcp}") from xcp
-        return NodeConsoleStdoutSnapshot(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            lines=stdout_tail.lines,
-            truncated=stdout_tail.truncated,
-            running=app.check_running(),
-        )
+        return self._app_operations.build_console_stdout_snapshot(app=app, max_lines=max_lines)
 
     async def execute_console_action(
         self,
@@ -4145,39 +3731,11 @@ class NodeApiService:
         raw_value: str | None,
         actor_user_id: int,
     ) -> NodeConsoleActionExecutionResult:
-        action: ConsoleAction = self._resolve_console_action(app, action_key)
-        await self._require_acl().perm_check(actor_user_id, action.power_level)
-        try:
-            result: ConsoleActionResult = await execute_console_action(
-                app=app,
-                is_running=app.check_running,
-                action=action,
-                raw_value=raw_value,
-            )
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        except RuntimeError as xcp:
-            raise self._runtime_http_exception(app=app, action="Console action", error=xcp) from xcp
-        except Exception as xcp:
-            raise _http_exception(500, f"Console action failed: {xcp}") from xcp
-
-        traffic_log.info(
-            "Node API console action executed: node=%s app=%s action=%s actor=%s success=%s",
-            self.node_name,
-            app.name,
-            action.key,
-            actor_user_id,
-            result.success,
-        )
-        return NodeConsoleActionExecutionResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            action_key=action.key,
-            summary=result.summary,
-            success=result.success,
-            text=result.text,
-            source=result.source,
+        return await self._app_operations.execute_console_action(
+            app=app,
+            action_key=action_key,
+            raw_value=raw_value,
+            actor_user_id=actor_user_id,
         )
 
     async def update_client_pack_config(
@@ -4211,64 +3769,7 @@ class NodeApiService:
         )
 
     def _resolve_console_action(self, app: App, action_key: str) -> ConsoleAction:
-        if not app.supports_console_actions:
-            raise _http_exception(404, f"{app.friendly} does not support console actions.")
-        normalised_key: str = action_key.strip().casefold()
-        if not normalised_key:
-            raise _http_exception(400, "Console action key must not be empty.")
-        for action in app.console_actions:
-            if action.key.casefold() == normalised_key:
-                return action
-        raise _http_exception(404, f"Unknown console action: {action_key}")
-
-    def _console_action_entry(
-        self,
-        *,
-        action: ConsoleAction,
-        actor_user_id: int,
-        acl: Access_Control,
-        runtime_running: bool,
-    ) -> NodeConsoleActionEntry:
-        parameter: ConsoleActionParameter[object] | None = action.parameter
-        can_run: bool = acl.can(actor_user_id, action.power_level)
-        return NodeConsoleActionEntry(
-            key=action.key,
-            label=action.label,
-            description=action.description,
-            power_level_name=action.power_level.name,
-            power_level_label=action.power_level.name.title(),
-            requires_running=action.requires_running,
-            can_run=can_run,
-            runtime_running=runtime_running,
-            parameter=(
-                self._console_action_parameter_entry(parameter, include_recent_inputs=can_run)
-                if parameter is not None
-                else None
-            ),
-        )
-
-    @staticmethod
-    def _console_action_parameter_entry(
-        parameter: ConsoleActionParameter[object],
-        *,
-        include_recent_inputs: bool,
-    ) -> NodeConsoleActionParameter:
-        resolved_parameter: ConsoleActionParameter[object] = parameter
-        return NodeConsoleActionParameter(
-            key=resolved_parameter.key,
-            label=resolved_parameter.label,
-            value_type_name=resolved_parameter.value_type_name,
-            description=resolved_parameter.desc,
-            max_length=resolved_parameter.max_length,
-            multiline=resolved_parameter.multiline,
-            strict_choice=resolved_parameter.strict_choice,
-            allows_text_input=resolved_parameter.choice_spec is None or not resolved_parameter.strict_choice,
-            choices=tuple[NodeSettingChoice, ...](
-                NodeSettingChoice(label=label, raw_value=raw_value)
-                for label, raw_value in resolved_parameter.choice_items()
-            ),
-            recent_inputs=resolved_parameter.recent_inputs if include_recent_inputs else (),
-        )
+        return self._app_operations.resolve_console_action(app, action_key)
 
     def apps_url(self, *, subject: str = "web", base_url: str | None = None) -> str:
         token: str | None = self.issue_access_token(
@@ -4731,15 +4232,6 @@ class NodeApiService:
             raise _http_exception(503, "Mod web permissions are not available.")
         return self._acl
 
-    @staticmethod
-    def _validated_upload_filename(filename: str, *, kind: str) -> str:
-        resolved = filename.strip()
-        if not resolved:
-            raise _http_exception(400, f"{kind} upload filename is required.")
-        if resolved in {".", ".."} or PurePosixPath(resolved).name != resolved or "\\" in resolved:
-            raise _http_exception(400, f"{kind} upload filename must not include directories.")
-        return resolved
-
     def _running_blocker_name(self, app: App) -> str | None:
         manager = self._require_manager()
         blocker = manager.start_blocker(app, include_current_activity=False)
@@ -4747,183 +4239,6 @@ class NodeApiService:
         if blocker is None or not isinstance(friendly_name, str) or not friendly_name.strip():
             return None
         return friendly_name
-
-    @staticmethod
-    def _settings_for_app(app: App) -> tuple[Setting[object], ...]:
-        settings_manager = NodeApiService._require_settings_manager(app)
-        return tuple(cast(Sequence[Setting[object]], settings_manager.app.options))
-
-    @staticmethod
-    def _require_settings_manager(app: App) -> Settings_Manager:
-        settings_manager = app.settings
-        if settings_manager is None:
-            raise _http_exception(404, f"{app.friendly} does not support settings.")
-        return settings_manager
-
-    def _resolve_setting(self, *, app: App, setting_key: str) -> Setting[object]:
-        setting = self._setting_lookup(app).get(setting_key.casefold())
-        if setting is None:
-            raise _http_exception(404, f"Unknown setting: {setting_key}")
-        return setting
-
-    @classmethod
-    def _setting_lookup(cls, app: App) -> dict[str, Setting[object]]:
-        lookup: dict[str, Setting[object]] = {}
-        for setting in cls._settings_for_app(app):
-            lookup[setting.key.casefold()] = setting
-        return lookup
-
-    @staticmethod
-    def _setting_type_name(setting: Setting[object]) -> str:
-        return setting.type_name
-
-    @staticmethod
-    def _setting_current_input_value(
-        setting: Setting[object],
-        *,
-        can_edit: bool,
-        settings_manager: Settings_Manager,
-        actor_user_id: int,
-    ) -> str:
-        if setting.do_hide is not None and (not can_edit or setting.value_type is not bool):
-            return ""
-        return settings_manager.current_input_value(setting, actor_user_id)
-
-    @staticmethod
-    def _setting_recent_inputs(setting: Setting[object]) -> tuple[str, ...]:
-        if not setting.supports_recent_inputs:
-            return ()
-        return setting.recent_inputs
-
-    @staticmethod
-    def _setting_allows_text_input(setting: Setting[object]) -> bool:
-        return not setting.choices or not setting.strict_choice
-
-    @staticmethod
-    def _setting_label_text(
-        setting: Setting[object],
-        value: object,
-    ) -> str:
-        choice_label = setting.spec.choice_label_for_value(value)
-        if choice_label is not None:
-            return choice_label
-        return setting.spec.display_value(value)
-
-    @classmethod
-    def _setting_default_text(cls, setting: Setting[object]) -> str:
-        if setting.do_hide is not None:
-            return ""
-        return cls._setting_label_text(setting, setting.default)
-
-    @classmethod
-    def _setting_value_text(
-        cls,
-        setting: Setting[object],
-        *,
-        can_reveal: bool,
-        settings_manager: Settings_Manager,
-        actor_user_id: int,
-    ) -> str:
-        if setting.do_hide is None:
-            return settings_manager.label_text(setting, actor_user_id)
-        if setting.is_sensitive:
-            return "REDACTED"
-        if can_reveal:
-            return "Hidden"
-        return f"Hidden (requires {setting.do_hide.name.title()})"
-
-    @classmethod
-    def _setting_revealed_value_text(
-        cls,
-        setting: Setting[object],
-        *,
-        can_reveal: bool,
-        settings_manager: Settings_Manager,
-        actor_user_id: int,
-    ) -> str:
-        if setting.do_hide is None or not can_reveal:
-            return ""
-        return settings_manager.label_text(setting, actor_user_id)
-
-    def _setting_entry(
-        self,
-        setting: Setting[object],
-        *,
-        acl: Access_Control,
-        actor_user_id: int,
-        settings_manager: Settings_Manager,
-    ) -> NodeSettingEntry:
-        can_edit = acl.can(actor_user_id, setting.power_level)
-        reveal_level = setting.do_hide
-        can_reveal = reveal_level is not None and acl.can(actor_user_id, reveal_level)
-        value_is_hidden = reveal_level is not None
-        choices = tuple(
-            NodeSettingChoice(label=label, raw_value=raw_value) for label, raw_value in setting.choice_items()
-        )
-        return NodeSettingEntry(
-            key=setting.key,
-            label=setting.label,
-            type_name=self._setting_type_name(setting),
-            permission_level=setting.power_level.name.title(),
-            permission_level_name=setting.power_level.name,
-            default_text=self._setting_default_text(setting),
-            description=setting.desc,
-            paragraph=setting.paragraph,
-            is_sensitive=setting.is_sensitive,
-            value_text=self._setting_value_text(
-                setting,
-                can_reveal=can_reveal,
-                settings_manager=settings_manager,
-                actor_user_id=actor_user_id,
-            ),
-            revealed_value_text=self._setting_revealed_value_text(
-                setting,
-                can_reveal=can_reveal,
-                settings_manager=settings_manager,
-                actor_user_id=actor_user_id,
-            ),
-            current_input_value=self._setting_current_input_value(
-                setting,
-                can_edit=can_edit,
-                settings_manager=settings_manager,
-                actor_user_id=actor_user_id,
-            ),
-            has_pending_value=settings_manager.has_pending_value(actor_user_id, setting),
-            can_edit=can_edit,
-            value_is_hidden=value_is_hidden,
-            can_reveal_hidden_text=can_reveal,
-            allows_text_input=self._setting_allows_text_input(setting),
-            allows_blank_input=setting.allows_blank_input,
-            strict_choice=setting.strict_choice,
-            choices=choices,
-            recent_inputs=self._setting_recent_inputs(setting) if can_edit else (),
-        )
-
-    @staticmethod
-    @staticmethod
-    def _config_entry(config_file: AppConfigFile) -> NodeConfigEntry:
-        return NodeConfigEntry(
-            id=config_file.id,
-            label=config_file.label,
-            relative_path=config_file.relative_path,
-            root_id=config_file.root_id,
-            root_label=config_file.root_label,
-            kind=config_file.kind.value,
-            read_power_level=config_file.read_power_level,
-            write_power_level=config_file.write_power_level,
-            size_bytes=config_file.size_bytes,
-            size_text=Utilities.humanise_bytes(config_file.size_bytes),
-            modified_at=config_file.modified_at.isoformat(sep=" ", timespec="seconds"),
-        )
-
-    def _config_content(self, *, app: App, content: AppConfigFileContent) -> NodeConfigContent:
-        return NodeConfigContent(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            config=self._config_entry(content.file),
-            content=content.content,
-        )
 
     @staticmethod
     def _save_entry(save_file: AppSaveEntry, *, can_delete: bool = False) -> NodeSaveEntry:
@@ -4945,63 +4260,6 @@ class NodeApiService:
             can_delete=can_delete,
         )
 
-    def _blueprint_file_entry(
-        self,
-        blueprint_file: AppBlueprintFileEntry,
-        *,
-        actor_user_id: int,
-    ) -> NodeBlueprintFileEntry:
-        uploaded_by_user_id: int | None = blueprint_file.uploaded_by_user_id
-        uploaded_by_display_name: str | None = None
-        if uploaded_by_user_id is not None:
-            uploaded_by_display_name = config.Name_Cache().cached_display_name(
-                uploaded_by_user_id,
-                f"User {uploaded_by_user_id}",
-            )
-        can_delete: bool = uploaded_by_user_id == actor_user_id
-        if not can_delete and self._acl is not None:
-            can_delete = self._acl.can(actor_user_id, Power_Level.sudo)
-        return NodeBlueprintFileEntry(
-            id=blueprint_file.id,
-            label=blueprint_file.label,
-            relative_path=blueprint_file.relative_path,
-            size_bytes=blueprint_file.size_bytes,
-            size_text=Utilities.humanise_bytes(blueprint_file.size_bytes),
-            modified_at=blueprint_file.modified_at.isoformat(sep=" ", timespec="seconds"),
-            uploaded_by_display_name=uploaded_by_display_name,
-            can_delete=can_delete,
-        )
-
-    def _blueprint_entry(self, blueprint_file: AppBlueprintEntry, *, actor_user_id: int) -> NodeBlueprintEntry:
-        main_file = self._blueprint_file_entry(
-            AppBlueprintFileEntry(
-                id=blueprint_file.id,
-                label=blueprint_file.label,
-                relative_path=blueprint_file.relative_path,
-                size_bytes=blueprint_file.size_bytes,
-                modified_at=blueprint_file.modified_at,
-                uploaded_by_user_id=blueprint_file.uploaded_by_user_id,
-            ),
-            actor_user_id=actor_user_id,
-        )
-        config_file = (
-            self._blueprint_file_entry(blueprint_file.config_file, actor_user_id=actor_user_id)
-            if blueprint_file.config_file is not None
-            else None
-        )
-        return NodeBlueprintEntry(
-            id=main_file.id,
-            label=main_file.label,
-            session_name=blueprint_file.session_name,
-            relative_path=main_file.relative_path,
-            size_bytes=main_file.size_bytes,
-            size_text=main_file.size_text,
-            modified_at=main_file.modified_at,
-            uploaded_by_display_name=main_file.uploaded_by_display_name,
-            can_delete=main_file.can_delete and (config_file is None or config_file.can_delete),
-            config_file=config_file,
-        )
-
     @staticmethod
     def _save_archive_name(*, app: App, save_path: Path) -> str:
         app_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in app.friendly.strip())
@@ -5011,14 +4269,6 @@ class NodeApiService:
         base_app_name = app_name.strip("_") or app.name
         base_save_name = save_name.strip("_") or save_path.name
         return f"{base_app_name}_{base_save_name}.zip"
-
-    @staticmethod
-    def _config_root_archive_name(*, app: App, root: AppConfigFileRoot) -> str:
-        app_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in app.friendly.strip())
-        root_name = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in root.id.strip())
-        base_app_name = app_name.strip("_") or app.name
-        base_root_name = root_name.strip("_") or root.id
-        return f"{base_app_name}_{base_root_name}_configs.zip"
 
     @staticmethod
     def _request_token(request: Any, access_token: str | None) -> str:

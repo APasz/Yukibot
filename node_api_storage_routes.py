@@ -1,41 +1,171 @@
-# pyright: reportImportCycles=false
 """HTTP registration for configs, Factorio files, saves, and blueprints."""
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any, Protocol
 
 from fastapi import File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from _audit import audit_log
-from node_api_files import NodeConfigWriteRequest, NodeSaveRenameRequest, NodeSaveUploadTransport
-from node_api_route_contracts import HttpExceptionFactory
+from _security import Power_Level
+from apps._app import App
+from apps.factorio.node_api import (
+    NodeFactorioGenerationUpdateRequest,
+    NodeFactorioMapExchangeImportRequest,
+)
+from apps.satisfactory.node_api import NodeBlueprintMutationResult
+from node_api_files import (
+    NodeConfigWriteRequest,
+    NodeSaveMutationResult,
+    NodeSaveRenameRequest,
+    NodeSaveUploadTransport,
+)
+from node_api_route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
 from node_auth import NodeAccessGrant, NodeApiScope
 
-if TYPE_CHECKING:
-    from node_api import NodeApiService
+
+class NodeStorageRouteService(NodeAuthenticatedRouteService, Protocol):
+    """Storage operations required by the storage route registrar."""
+
+    def _resolve_app(self, app_name: str) -> App: ...
+
+    def _request_actor_user_id_if_available(
+        self,
+        *,
+        request: Request,
+        access_token: str | None,
+        app_name: str | None,
+        scopes: tuple[NodeApiScope, ...],
+        verified_grant: NodeAccessGrant | None = None,
+    ) -> int | None: ...
+
+    async def _require_actor_level_for_request(
+        self,
+        *,
+        request: Request,
+        access_token: str | None,
+        app_name: str | None,
+        scopes: tuple[NodeApiScope, ...],
+        required_level: Power_Level,
+        verified_grant: NodeAccessGrant | None = None,
+    ) -> None: ...
+
+    def build_config_list(self, app: App, *, actor_user_id: int | None = None) -> MappingResponse: ...
+
+    def read_config_file(self, *, app: App, config_id: str) -> MappingResponse: ...
+
+    def write_config_file(self, *, app: App, config_id: str, content: str) -> MappingResponse: ...
+
+    async def build_config_root_download_response(
+        self,
+        *,
+        app: App,
+        root_id: str,
+        actor_user_id: int | None = None,
+    ) -> FileResponse: ...
+
+    def factorio_generation_state(self, *, app: App) -> MappingResponse: ...
+
+    def update_factorio_generation(
+        self,
+        *,
+        app: App,
+        update: NodeFactorioGenerationUpdateRequest,
+    ) -> MappingResponse: ...
+
+    async def import_factorio_map_exchange_string(
+        self,
+        *,
+        app: App,
+        import_request: NodeFactorioMapExchangeImportRequest,
+    ) -> MappingResponse: ...
+
+    async def sync_factorio_generation_from_running_world(self, *, app: App) -> MappingResponse: ...
+
+    async def export_factorio_map_exchange_string(self, *, app: App) -> MappingResponse: ...
+
+    def factorio_mod_settings_state(self, *, app: App) -> MappingResponse: ...
+
+    def build_factorio_mod_settings_download_response(self, *, app: App) -> FileResponse: ...
+
+    async def upload_factorio_mod_settings(
+        self,
+        *,
+        app: App,
+        upload: UploadFile,
+        upload_name: str,
+        actor_user_id: int,
+    ) -> MappingResponse: ...
+
+    def delete_factorio_mod_settings(self, *, app: App) -> MappingResponse: ...
+
+    async def build_save_list(self, app: App) -> MappingResponse: ...
+
+    async def build_save_download_response(self, *, app: App, save_id: str) -> Response: ...
+
+    async def upload_save_file(
+        self,
+        *,
+        app: App,
+        root_id: str,
+        upload: UploadFile,
+        upload_name: str | None,
+        actor_user_id: int,
+        upload_transport: NodeSaveUploadTransport = NodeSaveUploadTransport.DIRECT,
+    ) -> NodeSaveMutationResult: ...
+
+    async def rename_save_file(
+        self,
+        *,
+        app: App,
+        save_id: str,
+        new_name: str,
+        actor_user_id: int,
+    ) -> NodeSaveMutationResult: ...
+
+    async def delete_save_file(
+        self,
+        *,
+        app: App,
+        save_id: str,
+        actor_user_id: int,
+    ) -> NodeSaveMutationResult: ...
+
+    def build_blueprint_list(self, app: App, *, actor_user_id: int) -> MappingResponse: ...
+
+    async def upload_blueprint_files(
+        self,
+        *,
+        app: App,
+        session_name: str,
+        uploads: list[UploadFile],
+        actor_user_id: int,
+    ) -> NodeBlueprintMutationResult: ...
+
+    def delete_blueprint_file(
+        self,
+        *,
+        app: App,
+        blueprint_id: str,
+        actor_user_id: int,
+    ) -> NodeBlueprintMutationResult: ...
+
+
+FACTORIO_MOD_SETTINGS_ACCESS_LEVEL = Power_Level.sudo
+FACTORIO_GENERATION_ACCESS_LEVEL = Power_Level.sudo
 
 
 def register_storage_routes(
     nicegui_app: Any,
     *,
-    service: NodeApiService,
+    service: NodeStorageRouteService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
 ) -> None:
     """Register all app-scoped storage and file-management endpoints."""
-    from node_api import (
-        FACTORIO_GENERATION_ACCESS_LEVEL,
-        FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
-        NodeBlueprintMutationResult,
-        NodeFactorioGenerationUpdateRequest,
-        NodeFactorioMapExchangeImportRequest,
-        NodeSaveMutationResult,
-    )
-
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/configs")
     async def _list_configs(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API config list request: node=%s app=%s", service.node_name, app_name)

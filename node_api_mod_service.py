@@ -8,7 +8,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Literal, Protocol, TypeVar, cast
 
 from fastapi import HTTPException, UploadFile
@@ -54,7 +54,7 @@ from apps.factorio.node_api import (
     NodeModUpdateDependency,
 )
 from node_api_app_state import NodeAppRuntimeSummary
-from node_api_upload import persist_upload_to_temp
+from node_api_upload import persist_upload_to_temp, validated_upload_filename
 
 _MOD_INVENTORY_CACHE_TTL_SECONDS = 5.0
 _BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS = 60.0 * 60.0
@@ -1046,12 +1046,10 @@ class NodeModService:
 
     @staticmethod
     def _validated_upload_filename(filename: str, *, kind: str) -> str:
-        resolved = filename.strip()
-        if not resolved:
-            raise _http_exception(400, f"{kind} upload filename is required.")
-        if resolved in {".", ".."} or PurePosixPath(resolved).name != resolved or "\\" in resolved:
-            raise _http_exception(400, f"{kind} upload filename must not include directories.")
-        return resolved
+        try:
+            return validated_upload_filename(filename, kind=kind)
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
 
     def _validated_mod_upload_sources(
         self,

@@ -152,20 +152,16 @@ from deployment_metadata import DeploymentMetadata
 from maintenance import MaintenanceService
 from map_annotations import MapAnnotationDraft
 from node_api import (
-    FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
     NodeApiService,
     NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
-    NodeBlueprintList,
-    NodeBlueprintMutationResult,
     NodeCapacityMutationResult,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
-    NodeConfigList,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
@@ -185,7 +181,6 @@ from node_api import (
     NodeRestartState,
     NodeSaveList,
     NodeSaveMutationResult,
-    NodeSettingEntry,
     NodeSettingList,
     NodeSevenDaysSandboxOptionsState,
     NodeStateStreamEvent,
@@ -198,6 +193,10 @@ from node_api import (
     NodeSystemSummary,
     NodeWebChatRequest,
 )
+from node_api_settings import NodeSettingEntry
+from node_api_storage_routes import FACTORIO_MOD_SETTINGS_ACCESS_LEVEL
+from node_api_files import NodeConfigList
+from apps.satisfactory.node_api import NodeBlueprintList, NodeBlueprintMutationResult
 from node_api_app_state import (
     NodeAppMutationAction,
     NodeAppMutationResult,
@@ -8268,7 +8267,7 @@ class NodeApiTests(unittest.TestCase):
                 new=AsyncMock(),
             ) as import_map_exchange_string,
             patch.object(service, "_invalidate_state_caches") as invalidate_state_caches,
-            patch.object(service, "factorio_generation_state", return_value=expected_state),
+            patch.object(service._factorio, "generation_state", return_value=expected_state),
         ):
             result = asyncio.run(service.sync_factorio_generation_from_running_world(app=app))
 

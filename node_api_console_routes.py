@@ -1,26 +1,59 @@
-# pyright: reportImportCycles=false
 """HTTP and WebSocket registration for app console routes."""
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from fastapi import HTTPException, Request, WebSocket, WebSocketException, status
 
 from _audit import audit_log
-from node_api_console import NodeConsoleActionExecuteRequest
-from node_api_route_contracts import HttpExceptionFactory
+from apps._app import App
+from apps._console import ConsoleAction
+from node_api_console import NodeConsoleActionExecuteRequest, NodeConsoleActionExecutionResult
+from node_api_route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
 from node_auth import NodeAccessGrant, NodeApiScope
 
-if TYPE_CHECKING:
-    from node_api import NodeApiService
+
+class NodeConsoleRouteService(NodeAuthenticatedRouteService, Protocol):
+    """Console operations required by the console route registrar."""
+
+    def _resolve_app(self, app_name: str) -> App: ...
+
+    def _resolve_console_action(self, app: App, action_key: str) -> ConsoleAction: ...
+
+    def _require_websocket_token_access(
+        self,
+        *,
+        websocket: WebSocket,
+        access_token: str | None,
+        app_name: str | None,
+        scopes: tuple[NodeApiScope, ...],
+    ) -> NodeAccessGrant: ...
+
+    @staticmethod
+    def _websocket_exception_from_http(error: HTTPException) -> WebSocketException: ...
+
+    async def _serve_console_stdout_stream(self, *, websocket: WebSocket, app: App, max_lines: int) -> None: ...
+
+    def build_console_action_list(self, *, app: App, actor_user_id: int) -> MappingResponse: ...
+
+    async def execute_console_action(
+        self,
+        *,
+        app: App,
+        action_key: str,
+        raw_value: str | None,
+        actor_user_id: int,
+    ) -> NodeConsoleActionExecutionResult: ...
+
+    async def read_console_stdout(self, *, app: App, actor_user_id: int, max_lines: int) -> MappingResponse: ...
 
 
 def register_console_routes(
     nicegui_app: Any,
     *,
-    service: NodeApiService,
+    service: NodeConsoleRouteService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
