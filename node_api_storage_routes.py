@@ -17,6 +17,9 @@ from apps.factorio.node_api import (
 )
 from apps.satisfactory.node_api import NodeBlueprintMutationResult
 from node_api_files import (
+    NodeConfigContent,
+    NodeConfigCreateRequest,
+    NodeConfigMutationResult,
     NodeConfigWriteRequest,
     NodeSaveMutationResult,
     NodeSaveRenameRequest,
@@ -57,6 +60,17 @@ class NodeStorageRouteService(NodeAuthenticatedRouteService, Protocol):
     def read_config_file(self, *, app: App, config_id: str) -> MappingResponse: ...
 
     def write_config_file(self, *, app: App, config_id: str, content: str) -> MappingResponse: ...
+
+    def create_config_file(
+        self,
+        *,
+        app: App,
+        root_id: str,
+        relative_path: str,
+        content: str,
+    ) -> NodeConfigContent: ...
+
+    def delete_config_file(self, *, app: App, config_id: str) -> NodeConfigMutationResult: ...
 
     async def build_config_root_download_response(
         self,
@@ -179,6 +193,52 @@ def register_storage_routes(
             verified_grant=grant,
         )
         return service.build_config_list(app, actor_user_id=actor_user_id).to_mapping()
+
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/configs")
+    async def _create_config(
+        app_name: str,
+        payload: dict[str, object],
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        traffic_log.info("Node API config create request: node=%s app=%s", service.node_name, app_name)
+        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
+        create_request = NodeConfigCreateRequest.model_validate(payload)
+        app = service._resolve_app(app_name)
+        try:
+            required_level = app.config_file_write_level_for_root(create_request.root_id)
+        except ValueError as xcp:
+            raise http_exception(400, str(xcp)) from xcp
+        await service._require_actor_level_for_request(
+            request=request,
+            access_token=access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            required_level=required_level,
+            verified_grant=grant,
+        )
+        actor_user_id = service._request_actor_user_id(
+            request=request,
+            access_token=access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            verified_grant=grant,
+        )
+        result = service.create_config_file(
+            app=app,
+            root_id=create_request.root_id,
+            relative_path=create_request.relative_path,
+            content=create_request.content,
+        )
+        audit_log(
+            "config.file_created",
+            actor_user_id=actor_user_id,
+            node_name=service.node_name,
+            app_name=app.name,
+            config_id=result.config.id,
+            required_level=required_level.name,
+        )
+        return result.to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/factorio/mod-settings")
     async def _factorio_mod_settings_state(
@@ -547,6 +607,48 @@ def register_storage_routes(
             node_name=service.node_name,
             app_name=app.name,
             config_id=config_id,
+            required_level=required_level.name,
+        )
+        return result.to_mapping()
+
+    @nicegui_app.delete(f"{api_prefix}/apps/{{app_name}}/configs/{{config_id:path}}")
+    async def _delete_config(
+        app_name: str,
+        config_id: str,
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        traffic_log.info(
+            "Node API config delete request: node=%s app=%s config=%s", service.node_name, app_name, config_id
+        )
+        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
+        app = service._resolve_app(app_name)
+        try:
+            required_level = app.config_file_write_level_for_id(config_id)
+        except ValueError as xcp:
+            raise http_exception(400, str(xcp)) from xcp
+        await service._require_actor_level_for_request(
+            request=request,
+            access_token=access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            required_level=required_level,
+            verified_grant=grant,
+        )
+        actor_user_id = service._request_actor_user_id(
+            request=request,
+            access_token=access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            verified_grant=grant,
+        )
+        result = service.delete_config_file(app=app, config_id=config_id)
+        audit_log(
+            "config.file_deleted",
+            actor_user_id=actor_user_id,
+            node_name=service.node_name,
+            app_name=app.name,
+            config_id=result.config_id,
             required_level=required_level.name,
         )
         return result.to_mapping()

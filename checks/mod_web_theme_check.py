@@ -479,6 +479,12 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertRegex(
             css,
+            r"(?s)\.mod-settings-search \.q-field__label,.*?color: var\(--mod-text\) !important;"
+            r".*?\.mod-settings-search \.q-field__native::placeholder,.*?"
+            r"-webkit-text-fill-color: var\(--mod-text\) !important;",
+        )
+        self.assertRegex(
+            css,
             r"(?s):is\(\.mod-config-input, \.mod-config-select\) input:-webkit-autofill,.*?"
             r"-webkit-text-fill-color: var\(--mod-text\) !important;",
         )
@@ -588,6 +594,7 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertIn(".mod-setting-control-surface", css)
         self.assertIn(".mod-setting-field-secondary", css)
+        self.assertIn(".mod-settings-group-divider", css)
         self.assertIn(".mod-setting-menu", css)
         self.assertIn(".mod-notepad-menu", css)
         self.assertIn(".mod-card-notepad .mod-config-select .q-field__control", css)

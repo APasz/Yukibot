@@ -128,6 +128,7 @@ from apps.minecraft import (
     MinecraftRecipeIngredient,
     MinecraftRecipeItemStack,
     MinecraftShapelessRecipe,
+    Minecraft_Setting_Group,
 )
 from apps.minecraft.pack_export import PackFormat, PackPurpose
 from apps.satisfactory import (
@@ -1914,6 +1915,8 @@ class NodeApiTests(unittest.TestCase):
             strict_choice=False,
             choices=(),
             recent_inputs=(),
+            group_id="computercraft",
+            group_label="ComputerCraft",
         )
 
         mapped = result.to_mapping()
@@ -1951,6 +1954,7 @@ class NodeApiTests(unittest.TestCase):
             server_name: Setting[object] | None = settings_app.get_setting("server_name")
             assert server_name is not None
             server_name.update("Beta", remember_input=True)
+            server_name.group = Minecraft_Setting_Group.computercraft
             _attach_settings(app, settings_app)
 
             users_pointer: Path = root / "users.json"
@@ -1975,6 +1979,8 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.settings[1].default_text, "Alpha")
         self.assertEqual(result.settings[1].current_input_value, "Beta")
         self.assertEqual(result.settings[1].recent_inputs, ("Beta",))
+        self.assertEqual(result.settings[1].group_id, "computercraft")
+        self.assertEqual(result.settings[1].group_label, "ComputerCraft")
 
     def test_build_setting_list_shows_restricted_values_when_hide_policy_is_disabled(
         self,
@@ -8118,6 +8124,7 @@ class NodeApiTests(unittest.TestCase):
             write_power_level=Power_Level.sudo,
             size_bytes=14,
             modified_at=datetime(2026, 5, 26, 12, 0, 0),
+            write_notice="Restart the game to apply this config file.",
         )
         app.list_config_files = Mock(return_value=(config_file,))  # type: ignore[method-assign]
 
@@ -8132,6 +8139,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(model.configs[0].kind, "game")
         self.assertEqual(model.configs[0].read_power_level, Power_Level.user)
         self.assertEqual(model.configs[0].write_power_level, Power_Level.sudo)
+        self.assertEqual(model.configs[0].write_notice, "Restart the game to apply this config file.")
         self.assertIn("B", model.configs[0].size_text)
 
     def test_build_config_list_filters_entries_above_actor_level(self) -> None:

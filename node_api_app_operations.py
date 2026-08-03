@@ -442,6 +442,8 @@ class NodeAppOperationsService:
                 for label, raw_value in setting.choice_items()
             ),
             recent_inputs=cls._setting_recent_inputs(setting) if can_edit else (),
+            group_id=setting.group.name if setting.group is not None else None,
+            group_label=setting.group.value if setting.group is not None else None,
         )
 
     def _console_action_entry(

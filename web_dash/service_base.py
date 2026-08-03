@@ -32,6 +32,7 @@ from .runtime_imports import (
     NodeCapacityMutationResult,
     NodeConfigContent,
     NodeConfigList,
+    NodeConfigMutationResult,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
@@ -617,6 +618,16 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_remote_config_write_async"]
     ) -> Callable[..., Awaitable[NodeConfigContent]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_config_create_async"]
+    ) -> Callable[..., Awaitable[NodeConfigContent]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_config_delete_async"]
+    ) -> Callable[..., Awaitable[NodeConfigMutationResult]]: ...
 
     @overload
     def __getattr__(

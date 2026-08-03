@@ -29,6 +29,15 @@ class Setting_Label(StrEnum):
     difficulty = "Difficulty"
 
 
+class Setting_Group(StrEnum):
+    """Extensible base for app-specific setting groups."""
+
+    @property
+    def sort_order(self) -> int:
+        """Return this group's declaration order within its app-specific enum."""
+        return tuple(type(self)).index(self)
+
+
 T = TypeVar("T", default=object)
 
 
@@ -358,6 +367,7 @@ class Setting(Generic[T]):
     value: T | hikari.UndefinedType
     default: T
     power_level: Power_Level
+    group: Setting_Group | None
     desc: str | None
     paragraph: bool
     min_app_version: AppVersion | None
@@ -375,6 +385,7 @@ class Setting(Generic[T]):
         default: T,
         value: T | hikari.UndefinedType = hikari.UNDEFINED,
         power_level: Power_Level = Power_Level.admin,
+        group: Setting_Group | None = None,
         desc: str | None = None,
         paragraph: bool = False,
         min_app_version: AppVersion | str | None = None,
@@ -393,6 +404,9 @@ class Setting(Generic[T]):
             label = label.value
         self.label = label.title()
         self.power_level = power_level
+        if group is not None and not isinstance(group, Setting_Group):
+            raise TypeError("Setting group must be a Setting_Group value or None.")
+        self.group = group
         self.desc = desc
         self.paragraph = paragraph
         self.min_app_version = normalise_app_version(min_app_version)
@@ -544,11 +558,15 @@ class Setting(Generic[T]):
     def __lt__(self, other: object) -> bool:
         if not isinstance(other, Setting):
             return NotImplemented
-        return (
-            self.label.lower() < other.label.lower()
-            if self.label != other.label
-            else self.key.lower() < other.key.lower()
-        )
+        return self._sort_key < other._sort_key
+
+    @property
+    def _sort_key(self) -> tuple[int, str, int, str, str]:
+        if self.group is None:
+            return (0, "", 0, self.label.casefold(), self.key.casefold())
+        group_type = type(self.group)
+        group_type_id = f"{group_type.__module__}.{group_type.__qualname__}"
+        return (1, group_type_id, self.group.sort_order, self.label.casefold(), self.key.casefold())
 
 
 class App_Settings:

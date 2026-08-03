@@ -10,6 +10,7 @@ from pydantic.config import ConfigDict
 from _security import Power_Level
 from apps._node_api import (
     power_level as _power_level,
+    required_bool as _required_bool,
     required_int as _required_int,
     required_string as _required_string,
 )
@@ -38,9 +39,21 @@ class NodeConfigEntry:
     size_text: str
     modified_at: str
     write_power_level: Power_Level = _DEFAULT_REMOTE_CONFIG_WRITE_LEVEL
+    can_write: bool = True
+    can_delete: bool = False
+    write_notice: str | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeConfigEntry:
+        raw_can_write = payload.get("can_write", True)
+        raw_can_delete = payload.get("can_delete", False)
+        if not isinstance(raw_can_write, bool):
+            raise ValueError("Node config entry can_write is invalid.")
+        if not isinstance(raw_can_delete, bool):
+            raise ValueError("Node config entry can_delete is invalid.")
+        write_notice = payload.get("write_notice")
+        if write_notice is not None and not isinstance(write_notice, str):
+            raise ValueError("Node config entry write_notice is invalid.")
         return cls(
             id=_required_string(payload, "id"),
             label=_required_string(payload, "label"),
@@ -53,6 +66,9 @@ class NodeConfigEntry:
             size_bytes=_required_int(payload, "size_bytes"),
             size_text=_required_string(payload, "size_text"),
             modified_at=_required_string(payload, "modified_at"),
+            can_write=raw_can_write,
+            can_delete=raw_can_delete,
+            write_notice=write_notice,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -68,6 +84,40 @@ class NodeConfigEntry:
             "size_bytes": self.size_bytes,
             "size_text": self.size_text,
             "modified_at": self.modified_at,
+            "can_write": self.can_write,
+            "can_delete": self.can_delete,
+            "write_notice": self.write_notice,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeConfigRootEntry:
+    id: str
+    label: str
+    kind: str
+    read_power_level: Power_Level
+    write_power_level: Power_Level
+    can_create: bool
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeConfigRootEntry:
+        return cls(
+            id=_required_string(payload, "id"),
+            label=_required_string(payload, "label"),
+            kind=_required_string(payload, "kind"),
+            read_power_level=_power_level(payload, "read_power_level", default=_DEFAULT_REMOTE_CONFIG_READ_LEVEL),
+            write_power_level=_power_level(payload, "write_power_level", default=_DEFAULT_REMOTE_CONFIG_WRITE_LEVEL),
+            can_create=_required_bool(payload, "can_create"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "kind": self.kind,
+            "read_power_level": self.read_power_level.name,
+            "write_power_level": self.write_power_level.name,
+            "can_create": self.can_create,
         }
 
 
@@ -77,6 +127,7 @@ class NodeConfigList:
     app_friendly: str
     node: str
     configs: tuple[NodeConfigEntry, ...]
+    roots: tuple[NodeConfigRootEntry, ...] = ()
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeConfigList:
@@ -91,7 +142,21 @@ class NodeConfigList:
             if not isinstance(raw_config, Mapping):
                 raise ValueError("Node config list contains an invalid config entry.")
             configs.append(NodeConfigEntry.from_mapping(raw_config))
-        return cls(app_name=app_name, app_friendly=app_friendly, node=node, configs=tuple(configs))
+        raw_roots = payload.get("roots", ())
+        if not isinstance(raw_roots, Sequence) or isinstance(raw_roots, (str, bytes)):
+            raise ValueError("Node config list roots are invalid.")
+        roots: list[NodeConfigRootEntry] = []
+        for raw_root in raw_roots:
+            if not isinstance(raw_root, Mapping):
+                raise ValueError("Node config list contains an invalid root entry.")
+            roots.append(NodeConfigRootEntry.from_mapping(raw_root))
+        return cls(
+            app_name=app_name,
+            app_friendly=app_friendly,
+            node=node,
+            configs=tuple(configs),
+            roots=tuple(roots),
+        )
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -99,6 +164,7 @@ class NodeConfigList:
             "app_friendly": self.app_friendly,
             "node": self.node,
             "configs": [entry.to_mapping() for entry in self.configs],
+            "roots": [entry.to_mapping() for entry in self.roots],
         }
 
 
@@ -140,6 +206,42 @@ class NodeConfigWriteRequest(BaseModel):
     content: str
 
     model_config = ConfigDict(str_strip_whitespace=False)
+
+
+class NodeConfigCreateRequest(BaseModel):
+    root_id: str
+    relative_path: str
+    content: str = ""
+
+    model_config = ConfigDict(str_strip_whitespace=False)
+
+
+@dataclass(frozen=True, slots=True)
+class NodeConfigMutationResult:
+    app_name: str
+    app_friendly: str
+    node: str
+    config_id: str
+    message: str
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeConfigMutationResult:
+        return cls(
+            app_name=_required_string(payload, "app_name"),
+            app_friendly=_required_string(payload, "app_friendly"),
+            node=_required_string(payload, "node"),
+            config_id=_required_string(payload, "config_id"),
+            message=_required_string(payload, "message"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "config_id": self.config_id,
+            "message": self.message,
+        }
 
 
 @dataclass(frozen=True, slots=True)

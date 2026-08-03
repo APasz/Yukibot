@@ -912,6 +912,8 @@ class ModWebTests(unittest.TestCase):
         strict_choice: bool = False,
         choices: tuple[NodeSettingChoice, ...] = (),
         recent_inputs: tuple[str, ...] = (),
+        group_id: str | None = None,
+        group_label: str | None = None,
     ) -> NodeSettingEntry:
         resolved_permission_level_name: str = permission_level_name or permission_level.casefold()
         return NodeSettingEntry(
@@ -936,6 +938,8 @@ class ModWebTests(unittest.TestCase):
             strict_choice=strict_choice,
             choices=choices,
             recent_inputs=recent_inputs,
+            group_id=group_id,
+            group_label=group_label,
         )
 
     @staticmethod
@@ -14359,6 +14363,75 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(filtered, (settings[1],))
+
+    def test_filter_setting_entries_matches_group(self) -> None:
+        settings = (
+            self._setting_entry(
+                key="computercraft.http.enabled",
+                label="ComputerCraft HTTP Enabled",
+                type_name="bool",
+                group_id="computercraft",
+                group_label="ComputerCraft",
+            ),
+            self._setting_entry(
+                key="computercraft.peripheral.modem_range",
+                label="ComputerCraft Modem Range",
+                type_name="int",
+                group_id="computercraft",
+                group_label="ComputerCraft",
+            ),
+            self._setting_entry(
+                key="max_players",
+                label="Max Players",
+                type_name="int",
+            ),
+        )
+
+        filtered = ModWebService._filter_setting_entries(
+            settings=settings,
+            options=ModWebService._setting_options(settings),
+            search_query="",
+            group_id="computercraft",
+        )
+
+        self.assertEqual(filtered, (settings[0], settings[1]))
+        self.assertEqual(
+            ModWebService._setting_group_options(settings),
+            {
+                "computercraft": "ComputerCraft",
+            },
+        )
+
+    def test_setting_group_dividers_mark_each_group_run(self) -> None:
+        settings = (
+            self._setting_entry(key="max_players", label="Max Players", type_name="int"),
+            self._setting_entry(
+                key="computercraft.http.enabled",
+                label="HTTP Enabled",
+                type_name="bool",
+                group_id="computercraft",
+                group_label="ComputerCraft",
+            ),
+            self._setting_entry(
+                key="computercraft.peripheral.modem_range",
+                label="Modem Range",
+                type_name="int",
+                group_id="computercraft",
+                group_label="ComputerCraft",
+            ),
+            self._setting_entry(
+                key="factorio.visibility",
+                label="Visibility",
+                type_name="str",
+                group_id="factorio",
+                group_label="Factorio",
+            ),
+        )
+
+        self.assertEqual(
+            ModWebService._setting_group_dividers(settings),
+            ((1, "ComputerCraft"), (3, "Factorio")),
+        )
 
     def test_filter_setting_entries_ignores_setting_metadata_not_shown_on_card(
         self,

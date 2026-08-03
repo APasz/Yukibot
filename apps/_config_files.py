@@ -40,12 +40,29 @@ class AppConfigFileRoot:
     suffixes: frozenset[str] = DEFAULT_CONFIG_FILE_SUFFIXES
     read_power_level_override: Power_Level | None = None
     write_power_level_override: Power_Level | None = None
+    allow_file_creation: bool = False
+    allow_file_deletion: bool = False
+    protected_relative_paths: frozenset[str] = frozenset()
+    write_notice: str | None = None
 
     def __post_init__(self) -> None:
         if not self.id or "/" in self.id or self.id in {".", ".."}:
             raise ValueError(f"Invalid config root id: {self.id!r}")
         if not self.label.strip():
             raise ValueError("Config root label must not be empty.")
+        if self.path.exists() and self.path.is_file() and (self.allow_file_creation or self.allow_file_deletion):
+            raise ValueError(f"Config root {self.id!r} must be a directory for file management.")
+        protected_relative_paths = frozenset(
+            _normalise_relative_path(relative_path) for relative_path in self.protected_relative_paths
+        )
+        if protected_relative_paths != self.protected_relative_paths:
+            object.__setattr__(self, "protected_relative_paths", protected_relative_paths)
+        if self.write_notice is not None:
+            if not isinstance(self.write_notice, str) or not self.write_notice.strip():
+                raise ValueError("Config root write notice must be a non-empty string or None.")
+            normalised_write_notice = self.write_notice.strip()
+            if normalised_write_notice != self.write_notice:
+                object.__setattr__(self, "write_notice", normalised_write_notice)
 
     @property
     def resolved_path(self) -> Path:
@@ -64,6 +81,9 @@ class AppConfigFile:
     write_power_level: Power_Level
     size_bytes: int
     modified_at: datetime
+    can_write: bool = True
+    can_delete: bool = False
+    write_notice: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +183,8 @@ def write_app_config_file(
 ) -> AppConfigFileContent:
     root, path, relative_path = resolve_app_config_path(roots, file_id)
     _validate_readable_config_file(path)
+    if relative_path in root.protected_relative_paths:
+        raise ValueError(f"Config file is managed and cannot be modified: {relative_path}")
     encoded = content.encode(config.STR_ENCODE)
     if len(encoded) > MAX_CONFIG_FILE_BYTES:
         raise ValueError(f"Config file content exceeds {MAX_CONFIG_FILE_BYTES} bytes.")
@@ -179,6 +201,80 @@ def write_app_config_file(
     )
 
 
+def create_app_config_file(
+    roots: tuple[AppConfigFileRoot, ...],
+    root_id: str,
+    relative_path: str,
+    content: str,
+    *,
+    default_read_level: Power_Level,
+    default_write_level: Power_Level,
+) -> AppConfigFileContent:
+    file_id = f"{root_id}/{relative_path}"
+    root, path, normalised_relative_path = resolve_app_config_path(roots, file_id)
+    if not root.allow_file_creation:
+        raise ValueError(f"Config root does not allow file creation: {root.label}")
+    if normalised_relative_path in root.protected_relative_paths:
+        raise ValueError(f"Config file is managed and cannot be created: {normalised_relative_path}")
+    if path.exists():
+        raise ValueError(f"Config file already exists: {normalised_relative_path}")
+    encoded = content.encode(config.STR_ENCODE)
+    if len(encoded) > MAX_CONFIG_FILE_BYTES:
+        raise ValueError(f"Config file content exceeds {MAX_CONFIG_FILE_BYTES} bytes.")
+
+    root_path = root.resolved_path
+    if root_path.exists() and not root_path.is_dir():
+        raise ValueError(f"Config root is not a directory: {root.label}")
+    root_path.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.parent.resolve().is_relative_to(root_path):
+        raise ValueError(f"Config file escapes root {root.id}: {file_id}")
+    created = False
+    try:
+        with path.open("x", encoding=config.STR_ENCODE) as handle:
+            created = True
+            handle.write(content)
+    except OSError:
+        if created:
+            path.unlink(missing_ok=True)
+        raise
+
+    return AppConfigFileContent(
+        file=_file_metadata(
+            root=root,
+            path=path,
+            relative_path=normalised_relative_path,
+            default_read_level=default_read_level,
+            default_write_level=default_write_level,
+        ),
+        content=content,
+    )
+
+
+def delete_app_config_file(
+    roots: tuple[AppConfigFileRoot, ...],
+    file_id: str,
+    *,
+    default_read_level: Power_Level,
+    default_write_level: Power_Level,
+) -> AppConfigFile:
+    root, path, relative_path = resolve_app_config_path(roots, file_id)
+    _validate_readable_config_file(path)
+    if not root.allow_file_deletion:
+        raise ValueError(f"Config root does not allow file deletion: {root.label}")
+    if relative_path in root.protected_relative_paths:
+        raise ValueError(f"Config file is managed and cannot be deleted: {relative_path}")
+    deleted_file = _file_metadata(
+        root=root,
+        path=path,
+        relative_path=relative_path,
+        default_read_level=default_read_level,
+        default_write_level=default_write_level,
+    )
+    path.unlink()
+    return deleted_file
+
+
 def resolve_app_config_path(roots: tuple[AppConfigFileRoot, ...], file_id: str) -> tuple[AppConfigFileRoot, Path, str]:
     root_id, separator, raw_relative_path = file_id.partition("/")
     if not root_id or not separator or not raw_relative_path:
@@ -191,6 +287,8 @@ def resolve_app_config_path(roots: tuple[AppConfigFileRoot, ...], file_id: str) 
         if relative_path != root_path.name:
             raise ValueError(f"Config file is not in root {root.id}: {file_id}")
         return root, root_path, relative_path
+    if not root.recursive and len(PurePosixPath(relative_path).parts) != 1:
+        raise ValueError(f"Config root does not allow nested files: {file_id}")
 
     candidate = (root_path / relative_path).resolve()
     if not candidate.is_relative_to(root_path):
@@ -250,4 +348,7 @@ def _file_metadata(
         write_power_level=effective_config_root_write_level(root=root, default=default_write_level),
         size_bytes=stat.st_size,
         modified_at=datetime.fromtimestamp(stat.st_mtime),
+        can_write=relative_path not in root.protected_relative_paths,
+        can_delete=root.allow_file_deletion and relative_path not in root.protected_relative_paths,
+        write_notice=root.write_notice,
     )

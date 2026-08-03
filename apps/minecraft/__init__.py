@@ -75,6 +75,7 @@ from apps._settings import (
     ChoiceSpec,
     IntSettingSpec,
     Setting,
+    Setting_Group,
     Setting_Label,
     StringSettingSpec,
 )
@@ -288,9 +289,49 @@ _LEGACY_YUKIBOT_ITEM_ICONS_RELATIVE_PATH = _LEGACY_YUKIBOT_ASSETS_RELATIVE_PATH 
 _YUKIBOT_RECIPES_FILE_NAME = "recipes.json"
 _YUKIBOT_ITEM_REGISTRY_FILE_NAME = "items.json"
 _KUBEJS_SERVER_SCRIPTS_RELATIVE_PATH = Path("kubejs/server_scripts")
+_KUBEJS_STARTUP_SCRIPTS_RELATIVE_PATH = Path("kubejs/startup_scripts")
+_KUBEJS_CLIENT_SCRIPTS_RELATIVE_PATH = Path("kubejs/client_scripts")
 _KUBEJS_YUKI_LOG_SCRIPT_NAME = "yuki_log.js"
 _KUBEJS_YUKI_RECIPES_SCRIPT_NAME = "yuki_recipes.js"
 _KUBEJS_YUKI_ITEM_REGISTRY_SCRIPT_NAME = "yuki_item_registry.js"
+_KUBEJS_SCRIPT_SUFFIXES = frozenset[str]({".js"})
+_KUBEJS_MANAGED_SCRIPT_NAMES = frozenset(
+    {
+        _KUBEJS_YUKI_LOG_SCRIPT_NAME,
+        _KUBEJS_YUKI_RECIPES_SCRIPT_NAME,
+        _KUBEJS_YUKI_ITEM_REGISTRY_SCRIPT_NAME,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _KubeJsScriptConfigRoot:
+    id: str
+    label: str
+    relative_path: Path
+    write_notice: str
+
+
+_KUBEJS_SCRIPT_CONFIG_ROOTS: tuple[_KubeJsScriptConfigRoot, ...] = (
+    _KubeJsScriptConfigRoot(
+        id="kubejs-server-scripts",
+        label="KubeJS Server Scripts",
+        relative_path=_KUBEJS_SERVER_SCRIPTS_RELATIVE_PATH,
+        write_notice="KubeJS server script saved. Run /kubejs reload server_scripts or restart Minecraft.",
+    ),
+    _KubeJsScriptConfigRoot(
+        id="kubejs-startup-scripts",
+        label="KubeJS Startup Scripts",
+        relative_path=_KUBEJS_STARTUP_SCRIPTS_RELATIVE_PATH,
+        write_notice="KubeJS startup script saved. Restart Minecraft to apply it.",
+    ),
+    _KubeJsScriptConfigRoot(
+        id="kubejs-client-scripts",
+        label="KubeJS Client Scripts",
+        relative_path=_KUBEJS_CLIENT_SCRIPTS_RELATIVE_PATH,
+        write_notice="KubeJS client script saved. Restart clients to apply it.",
+    ),
+)
 _KUBEJS_YUKI_LOG_SOURCE_PATH = (
     Path(__file__).resolve().parents[2] / "resources" / "minecraft" / "kubejs" / _KUBEJS_YUKI_LOG_SCRIPT_NAME
 )
@@ -433,6 +474,10 @@ class MinecraftLoader(enum.StrEnum):
         if self is MinecraftLoader.LEGACY_FABRIC:
             return "Legacy Fabric"
         return self.title()
+
+
+class Minecraft_Setting_Group(Setting_Group):
+    computercraft = "ComputerCraft"
 
 
 class MinecraftRecipeKind(enum.StrEnum):
@@ -2669,8 +2714,354 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
 )
 
 
+_COMPUTERCRAFT_PROXY_TYPE_CHOICES = ChoiceSpec(
+    ChoiceOption("HTTP"),
+    ChoiceOption("HTTPS"),
+    ChoiceOption("SOCKS4"),
+    ChoiceOption("SOCKS5"),
+)
+_COMPUTERCRAFT_RULE_ACTION_CHOICES = ChoiceSpec(
+    ChoiceOption("allow", "Allow"),
+    ChoiceOption("deny", "Deny"),
+)
+_COMPUTERCRAFT_MODEM_MAX_RANGE = 100_000
+_COMPUTERCRAFT_CONFIG_FILE_NAME = "computercraft-server.toml"
+_COMPUTERCRAFT_TOML_TABLE_RE = re.compile(
+    r"^\s*(?P<open>\[\[|\[)(?P<path>[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)(?P<close>\]\]|\])\s*(?:#.*)?$"
+)
+_COMPUTERCRAFT_TOML_ASSIGNMENT_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_-]+)(?P<separator>\s*=\s*)(?P<value>.*)$"
+)
+_ComputerCraftTomlScalar: TypeAlias = bool | int | str
+_ComputerCraftSetting: TypeAlias = Setting[bool] | Setting[int] | Setting[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _ComputerCraftTomlTarget:
+    table_path: tuple[str, ...]
+    key: str
+    array_index: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ComputerCraftSettingBinding:
+    setting: _ComputerCraftSetting
+    target: _ComputerCraftTomlTarget
+
+
+def _computer_craft_setting_bindings() -> tuple[_ComputerCraftSettingBinding, ...]:
+    sudo = Power_Level.sudo
+    return (
+        _ComputerCraftSettingBinding(
+            Setting[bool](
+                BoolSettingSpec(),
+                "HTTP Enabled",
+                "computercraft.http.enabled",
+                [],
+                default=True,
+                desc="Enables ComputerCraft's HTTP API, including wget and pastebin.",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("http",), "enabled"),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[bool](
+                BoolSettingSpec(),
+                "HTTP Websockets",
+                "computercraft.http.websocket_enabled",
+                [],
+                default=True,
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("http",), "websocket_enabled"),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[str](
+                StringSettingSpec(_COMPUTERCRAFT_PROXY_TYPE_CHOICES),
+                "HTTP Proxy Type",
+                "computercraft.http.proxy.type",
+                [],
+                default="HTTP",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("http", "proxy"), "type"),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[str](
+                StringSettingSpec(allow_blank=True),
+                "HTTP Proxy Host",
+                "computercraft.http.proxy.host",
+                [],
+                default="",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("http", "proxy"), "host"),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[int](
+                IntSettingSpec(min_value=1, max_value=65_536),
+                "HTTP Proxy Port",
+                "computercraft.http.proxy.port",
+                [],
+                default=8080,
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("http", "proxy"), "port"),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[str](
+                StringSettingSpec(),
+                "HTTP Rule 1 Host",
+                "computercraft.http.rules.0.host",
+                [],
+                default="$private",
+                desc="HTTP rules are evaluated in order, so Rule 1 takes priority over later rules.",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("http", "rules"), "host", array_index=0),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[str](
+                StringSettingSpec(_COMPUTERCRAFT_RULE_ACTION_CHOICES),
+                "HTTP Rule 1 Action",
+                "computercraft.http.rules.0.action",
+                [],
+                default="deny",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("http", "rules"), "action", array_index=0),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[str](
+                StringSettingSpec(),
+                "HTTP Rule 2 Host",
+                "computercraft.http.rules.1.host",
+                [],
+                default="*",
+                desc="HTTP rules are evaluated in order, so Rule 2 only applies after Rule 1.",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("http", "rules"), "host", array_index=1),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[str](
+                StringSettingSpec(_COMPUTERCRAFT_RULE_ACTION_CHOICES),
+                "HTTP Rule 2 Action",
+                "computercraft.http.rules.1.action",
+                [],
+                default="allow",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("http", "rules"), "action", array_index=1),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[bool](
+                BoolSettingSpec(),
+                "Command Block Peripheral",
+                "computercraft.peripheral.command_block_enabled",
+                [],
+                default=False,
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("peripheral",), "command_block_enabled"),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[int](
+                IntSettingSpec(min_value=0, max_value=_COMPUTERCRAFT_MODEM_MAX_RANGE),
+                "Modem Range",
+                "computercraft.peripheral.modem_range",
+                [],
+                default=64,
+                desc="Wireless modem range at low altitude in clear weather, in metres.",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("peripheral",), "modem_range"),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[int](
+                IntSettingSpec(min_value=0, max_value=_COMPUTERCRAFT_MODEM_MAX_RANGE),
+                "High-Altitude Modem Range",
+                "computercraft.peripheral.modem_high_altitude_range",
+                [],
+                default=384,
+                desc="Wireless modem range at maximum altitude in clear weather, in metres.",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("peripheral",), "modem_high_altitude_range"),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[int](
+                IntSettingSpec(min_value=0, max_value=_COMPUTERCRAFT_MODEM_MAX_RANGE),
+                "Storm Modem Range",
+                "computercraft.peripheral.modem_range_during_storm",
+                [],
+                default=64,
+                desc="Wireless modem range at low altitude in stormy weather, in metres.",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("peripheral",), "modem_range_during_storm"),
+        ),
+        _ComputerCraftSettingBinding(
+            Setting[int](
+                IntSettingSpec(min_value=0, max_value=_COMPUTERCRAFT_MODEM_MAX_RANGE),
+                "High-Altitude Storm Modem Range",
+                "computercraft.peripheral.modem_high_altitude_range_during_storm",
+                [],
+                default=384,
+                desc="Wireless modem range at maximum altitude in stormy weather, in metres.",
+                power_level=sudo,
+                group=Minecraft_Setting_Group.computercraft,
+            ),
+            _ComputerCraftTomlTarget(("peripheral",), "modem_high_altitude_range_during_storm"),
+        ),
+    )
+
+
+def _toml_scalar_to_text(value: _ComputerCraftTomlScalar) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    return value
+
+
+def _toml_scalar_to_source(value: _ComputerCraftTomlScalar) -> str:
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    return _toml_scalar_to_text(value)
+
+
+def _computer_craft_toml_value(
+    data: Mapping[str, object], target: _ComputerCraftTomlTarget
+) -> _ComputerCraftTomlScalar:
+    current: object = data
+    for table_key in target.table_path:
+        current_table = _computer_craft_toml_table(current, target.table_path)
+        try:
+            current = current_table[table_key]
+        except KeyError as xcp:
+            raise ValueError(f"ComputerCraft TOML table {'.'.join(target.table_path)!r} is missing.") from xcp
+
+    if target.array_index is not None:
+        if not isinstance(current, list):
+            raise ValueError(f"ComputerCraft TOML table {'.'.join(target.table_path)!r} must be an array.")
+        rules = cast(list[object], current)
+        try:
+            current = rules[target.array_index]
+        except IndexError as xcp:
+            raise ValueError(
+                f"ComputerCraft TOML rule {target.array_index + 1} is missing from {'.'.join(target.table_path)!r}."
+            ) from xcp
+
+    current_table = _computer_craft_toml_table(current, target.table_path)
+    try:
+        value = current_table[target.key]
+    except KeyError as xcp:
+        raise ValueError(
+            f"ComputerCraft TOML setting {'.'.join((*target.table_path, target.key))!r} is missing."
+        ) from xcp
+    if not isinstance(value, (bool, int, str)):
+        raise ValueError(
+            f"ComputerCraft TOML setting {'.'.join((*target.table_path, target.key))!r} must be a string, integer, or boolean."
+        )
+    return value
+
+
+def _computer_craft_toml_table(value: object, table_path: tuple[str, ...]) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"ComputerCraft TOML table {'.'.join(table_path)!r} is invalid.")
+    return cast(Mapping[str, object], value)
+
+
+def _toml_inline_comment_suffix(value: str) -> str:
+    in_basic_string = False
+    escaped = False
+    for index, character in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if in_basic_string and character == "\\":
+            escaped = True
+            continue
+        if character == '"':
+            in_basic_string = not in_basic_string
+            continue
+        if character == "#" and not in_basic_string:
+            content = value[:index].rstrip()
+            return value[len(content) :]
+    return ""
+
+
+def _replace_computer_craft_toml_value(
+    source: str,
+    *,
+    target: _ComputerCraftTomlTarget,
+    value: _ComputerCraftTomlScalar,
+) -> str:
+    lines = source.splitlines(keepends=True)
+    active_table_path: tuple[str, ...] | None = None
+    active_array_index: int | None = None
+    array_indices: dict[tuple[str, ...], int] = {}
+    replacement = _toml_scalar_to_source(value)
+
+    for index, line_with_newline in enumerate(lines):
+        line = line_with_newline.rstrip("\r\n")
+        table_match = _COMPUTERCRAFT_TOML_TABLE_RE.match(line)
+        if table_match is not None:
+            opening = table_match.group("open")
+            closing = table_match.group("close")
+            if (opening, closing) not in {("[", "]"), ("[[", "]]")}:
+                continue
+            active_table_path = tuple(table_match.group("path").split("."))
+            if opening == "[[":
+                active_array_index = array_indices.get(active_table_path, -1) + 1
+                array_indices[active_table_path] = active_array_index
+            else:
+                active_array_index = None
+            continue
+
+        if active_table_path != target.table_path:
+            continue
+        if target.array_index is not None and active_array_index != target.array_index:
+            continue
+        if target.array_index is None and active_array_index is not None:
+            continue
+
+        assignment_match = _COMPUTERCRAFT_TOML_ASSIGNMENT_RE.match(line)
+        if assignment_match is None or assignment_match.group("key") != target.key:
+            continue
+        newline = line_with_newline[len(line) :]
+        comment_suffix = _toml_inline_comment_suffix(assignment_match.group("value"))
+        lines[index] = (
+            f"{assignment_match.group('indent')}{assignment_match.group('key')}"
+            f"{assignment_match.group('separator')}{replacement}{comment_suffix}{newline}"
+        )
+        return "".join(lines)
+
+    target_path = ".".join((*target.table_path, target.key))
+    raise ValueError(f"Unable to find ComputerCraft TOML setting {target_path!r} to save.")
+
+
 class Minecraft_Settings(App_Settings):
     def __init__(self, pointer: Path, *, version_getter: Callable[[], AppVersion | None] | None = None) -> None:
+        self._computer_craft_bindings = _computer_craft_setting_bindings()
+        self._computer_craft_bindings_by_key = {
+            binding.setting.key.casefold(): binding for binding in self._computer_craft_bindings
+        }
+        self._loaded_computer_craft_pointer: Path | None = None
         options = [
             Setting[int](
                 IntSettingSpec(),
@@ -2784,19 +3175,62 @@ class Minecraft_Settings(App_Settings):
                 default="easy",
             ),
         ]
+        self._server_setting_keys = frozenset(setting.key.casefold() for setting in options)
+        options.extend(binding.setting for binding in self._computer_craft_bindings)
         super().__init__(pointer, options, version_getter=version_getter)
+
+    @property
+    def options(self) -> list[Setting]:
+        options = super().options
+        if self._computer_craft_available:
+            return options
+        return [option for option in options if option.key.casefold() not in self._computer_craft_bindings_by_key]
+
+    @property
+    def _computer_craft_available(self) -> bool:
+        return self._loaded_computer_craft_pointer is not None or self._computer_craft_config_path().is_file()
+
+    def _computer_craft_config_path(self) -> Path:
+        level_name = "world"
+        level_name_setting = self._settings_by_key.get("level-name")
+        if level_name_setting is not None and isinstance(level_name_setting.value, str):
+            level_name = level_name_setting.value.strip() or level_name
+        return self.pointer.parent / level_name / "serverconfig" / _COMPUTERCRAFT_CONFIG_FILE_NAME
+
+    def get_setting(self, ident: str) -> Setting | None:
+        setting = super().get_setting(ident)
+        if setting is None:
+            return None
+        if setting.key.casefold() in self._computer_craft_bindings_by_key and not self._computer_craft_available:
+            return None
+        return setting
 
     def load(self) -> None:
         data: str = self.pointer.read_text(config.STR_ENCODE)
         if not data:
             raise ValueError("config must not be empty")
 
-        lines: list[str] = data.split("\n")
-        for line in lines:
-            for opt in self.options:
-                if line.startswith(opt.key):
-                    arg, val = [x.strip() for x in line.split("=", 1)]
-                    opt.load_value(val)
+        for line in data.splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or key.lstrip().startswith("#"):
+                continue
+            setting = self._settings_by_key.get(key.strip().casefold())
+            if setting is None or setting.key.casefold() not in self._server_setting_keys:
+                continue
+            setting.load_value(value.strip())
+
+        computer_craft_pointer = self._computer_craft_config_path()
+        self._loaded_computer_craft_pointer = None
+        if not computer_craft_pointer.is_file():
+            return
+
+        computer_craft_data = cast(
+            Mapping[str, object], tomllib.loads(computer_craft_pointer.read_text(config.STR_ENCODE))
+        )
+        for binding in self._computer_craft_bindings:
+            value = _computer_craft_toml_value(computer_craft_data, binding.target)
+            binding.setting.load_value(_toml_scalar_to_text(value))
+        self._loaded_computer_craft_pointer = computer_craft_pointer
 
     def save(self) -> str:
         data: str = self.pointer.read_text(config.STR_ENCODE)
@@ -2805,14 +3239,43 @@ class Minecraft_Settings(App_Settings):
 
         lines: list[str] = data.split("\n")
         for idx, line in enumerate[str](lines):
-            for opt in self.options:
-                if line.startswith(opt.key):
-                    arg, val = [x.strip() for x in line.split("=", 1)]
-                    lines[idx] = f"{arg}={opt.serialise_value()}"
+            key, separator, _ = line.partition("=")
+            if not separator or key.lstrip().startswith("#"):
+                continue
+            setting = self._settings_by_key.get(key.strip().casefold())
+            if setting is None or setting.key.casefold() not in self._server_setting_keys:
+                continue
+            lines[idx] = f"{key.strip()}={setting.serialise_value()}"
+
+        self._save_computer_craft_settings()
 
         string: str = "\n".join(lines)
         self.pointer.write_text(string, config.STR_ENCODE)
         return data
+
+    def _save_computer_craft_settings(self) -> None:
+        computer_craft_pointer = self._loaded_computer_craft_pointer
+        if computer_craft_pointer is None:
+            return
+
+        source = computer_craft_pointer.read_text(config.STR_ENCODE)
+        computer_craft_data = cast(Mapping[str, object], tomllib.loads(source))
+        updated_source = source
+        for binding in self._computer_craft_bindings:
+            current_value = _computer_craft_toml_value(computer_craft_data, binding.target)
+            setting_value = binding.setting.value
+            if isinstance(setting_value, hikari.UndefinedType):
+                raise ValueError(f"ComputerCraft setting {binding.setting.label!r} has not been loaded.")
+            if type(current_value) is type(setting_value) and current_value == setting_value:
+                continue
+            updated_source = _replace_computer_craft_toml_value(
+                updated_source,
+                target=binding.target,
+                value=setting_value,
+            )
+
+        if updated_source != source:
+            computer_craft_pointer.write_text(updated_source, config.STR_ENCODE)
 
 
 class Minecraft_Config(App_Config):
@@ -2918,7 +3381,7 @@ class Minecraft(App[Minecraft_Config]):
 
     @property
     def config_file_roots(self) -> tuple[AppConfigFileRoot, ...]:
-        return (
+        roots: list[AppConfigFileRoot] = [
             AppConfigFileRoot(
                 id="server",
                 label="Server Properties",
@@ -2940,7 +3403,25 @@ class Minecraft(App[Minecraft_Config]):
                 path=self._world_directory_path() / "serverconfig",
                 kind=AppConfigFileKind.GAME,
             ),
-        )
+        ]
+        if self._has_enabled_kubejs_mod():
+            roots.extend(
+                AppConfigFileRoot(
+                    id=script_root.id,
+                    label=script_root.label,
+                    path=self.directory / script_root.relative_path,
+                    kind=AppConfigFileKind.MOD,
+                    suffixes=_KUBEJS_SCRIPT_SUFFIXES,
+                    read_power_level_override=Power_Level.sudo,
+                    write_power_level_override=Power_Level.sudo,
+                    allow_file_creation=True,
+                    allow_file_deletion=True,
+                    protected_relative_paths=_KUBEJS_MANAGED_SCRIPT_NAMES,
+                    write_notice=script_root.write_notice,
+                )
+                for script_root in _KUBEJS_SCRIPT_CONFIG_ROOTS
+            )
+        return tuple(roots)
 
     @property
     def save_file_roots(self) -> tuple[AppSaveRoot, ...]:
@@ -3072,9 +3553,10 @@ class Minecraft(App[Minecraft_Config]):
         return self._squaremap_public_url()
 
     def _has_enabled_matching_mod(self, matcher: Callable[[str], bool]) -> bool:
-        if self.mods is None:
+        mods = getattr(self, "mods", None)
+        if mods is None:
             return False
-        return any(matcher(mod.name) for mod in self.mods.list_mods(True))
+        return any(matcher(mod.name) for mod in mods.list_mods(True))
 
     def _has_squaremap_mod(self) -> bool:
         return self._has_enabled_matching_mod(_is_squaremap_mod_name)

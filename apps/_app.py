@@ -43,6 +43,8 @@ from apps._config_files import (
     AppConfigFile,
     AppConfigFileContent,
     AppConfigFileRoot,
+    create_app_config_file,
+    delete_app_config_file,
     effective_config_root_read_level,
     effective_config_root_write_level,
     list_app_config_files,
@@ -1159,6 +1161,24 @@ class App(Generic[ConfigT], ABC):
             self.config_file_roots,
             file_id,
             content,
+            default_read_level=self.config_file_read_level,
+            default_write_level=self.config_file_write_level,
+        )
+
+    def create_config_file(self, *, root_id: str, relative_path: str, content: str) -> AppConfigFileContent:
+        return create_app_config_file(
+            self.config_file_roots,
+            root_id,
+            relative_path,
+            content,
+            default_read_level=self.config_file_read_level,
+            default_write_level=self.config_file_write_level,
+        )
+
+    def delete_config_file(self, file_id: str) -> AppConfigFile:
+        return delete_app_config_file(
+            self.config_file_roots,
+            file_id,
             default_read_level=self.config_file_read_level,
             default_write_level=self.config_file_write_level,
         )

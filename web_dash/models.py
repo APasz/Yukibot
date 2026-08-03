@@ -73,6 +73,7 @@ from .runtime_imports import (
     NodeBlueprintMutationResult,
     NodeConfigContent,
     NodeConfigList,
+    NodeConfigMutationResult,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
@@ -2159,6 +2160,47 @@ class ModWebModelsMixin(ModWebServiceSupport):
             json_payload={"content": content},
         )
         return NodeConfigContent.from_mapping(payload)
+
+    async def _remote_config_create_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        root_id: str,
+        relative_path: str,
+        content: str,
+        user: ModWebUser,
+    ) -> NodeConfigContent:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/configs",
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "root_id": root_id,
+                "relative_path": relative_path,
+                "content": content,
+            },
+        )
+        return NodeConfigContent.from_mapping(payload)
+
+    async def _remote_config_delete_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        config_id: str,
+        user: ModWebUser,
+    ) -> NodeConfigMutationResult:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/configs/{quote(config_id, safe='/')}",
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            user=user,
+            method="DELETE",
+        )
+        return NodeConfigMutationResult.from_mapping(payload)
 
     async def _remote_setting_list_async(
         self,

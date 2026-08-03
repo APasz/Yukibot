@@ -2405,6 +2405,22 @@ class ModWebTheme:
                     color: var(--mod-accent-text) !important;
                     opacity: 1;
                 }}
+                .mod-settings-search .q-field__label,
+                .mod-settings-search .q-field__native,
+                .mod-settings-search .q-field__input,
+                .mod-settings-search .q-field__append,
+                .mod-settings-search .q-field__prepend,
+                .mod-settings-search .q-field__marginal,
+                .mod-settings-search .q-icon {{
+                    color: var(--mod-text) !important;
+                    -webkit-text-fill-color: var(--mod-text) !important;
+                }}
+                .mod-settings-search .q-field__native::placeholder,
+                .mod-settings-search input::placeholder {{
+                    color: var(--mod-text) !important;
+                    -webkit-text-fill-color: var(--mod-text) !important;
+                    opacity: 1;
+                }}
                 .mod-tab-toolbar-actions {{
                     display: flex;
                     gap: 0.5rem;
@@ -2470,6 +2486,31 @@ class ModWebTheme:
                     display: flex;
                     flex-direction: column;
                     gap: 0.55rem;
+                }}
+                .mod-settings-group-divider {{
+                    display: flex;
+                    align-items: center;
+                    gap: 0.7rem;
+                    min-height: 1.75rem;
+                    padding: 0.4rem 0 0.05rem;
+                }}
+                .mod-settings-group-divider::before,
+                .mod-settings-group-divider::after {{
+                    content: "";
+                    flex: 1 1 auto;
+                    height: 1px;
+                    background: linear-gradient(90deg, transparent, var(--mod-accent-faint));
+                }}
+                .mod-settings-group-divider::after {{
+                    background: linear-gradient(90deg, var(--mod-accent-faint), transparent);
+                }}
+                .mod-settings-group-divider-label {{
+                    color: var(--mod-accent-text-strong) !important;
+                    font-size: 0.68rem !important;
+                    font-weight: 900 !important;
+                    letter-spacing: 0.1em;
+                    text-transform: uppercase;
+                    white-space: nowrap;
                 }}
                 .mod-setting-card {{
                     border-radius: 0 !important;

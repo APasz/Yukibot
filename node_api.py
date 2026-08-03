@@ -143,6 +143,7 @@ from node_api_core_routes import register_core_routes
 from node_api_files import (
     NodeConfigContent,
     NodeConfigList,
+    NodeConfigMutationResult,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveMutationResult,
@@ -3269,6 +3270,24 @@ class NodeApiService:
 
     def write_config_file(self, *, app: App, config_id: str, content: str) -> NodeConfigContent:
         return self._storage.write_config_file(app=app, config_id=config_id, content=content)
+
+    def create_config_file(
+        self,
+        *,
+        app: App,
+        root_id: str,
+        relative_path: str,
+        content: str,
+    ) -> NodeConfigContent:
+        return self._storage.create_config_file(
+            app=app,
+            root_id=root_id,
+            relative_path=relative_path,
+            content=content,
+        )
+
+    def delete_config_file(self, *, app: App, config_id: str) -> NodeConfigMutationResult:
+        return self._storage.delete_config_file(app=app, config_id=config_id)
 
     def factorio_generation_state(self, *, app: App) -> NodeFactorioGenerationState:
         return self._factorio.generation_state(app=app)

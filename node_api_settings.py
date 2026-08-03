@@ -64,6 +64,12 @@ class NodeSettingEntry:
     strict_choice: bool
     choices: tuple[NodeSettingChoice, ...]
     recent_inputs: tuple[str, ...]
+    group_id: str | None = None
+    group_label: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.group_id is None) != (self.group_label is None):
+            raise ValueError("Node setting group id and label must either both be set or both be absent.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeSettingEntry:
@@ -95,6 +101,8 @@ class NodeSettingEntry:
         has_pending_value = payload.get("has_pending_value", False)
         if not isinstance(has_pending_value, bool):
             raise ValueError("Node setting entry has_pending_value is invalid.")
+        group_id = _optional_string(payload, "group_id")
+        group_label = _optional_string(payload, "group_label")
 
         return cls(
             key=_required_string(payload, "key"),
@@ -118,6 +126,8 @@ class NodeSettingEntry:
             strict_choice=_required_bool(payload, "strict_choice"),
             choices=tuple(choices),
             recent_inputs=tuple(recent_inputs),
+            group_id=group_id,
+            group_label=group_label,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -143,6 +153,8 @@ class NodeSettingEntry:
             "strict_choice": self.strict_choice,
             "choices": [choice.to_mapping() for choice in self.choices],
             "recent_inputs": list(self.recent_inputs),
+            "group_id": self.group_id,
+            "group_label": self.group_label,
         }
 
 

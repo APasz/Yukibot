@@ -51,6 +51,8 @@ from .runtime_imports import (
     NodeConfigContent,
     NodeConfigEntry,
     NodeConfigList,
+    NodeConfigMutationResult,
+    NodeConfigRootEntry,
     NodeConsoleActionEntry,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
@@ -1952,11 +1954,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return
 
         setting_options: tuple[ModWebSearchOption, ...] = self._setting_options(settings.settings)
+        setting_group_options: dict[str, str] = self._setting_group_options(settings.settings)
         draft_values: dict[str, bool | str] = {}
         invalid_setting_keys: set[str] = set[str]()
         save_button: Button | None = None
         reload_button: Button | None = None
         search_query_text: str = model.search_query
+        setting_group_id: str | None = None
         setting_page_number = 1
         required_save_level: Power_Level = (
             Access_Control.parse_level(settings.required_save_level_name) or Power_Level.user
@@ -2083,6 +2087,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 settings=settings.settings,
                 options=setting_options,
                 search_query=search_query,
+                group_id=setting_group_id,
             )
             if not filtered_settings:
                 with ui.card().classes("mod-setting-card locked w-full"):
@@ -2099,9 +2104,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             visible_settings: tuple[NodeSettingEntry, ...] = filtered_settings[
                 page_start : page_start + _SERVER_RENDERED_LIST_PAGE_SIZE
             ]
+            setting_group_dividers: dict[int, str] = dict(self._setting_group_dividers(visible_settings))
 
             with ui.column().classes("mod-settings-grid w-full"):
-                for setting in visible_settings:
+                for index, setting in enumerate(visible_settings):
+                    group_label = setting_group_dividers.get(index)
+                    if group_label is not None:
+                        with ui.element("div").classes("mod-settings-group-divider w-full"):
+                            ui.label(group_label).classes("mod-settings-group-divider-label")
                     self._render_setting_card(
                         ui=ui,
                         setting=setting,
@@ -2146,6 +2156,23 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         _setting_card_list.refresh(search_query_text)
 
                     search_input.on("keydown.enter", _submit_setting_search)
+                    if setting_group_options:
+                        def _select_setting_group(event: ModWebValueContainer) -> None:
+                            nonlocal setting_group_id, setting_page_number
+                            selected_group_id = _value_as_object(event)
+                            if selected_group_id is not None and not isinstance(selected_group_id, str):
+                                raise TypeError("Settings group filter must be a string or empty.")
+                            setting_group_id = selected_group_id or None
+                            setting_page_number = 1
+                            _setting_card_list.refresh(search_query_text)
+
+                        ui.select(
+                            setting_group_options,
+                            label="Group",
+                            on_change=_select_setting_group,
+                        ).props(self._setting_select_props()).classes(
+                            "mod-config-search mod-settings-search"
+                        )
                     with ui.row().classes("mod-tab-toolbar-actions mod-inline-toolbar-actions"):
                         reload_button = ui.button("Reload", on_click=reload_settings).classes(
                             "mod-list-button secondary"
@@ -2378,20 +2405,122 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return
 
         configs: tuple[NodeConfigEntry, ...] = model.configs.configs
+        creatable_roots: tuple[NodeConfigRootEntry, ...] = tuple(
+            root
+            for root in model.configs.roots
+            if root.can_create and self._user_has_level(user, root.write_power_level)
+        )
         can_write = (
             any(self._user_has_level(user, entry.write_power_level) for entry in configs)
             if configs
             else app_level_can_write
         )
         is_factorio_app: bool = model.app_scope == config.AppScopes.factorio.value
-        if not configs and not is_factorio_app:
-            self._render_flat_tab_empty_state(
-                ui=ui,
-                title="Configs",
-                description="No config files are currently indexed for this app.",
-                detail_text="Add a readable config root to populate this tab.",
-                notepad=True,
+
+        create_dialog: Dialog | None = None
+        create_root_select: Select | None = None
+        create_path_input: Input | None = None
+        create_submit_button: Button | None = None
+
+        async def _create_selected_config() -> None:
+            if create_dialog is None or create_root_select is None or create_path_input is None:
+                raise ValueError("Config creation dialog controls are not available.")
+            root_id: str = _value_as_text(create_root_select).strip()
+            relative_path: str = _value_as_text(create_path_input).strip()
+            if not root_id:
+                ui.notify("Select a config area first.", type="warning")
+                return
+            if not relative_path:
+                ui.notify("Enter a file path first.", type="warning")
+                return
+            try:
+                created: NodeConfigContent = await self._create_config_file(
+                    model=model,
+                    root_id=root_id,
+                    relative_path=relative_path,
+                    content="",
+                    user=user,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Config create failed: node=%s app=%s root=%s path=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    root_id,
+                    relative_path,
+                    xcp,
+                )
+                ui.notify(f"Config create failed: {xcp}", type="negative")
+                return
+            create_dialog.close()
+            ui.notify(
+                f"Created {created.config.root_label} / {created.config.relative_path}.",
+                type="positive",
             )
+            self._guarded_reload(ui=ui)
+
+        async def create_selected_config() -> None:
+            if create_submit_button is None:
+                raise ValueError("Config creation submit button is not available.")
+            await self._run_with_loading_button(button=create_submit_button, action=_create_selected_config)
+
+        def open_create_config_dialog() -> None:
+            nonlocal create_dialog, create_root_select, create_path_input, create_submit_button
+            if create_dialog is None:
+                with ui.dialog() as created_dialog:
+                    create_dialog = created_dialog
+                    with ui.card().classes("mod-card mod-dialog-card"):
+                        with ui.column().classes("w-full gap-4 p-5"):
+                            with ui.column().classes("gap-1"):
+                                ui.label("Create Config File").classes("text-xl font-black mod-title-small")
+                                ui.label(
+                                    "The selected area controls which file types may be created."
+                                ).classes("mod-subtitle text-sm")
+                            create_root_select = (
+                                ui.select(
+                                    {root.id: root.label for root in creatable_roots},
+                                    label="Config Area",
+                                    value=creatable_roots[0].id,
+                                )
+                                .props(self._config_select_props(clearable=False))
+                                .classes("w-full")
+                            )
+                            create_path_input = (
+                                ui.input(label="File path", placeholder="example.js")
+                                .props("filled square dense clearable hide-bottom-space color=accent")
+                                .classes("w-full")
+                            )
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                ui.button("Cancel", on_click=created_dialog.close).classes("mod-list-button secondary")
+                                create_submit_button = ui.button(
+                                    "Create", on_click=create_selected_config
+                                ).classes("mod-list-button")
+            create_dialog.open()
+
+        def render_create_config_button() -> None:
+            if creatable_roots:
+                ui.button("New File", on_click=open_create_config_dialog).classes("mod-list-button")
+
+        if not configs and not is_factorio_app:
+            if not creatable_roots:
+                self._render_flat_tab_empty_state(
+                    ui=ui,
+                    title="Configs",
+                    description="No config files are currently indexed for this app.",
+                    detail_text="Add a readable config root to populate this tab.",
+                    notepad=True,
+                )
+                return
+            with ui.card().classes(self._flat_tab_card_classes(notepad=True)):
+                with ui.column().classes(self._tab_section_body_classes()):
+                    self._render_flat_tab_header(
+                        ui=ui,
+                        title="Configs",
+                        description="No files are currently indexed for this app.",
+                        secondary_description="Create a file in one of the available config areas to get started.",
+                    )
+                    with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
+                        render_create_config_button()
             return
         if not configs:
             self._render_factorio_mod_settings_panel(ui=ui, model=model, user=user, can_write=can_write)
@@ -2407,14 +2536,44 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         }
 
         config_select: Select | None = None
+        save_button: Button | None = None
+        delete_button: Button | None = None
+
+        def selected_config_entry() -> NodeConfigEntry | None:
+            return config_by_id.get(state["config_id"])
+
+        def update_selected_config_action_controls() -> None:
+            selected_entry = selected_config_entry()
+            can_save_selected = (
+                selected_entry is not None
+                and selected_entry.can_write
+                and self._user_has_level(user, selected_entry.write_power_level)
+            )
+            can_delete_selected = (
+                selected_entry is not None
+                and selected_entry.can_delete
+                and self._user_has_level(user, selected_entry.write_power_level)
+            )
+            if save_button is not None:
+                if can_save_selected:
+                    save_button.enable()
+                else:
+                    save_button.disable()
+            if delete_button is not None:
+                if can_delete_selected:
+                    delete_button.enable()
+                else:
+                    delete_button.disable()
 
         def set_selected_config(config_id: str | None) -> None:
             state["config_id"] = config_id or ""
             if not config_id:
+                update_selected_config_action_controls()
                 return
             selected_entry: NodeConfigEntry | None = config_by_id.get(config_id)
             if selected_entry is not None:
                 state["root_id"] = selected_entry.root_id
+            update_selected_config_action_controls()
 
         async def load_config(config_id: str, *, notify: bool = False) -> None:
             if not config_id:
@@ -2451,6 +2610,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if not config_id:
                 ui.notify("Select a config file first.", type="warning")
                 return
+            selected_entry = selected_config_entry()
+            if selected_entry is None:
+                ui.notify("The selected config file is no longer available.", type="warning")
+                return
+            if not selected_entry.can_write:
+                ui.notify("This file is managed by YukiBot and cannot be edited here.", type="warning")
+                return
             required_level = self._config_write_level_for_id(model=model, config_id=config_id)
             if not self._user_has_level(user, required_level):
                 ui.notify(
@@ -2477,7 +2643,71 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 return
             loaded_label.set_text(f"{saved.config.root_label} / {saved.config.relative_path}")
             meta_label.set_text(f"{saved.config.size_text} · modified {saved.config.modified_at}")
-            ui.notify("Config saved.", type="positive")
+            ui.notify(saved.config.write_notice or "Config saved.", type="positive")
+
+        delete_dialog: Dialog | None = None
+        delete_submit_button: Button | None = None
+
+        async def _delete_selected_config() -> None:
+            config_id: str = state["config_id"]
+            selected_entry = selected_config_entry()
+            if not config_id or selected_entry is None:
+                ui.notify("Select a config file first.", type="warning")
+                return
+            if not selected_entry.can_delete:
+                ui.notify("This config file cannot be deleted.", type="warning")
+                return
+            required_level = self._config_write_level_for_id(model=model, config_id=config_id)
+            if not self._user_has_level(user, required_level):
+                ui.notify(
+                    f"{required_level.name.title()} access is required to delete this config file.",
+                    type="warning",
+                )
+                return
+            try:
+                deleted: NodeConfigMutationResult = await self._delete_config_file(
+                    model=model,
+                    config_id=config_id,
+                    user=user,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Config delete failed: node=%s app=%s config=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    config_id,
+                    xcp,
+                )
+                ui.notify(f"Config delete failed: {xcp}", type="negative")
+                return
+            if delete_dialog is not None:
+                delete_dialog.close()
+            ui.notify(deleted.message, type="positive")
+            self._guarded_reload(ui=ui)
+
+        async def delete_selected_config() -> None:
+            if delete_submit_button is None:
+                raise ValueError("Config deletion submit button is not available.")
+            await self._run_with_loading_button(button=delete_submit_button, action=_delete_selected_config)
+
+        def open_delete_config_dialog() -> None:
+            nonlocal delete_dialog, delete_submit_button
+            if delete_dialog is None:
+                with ui.dialog() as created_dialog:
+                    delete_dialog = created_dialog
+                    with ui.card().classes("mod-card mod-dialog-card"):
+                        with ui.column().classes("w-full gap-4 p-5"):
+                            with ui.column().classes("gap-1"):
+                                ui.label("Delete Config File").classes("text-xl font-black mod-title-small")
+                                ui.label(
+                                    "Permanently delete the selected config file? This cannot be undone."
+                                ).classes("mod-subtitle text-sm")
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                ui.button("Cancel", on_click=created_dialog.close).classes("mod-list-button secondary")
+                                delete_submit_button = ui.button(
+                                    "Delete", on_click=delete_selected_config
+                                ).classes("mod-list-button danger")
+            delete_dialog.open()
 
         async def download_selected_root() -> None:
             root_id: str = state["root_id"]
@@ -2579,11 +2809,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     with ui.row().classes("mod-tab-toolbar-actions"):
                         ui.button("Reload", on_click=load_selected_config).classes("mod-list-button secondary")
                         ui.button("Download All", on_click=download_selected_root).classes("mod-list-button secondary")
-                        save_button: Button = ui.button("Save", on_click=save_selected_config).classes(
-                            "mod-list-button"
+                        render_create_config_button()
+                        save_button = ui.button("Save", on_click=save_selected_config).classes("mod-list-button")
+                        delete_button = ui.button("Delete", on_click=open_delete_config_dialog).classes(
+                            "mod-list-button danger"
                         )
-                        if not can_write:
-                            save_button.disable()
+                        update_selected_config_action_controls()
                 with ui.column().classes("mod-config-editor-shell relative w-full"):
                     editor: CodeMirror = ui.codemirror(
                         value="",
@@ -2751,6 +2982,38 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await self._remote_config_write_async(node, model.app_name, config_id, content, user)
+
+    async def _create_config_file(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        root_id: str,
+        relative_path: str,
+        content: str,
+        user: ModWebUser,
+    ) -> NodeConfigContent:
+        required_level: Power_Level = self._config_write_level_for_root(model=model, root_id=root_id)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(
+                f"{required_level.name.title()} access is required to create config files for {model.app_friendly}."
+            )
+        node: ModWebNodeLink = self._remote_node_link(model.node_name)
+        return await self._remote_config_create_async(node, model.app_name, root_id, relative_path, content, user)
+
+    async def _delete_config_file(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        config_id: str,
+        user: ModWebUser,
+    ) -> NodeConfigMutationResult:
+        required_level: Power_Level = self._config_write_level_for_id(model=model, config_id=config_id)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(
+                f"{required_level.name.title()} access is required to delete config files for {model.app_friendly}."
+            )
+        node: ModWebNodeLink = self._remote_node_link(model.node_name)
+        return await self._remote_config_delete_async(node, model.app_name, config_id, user)
 
     async def _download_save(
         self,
@@ -3357,6 +3620,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 return config_entry.write_power_level
         return model.config_write_level
 
+    def _config_write_level_for_root(self, *, model: ModWebBasePageModel, root_id: str) -> Power_Level:
+        for root in model.configs.roots:
+            if root.id == root_id:
+                return root.write_power_level
+        return model.config_write_level
+
     @staticmethod
     def _hex_color_to_rgba(color_hex: str, *, alpha: float) -> str:
         if len(color_hex) != 7 or not color_hex.startswith("#"):
@@ -3692,7 +3961,28 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _setting_search_text(entry: NodeSettingEntry) -> str:
-        return " ".join(filter(None, (entry.label, entry.key))).casefold()
+        return " ".join(filter(None, (entry.label, entry.key, entry.group_label))).casefold()
+
+    @staticmethod
+    def _setting_group_options(settings: tuple[NodeSettingEntry, ...]) -> dict[str, str]:
+        groups: dict[str, str] = {}
+        for setting in settings:
+            if setting.group_id is None or setting.group_label is None:
+                continue
+            groups.setdefault(setting.group_id, setting.group_label)
+        return groups
+
+    @staticmethod
+    def _setting_group_dividers(settings: tuple[NodeSettingEntry, ...]) -> tuple[tuple[int, str], ...]:
+        previous_group_id: str | None = None
+        dividers: list[tuple[int, str]] = []
+        for index, setting in enumerate(settings):
+            if setting.group_id == previous_group_id:
+                continue
+            previous_group_id = setting.group_id
+            if setting.group_label is not None:
+                dividers.append((index, setting.group_label))
+        return tuple(dividers)
 
     @classmethod
     def _setting_options(cls, settings: tuple[NodeSettingEntry, ...]) -> tuple[ModWebSearchOption, ...]:
@@ -3753,6 +4043,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         settings: tuple[NodeSettingEntry, ...],
         options: tuple[ModWebSearchOption, ...],
         search_query: str,
+        group_id: str | None = None,
     ) -> tuple[NodeSettingEntry, ...]:
         matching_ids: set[str] = {
             option.option_id for option in cls._matching_search_options(options=options, search_query=search_query)
@@ -3760,7 +4051,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if not matching_ids and cls._search_query_tokens(search_query):
             return ()
         return tuple[NodeSettingEntry, ...](
-            setting for setting in settings if setting.key in matching_ids or not matching_ids
+            setting
+            for setting in settings
+            if (group_id is None or setting.group_id == group_id) and (setting.key in matching_ids or not matching_ids)
         )
 
     @classmethod

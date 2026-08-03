@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -16,6 +17,7 @@ from apps._settings import (
     ForcedSettingState,
     IntSettingSpec,
     Setting,
+    Setting_Group,
     Setting_Label,
     SettingStateForceRule,
     Settings_Manager,
@@ -25,6 +27,11 @@ from apps.factorio import Factorio_Settings
 from apps.minecraft import Minecraft_Settings
 from apps.sevendays import SevenDays_Settings
 from cmd_app import AppManageMode, AppManageState, _state_from_value, _state_value
+
+
+class _TestSettingGroup(Setting_Group):
+    network = "Network"
+    proxy = "Proxy"
 
 
 def _write_sevendays_xml_files(
@@ -101,6 +108,53 @@ class SettingTests(unittest.TestCase):
         self.assertEqual(
             setting.choice_items(),
             (("Enabled", "true"), ("Disabled", "false")),
+        )
+
+    def test_setting_groups_sort_before_setting_labels(self) -> None:
+        class _GroupedSettings(App_Settings):
+            def load(self) -> None:
+                return None
+
+            def save(self) -> None:
+                return None
+
+        with TemporaryDirectory() as temp_dir:
+            pointer = Path(temp_dir) / "settings.json"
+            pointer.write_text("{}", encoding="utf-8")
+            settings = _GroupedSettings(
+                pointer,
+                [
+                    Setting(StringSettingSpec(), "Zulu", "ungrouped", [], default=""),
+                    Setting(
+                        StringSettingSpec(),
+                        "Zulu",
+                        "http-zulu",
+                        [],
+                        default="",
+                        group=_TestSettingGroup.network,
+                    ),
+                    Setting(
+                        StringSettingSpec(),
+                        "Alpha",
+                        "http-alpha",
+                        [],
+                        default="",
+                        group=_TestSettingGroup.network,
+                    ),
+                    Setting(
+                        StringSettingSpec(),
+                        "Alpha",
+                        "proxy-alpha",
+                        [],
+                        default="",
+                        group=_TestSettingGroup.proxy,
+                    ),
+                ],
+            )
+
+        self.assertEqual(
+            [setting.key for setting in settings.options],
+            ["ungrouped", "http-alpha", "http-zulu", "proxy-alpha"],
         )
 
     def test_spec_based_setting_exposes_sensitive_and_blank_metadata(self) -> None:
@@ -611,6 +665,113 @@ class SettingTests(unittest.TestCase):
             self.assertIn("pvp=false", saved)
             self.assertIn("view-distance=12", saved)
             self.assertIn("spawn-protection=0", saved)
+
+    def test_minecraft_settings_round_trip_computercraft_server_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pointer = root / "server.properties"
+            pointer.write_text("level-name=world\n", encoding="utf-8")
+            computer_craft_pointer = root / "world" / "serverconfig" / "computercraft-server.toml"
+            computer_craft_pointer.parent.mkdir(parents=True)
+            computer_craft_pointer.write_text(
+                "\n".join(
+                    (
+                        "[http]",
+                        "enabled = true",
+                        "websocket_enabled = true",
+                        "",
+                        "[http.proxy]",
+                        'type = "HTTP"',
+                        'host = "" # Proxy hostname',
+                        "port = 8080",
+                        "",
+                        "[[http.rules]]",
+                        'host = "$private"',
+                        'action = "deny"',
+                        "",
+                        "[[http.rules]]",
+                        'host = "*"',
+                        'action = "allow"',
+                        "",
+                        "[peripheral]",
+                        "command_block_enabled = false",
+                        "modem_range = 64",
+                        "modem_high_altitude_range = 384",
+                        "modem_range_during_storm = 64",
+                        "modem_high_altitude_range_during_storm = 384",
+                        'unmanaged_setting = "preserved"',
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            settings = Minecraft_Settings(pointer)
+            updates = {
+                "computercraft.http.enabled": "false",
+                "computercraft.http.websocket_enabled": "false",
+                "computercraft.http.proxy.type": "SOCKS5",
+                "computercraft.http.proxy.host": "proxy.example.test",
+                "computercraft.http.proxy.port": "1080",
+                "computercraft.http.rules.0.host": "10.0.0.0/8",
+                "computercraft.http.rules.0.action": "allow",
+                "computercraft.http.rules.1.host": "*.example.test",
+                "computercraft.http.rules.1.action": "deny",
+                "computercraft.peripheral.command_block_enabled": "true",
+                "computercraft.peripheral.modem_range": "128",
+                "computercraft.peripheral.modem_high_altitude_range": "512",
+                "computercraft.peripheral.modem_range_during_storm": "96",
+                "computercraft.peripheral.modem_high_altitude_range_during_storm": "256",
+            }
+            for key, value in updates.items():
+                setting = settings.get_setting(key)
+                if setting is None:
+                    raise AssertionError(f"Missing setting {key}")
+                setting.update(value)
+
+            settings.save()
+
+            saved_source = computer_craft_pointer.read_text(encoding="utf-8")
+            saved = tomllib.loads(saved_source)
+            self.assertEqual(
+                saved,
+                {
+                    "http": {
+                        "enabled": False,
+                        "websocket_enabled": False,
+                        "proxy": {
+                            "type": "SOCKS5",
+                            "host": "proxy.example.test",
+                            "port": 1080,
+                        },
+                        "rules": [
+                            {"host": "10.0.0.0/8", "action": "allow"},
+                            {"host": "*.example.test", "action": "deny"},
+                        ],
+                    },
+                    "peripheral": {
+                        "command_block_enabled": True,
+                        "modem_range": 128,
+                        "modem_high_altitude_range": 512,
+                        "modem_range_during_storm": 96,
+                        "modem_high_altitude_range_during_storm": 256,
+                        "unmanaged_setting": "preserved",
+                    },
+                },
+            )
+            self.assertIn('# Proxy hostname', saved_source)
+
+    def test_minecraft_settings_hide_computercraft_controls_without_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pointer = Path(temp_dir) / "server.properties"
+            pointer.write_text("level-name=world\n", encoding="utf-8")
+
+            settings = Minecraft_Settings(pointer)
+
+            self.assertIsNone(settings.get_setting("computercraft.http.enabled"))
+            self.assertNotIn(
+                "computercraft.http.enabled",
+                {setting.key for setting in settings.options},
+            )
 
     def test_sevendays_settings_register_and_save_extended_server_config(self) -> None:
         property_values = {

@@ -12,7 +12,13 @@ from _security import Access_Control
 from _utils import Utilities
 from apps._app import App
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
-from node_api_files import NodeConfigContent, NodeConfigEntry, NodeConfigList
+from node_api_files import (
+    NodeConfigContent,
+    NodeConfigEntry,
+    NodeConfigList,
+    NodeConfigMutationResult,
+    NodeConfigRootEntry,
+)
 
 
 class NodeStorageService:
@@ -48,6 +54,7 @@ class NodeStorageService:
             app_friendly=app.friendly,
             node=self._node_name(),
             configs=tuple(self._config_entry(config_file) for config_file in configs),
+            roots=tuple(self._config_root_entry(app=app, root=root) for root in self._visible_config_roots(app=app, actor_user_id=actor_user_id)),
         )
 
     def read_config_file(self, *, app: App, config_id: str) -> NodeConfigContent:
@@ -76,6 +83,51 @@ class NodeStorageService:
         )
         self._invalidate_client_pack_content(app)
         return self._config_content(app=app, content=updated)
+
+    def create_config_file(
+        self,
+        *,
+        app: App,
+        root_id: str,
+        relative_path: str,
+        content: str,
+    ) -> NodeConfigContent:
+        try:
+            created = app.create_config_file(root_id=root_id, relative_path=relative_path, content=content)
+        except FileNotFoundError as xcp:
+            raise self._http_exception(404, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise self._http_exception(400, str(xcp)) from xcp
+        self._traffic_log.info(
+            "Node API created config file: node=%s app=%s config=%s",
+            self._node_name(),
+            app.name,
+            created.file.id,
+        )
+        self._invalidate_client_pack_content(app)
+        return self._config_content(app=app, content=created)
+
+    def delete_config_file(self, *, app: App, config_id: str) -> NodeConfigMutationResult:
+        try:
+            deleted = app.delete_config_file(config_id)
+        except FileNotFoundError as xcp:
+            raise self._http_exception(404, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise self._http_exception(400, str(xcp)) from xcp
+        self._traffic_log.info(
+            "Node API deleted config file: node=%s app=%s config=%s",
+            self._node_name(),
+            app.name,
+            deleted.id,
+        )
+        self._invalidate_client_pack_content(app)
+        return NodeConfigMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self._node_name(),
+            config_id=deleted.id,
+            message=f"Deleted {deleted.root_label} / {deleted.relative_path}.",
+        )
 
     async def build_config_root_download_response(
         self,
@@ -156,6 +208,19 @@ class NodeStorageService:
             if acl.can(actor_user_id, config_file.read_power_level)
         )
 
+    def _visible_config_roots(
+        self, *, app: App, actor_user_id: int | None
+    ) -> tuple[AppConfigFileRoot, ...]:
+        roots = app.config_file_roots
+        acl = self._current_acl()
+        if actor_user_id is None or acl is None:
+            return roots
+        return tuple(
+            root
+            for root in roots
+            if acl.can(actor_user_id, app.config_file_read_level_for_root(root.id))
+        )
+
     @staticmethod
     def _config_entry(config_file: AppConfigFile) -> NodeConfigEntry:
         return NodeConfigEntry(
@@ -170,6 +235,20 @@ class NodeStorageService:
             size_bytes=config_file.size_bytes,
             size_text=Utilities.humanise_bytes(config_file.size_bytes),
             modified_at=config_file.modified_at.isoformat(sep=" ", timespec="seconds"),
+            can_write=config_file.can_write,
+            can_delete=config_file.can_delete,
+            write_notice=config_file.write_notice,
+        )
+
+    @staticmethod
+    def _config_root_entry(*, app: App, root: AppConfigFileRoot) -> NodeConfigRootEntry:
+        return NodeConfigRootEntry(
+            id=root.id,
+            label=root.label,
+            kind=root.kind.value,
+            read_power_level=app.config_file_read_level_for_root(root.id),
+            write_power_level=app.config_file_write_level_for_root(root.id),
+            can_create=root.allow_file_creation,
         )
 
     def _config_content(
