@@ -7215,7 +7215,7 @@ class ModWebTests(unittest.TestCase):
         service = ModWebService()
         service.set_acl(acl)
 
-        with patch("web_dash.status.config.Name_Cache", return_value=name_cache):
+        with patch("web_dash.status_pages.config.Name_Cache", return_value=name_cache):
             administrators = service._login_administrators()
 
         self.assertEqual([administrator.user_id for administrator in administrators], [5, 4, 3])
@@ -19107,7 +19107,7 @@ class ModWebTests(unittest.TestCase):
         if currency_item.on_click is None:
             raise AssertionError("Currency menu item is missing a click handler.")
         with patch(
-            "web_dash.status.CurrencyConverter.cached_ecb_conversion_batch",
+            "web_dash.status_currency_converter.CurrencyConverter.cached_ecb_conversion_batch",
             return_value=CurrencyConversionBatch(
                 amounts={currency: Decimal("1") for currency in config.SUPPORTED_CURRENCY},
                 provider=CurrencyRateProvider.ECB,
@@ -19119,7 +19119,7 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(ui.dialogs[2].opened)
         self.assertTrue(ui.columns[-1].visible)
         with patch(
-            "web_dash.status.CurrencyConverter.convert_all_with_ecb_metadata",
+            "web_dash.status_currency_converter.CurrencyConverter.convert_all_with_ecb_metadata",
             new=AsyncMock(
                 return_value=CurrencyConversionBatch(
                     amounts={currency: Decimal("1.5") for currency in config.SUPPORTED_CURRENCY},
@@ -19149,7 +19149,7 @@ class ModWebTests(unittest.TestCase):
         currency_amount_input = ui.inputs[-1]
         currency_amount_input.value = "2"
         with patch(
-            "web_dash.status.CurrencyConverter.convert_all_with_ecb_metadata",
+            "web_dash.status_currency_converter.CurrencyConverter.convert_all_with_ecb_metadata",
             new=AsyncMock(
                 return_value=CurrencyConversionBatch(
                     amounts={currency: Decimal("3") for currency in config.SUPPORTED_CURRENCY},
@@ -19182,7 +19182,7 @@ class ModWebTests(unittest.TestCase):
             )
         )
         with patch(
-            "web_dash.status.CurrencyConverter.convert_all_with_ecb_metadata",
+            "web_dash.status_currency_converter.CurrencyConverter.convert_all_with_ecb_metadata",
             new=source_conversion,
         ):
 
