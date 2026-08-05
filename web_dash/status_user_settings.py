@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import config
@@ -15,7 +16,14 @@ from .status_appearance import (
     _UserAppearanceColorKey,
 )
 from .status_timezone import ModWebStatusTimezoneMixin
-from .user_settings import ModWebChatSettings, ModWebTimestampSettings, ModWebUserSettings
+from .user_plate import user_plate_action_icons_by_label, user_plate_action_options
+from .user_settings import (
+    ModWebChatSettings,
+    ModWebTimestampSettings,
+    ModWebUserPlateAction,
+    ModWebUserPlateSettings,
+    ModWebUserSettings,
+)
 
 _TIME_FORMAT_OPTIONS: dict[str, str] = {
     "24": "24-hour · 14:30",
@@ -121,6 +129,88 @@ class ModWebStatusUserSettingsMixin(ModWebStatusTimezoneMixin, ModWebUserAppeara
                                     set_value(country.value if country is not None else None)
 
                         with ui.column().classes("mod-app-details-section gap-2"):
+                            ui.label("User plate").classes("mod-stat-label")
+                            ui.label(
+                                "Show selected actions beside your profile. They remain available in Utilities."
+                            ).classes("mod-subtitle text-xs")
+                            current_plate_actions = current_settings.user_plate.visible_actions
+
+                            def _user_plate_selection_summary(action_count: int) -> str:
+                                noun = "button" if action_count == 1 else "buttons"
+                                return f"{action_count} {noun} selected"
+
+                            user_plate_icons_by_label = json.dumps(user_plate_action_icons_by_label())
+                            user_plate_actions_input = (
+                                ui.select(
+                                    user_plate_action_options(),
+                                    value=[action.value for action in current_plate_actions],
+                                    label="Buttons",
+                                    multiple=True,
+                                )
+                                .props(
+                                    "filled square dense stack-label hide-bottom-space color=accent options-dark "
+                                    f'display-value="{_user_plate_selection_summary(len(current_plate_actions))}" '
+                                    'popup-content-class="mod-setting-menu mod-user-plate-menu"'
+                                )
+                                .classes("mod-app-details-field mod-config-select mod-user-plate-select w-full")
+                            )
+                            user_plate_actions_input.add_slot(
+                                "option",
+                                f"""
+                                <q-item v-bind="props.itemProps">
+                                    <q-item-section avatar>
+                                        <q-checkbox
+                                            :model-value="props.selected"
+                                            dense
+                                            color="primary"
+                                            tabindex="-1"
+                                            class="pointer-events-none"
+                                        />
+                                    </q-item-section>
+                                    <q-item-section>
+                                        <div class="mod-user-plate-option-content">
+                                            <q-icon :name='{user_plate_icons_by_label}[props.opt.label]' />
+                                            <q-item-label>{{{{ props.opt.label }}}}</q-item-label>
+                                        </div>
+                                    </q-item-section>
+                                </q-item>
+                                """,
+                            )
+
+                            def _update_user_plate_selection_summary(_: object) -> None:
+                                raw_actions = _value_as_object(user_plate_actions_input)
+                                if isinstance(raw_actions, list):
+                                    user_plate_actions_input.props(
+                                        f'display-value="{_user_plate_selection_summary(len(raw_actions))}"'
+                                    )
+
+                            user_plate_actions_input.on(
+                                "update:model-value",
+                                _update_user_plate_selection_summary,
+                            )
+
+                            def _capture_user_plate_settings() -> ModWebUserPlateSettings:
+                                raw_actions = _value_as_object(user_plate_actions_input)
+                                if not isinstance(raw_actions, list):
+                                    raise ValueError("Choose user plate buttons from the list.")
+                                visible_actions: list[ModWebUserPlateAction] = []
+                                for raw_action in raw_actions:
+                                    if not isinstance(raw_action, str):
+                                        raise ValueError("Choose user plate buttons from the list.")
+                                    try:
+                                        visible_actions.append(ModWebUserPlateAction(raw_action))
+                                    except ValueError as xcp:
+                                        raise ValueError("Choose user plate buttons from the list.") from xcp
+                                return ModWebUserPlateSettings(visible_actions=tuple(visible_actions))
+
+                            def _apply_user_plate_settings_to_control(settings: ModWebUserSettings) -> None:
+                                visible_actions = settings.user_plate.visible_actions
+                                user_plate_actions_input.set_value([action.value for action in visible_actions])
+                                user_plate_actions_input.props(
+                                    f'display-value="{_user_plate_selection_summary(len(visible_actions))}"'
+                                )
+
+                        with ui.column().classes("mod-app-details-section gap-2"):
                             ui.label("Timezone & format").classes("mod-stat-label")
                             with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 gap-2"):
                                 timezone_picker = self._build_timezone_picker(
@@ -164,6 +254,7 @@ class ModWebStatusUserSettingsMixin(ModWebStatusTimezoneMixin, ModWebUserAppeara
                                             tooltip_above_on_touch_device=_capture_tooltip_above_on_touch_device(),
                                         ),
                                         web_chat=ModWebChatSettings(use_24_hour_time=_capture_use_24_hour_time()),
+                                        user_plate=_capture_user_plate_settings(),
                                         timestamp=ModWebTimestampSettings(
                                             timezone_name=_value_as_text(timezone_picker.input),
                                             format_template=current_settings.timestamp.format_template,
@@ -199,6 +290,7 @@ class ModWebStatusUserSettingsMixin(ModWebStatusTimezoneMixin, ModWebUserAppeara
                                     self._resolved_user_appearance_colors(next_settings.appearance)
                                 )
                                 _apply_country_to_control(next_settings.country)
+                                _apply_user_plate_settings_to_control(next_settings)
                                 _apply_time_preferences_to_controls(next_settings)
                                 _apply_tooltip_placement_to_control(next_settings)
                                 ui.notify(
@@ -219,6 +311,7 @@ class ModWebStatusUserSettingsMixin(ModWebStatusTimezoneMixin, ModWebUserAppeara
                                             tooltip_above_on_touch_device=True,
                                         ),
                                         web_chat=ModWebChatSettings(use_24_hour_time=True),
+                                        user_plate=ModWebUserPlateSettings(),
                                         timestamp=ModWebTimestampSettings(
                                             timezone_name="UTC",
                                             format_template=current_settings.timestamp.format_template,
@@ -240,6 +333,7 @@ class ModWebStatusUserSettingsMixin(ModWebStatusTimezoneMixin, ModWebUserAppeara
                                     self._resolved_user_appearance_colors(next_settings.appearance)
                                 )
                                 _apply_country_to_control(next_settings.country)
+                                _apply_user_plate_settings_to_control(next_settings)
                                 _apply_time_preferences_to_controls(next_settings)
                                 _apply_tooltip_placement_to_control(next_settings)
                                 try:

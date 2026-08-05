@@ -61,6 +61,36 @@ class ModWebChatSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class ModWebUserPlateAction(StrEnum):
+    """Actions a user may pin beside their account identity."""
+
+    MIRRORS = "mirrors"
+    SETTINGS = "settings"
+    STANDARD_DRINKS = "standard_drinks"
+    CURRENCY = "currency"
+    DISCORD_TIME = "discord_time"
+    UNIT_CONVERTER = "unit_converter"
+    ALIASES = "aliases"
+    LOG_OUT = "log_out"
+
+
+class ModWebUserPlateSettings(BaseModel):
+    """Saved selection of utility actions visible on the user plate."""
+
+    visible_actions: tuple[ModWebUserPlateAction, ...] = (ModWebUserPlateAction.SETTINGS,)
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("visible_actions")
+    @classmethod
+    def _validate_visible_actions(
+        cls, value: tuple[ModWebUserPlateAction, ...]
+    ) -> tuple[ModWebUserPlateAction, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("User plate actions must not contain duplicates.")
+        return value
+
+
 class ModWebTimestampSettings(BaseModel):
     """Saved time preferences and Discord-timestamp defaults for the dashboard."""
 
@@ -105,6 +135,7 @@ class ModWebUserSettings(BaseModel):
 
     appearance: ModWebAppearanceSettings = ModWebAppearanceSettings()
     web_chat: ModWebChatSettings = ModWebChatSettings()
+    user_plate: ModWebUserPlateSettings = ModWebUserPlateSettings()
     timestamp: ModWebTimestampSettings = ModWebTimestampSettings()
     country: config.Country | None = None
 
@@ -229,6 +260,8 @@ __all__ = (
     "ModWebChatSettings",
     "ModWebColorScheme",
     "ModWebTimestampSettings",
+    "ModWebUserPlateAction",
+    "ModWebUserPlateSettings",
     "ModWebUserSettings",
     "ModWebUserSettingsStore",
 )

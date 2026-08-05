@@ -224,6 +224,7 @@ class ModWebStatusTimestampMixin(ModWebStatusTimezoneMixin):
                                 next_settings = ModWebUserSettings(
                                     appearance=current_settings.appearance,
                                     web_chat=current_settings.web_chat,
+                                    user_plate=current_settings.user_plate,
                                     timestamp=timestamp_settings,
                                     country=current_settings.country,
                                 )

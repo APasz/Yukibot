@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # ruff: noqa: F403, F405
 from .status_support import *
+from .ui_helpers import ModWebUiHelpersMixin
 
 
 class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
@@ -933,11 +934,15 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
                         with ui.column().classes("gap-1 min-w-0"):
                             ui.label(f"{display_name}").classes("text-sm text-white break-all leading-none")
                             self._badge(ui=ui, text=self._user_level_label(user), tone=self._user_level_tone(user))
-                    with ui.row().classes("w-full items-stretch gap-2"):
+                    with ui.row().classes("w-full items-stretch gap-2 flex-wrap"):
                         self._render_user_home_button(ui=ui, user=user)
-                        if self._user_has_level(user, Power_Level.user) and config.mirror_hosting_enabled():
-                            self._render_user_mirrors_button(ui=ui)
-                        self._render_user_utility_launcher(ui=ui, user=user)
+                        self._render_user_utility_launcher(
+                            ui=ui,
+                            user=user,
+                            include_mirrors=(
+                                self._user_has_level(user, Power_Level.user) and config.mirror_hosting_enabled()
+                            ),
+                        )
             with ui.element("div").classes("min-w-0 grow w-full mod-user-header-tray-shell").style(self._user_header_tray_style()):
                 self._render_user_notification_tray(ui=ui, user=user)
 
@@ -945,19 +950,12 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
         def _handle_home_click(_: object | None = None) -> None:
             self._navigate_home(ui=ui, user=user)
 
-        ui.button("", on_click=_handle_home_click).props(
+        home_button = ui.button("", on_click=_handle_home_click).props(
             "icon=home flat aria-label=Home"
         ).classes(
             f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-home-button"
         )
-
-    @staticmethod
-    def _render_user_mirrors_button(*, ui: ModWebUi) -> None:
-        ui.button("", on_click=lambda: ui.navigate.to("/mod-web/mirrors")).props(
-            "icon=cloud_sync flat aria-label=Update mirrors"
-        ).classes(
-            f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-home-button"
-        )
+        ModWebUiHelpersMixin._attach_badge_tooltip(ui=ui, target=home_button, text="Home")
 
     def _navigate_home(self, *, ui: ModWebUi, user: ModWebUser) -> bool:
         active_upload: bool = any(

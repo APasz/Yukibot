@@ -262,6 +262,8 @@ from web_dash.types import (
 )
 from web_dash.user_settings import (
     ModWebAppearanceSettings,
+    ModWebUserPlateAction,
+    ModWebUserPlateSettings,
     ModWebUserSettings,
     ModWebUserSettingsStore,
 )
@@ -18956,6 +18958,8 @@ class ModWebTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.menu_items: list[FakeButton] = []
                 self.buttons: list[FakeButton] = []
+                self.icons: list[str] = []
+                self.tooltips: list[str] = []
                 self.dialogs: list[FakeDialog] = []
                 self.inputs: list[FakeInput] = []
                 self.selects: list[FakeInput] = []
@@ -18996,6 +19000,13 @@ class ModWebTests(unittest.TestCase):
                 del tag
                 return FakeContainer()
 
+            def item_section(self) -> FakeContainer:
+                return FakeContainer()
+
+            def icon(self, name: str) -> FakeContainer:
+                self.icons.append(name)
+                return FakeContainer()
+
             def html(self, text: str) -> FakeContainer:
                 del text
                 return FakeContainer()
@@ -19005,6 +19016,10 @@ class ModWebTests(unittest.TestCase):
                 label.text = text
                 self.labels.append(label)
                 return label
+
+            def tooltip(self, text: str) -> FakeContainer:
+                self.tooltips.append(text)
+                return FakeContainer()
 
             def input(self, *args: object, **kwargs: object) -> FakeInput:
                 del args
@@ -19075,6 +19090,16 @@ class ModWebTests(unittest.TestCase):
                 return None
 
         service = ModWebService()
+        service._backend.user_settings_for = Mock(
+            return_value=ModWebUserSettings(
+                user_plate=ModWebUserPlateSettings(
+                    visible_actions=(
+                        ModWebUserPlateAction.SETTINGS,
+                        ModWebUserPlateAction.CURRENCY,
+                    )
+                )
+            )
+        )
         ui = FakeUi()
         user = ModWebUser(discord_id=42, username="sudo", global_name="Finch", avatar_hash=None)
 
@@ -19103,6 +19128,28 @@ class ModWebTests(unittest.TestCase):
                 "Aliases",
                 "About",
                 "Log out",
+            ],
+        )
+        self.assertEqual(
+            [button.props_value for button in ui.buttons[:3]],
+            [
+                "icon=settings flat aria-label=Settings",
+                "icon=currency_exchange flat aria-label=Currency",
+                "icon=menu flat aria-label=Utilities",
+            ],
+        )
+        self.assertEqual(ui.tooltips, ["Settings", "Currency", "Utilities"])
+        self.assertEqual(
+            ui.icons,
+            [
+                "settings",
+                "local_bar",
+                "currency_exchange",
+                "schedule",
+                "straighten",
+                "badge",
+                "info",
+                "logout",
             ],
         )
         settings_item = next(item for item in ui.menu_items if item.text == "Settings")
@@ -19370,12 +19417,13 @@ class ModWebTests(unittest.TestCase):
             def __init__(self, value: object) -> None:
                 super().__init__()
                 self.value = value
+                self.slots: dict[str, str | None] = {}
 
             def set_value(self, value: object) -> None:
                 self.value = value
 
             def add_slot(self, name: str, template: str | None = None) -> "FakeInput":
-                del name, template
+                self.slots[name] = template
                 return self
 
         class FakeSelect(FakeInput):
@@ -19476,7 +19524,12 @@ class ModWebTests(unittest.TestCase):
                 )
                 self.assertEqual(ui.selects[0].value, "AU")
                 self.assertEqual(ui.inputs[5].value, "UTC")
-                self.assertEqual(ui.selects[1].value, "24")
+                self.assertEqual(ui.selects[1].value, ["settings"])
+                self.assertEqual(ui.selects[2].value, "24")
+                self.assertIn('v-bind="props.itemProps"', ui.selects[1].slots["option"])
+                self.assertIn("cloud_sync", ui.selects[1].slots["option"])
+                self.assertIn("currency_exchange", ui.selects[1].slots["option"])
+                self.assertIn('display-value="1 button selected"', ui.selects[1].props_value)
                 self.assertTrue(ui.checkboxes[0].value)
                 self.assertEqual(
                     ui.selects[0].props_value,
@@ -19509,8 +19562,9 @@ class ModWebTests(unittest.TestCase):
                 ui.inputs[3].value = "#ef4444"
                 ui.inputs[4].value = "#0ea5e9"
                 ui.selects[0].value = "US"
+                ui.selects[1].value = ["settings", "currency"]
                 ui.inputs[5].value = "Australia/Melbourne"
-                ui.selects[1].value = "12"
+                ui.selects[2].value = "12"
                 ui.checkboxes[0].value = False
 
                 save_button = next(button for button in ui.buttons if button.text == "Save")
@@ -19528,6 +19582,15 @@ class ModWebTests(unittest.TestCase):
                 self.assertEqual(store.get(user_id=42).country, config.Country.UNITED_STATES)
                 self.assertEqual(store.get(user_id=42).timestamp.timezone_name, "Australia/Melbourne")
                 self.assertFalse(store.get(user_id=42).web_chat.use_24_hour_time)
+                self.assertEqual(
+                    store.get(user_id=42).user_plate,
+                    ModWebUserPlateSettings(
+                        visible_actions=(
+                            ModWebUserPlateAction.SETTINGS,
+                            ModWebUserPlateAction.CURRENCY,
+                        )
+                    ),
+                )
                 self.assertFalse(store.get(user_id=42).appearance.tooltip_above_on_touch_device)
                 self.assertIn("#336699", ui.javascript_calls[-1])
                 self.assertIn("--mod-accent-dark", ui.javascript_calls[-1])
@@ -19563,7 +19626,8 @@ class ModWebTests(unittest.TestCase):
                     ["#8B5CF6", "#6B7280", "#F59E0B", "#DC2626", "#8B5CF6"],
                 )
                 self.assertEqual(ui.inputs[5].value, "UTC")
-                self.assertEqual(ui.selects[1].value, "24")
+                self.assertEqual(ui.selects[1].value, ["settings"])
+                self.assertEqual(ui.selects[2].value, "24")
                 self.assertTrue(ui.checkboxes[0].value)
                 self.assertIn("null", ui.javascript_calls[-1])
                 self.assertIn('"--q-primary"', ui.javascript_calls[-1])

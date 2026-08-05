@@ -2821,6 +2821,22 @@ class ModWebTheme:
                     background: var(--mod-accent-glow) !important;
                     color: var(--mod-accent-text-strong) !important;
                 }}
+                .mod-user-plate-menu .q-item.q-manual-focusable--focused,
+                .mod-user-plate-menu .q-item[aria-selected="true"],
+                .mod-user-plate-menu .q-item--active {{
+                    background: rgba(82, 82, 91, 0.28) !important;
+                    color: var(--mod-text) !important;
+                }}
+                .mod-user-plate-option-content {{
+                    display: flex;
+                    align-items: center;
+                    gap: 0.45rem;
+                    min-width: 0;
+                }}
+                .mod-user-plate-option-content .q-icon {{
+                    flex: 0 0 1rem;
+                    font-size: 1rem;
+                }}
                 .mod-setting-switch {{
                     padding: 0.1rem 0.25rem;
                     align-self: flex-start;
@@ -6221,6 +6237,24 @@ class ModWebTheme:
                     letter-spacing: 0.03em;
                     text-transform: uppercase;
                     transition: background 120ms ease, color 120ms ease;
+                }}
+                .mod-user-utility-menu-item {{
+                    position: relative;
+                    padding-left: 2.45rem !important;
+                }}
+                .mod-user-utility-menu-item .q-item__section--avatar {{
+                    position: absolute;
+                    top: 50%;
+                    left: 0.74rem;
+                    display: flex;
+                    width: 1rem;
+                    min-width: 1rem;
+                    padding: 0;
+                    color: inherit;
+                    transform: translateY(-50%);
+                }}
+                .mod-user-utility-menu-item .q-icon {{
+                    font-size: 1rem;
                 }}
                 .mod-timezone-option .q-btn__content {{
                     width: 100%;

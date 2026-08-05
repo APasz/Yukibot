@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Protocol, cast
 
 from nicegui.element import Element
@@ -13,9 +14,22 @@ from mod_web_auth import ModWebUser
 from .nicegui_protocols import ModWebUi
 from .status_support import _USER_HEADER_ICON_BUTTON_CLASSES, ModWebStatusFeatureSupport
 from .types import ModWebNotificationTrayItemKind
+from .ui_helpers import ModWebUiHelpersMixin
+from .user_plate import user_plate_action_spec
+from .user_settings import ModWebUserPlateAction
 
 
 type _UtilityAction = Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _UtilityActionSpec:
+    """A user action shared by the header plate and its utilities menu."""
+
+    label: str
+    icon: str | None
+    action: _UtilityAction
+    plate_action: ModWebUserPlateAction | None = None
 
 
 class _UtilityPanelBuilder(Protocol):
@@ -31,7 +45,13 @@ class _UtilityPanelBuilder(Protocol):
 
 
 class ModWebStatusUtilityLauncherMixin(ModWebStatusFeatureSupport):
-    def _render_user_utility_launcher(self, *, ui: ModWebUi, user: ModWebUser) -> None:
+    def _render_user_utility_launcher(
+        self,
+        *,
+        ui: ModWebUi,
+        user: ModWebUser,
+        include_mirrors: bool = False,
+    ) -> None:
         panels: _UtilityPanelBuilder = cast(_UtilityPanelBuilder, cast(object, self))
         open_user_settings: _UtilityAction = panels._build_user_settings_panel(ui=ui, user=user)
         open_standard_drinks: _UtilityAction = panels._build_standard_drinks_panel(ui=ui, user=user)
@@ -73,42 +93,95 @@ class ModWebStatusUtilityLauncherMixin(ModWebStatusFeatureSupport):
         def _clear_transfers() -> None:
             self._backend.clear_user_transfers(user_id=user.discord_id)
 
-        action_specs: list[tuple[str, _UtilityAction]] = []
+        def _plate_action(
+            plate_action: ModWebUserPlateAction,
+            action: _UtilityAction,
+        ) -> _UtilityActionSpec:
+            presentation = user_plate_action_spec(plate_action)
+            return _UtilityActionSpec(
+                label=presentation.label,
+                icon=presentation.icon,
+                action=action,
+                plate_action=plate_action,
+            )
+
+        action_specs: list[_UtilityActionSpec] = []
         if config.INDEV:
             action_specs.extend(
                 (
-                    ("Sim Upload", lambda: _simulate(ModWebNotificationTrayItemKind.UPLOAD)),
-                    ("Sim Download", lambda: _simulate(ModWebNotificationTrayItemKind.DOWNLOAD)),
-                    ("Clear Transfers", _clear_transfers),
+                    _UtilityActionSpec(
+                        label="Sim Upload",
+                        icon=None,
+                        action=lambda: _simulate(ModWebNotificationTrayItemKind.UPLOAD),
+                    ),
+                    _UtilityActionSpec(
+                        label="Sim Download",
+                        icon=None,
+                        action=lambda: _simulate(ModWebNotificationTrayItemKind.DOWNLOAD),
+                    ),
+                    _UtilityActionSpec(label="Clear Transfers", icon=None, action=_clear_transfers),
                 )
             )
-        action_specs.append(("Settings", open_user_settings))
-        action_specs.append(("Standard drinks", open_standard_drinks))
-        action_specs.append(("Currency", open_currency_converter))
-        action_specs.append(("Discord Time", open_time_formatter))
-        action_specs.append(("Unit converter", open_unit_converter))
-        action_specs.append(("Aliases", _open_alias_page))
-        action_specs.append(("About", _open_about_page))
-        action_specs.append(("Log out", lambda: ui.navigate.to("/auth/logout")))
+        if include_mirrors:
+            action_specs.append(
+                _plate_action(ModWebUserPlateAction.MIRRORS, lambda: ui.navigate.to("/mod-web/mirrors"))
+            )
+        action_specs.append(_plate_action(ModWebUserPlateAction.SETTINGS, open_user_settings))
+        action_specs.append(_plate_action(ModWebUserPlateAction.STANDARD_DRINKS, open_standard_drinks))
+        action_specs.append(_plate_action(ModWebUserPlateAction.CURRENCY, open_currency_converter))
+        action_specs.append(_plate_action(ModWebUserPlateAction.DISCORD_TIME, open_time_formatter))
+        action_specs.append(_plate_action(ModWebUserPlateAction.UNIT_CONVERTER, open_unit_converter))
+        action_specs.append(_plate_action(ModWebUserPlateAction.ALIASES, _open_alias_page))
+        action_specs.append(_UtilityActionSpec(label="About", icon="info", action=_open_about_page))
+        action_specs.append(
+            _plate_action(ModWebUserPlateAction.LOG_OUT, lambda: ui.navigate.to("/auth/logout"))
+        )
+
+        def _action_handler(action: _UtilityAction) -> Callable[[object], None]:
+            def _on_click(_: object) -> None:
+                action()
+
+            return _on_click
+
+        selected_plate_actions = self._backend.user_settings_for(user_id=user.discord_id).user_plate.visible_actions
+        for action_spec in action_specs:
+            if action_spec.plate_action not in selected_plate_actions:
+                continue
+            if action_spec.icon is None:
+                continue
+            plate_button = ui.button("", on_click=_action_handler(action_spec.action)).props(
+                f"icon={action_spec.icon} flat aria-label={action_spec.label}"
+            ).classes(f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-plate-button")
+            ModWebUiHelpersMixin._attach_badge_tooltip(
+                ui=ui,
+                target=plate_button,
+                text=action_spec.label,
+            )
 
         menu_factory = getattr(ui, "menu", None)
         if callable(menu_factory):
             create_menu = cast(Callable[[], Element], menu_factory)
 
-            def _menu_action_handler(action: _UtilityAction) -> Callable[[object], None]:
-                def _on_click(_: object) -> None:
-                    action()
-
-                return _on_click
-
-            with (
+            utility_button = (
                 ui.button("")
                 .props("icon=menu flat aria-label=Utilities")
                 .classes(f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-menu-button")
-            ):
-                with create_menu().classes("mod-chat-entry-menu min-w-[12rem]"):
-                    for label, action in action_specs:
-                        ui.menu_item(label, on_click=_menu_action_handler(action)).classes("mod-chat-entry-menu-item")
+            )
+            ModWebUiHelpersMixin._attach_badge_tooltip(ui=ui, target=utility_button, text="Utilities")
+            with utility_button:
+                with create_menu().classes("mod-chat-entry-menu min-w-[13rem]"):
+                    for action_spec in action_specs:
+                        item_classes = "mod-chat-entry-menu-item"
+                        if action_spec.icon is not None:
+                            item_classes += " mod-user-utility-menu-item"
+                        menu_item = ui.menu_item(
+                            action_spec.label,
+                            on_click=_action_handler(action_spec.action),
+                        ).classes(item_classes)
+                        if action_spec.icon is not None:
+                            with menu_item:
+                                with ui.item_section().props("avatar"):
+                                    ui.icon(action_spec.icon).classes("text-base")
             return
 
         with ui.dialog() as utility_dialog:
@@ -123,11 +196,17 @@ class ModWebStatusUtilityLauncherMixin(ModWebStatusFeatureSupport):
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-2 p-4"):
                     ui.label("Tray Tools").classes("text-lg font-black mod-title-small")
-                    for label, action in action_specs:
-                        ui.button(label, on_click=_dialog_action_handler(action)).classes(
+                    for action_spec in action_specs:
+                        button = ui.button(
+                            action_spec.label,
+                            on_click=_dialog_action_handler(action_spec.action),
+                        ).classes(
                             "mod-list-button secondary w-full"
                         )
+                        if action_spec.icon is not None:
+                            button.props(f"icon={action_spec.icon}")
 
-        ui.button("", on_click=utility_dialog.open).props("icon=menu flat aria-label=Utilities").classes(
+        utility_button = ui.button("", on_click=utility_dialog.open).props("icon=menu flat aria-label=Utilities").classes(
             f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-menu-button"
         )
+        ModWebUiHelpersMixin._attach_badge_tooltip(ui=ui, target=utility_button, text="Utilities")
