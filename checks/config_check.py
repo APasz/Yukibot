@@ -713,6 +713,12 @@ class ConfigDataAuthorityTests(unittest.TestCase):
 
         self.assertIs(config._data_authority_mode(profile), config.DataAuthorityMode.REMOTE)
 
+    def test_mirror_hosting_is_restricted_to_the_portal_profile(self) -> None:
+        with patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[config.BotProfileName.PORTAL]):
+            self.assertTrue(config.mirror_hosting_enabled())
+        with patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[config.BotProfileName.YUKI]):
+            self.assertFalse(config.mirror_hosting_enabled())
+
     def test_resolve_data_authority_endpoint_defaults_to_https_for_bare_host_without_public_hint(self) -> None:
         endpoint = config.resolve_data_authority_endpoint(
             "wakusei.apasz.com",

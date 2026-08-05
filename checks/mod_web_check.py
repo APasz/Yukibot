@@ -13384,6 +13384,38 @@ class ModWebTests(unittest.TestCase):
             "https://wakusei.apasz.com/mod-web/nodes/erin/mods/minecraft_survival?tab=mods",
         )
 
+    def test_remote_node_mirror_page_redirects_to_portal(self) -> None:
+        server = replace(config.MOD_WEB_SERVER, node_name="erin")
+        request = SimpleNamespace(method="GET", url=SimpleNamespace(path="/mod-web/mirrors", query=""))
+
+        with (
+            patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
+            patch.object(config, "MOD_WEB_SERVER", server),
+            patch.object(ModWebService, "_portal_base_url", return_value="https://wakusei.apasz.com"),
+        ):
+            response = ModWebService()._remote_portal_redirect(cast(Any, request))
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response.headers["location"], "https://wakusei.apasz.com/mod-web/mirrors")
+
+    def test_mirror_service_is_initialized_only_for_portal(self) -> None:
+        storage_root = Path(self.enterContext(TemporaryDirectory())) / "mirrors"
+        with (
+            patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[config.BotProfileName.YUKI]),
+            patch.object(config, "MIRROR_STORAGE_ROOT", storage_root),
+        ):
+            node_service = ModWebService()
+
+        with (
+            patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[config.BotProfileName.PORTAL]),
+            patch.object(config, "MIRROR_STORAGE_ROOT", storage_root),
+        ):
+            portal_service = ModWebService()
+
+        self.assertIsNone(node_service._mirrors)
+        self.assertIsNotNone(portal_service._mirrors)
+
     def test_remote_node_node_page_redirect_preserves_requested_node_path(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="erin")
         request = SimpleNamespace(
@@ -13531,6 +13563,7 @@ class ModWebTests(unittest.TestCase):
             ("/mod-web/nodes/erin/mods/minecraft_survival", "tab=mods"),
             ("/mod-web/dev/error/page-unavailable", ""),
             ("/mod-web/assets/fonts/test.woff2", ""),
+            ("/mod-web/mirrors", ""),
         )
 
         with (

@@ -44,3 +44,4 @@ restart_type_sentinel.json
 apps/*/instances.json
 moddb;*.jsonl
 mod-metadata;*.json
+mirror_data/*

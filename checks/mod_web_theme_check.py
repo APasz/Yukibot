@@ -446,19 +446,21 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertRegex(
             css,
-            r"(?s)\.mod-mod-details-dialog-card \.mod-app-details-field\.q-field--labeled "
-            r"\.q-field__native,.*?padding-top: 1\.35rem !important;",
+            r"(?s)\.mod-app-details-field\.q-field--labeled \.q-field__native,.*?"
+            r"\.mod-app-details-field \.q-field--labeled \.q-field__input \{.*?"
+            r"min-height: 3\.35rem;.*?padding-top: 1\.35rem !important;.*?"
+            r"padding-bottom: 0\.25rem !important;",
         )
         self.assertRegex(
             css,
-            r"(?s)\.mod-mod-details-dialog-card "
-            r"\.mod-app-details-field\.mod-mod-details-select \.q-field__control \{.*?"
+            r"(?s)\.mod-app-details-field:is\(\.mod-config-select, \.mod-mod-details-select\) "
+            r"\.q-field__control \{.*?"
             r"height: 3\.35rem !important;.*?min-height: 3\.35rem !important;",
         )
         self.assertRegex(
             css,
-            r"(?s)\.mod-mod-details-dialog-card "
-            r"\.mod-app-details-field\.mod-mod-details-select \.q-field__native \{.*?"
+            r"(?s)\.mod-app-details-field:is\(\.mod-config-select, \.mod-mod-details-select\) "
+            r"\.q-field__native \{.*?"
             r"height: auto !important;.*?min-height: 0 !important;.*?"
             r"padding-top: 0\.875rem !important;.*?padding-bottom: 0\.125rem !important;",
         )

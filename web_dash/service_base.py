@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, overload
 
+from mirror_service import MirrorService
+
 from .backend import ModWebDashboardBackend
 from .nicegui_protocols import AsyncRefresh, ModWebFastApiApp, ModWebRouteUi, WebChatRelayPublisher
 from .runtime_imports import (
@@ -119,6 +121,7 @@ if TYPE_CHECKING:
 
 class ModWebServiceSupport:
     _backend: ModWebDashboardBackend = cast(ModWebDashboardBackend, cast(object, None))
+    _mirrors: MirrorService | None = None
     _startup_signal: threading.Event = cast(threading.Event, cast(object, None))
     _started: bool = False
     _routes_registered: bool = False
@@ -251,6 +254,27 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_authorised_page_user"]
     ) -> Callable[..., Awaitable[ModWebUser | None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_mirrors_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_mirror_service"]) -> Callable[..., MirrorService]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_skip_link"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_user_notification_tray"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_user_utility_launcher"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_user_header_surface_style"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_user_header_tray_style"]) -> Callable[..., str]: ...
 
     @overload
     def __getattr__(self, name: Literal["_badge"]) -> Callable[..., Label]: ...

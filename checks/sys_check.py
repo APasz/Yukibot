@@ -246,6 +246,7 @@ def test_reboot_host_uses_non_interactive_systemctl(monkeypatch: pytest.MonkeyPa
         calls.append((command, check))
         return SimpleNamespace(returncode=0)
 
+    monkeypatch.setattr(config, "INDEV", False)
     monkeypatch.setattr("_sys.subprocess.run", run)
 
     reboot_host()
@@ -253,7 +254,23 @@ def test_reboot_host_uses_non_interactive_systemctl(monkeypatch: pytest.MonkeyPa
     assert calls == [(["sudo", "systemctl", "reboot", "-i"], False)]
 
 
+def test_reboot_host_is_mocked_in_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], bool]] = []
+
+    def run(command: list[str], *, check: bool) -> SimpleNamespace:
+        calls.append((command, check))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(config, "INDEV", True)
+    monkeypatch.setattr("_sys.subprocess.run", run)
+
+    reboot_host()
+
+    assert calls == []
+
+
 def test_reboot_host_fails_loudly_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "INDEV", False)
     monkeypatch.setattr("_sys.subprocess.run", lambda command, check: SimpleNamespace(returncode=1))
 
     with pytest.raises(RuntimeError, match="exit code 1"):

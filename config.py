@@ -134,6 +134,7 @@ class EnvSettings(BaseSettings):
     mod_web_auth_redirect_url: str | None = None
     mod_web_session_cache_dir: str | None = None
     mod_web_build_sha: str | None = None
+    mirror_storage_dir: str | None = None
     dir_tmp: str | None = None
     dir_opt: str | None = None
     exg_token: str | None = None
@@ -2026,6 +2027,14 @@ def _binding_hosts_overlap(left: str, right: str) -> bool:
 
 ACTIVE_BOT_PROFILE = BOT_PROFILES[_parse_bot_profile(_env_settings.bot_profile)]
 DATA_AUTHORITY_MODE = _data_authority_mode(ACTIVE_BOT_PROFILE)
+
+
+def mirror_hosting_enabled() -> bool:
+    """Return whether this process is the sole public mirror host."""
+
+    return ACTIVE_BOT_PROFILE.name is BotProfileName.PORTAL
+
+
 INDEV = _parse_env_flag(_env_settings.indev, var_name="INDEV")
 BYPASS_WEB_AUTH = INDEV and _parse_env_flag(_env_settings.bypass_web_auth, var_name="BYPASS_WEB_AUTH")
 ALLOW_UNAUTH_NODE_API = _parse_env_flag(
@@ -2472,6 +2481,7 @@ NODE_API_BIND_HOST = _parse_bind_host(_env_settings.node_api_bind_host)
 NODE_API_PORT = _parse_optional_port(_env_settings.node_api_port, var_name="NODE_API_PORT")
 MOD_WEB_BIND_HOST = _parse_bind_host(_env_settings.mod_web_bind_host) or "0.0.0.0"
 MOD_WEB_PORT = _parse_optional_port(_env_settings.mod_web_port, var_name="MOD_WEB_PORT") or 3180
+MIRROR_STORAGE_ROOT = Path(_env_settings.mirror_storage_dir or "mirror_data")
 MOD_WEB_PUBLIC_BASE_URL = resolve_mod_web_public_base_url(
     _env_settings.mod_web_public_base_url,
     public_base_url=PUBLIC_BASE_URL,

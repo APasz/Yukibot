@@ -255,6 +255,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         "/auth/",
         "/mod-web/assets/",
         "/mod-web/dev/",
+        "/mod-web/mirrors",
     )
     _NODE_SCOPED_PATH_PREFIX: str = "/mod-web/nodes/"
     _DEFAULT_APP_COLOR_HEX: str = "#96212B"

@@ -5219,6 +5219,10 @@ class ModWebTheme:
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.04);
                 }}
+                .mod-app-details-field.q-field--labeled .q-field__control,
+                .mod-app-details-field .q-field--labeled .q-field__control {{
+                    min-height: 3.35rem;
+                }}
                 .mod-app-details-field .q-field--filled .q-field__control::before {{
                     border-bottom: 0 !important;
                     opacity: 0 !important;
@@ -5252,6 +5256,28 @@ class ModWebTheme:
                 .mod-app-details-field .q-field__input {{
                     font-size: 0.9rem !important;
                     font-weight: 850 !important;
+                }}
+                .mod-app-details-field.q-field--labeled .q-field__native,
+                .mod-app-details-field.q-field--labeled .q-field__input,
+                .mod-app-details-field .q-field--labeled .q-field__native,
+                .mod-app-details-field .q-field--labeled .q-field__input {{
+                    min-height: 3.35rem;
+                    padding-top: 1.35rem !important;
+                    padding-bottom: 0.25rem !important;
+                    line-height: 1.15 !important;
+                }}
+                .mod-app-details-field:is(.mod-config-select, .mod-mod-details-select) .q-field__control {{
+                    height: 3.35rem !important;
+                    min-height: 3.35rem !important;
+                }}
+                .mod-app-details-field:is(.mod-config-select, .mod-mod-details-select) .q-field__native {{
+                    height: auto !important;
+                    min-height: 0 !important;
+                    padding-top: 0.875rem !important;
+                    padding-bottom: 0.125rem !important;
+                }}
+                .mod-app-details-field:is(.mod-config-select, .mod-mod-details-select) .q-field__marginal {{
+                    height: 3.35rem !important;
                 }}
                 .mod-timestamp-mode-panels,
                 .mod-timestamp-mode-panels .q-panel,
@@ -5529,29 +5555,6 @@ class ModWebTheme:
                     padding: 1rem;
                     background: rgba(10, 10, 14, 0.78) !important;
                     box-shadow: none !important;
-                }}
-                .mod-mod-details-dialog-card .mod-app-details-field .q-field__control {{
-                    min-height: 3.35rem;
-                }}
-                .mod-mod-details-dialog-card .mod-app-details-field.q-field--labeled .q-field__native,
-                .mod-mod-details-dialog-card .mod-app-details-field.q-field--labeled .q-field__input {{
-                    min-height: 3.35rem;
-                    padding-top: 1.35rem !important;
-                    padding-bottom: 0.25rem !important;
-                    line-height: 1.15 !important;
-                }}
-                .mod-mod-details-dialog-card .mod-app-details-field.mod-mod-details-select .q-field__control {{
-                    height: 3.35rem !important;
-                    min-height: 3.35rem !important;
-                }}
-                .mod-mod-details-dialog-card .mod-app-details-field.mod-mod-details-select .q-field__native {{
-                    height: auto !important;
-                    min-height: 0 !important;
-                    padding-top: 0.875rem !important;
-                    padding-bottom: 0.125rem !important;
-                }}
-                .mod-mod-details-dialog-card .mod-app-details-field.mod-mod-details-select .q-field__marginal {{
-                    height: 3.35rem !important;
                 }}
                 .mod-mod-details-dialog-card .mod-app-details-field .q-field__label {{
                     line-height: 1 !important;

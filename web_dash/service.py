@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from _async_utils import run_blocking
+from mirror_service import MirrorService
 
 from . import avatars as mod_web_avatars
 from .actions import ModWebActionsMixin
@@ -18,6 +19,7 @@ from .links import (
     mod_web_node_chat_path,
 )
 from .models import ModWebModelsMixin
+from .mirrors import ModWebMirrorsMixin
 from .nicegui_protocols import (
     ModWebFastApiApp,
     ModWebRouteUi,
@@ -65,6 +67,7 @@ from .ui_helpers import ModWebUiHelpersMixin
 
 class ModWebService(
     ModWebRoutesMixin,
+    ModWebMirrorsMixin,
     ModWebPageHandlersMixin,
     ModWebStreamsMixin,
     ModWebChatMixin,
@@ -79,6 +82,7 @@ class ModWebService(
 ):
     def __init__(self) -> None:
         self._backend = ModWebDashboardBackend()
+        self._mirrors = MirrorService(config.MIRROR_STORAGE_ROOT) if config.mirror_hosting_enabled() else None
         self._startup_lock = asyncio.Lock()
         self._startup_signal = threading.Event()
         self._server_thread: threading.Thread | None = None
@@ -201,6 +205,12 @@ class ModWebService(
 
     def index_path(self) -> str:
         return "/"
+
+    @property
+    def mirror_service(self) -> MirrorService | None:
+        """Return the Portal-owned mirror service, if this process hosts it."""
+
+        return self._mirrors
 
     async def start(self, manager: App_Manager | None = None, acl: Access_Control | None = None) -> None:
         if manager is not None:

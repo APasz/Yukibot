@@ -8,6 +8,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import Receive, Scope, Send
 
+from mirror_service import COMPUTERCRAFT_MIRROR_INSTALLER, MirrorError, MirrorRevisionUnavailable
 from font_assets import font_assets
 from mod_web_theme import MOD_WEB_THEME_STYLESHEET
 from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT
@@ -1008,6 +1009,52 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 user=user,
             )
 
+        if config.mirror_hosting_enabled():
+            mirrors = self._mirror_service()
+
+            @nicegui_app.get("/mirror/v1/installer.lua")
+            def _computercraft_mirror_installer() -> StarletteResponse:
+                return StarletteResponse(
+                    content=COMPUTERCRAFT_MIRROR_INSTALLER,
+                    media_type="text/plain",
+                    headers={"Cache-Control": "no-cache"},
+                )
+
+            @nicegui_app.get("/mirror/v1/projects/{project_id}/manifest.json")
+            def _mirror_manifest(project_id: str) -> FileResponse:
+                try:
+                    manifest_path = mirrors.manifest_path(project_id)
+                except MirrorError as xcp:
+                    raise _http_exception(404, "Mirror project was not found.") from xcp
+                if manifest_path is None:
+                    raise _http_exception(404, "Mirror snapshot was not found.")
+                return FileResponse(
+                    path=manifest_path,
+                    media_type="application/json",
+                    headers={"Cache-Control": "no-cache"},
+                )
+
+            @nicegui_app.get("/mirror/v1/projects/{project_id}/files/{relative_path:path}")
+            def _mirror_file(project_id: str, relative_path: str, revision: str | None = None) -> FileResponse:
+                try:
+                    file_path = mirrors.file_path(
+                        project_id=project_id,
+                        relative_path=relative_path,
+                        revision=revision,
+                    )
+                except MirrorRevisionUnavailable as xcp:
+                    raise _http_exception(409, "Mirror snapshot changed; fetch a new manifest and retry.") from xcp
+                except MirrorError as xcp:
+                    raise _http_exception(404, "Mirror project was not found.") from xcp
+                if file_path is None:
+                    raise _http_exception(404, "Mirror file was not found.")
+                cache_control = "public, max-age=31536000, immutable" if revision is not None else "no-cache"
+                return FileResponse(
+                    path=file_path,
+                    media_type="application/octet-stream",
+                    headers={"Cache-Control": cache_control},
+                )
+
         @ui.page("/")
         async def _home_page(request: Request) -> None:
             traffic_log.info("Rendering mod web home page")
@@ -1031,6 +1078,15 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                     request=request,
                     show_api_actions=self._app_list_api_actions_enabled(request),
                 )
+
+        if config.mirror_hosting_enabled():
+
+            @ui.page("/mod-web/mirrors")
+            async def _mirrors_page(request: Request) -> None:
+                traffic_log.info("Rendering mirror dashboard")
+                user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.user)
+                if user is not None:
+                    await self._render_mirrors_page(ui=ui, user=user)
 
         @ui.page("/aliases")
         @ui.page("/mod-web/aliases")

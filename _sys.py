@@ -849,6 +849,10 @@ async def _finish_restart(
 
 
 def reboot_host() -> None:
+    if config.INDEV:
+        log.info("Host reboot mocked because INDEV is enabled")
+        return
+
     result = subprocess.run(["sudo", "systemctl", "reboot", "-i"], check=False)
     log.info("Host reboot command completed: code=%s", result.returncode)
     if result.returncode != 0:

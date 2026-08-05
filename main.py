@@ -44,6 +44,7 @@ from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, Voice
 from config import Activity_Provider, Name_Cache, NodeCapacityProfile
 from font_assets import font_assets
 from maintenance import MaintenanceService
+from mirror_service import MirrorAutoSyncOutcome, MirrorAutoSyncResult, MirrorService
 from node_api import NodeSystemAction
 from node_api_relay import RemoteRelayTTSForwarder
 from node_api_http import NodeApiHttpService
@@ -86,6 +87,7 @@ start_time: datetime = datetime.now()
 _RESTART_AUTO_LAUNCH_DELAY_SECONDS: float = 0.0
 _PORTAL_AUTHORITY_REFRESH_INTERVAL_SECONDS: float = 60.0
 _PORTAL_MAINTENANCE_REFRESH_INTERVAL_SECONDS: float = 60.0
+_PORTAL_MIRROR_SYNC_PACE_SECONDS: float = 15.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,6 +379,15 @@ async def _run_portal() -> None:
     refresh_task: asyncio.Task[None] | None = None
     if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
         refresh_task = asyncio.create_task(_portal_authority_refresh_loop(acl=acl, stop_event=stop_event))
+    mirror_sync_task: asyncio.Task[None] | None = None
+    if config.mirror_hosting_enabled():
+        mirrors = mod_web.mirror_service
+        if mirrors is None:
+            raise RuntimeError("Portal mirror service was not initialised.")
+        mirror_sync_task = asyncio.create_task(
+            _portal_mirror_sync_loop(mirrors=mirrors, stop_event=stop_event),
+            name="portal-mirror-sync",
+        )
     maintenance_task = asyncio.create_task(
         _portal_maintenance_restart_loop(
             maintenance=maintenance,
@@ -391,7 +402,7 @@ async def _run_portal() -> None:
     try:
         await stop_event.wait()
     finally:
-        for task in (refresh_task, maintenance_task):
+        for task in (refresh_task, mirror_sync_task, maintenance_task):
             if task is None:
                 continue
             task.cancel()
@@ -445,6 +456,37 @@ async def _portal_maintenance_restart_loop(
             )
             on_restart(RestartKind.SCHEDULED_BOT)
             continue
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def _portal_mirror_sync_loop(
+    *,
+    mirrors: MirrorService,
+    stop_event: asyncio.Event,
+    interval_seconds: float = _PORTAL_MIRROR_SYNC_PACE_SECONDS,
+) -> None:
+    """Run one due Git mirror check per paced Portal scheduler tick."""
+
+    while not stop_event.is_set():
+        try:
+            result: MirrorAutoSyncResult | None = await run_blocking(mirrors.sync_next_due_git_project)
+        except Exception:
+            log.exception("Portal automatic mirror check crashed")
+        else:
+            if result is not None:
+                detail = result.project.status_detail or "No status detail."
+                if result.outcome is MirrorAutoSyncOutcome.FAILED:
+                    log.warning("Portal automatic mirror check failed: project=%s detail=%s", result.project_id, detail)
+                else:
+                    log.info(
+                        "Portal automatic mirror check: project=%s outcome=%s detail=%s",
+                        result.project_id,
+                        result.outcome.value,
+                        detail,
+                    )
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except asyncio.TimeoutError:

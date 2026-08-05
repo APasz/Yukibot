@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ import main
 from _manager import AppStartBlocker, AppStartBlockerKind, App_Manager
 from apps._app import App
 from apps._config import AppResourcePointProfile, App_Config
+from mirror_service import MirrorProject
 from relay_notices import BotLifecycleStage, RelayNoticeSeverity, render_system_notice_text
 
 
@@ -376,6 +378,30 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
             await main._refresh_portal_remote_state(acl)
 
         run_blocking_mock.assert_not_awaited()
+
+    async def test_portal_mirror_sync_loop_checks_one_due_project_per_tick(self) -> None:
+        stop_event = asyncio.Event()
+        result = main.MirrorAutoSyncResult(
+            project_id="example",
+            outcome=main.MirrorAutoSyncOutcome.UNCHANGED,
+            project=cast(MirrorProject, Mock(status_detail="Revision is already published.")),
+        )
+        mirrors = Mock()
+        mirrors.sync_next_due_git_project.return_value = result
+
+        async def run_in_thread(function: Callable[[], object]) -> object:
+            self.assertIs(function, mirrors.sync_next_due_git_project)
+            stop_event.set()
+            return function()
+
+        with patch("main.run_blocking", side_effect=run_in_thread):
+            await main._portal_mirror_sync_loop(
+                mirrors=cast(main.MirrorService, mirrors),
+                stop_event=stop_event,
+                interval_seconds=0.01,
+            )
+
+        mirrors.sync_next_due_git_project.assert_called_once_with()
 
     async def test_portal_process_action_exits_main_process_with_failure(self) -> None:
         restart_handler: Callable[[main.NodeSystemAction, bool, bool], None] = Mock()
