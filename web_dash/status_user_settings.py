@@ -274,6 +274,7 @@ class ModWebStatusUserSettingsMixin(ModWebStatusTimezoneMixin, ModWebUserAppeara
                                     ui.notify(f"Settings update failed: {xcp}", type="negative")
                                     return
 
+                                plate_actions_changed = current_settings.user_plate != next_settings.user_plate
                                 current_settings = next_settings
                                 css_variables = self._user_appearance_css_variables(next_settings.appearance)
                                 try:
@@ -297,6 +298,8 @@ class ModWebStatusUserSettingsMixin(ModWebStatusTimezoneMixin, ModWebUserAppeara
                                     "Saved settings." if changed else "Settings are unchanged.",
                                     type="positive",
                                 )
+                                if plate_actions_changed:
+                                    ui.navigate.reload()
 
                             def _reset_appearance_colors(_: object | None = None) -> None:
                                 nonlocal current_settings
@@ -328,6 +331,7 @@ class ModWebStatusUserSettingsMixin(ModWebStatusTimezoneMixin, ModWebUserAppeara
                                     ui.notify(f"Settings reset failed: {xcp}", type="negative")
                                     return
 
+                                plate_actions_changed = current_settings.user_plate != next_settings.user_plate
                                 current_settings = next_settings
                                 _apply_color_values_to_controls(
                                     self._resolved_user_appearance_colors(next_settings.appearance)
@@ -348,6 +352,8 @@ class ModWebStatusUserSettingsMixin(ModWebStatusTimezoneMixin, ModWebUserAppeara
                                     "Reset settings." if changed else "Settings are already default.",
                                     type="positive",
                                 )
+                                if plate_actions_changed:
+                                    ui.navigate.reload()
 
                         with ui.row().classes("w-full justify-end mod-app-details-actions"):
                             ui.button("Reset", on_click=_reset_appearance_colors).classes("mod-list-button secondary")

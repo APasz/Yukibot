@@ -926,25 +926,23 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
     def _render_user_header(self, *, ui: ModWebUi, user: ModWebUser) -> None:
         display_name: str = self._web_display_name(user)
         avatar_uri: str = self._user_avatar_uri(user)
-        with ui.row().classes("w-full min-w-0 items-start gap-4 flex-wrap lg:flex-nowrap mod-user-header-row"):
-            with ui.element("div").classes("shrink-0 mod-user-header-surface").style(self._user_header_surface_style()):
-                with ui.column().classes("w-full h-full justify-between gap-2"):
-                    with ui.row().classes("items-center gap-2 no-wrap min-w-0"):
-                        ui.html(self._user_avatar_markup(avatar_uri=avatar_uri, display_name=display_name))
-                        with ui.column().classes("gap-1 min-w-0"):
-                            ui.label(f"{display_name}").classes("text-sm text-white break-all leading-none")
-                            self._badge(ui=ui, text=self._user_level_label(user), tone=self._user_level_tone(user))
-                    with ui.row().classes("w-full items-stretch gap-2 flex-wrap"):
-                        self._render_user_home_button(ui=ui, user=user)
-                        self._render_user_utility_launcher(
-                            ui=ui,
-                            user=user,
-                            include_mirrors=(
-                                self._user_has_level(user, Power_Level.user) and config.mirror_hosting_enabled()
-                            ),
-                        )
-            with ui.element("div").classes("min-w-0 grow w-full mod-user-header-tray-shell").style(self._user_header_tray_style()):
-                self._render_user_notification_tray(ui=ui, user=user)
+        self._render_user_transfer_overlay(ui=ui, user=user)
+        with ui.element("div").classes("w-full mod-user-header-surface").style(self._user_header_surface_style()):
+            with ui.column().classes("w-full h-full justify-between gap-2"):
+                with ui.row().classes("items-center gap-2 no-wrap min-w-0"):
+                    ui.html(self._user_avatar_markup(avatar_uri=avatar_uri, display_name=display_name))
+                    with ui.column().classes("gap-1 min-w-0"):
+                        ui.label(f"{display_name}").classes("text-sm text-white break-all leading-none")
+                        self._badge(ui=ui, text=self._user_level_label(user), tone=self._user_level_tone(user))
+                with ui.row().classes("w-full mod-user-plate-actions"):
+                    self._render_user_home_button(ui=ui, user=user)
+                    self._render_user_utility_launcher(
+                        ui=ui,
+                        user=user,
+                        include_mirrors=(
+                            self._user_has_level(user, Power_Level.user) and config.mirror_hosting_enabled()
+                        ),
+                    )
 
     def _render_user_home_button(self, *, ui: ModWebUi, user: ModWebUser) -> None:
         def _handle_home_click(_: object | None = None) -> None:

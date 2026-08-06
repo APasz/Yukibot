@@ -993,6 +993,94 @@ class ModWebTests(unittest.TestCase):
                 progress_percent=101.0,
             )
 
+    def test_user_header_surface_spans_the_available_page_width(self) -> None:
+        style = ModWebService._user_header_surface_style()
+
+        self.assertIn("width: 100%;", style)
+        self.assertNotIn("min-width:", style)
+
+    def test_user_transfer_overlay_is_fixed_and_outside_page_flow(self) -> None:
+        class FakeElement:
+            def __init__(self, *, tag: str) -> None:
+                self.tag: str = tag
+                self.class_values: list[str] = []
+                self.props_values: list[str] = []
+                self.style_values: list[str] = []
+
+            def classes(self, value: str) -> "FakeElement":
+                self.class_values.append(value)
+                return self
+
+            def props(self, value: str) -> "FakeElement":
+                self.props_values.append(value)
+                return self
+
+            def style(self, value: str) -> "FakeElement":
+                self.style_values.append(value)
+                return self
+
+            def __enter__(self) -> "FakeElement":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.elements: list[FakeElement] = []
+
+            def element(self, tag: str) -> FakeElement:
+                element = FakeElement(tag=tag)
+                self.elements.append(element)
+                return element
+
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        service._backend.start_transfers(
+            user_id=user.discord_id,
+            kind=ModWebNotificationTrayItemKind.UPLOAD,
+            filenames=("archive.zip",),
+            detail_text="Uploading archive.",
+            initial_progress_percent=37.5,
+        )
+        ui = FakeUi()
+
+        service._render_user_transfer_overlay(ui=cast(ModWebUi, cast(object, ui)), user=user)
+
+        self.assertEqual(len(ui.elements), 4)
+        overlay, tracks, track, fill = ui.elements
+        self.assertEqual(overlay.tag, "div")
+        self.assertEqual(overlay.class_values, ["mod-transfer-overlay"])
+        self.assertEqual(overlay.props_values, ["role=status aria-live=polite"])
+        self.assertEqual(
+            overlay.style_values,
+            ["position: fixed; top: 0; right: 0; left: 0; z-index: 2000; pointer-events: none;"],
+        )
+        self.assertEqual(tracks.class_values, ["mod-transfer-overlay-tracks"])
+        self.assertEqual(track.class_values, ["mod-transfer-overlay-track animate-pulse"])
+        self.assertEqual(
+            track.props_values,
+            ["role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow=37.50"],
+        )
+        self.assertEqual(
+            track.style_values,
+            ["--mod-transfer-colour: #0f766e; height: 0.38rem; flex: 0 0 0.38rem;"],
+        )
+        self.assertEqual(fill.class_values, ["mod-transfer-overlay-fill"])
+        self.assertEqual(
+            fill.style_values,
+            [
+                "position: absolute; top: 0; right: 0; height: 100%; width: 37.50%;"
+                " background: var(--mod-transfer-colour);"
+            ],
+        )
+
     def test_dashboard_backend_limits_active_transfers_per_user(self) -> None:
         backend = ModWebDashboardBackend()
 
@@ -19440,6 +19528,10 @@ class ModWebTests(unittest.TestCase):
                 self.buttons: list[FakeButton] = []
                 self.javascript_calls: list[str] = []
                 self.notifications: list[tuple[str, str | None]] = []
+                self.reload_count = 0
+                self.navigate = SimpleNamespace(
+                    reload=lambda: setattr(self, "reload_count", self.reload_count + 1)
+                )
 
             def dialog(self) -> FakeDialog:
                 dialog = FakeDialog()
@@ -19604,6 +19696,7 @@ class ModWebTests(unittest.TestCase):
                 self.assertIn("target.style.setProperty(name, value)", ui.javascript_calls[-1])
                 self.assertIn("const enabled = false", ui.javascript_calls[-1])
                 self.assertIn(("Saved settings.", "positive"), ui.notifications)
+                self.assertEqual(ui.reload_count, 1)
 
                 reset_button = next(button for button in ui.buttons if button.text == "Reset")
                 reset_click = reset_button.on_click
@@ -19644,6 +19737,7 @@ class ModWebTests(unittest.TestCase):
                 )
                 self.assertIn("target.style.removeProperty(name)", ui.javascript_calls[-1])
                 self.assertIn("const enabled = true", ui.javascript_calls[-1])
+                self.assertEqual(ui.reload_count, 2)
 
     def test_user_appearance_palette_sets_initial_variables_inline(self) -> None:
         style_html = ModWebService._user_appearance_style_html(

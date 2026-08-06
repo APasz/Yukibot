@@ -134,11 +134,11 @@ if TYPE_CHECKING:
     from nicegui.elements.button import Button
 
 _STATUS_SVG_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "svg" / "web_dash"
+_TRANSFER_OVERLAY_TRACK_HEIGHT_REM = 0.38
 _USER_HEADER_SURFACE_MIN_HEIGHT_REM = 4.9
-_USER_HEADER_TRAY_CARD_HEIGHT_REM = 4.35
-_USER_HEADER_SURFACE_ASPECT_RATIO = "4 / 1"
-_USER_HEADER_STACK_WIDTH_REM = 10.5
-_USER_HEADER_ICON_BUTTON_CLASSES = "mod-list-button secondary grow basis-0 min-h-[2.2rem] min-w-0 px-3 py-2"
+_USER_HEADER_ICON_BUTTON_CLASSES = (
+    "mod-list-button secondary mod-user-header-icon-button px-3 py-2"
+)
 _LOGIN_ADMINISTRATOR_LEVELS: tuple[Power_Level, ...] = (
     Power_Level.root,
     Power_Level.sudo,
@@ -261,12 +261,10 @@ __all__ = (
     "_ModWebNotificationTrayItem",
     "_ModWebStatusPageConfig",
     "_STATUS_SVG_DIRECTORY",
+    "_TRANSFER_OVERLAY_TRACK_HEIGHT_REM",
     "_USER_APPEARANCE_COLOR_SPECS",
     "_USER_HEADER_ICON_BUTTON_CLASSES",
-    "_USER_HEADER_STACK_WIDTH_REM",
-    "_USER_HEADER_SURFACE_ASPECT_RATIO",
     "_USER_HEADER_SURFACE_MIN_HEIGHT_REM",
-    "_USER_HEADER_TRAY_CARD_HEIGHT_REM",
     "_UserAppearanceColorKey",
     "_status_svg_markup",
     "_value_as_object",

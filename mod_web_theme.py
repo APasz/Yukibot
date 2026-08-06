@@ -6256,6 +6256,47 @@ class ModWebTheme:
                 .mod-user-utility-menu-item .q-icon {{
                     font-size: 1rem;
                 }}
+                .mod-user-plate-actions {{
+                    --mod-user-plate-action-height: 2.2rem;
+                    display: grid !important;
+                    grid-template-columns: repeat(
+                        auto-fill,
+                        minmax(
+                            var(--mod-user-plate-action-height),
+                            calc(var(--mod-user-plate-action-height) * 2)
+                        )
+                    );
+                    width: 100%;
+                    gap: 0.5rem;
+                }}
+                .mod-user-header-icon-button {{
+                    min-width: var(--mod-user-plate-action-height) !important;
+                    min-height: var(--mod-user-plate-action-height) !important;
+                }}
+                .mod-user-plate-actions > .mod-user-header-icon-button {{
+                    width: 100%;
+                    max-width: calc(var(--mod-user-plate-action-height) * 2);
+                }}
+                .mod-transfer-overlay {{
+                    display: flex;
+                }}
+                .mod-transfer-overlay-tracks {{
+                    display: flex;
+                    flex-direction: column;
+                    width: 100%;
+                    min-width: 0;
+                    gap: 1px;
+                }}
+                .mod-transfer-overlay-track {{
+                    position: relative;
+                    width: 100%;
+                    min-width: 0;
+                    overflow: hidden;
+                    background: color-mix(in srgb, var(--mod-transfer-colour) 22%, transparent);
+                }}
+                .mod-transfer-overlay-fill {{
+                    transition: width 180ms linear;
+                }}
                 .mod-timezone-option .q-btn__content {{
                     width: 100%;
                     align-items: flex-start;
@@ -6590,15 +6631,7 @@ class ModWebTheme:
                     50% {{ scale: 0.985; translate: 0 1px; filter: brightness(0.94); }}
                     100% {{ scale: 1; translate: 0 0; }}
                 }}
-                .mod-user-header-tray-shell:not(:has(.mod-user-header-tray)) {{
-                    display: none !important;
-                    min-height: 0 !important;
-                }}
-                @media (min-width: 961px) and (max-width: 1023px) {{
-                    .mod-user-header-row {{ flex-wrap: nowrap !important; }}
-                }}
                 @media (max-width: 960px) {{
-                    .mod-user-header-tray-shell {{ min-height: 0 !important; }}
                     .mod-hero-header {{ flex-wrap: wrap !important; }}
                     .mod-hero-header-main {{ flex-basis: 100%; }}
                     .mod-app-hero-status {{

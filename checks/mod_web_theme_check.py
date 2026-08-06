@@ -747,10 +747,33 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-chat-head-meta", css)
         self.assertIn(".mod-chat-badge-row", css)
         self.assertIn("flex-wrap: nowrap !important", css)
-        self.assertIn("@media (min-width: 961px) and (max-width: 1023px)", css)
-        self.assertIn(".mod-user-header-row { flex-wrap: nowrap !important; }", css)
-        self.assertIn(".mod-user-header-tray-shell { min-height: 0 !important; }", css)
-        self.assertIn(".mod-user-header-tray-shell:not(:has(.mod-user-header-tray))", css)
+        self.assertIn(".mod-transfer-overlay", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-transfer-overlay-tracks \{.*?display: flex;.*?flex-direction: column;.*?width: 100%;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-transfer-overlay-track \{.*?position: relative;.*?width: 100%;.*?overflow: hidden;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-user-plate-actions \{.*?display: grid !important;.*?"
+            r"grid-template-columns: repeat\(.*?auto-fill,.*?"
+            r"minmax\(.*?var\(--mod-user-plate-action-height\),.*?"
+            r"calc\(var\(--mod-user-plate-action-height\) \* 2\).*?\).*?\);.*?gap: 0\.5rem;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-user-plate-actions \{.*?--mod-user-plate-action-height: 2\.2rem;"
+            r".*?\.mod-user-header-icon-button \{.*?min-width: var\(--mod-user-plate-action-height\) !important;"
+            r".*?min-height: var\(--mod-user-plate-action-height\) !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-user-plate-actions > \.mod-user-header-icon-button \{.*?width: 100%;"
+            r".*?max-width: calc\(var\(--mod-user-plate-action-height\) \* 2\);",
+        )
         self.assertIn(".mod-user-utility-menu-item .q-item__section--avatar", css)
         self.assertIn("padding-left: 2.45rem", css)
         self.assertIn("transform: translateY(-50%)", css)
