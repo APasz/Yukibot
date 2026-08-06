@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .constants import log
 from .nicegui_protocols import ModWebNotificationType, ModWebUi, ModWebValueContainer, _value_as_text
 from .runtime_imports import (
@@ -24,6 +26,33 @@ from .runtime_imports import (
 )
 from .service_base import ModWebServiceSupport
 from .types import ModWebBasePageModel, _ModWebBadgeSpec
+
+
+@dataclass(frozen=True, slots=True)
+class _UpdateSectionViewState:
+    target_branch_label: str
+    configured_branch_text: str
+    pending_branch_text: str | None
+    branch_selection_disabled: bool
+    dry_preview_active: bool
+    installed_version: str
+    installed_branch: str
+    manifest_build: str
+    provider_label: str
+    app_id: int | None
+    install_alignment_badge: _ModWebBadgeSpec
+    status: AppUpdateStatus | None
+    status_summary: str
+    status_detail: str | None
+    progress_percent: float | None
+    progress_text: str
+    update_block_reason: str | None
+    verify_block_reason: str | None
+    update_button_label: str
+    verify_button_label: str
+    action_status_text: str
+    status_title: str
+    show_log: bool
 
 
 class ModWebAppPageUpdateMixin(ModWebServiceSupport):
@@ -181,7 +210,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         if update_running:
             return "Another update operation is already running."
         if app_running:
-            return "Stop the app before running update actions."
+            return "Stop the app to update or verify."
         if action is NodeAppMutationAction.VERIFY and not supports_verify:
             return "Verification is not available for this update provider."
         return None
@@ -349,6 +378,272 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             update_status=cls._prefer_newer_update_status(current_model.update_status, next_model.update_status),
         )
 
+    @classmethod
+    def _update_branch_label(cls, update_info: AppUpdateInfo, branch_id: str) -> str:
+        resolved_branch_id = cls._resolve_update_target_branch_id(update_info, branch_id)
+        if resolved_branch_id.casefold() == update_info.selected_branch_id.casefold():
+            return update_info.selected_branch_label
+        for branch in update_info.branches:
+            if branch.branch_id.casefold() == resolved_branch_id.casefold():
+                return branch.label
+        return update_info.selected_branch_label
+
+    @staticmethod
+    def _update_action_status_text(
+        *,
+        update_block_reason: str | None,
+        verify_block_reason: str | None,
+    ) -> str:
+        if update_block_reason is not None:
+            return update_block_reason
+        if verify_block_reason is not None:
+            return f"Update ready. {verify_block_reason}"
+        return "Ready to update or verify."
+
+    @staticmethod
+    def _update_status_title(status: AppUpdateStatus | None) -> str:
+        if status is None or status.state is not AppUpdateState.FAILED:
+            return "Current operation" if status is not None and status.running else "Latest result"
+        if status.operation_kind is None:
+            return "Update failed"
+        return f"{status.operation_kind.value.title()} failed"
+
+    @classmethod
+    def _update_section_view_state(
+        cls,
+        *,
+        model: ModWebBasePageModel,
+        update_info: AppUpdateInfo,
+        status: AppUpdateStatus | None,
+        selected_branch_id: str,
+        can_manage_updates: bool,
+        dry_preview_active: bool,
+    ) -> _UpdateSectionViewState:
+        resolved_selected_branch_id = cls._resolve_update_target_branch_id(update_info, selected_branch_id)
+        target_branch_label = cls._update_branch_label(update_info, resolved_selected_branch_id)
+        configured_branch_text = cls._update_branch_display_text(update_info, update_info.selected_branch_id)
+        pending_branch_text = cls._pending_update_target_display_text(update_info, selected_branch_id)
+        pending_branch_id = cls._pending_update_target_branch_id(update_info, selected_branch_id)
+        app_running = model.app_stats is not None and model.app_stats.running
+        update_running = status.running if status is not None else False
+        update_block_reason = cls._update_action_block_reason(
+            action=NodeAppMutationAction.UPDATE,
+            can_manage_updates=can_manage_updates,
+            app_running=app_running,
+            update_running=update_running,
+            supports_verify=update_info.supports_verify,
+        )
+        verify_block_reason = cls._update_action_block_reason(
+            action=NodeAppMutationAction.VERIFY,
+            can_manage_updates=can_manage_updates,
+            app_running=app_running,
+            update_running=update_running,
+            supports_verify=update_info.supports_verify,
+        )
+        failed_operation = (
+            status.operation_kind if status is not None and status.state is AppUpdateState.FAILED else None
+        )
+        update_button_prefix = "Retry update" if failed_operation is AppUpdateOperationKind.UPDATE else "Update"
+        verify_button_label = "Retry Verify" if failed_operation is AppUpdateOperationKind.VERIFY else "Verify"
+        installed_version = (
+            "Unknown" if model.app_stats is None or model.app_stats.version is None else model.app_stats.version
+        )
+        installed_branch = update_info.installed_branch_id or "Manifest branch unavailable"
+        manifest_build = "Unknown" if update_info.installed_build_id is None else str(update_info.installed_build_id)
+        progress_percent = cls._update_progress_percent(status)
+        return _UpdateSectionViewState(
+            target_branch_label=target_branch_label,
+            configured_branch_text=configured_branch_text,
+            pending_branch_text=None if pending_branch_id is None else pending_branch_text,
+            branch_selection_disabled=not can_manage_updates or update_running,
+            dry_preview_active=dry_preview_active,
+            installed_version=installed_version,
+            installed_branch=installed_branch,
+            manifest_build=manifest_build,
+            provider_label=update_info.provider_label,
+            app_id=update_info.app_id,
+            install_alignment_badge=cls._update_install_alignment_badge(update_info),
+            status=status,
+            status_summary="No activity yet." if status is None else status.summary,
+            status_detail=None if status is None else status.detail,
+            progress_percent=progress_percent,
+            progress_text=cls._update_progress_text(status),
+            update_block_reason=update_block_reason,
+            verify_block_reason=verify_block_reason,
+            update_button_label=f"{update_button_prefix} to {target_branch_label}",
+            verify_button_label=verify_button_label,
+            action_status_text=cls._update_action_status_text(
+                update_block_reason=update_block_reason,
+                verify_block_reason=verify_block_reason,
+            ),
+            status_title=cls._update_status_title(status),
+            show_log=status is not None and (bool(status.log_lines) or status.state is AppUpdateState.FAILED),
+        )
+
+    @staticmethod
+    def _render_update_value(
+        *,
+        ui: ModWebUi,
+        label: str,
+        value: str,
+        break_value: bool = False,
+    ) -> None:
+        value_classes = "text-sm font-black mod-title-small"
+        if break_value:
+            value_classes = f"{value_classes} break-all"
+        with ui.column().classes("min-w-0 gap-1"):
+            ui.label(label).classes("text-[0.68rem] uppercase tracking-[0.18em] mod-subtitle")
+            ui.label(value).classes(value_classes)
+
+    def _render_update_controls_card(
+        self,
+        *,
+        ui: ModWebUi,
+        view_state: _UpdateSectionViewState,
+        branch_options: dict[str, str],
+        selected_branch_id: str,
+        on_branch_change: Callable[[ModWebValueContainer], None],
+        on_update: Callable[[], Awaitable[None]],
+        on_verify: Callable[[], Awaitable[None]],
+        on_refresh: Callable[[], Awaitable[None]] | None,
+        on_dry_preview: Callable[[], None] | None,
+    ) -> None:
+        with ui.card().classes("mod-card w-full"):
+            with ui.column().classes("w-full gap-3"):
+                ui.label(f"Update to {view_state.target_branch_label}").classes("text-sm font-black mod-title-small")
+                branch_select = (
+                    ui.select(
+                        branch_options,
+                        value=selected_branch_id,
+                        label="Target branch",
+                        on_change=on_branch_change,
+                    )
+                    .props("filled square dense hide-bottom-space color=accent options-dark")
+                    .classes("mod-app-details-field mod-update-toolbar-branch")
+                )
+                if view_state.branch_selection_disabled:
+                    branch_select.disable()
+                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                    self._badge(ui=ui, text=f"Active {view_state.configured_branch_text}", tone="black")
+                    if view_state.pending_branch_text is not None:
+                        self._badge(ui=ui, text=f"Pending {view_state.pending_branch_text}", tone="purple")
+                    if view_state.dry_preview_active:
+                        self._badge(ui=ui, text="Dry preview active", tone="grey")
+                with ui.row().classes("w-full gap-2 flex-wrap"):
+                    if on_dry_preview is not None:
+                        ui.button("Dry", on_click=on_dry_preview).classes(
+                            "mod-list-button secondary mod-toolbar-button"
+                        )
+                    update_button = ui.button(view_state.update_button_label, on_click=on_update).classes(
+                        "mod-list-button mod-toolbar-button"
+                    )
+                    verify_button = ui.button(view_state.verify_button_label, on_click=on_verify).classes(
+                        "mod-list-button secondary mod-toolbar-button"
+                    )
+                    if on_refresh is not None:
+                        ui.button("Refresh", on_click=on_refresh).classes(
+                            "mod-list-button secondary mod-toolbar-button"
+                        )
+                    if view_state.update_block_reason is not None:
+                        update_button.disable()
+                    if view_state.verify_block_reason is not None:
+                        verify_button.disable()
+                ui.label(view_state.action_status_text).classes("mod-subtitle text-sm")
+
+    def _render_update_status_card(self, *, ui: ModWebUi, view_state: _UpdateSectionViewState) -> None:
+        status = view_state.status
+        with ui.card().classes("mod-card w-full xl:col-span-7"):
+            with ui.column().classes("w-full gap-3"):
+                ui.label(view_state.status_title).classes("text-sm font-black mod-title-small")
+                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                    if status is None:
+                        self._badge(ui=ui, text="No attempt recorded", tone="grey")
+                    else:
+                        self._badge(
+                            ui=ui,
+                            text=self._update_status_badge_text(status),
+                            tone=self._update_status_badge_tone(status),
+                        )
+                        if status.operation_kind is not None:
+                            self._badge(ui=ui, text=status.operation_kind.value.title(), tone="black")
+                        self._badge(ui=ui, text=view_state.progress_text, tone="grey")
+                with ui.column().classes("w-full gap-2"):
+                    ui.label(view_state.status_summary).classes("text-sm font-black mod-title-small break-all")
+                    if view_state.status_detail is not None:
+                        ui.label(view_state.status_detail).classes("mod-subtitle text-sm break-all")
+                    with ui.element("div").classes("w-full border border-white/10 bg-black/40 h-3 overflow-hidden"):
+                        ui.element("div").classes("h-full bg-white/70").style(
+                            f"width: {0.0 if view_state.progress_percent is None else view_state.progress_percent:.2f}%;"
+                        )
+                    with ui.element("div").classes("grid grid-cols-1 md:grid-cols-3 gap-3 w-full"):
+                        self._render_update_value(ui=ui, label="Progress", value=view_state.progress_text)
+                        self._render_update_value(
+                            ui=ui,
+                            label="Started",
+                            value=(
+                                self._format_update_timestamp(status.started_at_unix_ms)
+                                if status is not None and status.started_at_unix_ms is not None
+                                else "No start recorded"
+                            ),
+                        )
+                        self._render_update_value(
+                            ui=ui,
+                            label="Duration",
+                            value=(
+                                self._format_update_duration(
+                                    started_at_unix_ms=status.started_at_unix_ms,
+                                    finished_at_unix_ms=status.finished_at_unix_ms,
+                                )
+                                if status is not None and status.started_at_unix_ms is not None
+                                else "Unavailable"
+                            ),
+                        )
+
+    def _render_update_installed_card(self, *, ui: ModWebUi, view_state: _UpdateSectionViewState) -> None:
+        with ui.card().classes("mod-card w-full xl:col-span-5"):
+            with ui.column().classes("w-full gap-3"):
+                ui.label("Installed").classes("text-sm font-black mod-title-small")
+                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                    self._badge(
+                        ui=ui,
+                        text=view_state.install_alignment_badge.text,
+                        tone=view_state.install_alignment_badge.tone,
+                    )
+                    self._badge(ui=ui, text=view_state.provider_label, tone="grey")
+                    if view_state.app_id is not None:
+                        self._badge(ui=ui, text=f"App {view_state.app_id}", tone="grey")
+                with ui.element("div").classes("grid grid-cols-1 md:grid-cols-2 gap-3 w-full"):
+                    self._render_update_value(
+                        ui=ui,
+                        label="Installed version",
+                        value=view_state.installed_version,
+                        break_value=True,
+                    )
+                    self._render_update_value(
+                        ui=ui,
+                        label="Installed branch",
+                        value=view_state.installed_branch,
+                        break_value=True,
+                    )
+                    self._render_update_value(ui=ui, label="Manifest build", value=view_state.manifest_build)
+
+    def _render_update_log(self, *, ui: ModWebUi, view_state: _UpdateSectionViewState) -> None:
+        status = view_state.status
+        if status is None or not view_state.show_log:
+            return
+        with ui.card().classes("mod-card w-full"):
+            log_details = ui.element("details").classes("mod-update-log-details w-full")
+            if status.state is AppUpdateState.FAILED:
+                log_details.props("open")
+            with log_details:
+                with ui.element("summary").classes("mod-update-log-summary"):
+                    line_label = "No output captured" if not status.log_lines else f"SteamCMD log · {len(status.log_lines)} lines"
+                    ui.label(line_label).classes("mod-subtitle text-sm")
+                if status.log_lines:
+                    ui.html(self._update_log_markup(status)).classes(
+                        "w-full border border-white/10 bg-black/70 p-3 text-xs max-h-96 overflow-auto"
+                    )
+
     def _render_update_section(
         self,
         *,
@@ -383,7 +678,11 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
 
         def _set_selected_branch(event: ModWebValueContainer) -> None:
             nonlocal selected_branch_id
-            selected_branch_id = _value_as_text(event)
+            next_branch_id = _value_as_text(event)
+            if next_branch_id == selected_branch_id:
+                return
+            selected_branch_id = next_branch_id
+            render_update_section.refresh(current_model)
 
         async def _refresh_update_model() -> None:
             nonlocal current_model, selected_branch_id
@@ -537,319 +836,42 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 branch.branch_id: f"{branch.label} ({branch.branch_id})" for branch in section_update_info.branches
             }
             resolved_selected_branch_id = self._resolve_update_target_branch_id(section_update_info, selected_branch_id)
-            configured_branch_text = self._update_branch_display_text(
-                section_update_info,
-                section_update_info.selected_branch_id,
-            )
-            pending_branch_text = self._pending_update_target_display_text(section_update_info, selected_branch_id)
-            pending_branch_id = self._pending_update_target_branch_id(section_update_info, selected_branch_id)
-            installed_version = (
-                "Unknown"
-                if section_model.app_stats is None or section_model.app_stats.version is None
-                else section_model.app_stats.version
-            )
-            app_running = section_model.app_stats is not None and section_model.app_stats.running
-            update_running = section_update_status.running if section_update_status is not None else False
-            progress_percent = self._update_progress_percent(section_update_status)
-            progress_text = self._update_progress_text(section_update_status)
-            update_block_reason = self._update_action_block_reason(
-                action=NodeAppMutationAction.UPDATE,
+            view_state = self._update_section_view_state(
+                model=section_model,
+                update_info=section_update_info,
+                status=section_update_status,
+                selected_branch_id=selected_branch_id,
                 can_manage_updates=can_manage_updates,
-                app_running=app_running,
-                update_running=update_running,
-                supports_verify=section_update_info.supports_verify,
+                dry_preview_active=dry_preview_status is not None,
             )
-            verify_block_reason = self._update_action_block_reason(
-                action=NodeAppMutationAction.VERIFY,
-                can_manage_updates=can_manage_updates,
-                app_running=app_running,
-                update_running=update_running,
-                supports_verify=section_update_info.supports_verify,
-            )
-            install_alignment_badge = self._update_install_alignment_badge(section_update_info)
-
-            def _render_update_value(
-                label: str,
-                value: str,
-                *,
-                detail_text: str | None = None,
-                break_value: bool = False,
-            ) -> None:
-                value_classes = "text-sm font-black mod-title-small"
-                if break_value:
-                    value_classes = f"{value_classes} break-all"
-                with ui.column().classes("min-w-0 gap-1"):
-                    ui.label(label).classes("text-[0.68rem] uppercase tracking-[0.18em] mod-subtitle")
-                    ui.label(value).classes(value_classes)
-                    if detail_text is not None:
-                        ui.label(detail_text).classes("mod-subtitle text-xs break-all")
 
             with ui.card().classes(self._flat_tab_card_classes()):
                 with ui.column().classes(self._tab_section_body_classes()):
                     self._render_flat_tab_header(
                         ui=ui,
                         title="Update",
-                        description="Inspect installed Steam state, stage branch changes, and run update or verify operations.",
+                        description="Choose a target, then update or verify while the app is stopped.",
                         secondary_description=(
-                            "The configured target branch is applied automatically when update or verify starts."
+                            "Branch changes apply when you run an action."
                             if can_manage_updates
-                            else "Sudo access is required to change update targets or run update actions."
+                            else "Sudo access is required for update actions."
                         ),
                     )
                     with ui.element("div").classes("grid grid-cols-1 xl:grid-cols-12 gap-3 w-full"):
-                        with ui.card().classes("mod-card w-full xl:col-span-7"):
-                            with ui.column().classes("w-full gap-3"):
-                                ui.label("Target Branch").classes("text-sm font-black mod-title-small")
-                                ui.label(
-                                    "Use exact Steam branch targets, keep the configured branch visible, and stage changes before execution."
-                                ).classes("mod-subtitle text-sm")
-                                branch_select = (
-                                    ui.select(
-                                        branch_options,
-                                        value=resolved_selected_branch_id,
-                                        label="Configured target branch",
-                                        on_change=_set_selected_branch,
-                                    )
-                                    .props("filled square dense hide-bottom-space color=accent options-dark")
-                                    .classes("mod-app-details-field mod-update-toolbar-branch")
-                                )
-                                if not can_manage_updates or update_running:
-                                    branch_select.disable()
-                                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                                    self._badge(ui=ui, text=f"Configured {configured_branch_text}", tone="black")
-                                    if pending_branch_id is None:
-                                        self._badge(ui=ui, text="No pending branch switch", tone="grey")
-                                    else:
-                                        self._badge(ui=ui, text=f"Pending {pending_branch_text}", tone="purple")
-                                    if dry_preview_status is not None:
-                                        self._badge(ui=ui, text="Dry preview active", tone="grey")
-                                with ui.element("div").classes("grid grid-cols-1 md:grid-cols-2 gap-3 w-full"):
-                                    _render_update_value(
-                                        "Configured target",
-                                        configured_branch_text,
-                                        detail_text="This branch will be applied automatically before update or verify.",
-                                        break_value=True,
-                                    )
-                                    _render_update_value(
-                                        "Pending branch switch",
-                                        pending_branch_text,
-                                        detail_text=(
-                                            "Branch change is staged locally and will be persisted on the next update action."
-                                            if pending_branch_id is not None
-                                            else "No branch switch is waiting to be applied."
-                                        ),
-                                        break_value=True,
-                                    )
-
-                        with ui.card().classes("mod-card w-full xl:col-span-5"):
-                            with ui.column().classes("w-full gap-3"):
-                                ui.label("Actions").classes("text-sm font-black mod-title-small")
-                                ui.label(
-                                    "Run operator actions directly from here. Disabled controls explain the blocking condition."
-                                ).classes("mod-subtitle text-sm")
-                                with ui.row().classes("w-full gap-2 flex-wrap"):
-                                    if config.INDEV:
-                                        ui.button("Dry", on_click=_cycle_dry_preview).classes(
-                                            "mod-list-button secondary mod-toolbar-button"
-                                        )
-                                    update_button = ui.button(
-                                        "Update",
-                                        on_click=_create_update_action_handler(NodeAppMutationAction.UPDATE),
-                                    ).classes("mod-list-button mod-toolbar-button")
-                                    verify_button = ui.button(
-                                        "Verify",
-                                        on_click=_create_update_action_handler(NodeAppMutationAction.VERIFY),
-                                    ).classes("mod-list-button secondary mod-toolbar-button")
-                                    refresh_button = ui.button("Refresh", on_click=_refresh_update_model).classes(
-                                        "mod-list-button secondary mod-toolbar-button"
-                                    )
-                                    if update_block_reason is not None:
-                                        update_button.disable()
-                                    if verify_block_reason is not None:
-                                        verify_button.disable()
-                                    if refresh_async_runtime_model is None:
-                                        refresh_button.disable()
-                                with ui.column().classes("w-full gap-1"):
-                                    if update_block_reason is None:
-                                        ui.label("Update is available.").classes("mod-subtitle text-sm")
-                                    else:
-                                        ui.label(f"Update: {update_block_reason}").classes("mod-subtitle text-sm")
-                                    if verify_block_reason is None:
-                                        ui.label("Verify is available.").classes("mod-subtitle text-sm")
-                                    else:
-                                        ui.label(f"Verify: {verify_block_reason}").classes("mod-subtitle text-sm")
-                                    if refresh_async_runtime_model is None:
-                                        ui.label("Refresh: live runtime refresh is unavailable in this view.").classes(
-                                            "mod-subtitle text-sm"
-                                        )
-
-                        with ui.card().classes("mod-card w-full xl:col-span-7"):
-                            with ui.column().classes("w-full gap-3"):
-                                ui.label("Status").classes("text-sm font-black mod-title-small")
-                                ui.label(
-                                    "Track the active operation first, then inspect timestamps and duration without scanning the raw log."
-                                ).classes("mod-subtitle text-sm")
-                                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                                    if section_update_status is None:
-                                        self._badge(ui=ui, text="No attempt recorded", tone="grey")
-                                    else:
-                                        self._badge(
-                                            ui=ui,
-                                            text=self._update_status_badge_text(section_update_status),
-                                            tone=self._update_status_badge_tone(section_update_status),
-                                        )
-                                        if section_update_status.operation_kind is not None:
-                                            self._badge(
-                                                ui=ui,
-                                                text=section_update_status.operation_kind.value.title(),
-                                                tone="black",
-                                            )
-                                        self._badge(ui=ui, text=progress_text, tone="grey")
-                                with ui.column().classes("w-full gap-2"):
-                                    ui.label(
-                                        "No update or verify attempt recorded in this process yet."
-                                        if section_update_status is None
-                                        else section_update_status.summary
-                                    ).classes("text-sm font-black mod-title-small break-all")
-                                    if section_update_status is not None and section_update_status.detail is not None:
-                                        ui.label(section_update_status.detail).classes("mod-subtitle text-sm break-all")
-                                    with ui.element("div").classes(
-                                        "w-full border border-white/10 bg-black/40 h-3 overflow-hidden"
-                                    ):
-                                        ui.element("div").classes("h-full bg-white/70").style(
-                                            f"width: {0.0 if progress_percent is None else progress_percent:.2f}%;"
-                                        )
-                                    with ui.element("div").classes("grid grid-cols-1 md:grid-cols-3 gap-3 w-full"):
-                                        _render_update_value(
-                                            "Progress",
-                                            progress_text,
-                                            detail_text=(
-                                                "Reported by SteamCMD output."
-                                                if progress_percent is not None
-                                                else "The provider has not reported progress for this attempt."
-                                            ),
-                                        )
-                                        _render_update_value(
-                                            "Started",
-                                            (
-                                                self._format_update_timestamp(section_update_status.started_at_unix_ms)
-                                                if (
-                                                    section_update_status is not None
-                                                    and section_update_status.started_at_unix_ms is not None
-                                                )
-                                                else "No start recorded"
-                                            ),
-                                        )
-                                        _render_update_value(
-                                            "Duration",
-                                            (
-                                                self._format_update_duration(
-                                                    started_at_unix_ms=section_update_status.started_at_unix_ms,
-                                                    finished_at_unix_ms=section_update_status.finished_at_unix_ms,
-                                                )
-                                                if (
-                                                    section_update_status is not None
-                                                    and section_update_status.started_at_unix_ms is not None
-                                                )
-                                                else "Unavailable"
-                                            ),
-                                        )
-
-                        with ui.card().classes("mod-card w-full xl:col-span-5"):
-                            with ui.column().classes("w-full gap-3"):
-                                ui.label("Installed").classes("text-sm font-black mod-title-small")
-                                ui.label(
-                                    "Separate installed manifest state from configured targets so branch drift is obvious."
-                                ).classes("mod-subtitle text-sm")
-                                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                                    self._badge(
-                                        ui=ui, text=install_alignment_badge.text, tone=install_alignment_badge.tone
-                                    )
-                                    self._badge(ui=ui, text=section_update_info.provider_label, tone="grey")
-                                    if section_update_info.app_id is not None:
-                                        self._badge(ui=ui, text=f"App {section_update_info.app_id}", tone="grey")
-                                with ui.element("div").classes("grid grid-cols-1 md:grid-cols-2 gap-3 w-full"):
-                                    _render_update_value("Installed version", installed_version, break_value=True)
-                                    _render_update_value(
-                                        "Installed branch",
-                                        (
-                                            section_update_info.installed_branch_id
-                                            if section_update_info.installed_branch_id is not None
-                                            else "Manifest branch unavailable"
-                                        ),
-                                        break_value=True,
-                                    )
-                                    _render_update_value(
-                                        "Manifest build",
-                                        (
-                                            str(section_update_info.installed_build_id)
-                                            if section_update_info.installed_build_id is not None
-                                            else "Unknown"
-                                        ),
-                                    )
-                                    _render_update_value(
-                                        "Configured target",
-                                        configured_branch_text,
-                                        break_value=True,
-                                    )
-
-                        with ui.card().classes("mod-card w-full xl:col-span-5"):
-                            with ui.column().classes("w-full gap-3"):
-                                ui.label(
-                                    "Live Operation"
-                                    if section_update_status is not None and section_update_status.running
-                                    else "Attempt Summary"
-                                ).classes("text-sm font-black mod-title-small")
-                                ui.label(
-                                    "Summarize the last known attempt without forcing the operator to parse the full log stream."
-                                ).classes("mod-subtitle text-sm")
-                                if section_update_status is None or section_update_status.started_at_unix_ms is None:
-                                    ui.label("No update or verify attempt recorded in this process yet.").classes(
-                                        "mod-subtitle text-sm"
-                                    )
-                                else:
-                                    with ui.element("div").classes("grid grid-cols-1 gap-3 w-full"):
-                                        _render_update_value("State", section_update_status.state.value.title())
-                                        if section_update_status.operation_kind is not None:
-                                            _render_update_value(
-                                                "Operation",
-                                                section_update_status.operation_kind.value.title(),
-                                            )
-                                        _render_update_value(
-                                            "Finished",
-                                            (
-                                                self._format_update_timestamp(section_update_status.finished_at_unix_ms)
-                                                if section_update_status.finished_at_unix_ms is not None
-                                                else "In progress"
-                                            ),
-                                        )
-                                        _render_update_value(
-                                            "Summary",
-                                            section_update_status.summary,
-                                            break_value=True,
-                                        )
-                                        if section_update_status.detail is not None:
-                                            _render_update_value(
-                                                "Detail",
-                                                section_update_status.detail,
-                                                break_value=True,
-                                            )
-
-                        with ui.card().classes("mod-card w-full xl:col-span-7"):
-                            with ui.column().classes("w-full gap-3"):
-                                ui.label("SteamCMD Log").classes("text-sm font-black mod-title-small")
-                                ui.label(
-                                    "Keep raw output docked in its own pane so it remains available without overwhelming the control surface."
-                                ).classes("mod-subtitle text-sm")
-                                if section_update_status is None:
-                                    ui.label("No log output is available yet.").classes("mod-subtitle text-sm")
-                                else:
-                                    ui.label(f"{len(section_update_status.log_lines)} log lines").classes(
-                                        "mod-subtitle text-xs"
-                                    )
-                                    ui.html(self._update_log_markup(section_update_status)).classes(
-                                        "w-full border border-white/10 bg-black/70 p-3 text-xs max-h-96 overflow-auto"
-                                    )
+                        self._render_update_controls_card(
+                            ui=ui,
+                            view_state=view_state,
+                            branch_options=branch_options,
+                            selected_branch_id=resolved_selected_branch_id,
+                            on_branch_change=_set_selected_branch,
+                            on_update=_create_update_action_handler(NodeAppMutationAction.UPDATE),
+                            on_verify=_create_update_action_handler(NodeAppMutationAction.VERIFY),
+                            on_refresh=_refresh_update_model if refresh_async_runtime_model is not None else None,
+                            on_dry_preview=_cycle_dry_preview if config.INDEV else None,
+                        )
+                        self._render_update_status_card(ui=ui, view_state=view_state)
+                        self._render_update_installed_card(ui=ui, view_state=view_state)
+                        self._render_update_log(ui=ui, view_state=view_state)
 
         render_update_section(current_model)
 

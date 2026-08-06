@@ -8,7 +8,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import Receive, Scope, Send
 
-from mirror_service import COMPUTERCRAFT_MIRROR_INSTALLER, MirrorError, MirrorRevisionUnavailable
+from computercraft_mirror import COMPUTERCRAFT_MIRROR_INSTALLER
+from mirror_models import MirrorError, MirrorRevisionUnavailable
 from font_assets import font_assets
 from mod_web_theme import MOD_WEB_THEME_STYLESHEET
 from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT

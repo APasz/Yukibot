@@ -7,18 +7,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from _async_utils import run_blocking
-from mirror_service import (
+from computercraft_mirror import (
     COMPUTERCRAFT_MIRROR_STARTUP_DISPATCHER_PATH,
     COMPUTERCRAFT_MIRROR_STATE_ROOT,
+)
+from mirror_models import (
     GitMirrorSource,
     GitReferenceOption,
     GitRepositoryInspection,
     MirrorError,
     MirrorProject,
-    MirrorService,
     MirrorSyncState,
     MirrorTrackingMode,
 )
+from mirror_service import MirrorService
 
 from .nicegui_protocols import ModWebUi, _value_as_text
 from .runtime_imports import ModWebUser, Power_Level, config

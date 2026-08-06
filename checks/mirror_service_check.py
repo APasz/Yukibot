@@ -10,22 +10,24 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from mirror_service import (
+from computercraft_mirror import (
     COMPUTERCRAFT_MIRROR_STATE_ROOT,
     COMPUTERCRAFT_MIRROR_STARTUP_DISPATCHER_PATH,
     COMPUTERCRAFT_MIRROR_INSTALLER,
+)
+from mirror_models import (
     MirrorAutoSyncOutcome,
     GitMirrorSource,
     MirrorError,
     MirrorGitHost,
     MirrorProject,
     MirrorRevisionUnavailable,
-    MirrorService,
     MirrorSyncState,
     MirrorTrackingMode,
     parse_public_git_repository_link,
     parse_public_git_repository_url,
 )
+from mirror_service import MirrorService
 from web_dash.mirrors import ModWebMirrorsMixin
 
 
@@ -95,8 +97,8 @@ class MirrorServiceCheck(unittest.TestCase):
                 publish_root="",
             )
             with (
-                patch.object(service, "_fetch_json", return_value={"sha": "a" * 40}) as fetch_json,
-                patch.object(service, "_download_bytes", return_value=archive_bytes) as download_bytes,
+                patch.object(service._git_client, "fetch_json", return_value={"sha": "a" * 40}) as fetch_json,
+                patch.object(service._git_client, "download_bytes", return_value=archive_bytes) as download_bytes,
             ):
                 refreshed = service.refresh_project(
                     project_id=project.project_id,
@@ -128,8 +130,8 @@ class MirrorServiceCheck(unittest.TestCase):
                 repository_url="https://github.com/example/project",
             )
             with (
-                patch.object(service, "_fetch_json", side_effect=[{"sha": first_revision}, {"sha": second_revision}]),
-                patch.object(service, "_download_bytes", side_effect=[first_archive, second_archive]),
+                patch.object(service._git_client, "fetch_json", side_effect=[{"sha": first_revision}, {"sha": second_revision}]),
+                patch.object(service._git_client, "download_bytes", side_effect=[first_archive, second_archive]),
             ):
                 service.refresh_project(project_id=project.project_id, actor_user_id=42, can_manage_all=False)
                 service.refresh_project(project_id=project.project_id, actor_user_id=42, can_manage_all=False)
@@ -167,13 +169,13 @@ class MirrorServiceCheck(unittest.TestCase):
                 repository_url="https://github.com/example/project",
             )
             with (
-                patch.object(service, "_fetch_json", return_value={"sha": revision}),
-                patch.object(service, "_download_bytes", return_value=archive),
+                patch.object(service._git_client, "fetch_json", return_value={"sha": revision}),
+                patch.object(service._git_client, "download_bytes", return_value=archive),
             ):
                 service.refresh_project(project_id=project.project_id, actor_user_id=42, can_manage_all=False)
 
             with (
-                patch.object(service, "_fetch_json", side_effect=MirrorError("Git provider is unavailable.")),
+                patch.object(service._git_client, "fetch_json", side_effect=MirrorError("Git provider is unavailable.")),
                 self.assertRaisesRegex(MirrorError, "Git provider is unavailable"),
             ):
                 service.refresh_project(project_id=project.project_id, actor_user_id=42, can_manage_all=False)
@@ -228,8 +230,8 @@ class MirrorServiceCheck(unittest.TestCase):
             service._replace_project(due)
             with (
                 patch("mirror_service._utc_now_datetime", return_value=now),
-                patch.object(service, "_fetch_json", return_value={"sha": revision}),
-                patch.object(service, "_download_bytes", return_value=archive) as download_bytes,
+                patch.object(service._git_client, "fetch_json", return_value={"sha": revision}),
+                patch.object(service._git_client, "download_bytes", return_value=archive) as download_bytes,
             ):
                 published_result = service.sync_next_due_git_project(now=now)
 
@@ -249,8 +251,8 @@ class MirrorServiceCheck(unittest.TestCase):
             )
             with (
                 patch("mirror_service._utc_now_datetime", return_value=now + timedelta(days=1)),
-                patch.object(service, "_fetch_json", return_value={"sha": revision}),
-                patch.object(service, "_download_bytes") as download_bytes,
+                patch.object(service._git_client, "fetch_json", return_value={"sha": revision}),
+                patch.object(service._git_client, "download_bytes") as download_bytes,
             ):
                 unchanged_result = service.sync_next_due_git_project(now=now)
 
@@ -273,8 +275,8 @@ class MirrorServiceCheck(unittest.TestCase):
                     repository_url="https://github.com/example/project",
                 )
             with (
-                patch.object(service, "_fetch_json", return_value={"sha": published_revision}),
-                patch.object(service, "_download_bytes", return_value=archive),
+                patch.object(service._git_client, "fetch_json", return_value={"sha": published_revision}),
+                patch.object(service._git_client, "download_bytes", return_value=archive),
             ):
                 published = service.refresh_project(
                     project_id=project.project_id,
@@ -285,7 +287,7 @@ class MirrorServiceCheck(unittest.TestCase):
             service._replace_project(replace(published, next_check_at=(now - timedelta(seconds=1)).isoformat()))
             with (
                 patch("mirror_service._utc_now_datetime", return_value=now),
-                patch.object(service, "_fetch_json", side_effect=MirrorError("Git provider is unavailable.")),
+                patch.object(service._git_client, "fetch_json", side_effect=MirrorError("Git provider is unavailable.")),
             ):
                 result = service.sync_next_due_git_project(now=now)
 
@@ -418,8 +420,8 @@ class MirrorServiceCheck(unittest.TestCase):
         with TemporaryDirectory() as temporary_name:
             service = MirrorService(Path(temporary_name) / "mirrors")
             with patch.object(
-                service,
-                "_fetch_json",
+                service._git_client,
+                "fetch_json",
                 side_effect=[
                     {"name": "Example Project", "default_branch": "main"},
                     {"sha": "b" * 40},
@@ -439,8 +441,8 @@ class MirrorServiceCheck(unittest.TestCase):
         with TemporaryDirectory() as temporary_name:
             service = MirrorService(Path(temporary_name) / "mirrors")
             with patch.object(
-                service,
-                "_fetch_json",
+                service._git_client,
+                "fetch_json",
                 side_effect=[
                     {"name": "Project", "default_branch": "main"},
                     {"id": "c" * 40},
@@ -477,8 +479,8 @@ class MirrorServiceCheck(unittest.TestCase):
         with TemporaryDirectory() as temporary_name:
             service = MirrorService(Path(temporary_name) / "mirrors")
             with patch.object(
-                service,
-                "_fetch_json_list",
+                service._git_client,
+                "fetch_json_list",
                 side_effect=[
                     (
                         {"name": "main"},

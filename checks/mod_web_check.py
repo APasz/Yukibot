@@ -3807,6 +3807,95 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(branch_text, "Experimental (latest_experimental)")
 
+    def test_update_section_view_state_names_target_and_offers_update_retry(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(
+                AppUpdateBranchState(branch_id="public", label="Stable", selected=True),
+                AppUpdateBranchState(
+                    branch_id="latest_experimental",
+                    label="Experimental",
+                    selected=False,
+                ),
+            ),
+            supports_verify=True,
+            installed_branch_id="public",
+        )
+        status = AppUpdateStatus(
+            state=AppUpdateState.FAILED,
+            summary="SteamCMD could not install the update.",
+            operation_kind=AppUpdateOperationKind.UPDATE,
+            detail="Disk write failure",
+            log_lines=("ERROR! Failed to install app",),
+        )
+        model = replace(
+            self._overview_model_with_config_and_chat(),
+            update_info=update_info,
+            app_stats=NodeAppRuntimeSummary(
+                running=False,
+                enabled=True,
+                version="1.2.3",
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+            ),
+        )
+
+        view_state = ModWebService._update_section_view_state(
+            model=model,
+            update_info=update_info,
+            status=status,
+            selected_branch_id="latest_experimental",
+            can_manage_updates=True,
+            dry_preview_active=False,
+        )
+
+        self.assertEqual(view_state.target_branch_label, "Experimental")
+        self.assertEqual(view_state.pending_branch_text, "Experimental (latest_experimental)")
+        self.assertEqual(view_state.update_button_label, "Retry update to Experimental")
+        self.assertEqual(view_state.verify_button_label, "Verify")
+        self.assertEqual(view_state.status_title, "Update failed")
+        self.assertTrue(view_state.show_log)
+        self.assertFalse(view_state.branch_selection_disabled)
+
+    def test_update_section_view_state_hides_empty_success_log_and_respects_access(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            supports_verify=True,
+        )
+        status = AppUpdateStatus(
+            state=AppUpdateState.SUCCEEDED,
+            summary="Verified files.",
+            operation_kind=AppUpdateOperationKind.VERIFY,
+        )
+        model = replace(self._overview_model_with_config_and_chat(), update_info=update_info)
+
+        view_state = ModWebService._update_section_view_state(
+            model=model,
+            update_info=update_info,
+            status=status,
+            selected_branch_id="public",
+            can_manage_updates=False,
+            dry_preview_active=False,
+        )
+
+        self.assertEqual(view_state.status_title, "Latest result")
+        self.assertEqual(view_state.update_button_label, "Update to Stable")
+        self.assertEqual(view_state.verify_button_label, "Verify")
+        self.assertFalse(view_state.show_log)
+        self.assertTrue(view_state.branch_selection_disabled)
+        self.assertEqual(view_state.action_status_text, "Requires Sudo access.")
+
     def test_details_steam_update_preset_resolves_scope_default(self) -> None:
         preset = ModWebService._details_steam_update_preset("sevendays_alpha")
 
@@ -3871,6 +3960,18 @@ class ModWebTests(unittest.TestCase):
                 supports_verify=False,
             ),
             "Verification is not available for this update provider.",
+        )
+
+    def test_update_action_block_reason_directs_operator_to_stop_the_app(self) -> None:
+        self.assertEqual(
+            ModWebService._update_action_block_reason(
+                action=NodeAppMutationAction.UPDATE,
+                can_manage_updates=True,
+                app_running=True,
+                update_running=False,
+                supports_verify=True,
+            ),
+            "Stop the app to update or verify.",
         )
 
     def test_update_action_block_reason_prioritises_running_operation(self) -> None:

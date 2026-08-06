@@ -5092,6 +5092,29 @@ class ModWebTheme:
                 .mod-app-details-field {{
                     width: 100%;
                 }}
+                .mod-update-log-details {{
+                    width: 100%;
+                }}
+                .mod-update-log-summary {{
+                    display: flex;
+                    align-items: center;
+                    min-height: 2.5rem;
+                    cursor: pointer;
+                    list-style: none;
+                }}
+                .mod-update-log-summary::-webkit-details-marker {{
+                    display: none;
+                }}
+                .mod-update-log-summary::after {{
+                    margin-left: auto;
+                    color: var(--mod-muted);
+                    content: "+";
+                    font-size: 1.1rem;
+                    font-weight: 900;
+                }}
+                .mod-update-log-details[open] .mod-update-log-summary::after {{
+                    content: "−";
+                }}
                 .mod-standard-drink-table,
                 .mod-currency-table,
                 .mod-unit-conversion-table {{

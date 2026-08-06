@@ -44,7 +44,8 @@ from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, Voice
 from config import Activity_Provider, Name_Cache, NodeCapacityProfile
 from font_assets import font_assets
 from maintenance import MaintenanceService
-from mirror_service import MirrorAutoSyncOutcome, MirrorAutoSyncResult, MirrorService
+from mirror_models import MirrorAutoSyncOutcome, MirrorAutoSyncResult
+from mirror_service import MirrorService
 from node_api import NodeSystemAction
 from node_api_relay import RemoteRelayTTSForwarder
 from node_api_http import NodeApiHttpService

@@ -15,7 +15,7 @@ import main
 from _manager import AppStartBlocker, AppStartBlockerKind, App_Manager
 from apps._app import App
 from apps._config import AppResourcePointProfile, App_Config
-from mirror_service import MirrorProject
+from mirror_models import MirrorProject
 from relay_notices import BotLifecycleStage, RelayNoticeSeverity, render_system_notice_text
 
 
