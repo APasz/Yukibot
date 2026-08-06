@@ -812,7 +812,7 @@ def build_factorio_generation_state(*, app: Factorio, node_name: str) -> NodeFac
             map_settings=None,
             space_age_enabled=space_age_enabled,
             map_exchange_available=app.check_running(),
-            running_world_mapgen_available=app.check_running() and app.yuki_bridge_enabled,
+            running_world_mapgen_available=app.check_running() and app.running_map_exchange_available,
             load_error=str(xcp) or type(xcp).__name__,
         )
     return NodeFactorioGenerationState(
@@ -823,7 +823,7 @@ def build_factorio_generation_state(*, app: Factorio, node_name: str) -> NodeFac
         map_settings=map_settings,
         space_age_enabled=space_age_enabled,
         map_exchange_available=app.check_running(),
-        running_world_mapgen_available=app.check_running() and app.yuki_bridge_enabled,
+        running_world_mapgen_available=app.check_running() and app.running_map_exchange_available,
     )
 
 

@@ -365,7 +365,9 @@ class ModWebAppPageFactorioMixin(ModWebServiceSupport):
                     if not state.running_world_mapgen_available:
                         sync_running_world_button.disable()
                         with sync_running_world_button:
-                            ui.tooltip("Start Factorio with Yuki Bridge 1.1.0 or newer to load its current map settings.")
+                            ui.tooltip(
+                                "Start Factorio with Yuki Bridge 1.2.0 or newer and wait for its map generation snapshot."
+                            )
                     ui.button("Save", icon="save", on_click=save_generation).classes(
                         "mod-list-button mod-factorio-save"
                     )

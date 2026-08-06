@@ -1922,6 +1922,7 @@ class Factorio(App[App_Config]):
         self._tail_machers: set[_FACTORIO_LINE_MATCHER] = set()
         self._bridge_events_tail: Tailer | None = None
         self._bridge_tail_matchers: set[_FACTORIO_LINE_MATCHER] = set()
+        self._bridge_map_exchange_string: str | None = None
         self._map_exchange_lock = asyncio.Lock()
         self._startup_error: str | None = None
         self._players: Players = Players(self)
@@ -2059,12 +2060,14 @@ class Factorio(App[App_Config]):
             raise RuntimeError(f"{self.friendly} must be running to read its map generation settings.")
         if not self.yuki_bridge_enabled:
             raise RuntimeError(
-                f"{self.friendly} requires {_FACTORIO_YUKI_BRIDGE_MOD_ID} 1.1.0 or newer to read running map settings."
+                f"{self.friendly} requires {_FACTORIO_YUKI_BRIDGE_MOD_ID} 1.2.0 or newer to read running map settings."
             )
-        response = await self.send_player_gated_rcon("/yuki mapgen", check_player_gate=False)
-        if not isinstance(response, str):
-            raise RuntimeError(f"{self.friendly} did not return running map generation settings.")
-        return _parse_factorio_bridge_map_exchange_string(response)
+        map_exchange_string = getattr(self, "_bridge_map_exchange_string", None)
+        if not isinstance(map_exchange_string, str):
+            raise RuntimeError(
+                f"{self.friendly} has not received a map generation snapshot from {_FACTORIO_YUKI_BRIDGE_MOD_ID}."
+            )
+        return map_exchange_string
 
     def _set_configured_save_selection(self, filename: str | None, create_fresh_world: bool) -> None:
         if (
@@ -2116,6 +2119,10 @@ class Factorio(App[App_Config]):
     @property
     def bridge_events_tail_active(self) -> bool:
         return getattr(self, "_bridge_events_tail", None) is not None
+
+    @property
+    def running_map_exchange_available(self) -> bool:
+        return self.yuki_bridge_enabled and isinstance(getattr(self, "_bridge_map_exchange_string", None), str)
 
     @property
     def activity_providers(self) -> tuple[AppActivityProvider[Any], ...]:
@@ -2329,6 +2336,7 @@ class Factorio(App[App_Config]):
         return self.process is not None
 
     def _reset_bridge_events_file(self) -> None:
+        self._bridge_map_exchange_string = None
         File_Utils.remove(self.bridge_events_path, silent=True, resolve=False)
 
     async def _start_bridge_events_tail(self) -> None:
@@ -3104,33 +3112,28 @@ def _parse_factorio_bridge_evolution_snapshot(text: str) -> FactorioActivitySnap
     return _factorio_bridge_evolution_snapshot(payload)
 
 
-def _parse_factorio_bridge_map_exchange_string(text: str) -> str:
-    try:
-        response = _optional_mapping(json.loads(text))
-    except json.JSONDecodeError as xcp:
-        if _factorio_command_failed(text):
-            raise RuntimeError("Reading running map settings requires Yuki Bridge 1.1.0 or newer.") from xcp
-        raise RuntimeError("Yuki Bridge returned invalid map generation data.") from xcp
-    if response is None or response.get("kind") != "command_result" or response.get("command") != "mapgen":
-        raise RuntimeError("Yuki Bridge returned an unexpected map generation response.")
-    if response.get("ok") is not True:
-        error = response.get("error")
-        detail = error.strip() if isinstance(error, str) else "The map generation request failed."
-        raise RuntimeError(f"Yuki Bridge could not read map generation settings: {detail}")
-    result = _optional_mapping(response.get("result"))
-    if result is None or result.get("kind") != "mapgen":
-        raise RuntimeError("Yuki Bridge returned incomplete map generation data.")
-    raw_surfaces = result.get("surfaces")
-    if not isinstance(raw_surfaces, list) or len(raw_surfaces) != 1:
-        raise RuntimeError("Yuki Bridge did not return the requested map surface.")
-    surface = _optional_mapping(raw_surfaces[0])
-    raw_map_exchange_string = None if surface is None else surface.get("map_exchange_string")
-    if not isinstance(raw_map_exchange_string, str):
-        raise RuntimeError("Yuki Bridge did not return a map exchange string.")
-    try:
-        return normalise_factorio_map_exchange_string(raw_map_exchange_string)
-    except ValueError as xcp:
-        raise RuntimeError("Yuki Bridge returned an invalid map exchange string.") from xcp
+def _factorio_bridge_nauvis_map_exchange_string(payload: Mapping[str, object]) -> str | None:
+    if payload.get("kind") != "mapgen_snapshot":
+        return None
+    raw_surfaces = payload.get("surfaces")
+    if not isinstance(raw_surfaces, list):
+        return None
+    for raw_surface in cast(list[object], raw_surfaces):
+        surface_entry = _optional_mapping(raw_surface)
+        if surface_entry is None:
+            continue
+        surface = _optional_mapping(surface_entry.get("surface"))
+        raw_surface_name = None if surface is None else surface.get("name")
+        if not isinstance(raw_surface_name, str) or raw_surface_name.strip().casefold() != "nauvis":
+            continue
+        raw_map_exchange_string = surface_entry.get("map_exchange_string")
+        if not isinstance(raw_map_exchange_string, str):
+            return None
+        try:
+            return normalise_factorio_map_exchange_string(raw_map_exchange_string)
+        except ValueError:
+            return None
+    return None
 
 
 def _normalise_factorio_surface_name(raw_name: str) -> str:
@@ -3373,6 +3376,13 @@ class Matchers:
             snapshot = _factorio_bridge_evolution_snapshot(payload)
             if snapshot is not None:
                 self.app._activities.update_evolution_snapshot(snapshot)
+            return
+        if kind == "mapgen_snapshot":
+            map_exchange_string = _factorio_bridge_nauvis_map_exchange_string(payload)
+            if map_exchange_string is None:
+                log.warning("Ignoring invalid Yuki Bridge map generation snapshot: app=%s", self.app.name)
+                return
+            self.app._bridge_map_exchange_string = map_exchange_string
             return
         if kind == "research_finished":
             await self.match_research(line)

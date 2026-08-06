@@ -192,36 +192,28 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         app._relay.send.assert_awaited_once()
         self.assertTrue(output_removed)
 
-    def test_running_map_exchange_string_uses_yuki_bridge_mapgen_response(self) -> None:
+    def test_running_map_exchange_string_uses_yuki_bridge_mapgen_snapshot(self) -> None:
         app = cast(Factorio, object.__new__(Factorio))
         app.friendly = "Factorio Alpha"
         app.check_running = lambda: True
         app._factorio_yuki_bridge_enabled = True
-        app._relay = SimpleNamespace(
-            send=AsyncMock(
-                return_value=json.dumps(
-                    {
-                        "kind": "command_result",
-                        "command": "mapgen",
-                        "ok": True,
-                        "result": {
-                            "kind": "mapgen",
-                            "surfaces": [
-                                {
-                                    "surface": {"name": "nauvis", "index": 1},
-                                    "map_exchange_string": ">>>eA==<<<",
-                                }
-                            ],
-                        },
-                    }
-                )
-            )
-        )
+        app._bridge_map_exchange_string = ">>>eA==<<<"
 
         map_exchange_string = asyncio.run(app.running_map_exchange_string())
 
+        self.assertTrue(app.running_map_exchange_available)
         self.assertEqual(map_exchange_string, ">>>eA==<<<")
-        app._relay.send.assert_awaited_once_with("/yuki mapgen")
+
+    def test_running_map_exchange_string_requires_bridge_snapshot(self) -> None:
+        app = cast(Factorio, object.__new__(Factorio))
+        app.friendly = "Factorio Alpha"
+        app.check_running = lambda: True
+        app._factorio_yuki_bridge_enabled = True
+        app._bridge_map_exchange_string = None
+
+        self.assertFalse(app.running_map_exchange_available)
+        with self.assertRaisesRegex(RuntimeError, "has not received a map generation snapshot"):
+            asyncio.run(app.running_map_exchange_string())
 
     def test_running_map_exchange_string_requires_yuki_bridge(self) -> None:
         app = cast(Factorio, object.__new__(Factorio))
@@ -229,7 +221,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         app.check_running = lambda: True
         app._factorio_yuki_bridge_enabled = False
 
-        with self.assertRaisesRegex(RuntimeError, "requires yuki-bridge 1.1.0"):
+        with self.assertRaisesRegex(RuntimeError, "requires yuki-bridge 1.2.0"):
             asyncio.run(app.running_map_exchange_string())
 
     def test_selected_save_changes_the_generated_start_command(self) -> None:
@@ -2301,6 +2293,20 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
                 FactorioSurfaceEvolution("Vulcanus", FactorioEvolution(factor=0.0)),
             ),
         )
+
+    async def test_match_bridge_event_caches_mapgen_snapshot(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app._tail_machers = set()
+        app._bridge_tail_matchers = set()
+        matcher = Matchers(app)
+
+        await matcher.match_bridge_event(
+            '{"kind":"mapgen_snapshot","surfaces":[{"surface":{"name":"Nauvis","index":1},'
+            '"map_exchange_string":">>>eA==<<<"}]}'
+        )
+
+        self.assertEqual(app._bridge_map_exchange_string, ">>>eA==<<<")
 
     async def test_match_research_requires_yuki_bridge(self) -> None:
         app = cast(Any, object.__new__(Factorio))
