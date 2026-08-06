@@ -1210,7 +1210,7 @@ _SEVENDAYS_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         description="Request the sandbox option dump added in 7D2D 3.0 b259.",
         power_level=Power_Level.user,
         execute=_console_getsandboxoptions,
-        min_app_version=AppVersion(main="3.0", build=259),
+        min_app_version=_SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION,
     ),
     ConsoleAction(
         key="kick",

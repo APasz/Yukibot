@@ -1094,6 +1094,20 @@ class SevenDaysConsoleActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.text, "Sandbox options are written to the 7D2D stdout feed.")
         self.assertEqual(result.source, ConsoleResponseSource.TELNET)
 
+    def test_sandbox_options_version_gate_prioritises_semver_over_build(self) -> None:
+        supported_versions: tuple[AppVersion, ...] = (
+            AppVersion(main="3.0.1"),
+            AppVersion(main="3.1.0", build=4),
+            AppVersion(main="4.0.0", build=1),
+        )
+
+        for version in supported_versions:
+            with self.subTest(version=version.display_value):
+                app = self._console_app(version=version)
+
+                self.assertTrue(app.supports_sevendays_sandbox_options)
+                self.assertIn("getsandboxoptions", {action.key for action in app.console_actions})
+
     async def test_startup_sandbox_options_request_is_version_gated(self) -> None:
         unsupported_app = self._console_app(version=AppVersion(main="3.0", build=258))
         await unsupported_app._request_startup_sandbox_options(delay_seconds=0.0, max_attempts=1)

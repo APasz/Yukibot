@@ -3702,6 +3702,57 @@ class ModWebTheme:
                 .mod-row-title {{ color: var(--mod-text) !important; font-weight: 850; }}
                 .mod-row-file {{ color: var(--mod-dim) !important; font-size: 0.78rem; }}
                 .mod-row-meta {{ display: flex; justify-content: flex-end; gap: 0.35rem; flex-wrap: wrap; min-width: 12rem; }}
+                .mod-sandbox-options {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+                    gap: 0.8rem;
+                }}
+                .mod-sandbox-section {{ overflow: hidden; }}
+                .mod-sandbox-section-header {{
+                    display: flex;
+                    align-items: baseline;
+                    justify-content: space-between;
+                    gap: 0.75rem;
+                    padding: 0.85rem 1rem 0.7rem;
+                    border-bottom: 1px solid var(--mod-border);
+                    background: rgba(255, 255, 255, 0.025);
+                }}
+                .mod-sandbox-section-count,
+                .mod-sandbox-option-default {{
+                    color: var(--mod-muted);
+                    font-size: 0.72rem;
+                    font-weight: 750;
+                }}
+                .mod-sandbox-option {{
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) auto;
+                    align-items: center;
+                    gap: 0.9rem;
+                    padding: 0.72rem 1rem;
+                    border-bottom: 1px solid rgba(82, 82, 91, 0.38);
+                }}
+                .mod-sandbox-option:last-child {{ border-bottom: 0; }}
+                .mod-sandbox-option-name {{ min-width: 0; }}
+                .mod-sandbox-option-values {{
+                    min-width: 8.5rem;
+                    text-align: right;
+                }}
+                .mod-sandbox-option-current {{
+                    color: var(--mod-accent-text-strong);
+                    font-size: 0.86rem;
+                    font-weight: 900;
+                }}
+                @media (max-width: 42rem) {{
+                    .mod-sandbox-options {{ grid-template-columns: 1fr; }}
+                    .mod-sandbox-option {{
+                        grid-template-columns: 1fr;
+                        gap: 0.28rem;
+                    }}
+                    .mod-sandbox-option-values {{
+                        min-width: 0;
+                        text-align: left;
+                    }}
+                }}
                 .mod-pill {{
                     border-radius: 0 !important;
                     padding: 0.13rem 0.44rem;

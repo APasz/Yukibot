@@ -16265,7 +16265,31 @@ class ModWebTests(unittest.TestCase):
 
         self.assertIn("General", markup)
         self.assertIn("BlockDamage", markup)
-        self.assertIn("10/200%", markup)
+        self.assertIn("200%", markup)
+        self.assertIn("Default · 100%", markup)
+        self.assertNotIn("Current index", markup)
+        self.assertNotIn("10/200%", markup)
+
+    def test_sevendays_sandbox_options_markup_hides_matching_defaults(self) -> None:
+        markup = ModWebService._sevendays_sandbox_options_markup(
+            ModWebSevenDaysSandboxOptionsSummary(
+                data_path=".yukibot/sandbox_options.json",
+                file_exists=True,
+                options=(
+                    ModWebSevenDaysSandboxOptionEntry(
+                        section="General",
+                        key="Difficulty",
+                        value_index=3,
+                        value_label="Nomad",
+                        default_index=3,
+                        default_label="Nomad",
+                    ),
+                ),
+            )
+        )
+
+        self.assertIn("Nomad", markup)
+        self.assertNotIn("Default ·", markup)
 
     def test_minecraft_recipe_summary_reads_persisted_recipe_book(self) -> None:
         with TemporaryDirectory() as temp_dir:

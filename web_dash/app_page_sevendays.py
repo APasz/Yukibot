@@ -38,83 +38,55 @@ class ModWebAppPageSevenDaysMixin(ModWebServiceSupport):
     ) -> None:
         del user, tab
         summary = model.sevendays_sandbox_options
-        data_path = self._sevendays_sandbox_data_path(summary)
-        file_status = self._sevendays_sandbox_file_status(summary)
-        option_count = 0 if summary is None else len(summary.options)
-        section_count = 0 if summary is None else len({option.section.casefold() for option in summary.options})
-        generated_at = "Unknown" if summary is None or summary.generated_at is None else summary.generated_at
-        app_version = "Unknown" if summary is None or summary.app_version is None else summary.app_version
-        sandbox_code = "Unavailable" if summary is None or summary.sandbox_code is None else summary.sandbox_code
-
-        with ui.card().classes(self._flat_tab_card_classes()):
-            with ui.column().classes(self._tab_section_body_classes()):
-                self._render_flat_tab_header(
-                    ui=ui,
-                    title="Sandbox",
-                    description="Review the persisted 7D2D sandbox option snapshot detected by Yukibot.",
-                )
-                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                    self._badge(ui=ui, text=file_status, tone=self._sevendays_sandbox_status_tone(summary))
-                    self._badge(ui=ui, text=f"{option_count} options", tone="black" if option_count else "grey")
-                    self._badge(ui=ui, text=f"{section_count} sections", tone="grey")
-                with ui.element("div").classes("grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 w-full"):
-                    self._render_sevendays_sandbox_summary_value(ui=ui, label="Detected version", value=app_version)
-                    self._render_sevendays_sandbox_summary_value(ui=ui, label="Generated", value=generated_at)
-                    self._render_sevendays_sandbox_summary_value(ui=ui, label="Sandbox code", value=sandbox_code)
-                    self._render_sevendays_sandbox_summary_value(ui=ui, label="Snapshot file", value=data_path)
-
         if summary is None:
             self._render_flat_tab_empty_state(
                 ui=ui,
-                title="Sandbox",
-                description="Sandbox option data is not available for this node yet.",
-                detail_text="Run `Get Sandbox Options` while the server is running to populate the persisted snapshot.",
-                secondary_description=f"Expected file: {data_path}",
+                title="Sandbox settings",
+                description="Sandbox settings are not available yet.",
+                detail_text="Start the server, then use `Get Sandbox Options` from the Console tab to load its active rules.",
             )
             return
         if summary.load_error is not None:
             self._render_flat_tab_empty_state(
                 ui=ui,
-                title="Sandbox",
-                description="Sandbox option data could not be loaded.",
+                title="Sandbox settings",
+                description="Sandbox settings could not be loaded.",
                 detail_text=summary.load_error,
             )
             return
         if not summary.options:
             self._render_flat_tab_empty_state(
                 ui=ui,
-                title="Sandbox",
-                description="No sandbox options have been parsed yet.",
-                detail_text="The snapshot exists, but it does not currently contain any parsed option entries.",
+                title="Sandbox settings",
+                description="No sandbox settings have been received yet.",
+                detail_text="Use `Get Sandbox Options` from the Console tab while the server is running.",
             )
             return
+
+        option_count = len(summary.options)
+        section_count = len({option.section.casefold() for option in summary.options})
+        with ui.card().classes(self._flat_tab_card_classes()):
+            with ui.column().classes(self._tab_section_body_classes()):
+                self._render_flat_tab_header(
+                    ui=ui,
+                    title="Sandbox settings",
+                )
+                ui.label(f"{option_count} settings in {section_count} categories").classes("mod-subtitle text-sm")
+                if summary.sandbox_code is not None or summary.generated_at is not None:
+                    with ui.element("div").classes("grid grid-cols-1 md:grid-cols-2 gap-3 w-full"):
+                        if summary.sandbox_code is not None:
+                            self._render_sevendays_sandbox_summary_value(
+                                ui=ui,
+                                label="Sandbox code",
+                                value=summary.sandbox_code,
+                            )
+                        if summary.generated_at is not None:
+                            self._render_sevendays_sandbox_summary_value(
+                                ui=ui,
+                                label="Last updated",
+                                value=summary.generated_at,
+                            )
         ui.html(self._sevendays_sandbox_options_markup(summary)).classes("w-full")
-
-    @staticmethod
-    def _sevendays_sandbox_status_tone(summary: ModWebSevenDaysSandboxOptionsSummary | None) -> str:
-        if summary is None or not summary.file_exists:
-            return "grey"
-        if summary.load_error is not None:
-            return "warn"
-        if not summary.options:
-            return "grey"
-        return "black"
-
-    @staticmethod
-    def _sevendays_sandbox_file_status(summary: ModWebSevenDaysSandboxOptionsSummary | None) -> str:
-        if summary is None or not summary.file_exists:
-            return "Snapshot missing"
-        if summary.load_error is not None:
-            return "Snapshot unreadable"
-        if not summary.options:
-            return "Snapshot empty"
-        return "Snapshot ready"
-
-    @staticmethod
-    def _sevendays_sandbox_data_path(summary: ModWebSevenDaysSandboxOptionsSummary | None) -> str:
-        if summary is None:
-            return ".yukibot/sandbox_options.json"
-        return summary.data_path
 
     @staticmethod
     def _render_sevendays_sandbox_summary_value(*, ui: ModWebUi, label: str, value: str) -> None:
@@ -151,7 +123,7 @@ class ModWebAppPageSevenDaysMixin(ModWebServiceSupport):
             cls._sevendays_sandbox_option_section_markup(section=section, options=tuple(options))
             for section, options in sorted(grouped_options.items(), key=lambda item: item[0].casefold())
         )
-        return f'<div class="mod-config-file-list">{section_markup}</div>'
+        return f'<div class="mod-sandbox-options">{section_markup}</div>'
 
     @staticmethod
     def _sevendays_sandbox_option_section_markup(
@@ -161,26 +133,28 @@ class ModWebAppPageSevenDaysMixin(ModWebServiceSupport):
     ) -> str:
         rows = "".join(
             (
-                '<div class="mod-config-file-row">'
-                '<div class="min-w-0">'
+                '<div class="mod-sandbox-option">'
+                '<div class="mod-sandbox-option-name">'
                 f'<div class="mod-title">{escape(option.key)}</div>'
-                f'<div class="mod-subtitle">Current index <code>{escape(str(option.value_index))}</code> · '
-                f"Default index <code>{escape(str(option.default_index))}</code></div>"
                 "</div>"
-                '<div class="mod-config-file-meta">'
-                f'<span class="mod-pill">{escape(str(option.value_index))}/{escape(option.value_label)}</span>'
-                f'<span class="mod-pill">{escape(str(option.default_index))}/{escape(option.default_label)}</span>'
-                "</div>"
-                "</div>"
+                '<div class="mod-sandbox-option-values">'
+                f'<div class="mod-sandbox-option-current">{escape(option.value_label)}</div>'
+                + (
+                    f'<div class="mod-sandbox-option-default">Default · {escape(option.default_label)}</div>'
+                    if (option.value_index, option.value_label) != (option.default_index, option.default_label)
+                    else ""
+                )
+                + "</div>"
+                + "</div>"
             )
             for option in options
         )
         return (
-            '<div class="mod-card mod-card-plain">'
-            '<div class="mod-config-file-body">'
+            '<section class="mod-card mod-sandbox-section">'
+            '<div class="mod-sandbox-section-header">'
             f'<div class="mod-title">{escape(section)}</div>'
-            f'<div class="mod-subtitle">{len(options)} option{"s" if len(options) != 1 else ""}</div>'
+            f'<div class="mod-sandbox-section-count">{len(options)} setting{"s" if len(options) != 1 else ""}</div>'
+            "</div>"
             f"{rows}"
-            "</div>"
-            "</div>"
+            "</section>"
         )
