@@ -3413,13 +3413,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
             raise RuntimeError(f"Healthy node badge text element is missing its id: {section.node.node_name}")
         if not isinstance(badge_element_id, int) or not isinstance(text_element_id, int):
             return None
-        portal_node_latencies_url = (
-            section.node.portal_node_latencies_url
-            if section.node.is_current
-            else self._current_node_link().portal_node_latencies_url
-        )
-        if not section.node.is_current and portal_node_latencies_url is None:
-            return None
         pending_text = self._home_node_badge_initial_text(section)
         return _ModWebNodePresenceBadgeSpec(
             node_name=section.node.node_name,
@@ -3432,10 +3425,15 @@ class ModWebHomeMixin(ModWebServiceSupport):
             presence_stream_url=(
                 section.node.presence_stream_url if section.node.is_current and section.error is None else None
             ),
+            direct_latency_probe_url=(
+                section.node.latency_probe_url if not section.node.is_current and section.error is None else None
+            ),
             presence_health_url=(
                 section.node.presence_health_url if section.node.is_current and section.error is None else None
             ),
-            portal_node_latencies_url=portal_node_latencies_url if section.error is None else None,
+            portal_node_latencies_url=(
+                section.node.portal_node_latencies_url if section.node.is_current and section.error is None else None
+            ),
             pending_class_name=ModWebUiHelpersMixin._badge_class_name(
                 tone=self._node_status_badge_tone(section),
                 extra_classes=extra_classes,

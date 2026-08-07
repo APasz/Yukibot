@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, Literal
 
 from font_assets import font_assets
+from node_api_route_contracts import NODE_DISCORD_HEARTBEAT_LATENCY_HEADER
 
 from .constants import (
     _APP_LIST_API_QUERY_PARAM,
@@ -683,6 +684,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         latency_refresh_interval_ms: int = int(_HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS * 1000)
         latency_timeout_ms: int = int(_HOME_NODE_LATENCY_TIMEOUT_SECONDS * 1000)
         reconnect_delay_ms: int = int(_NODE_PRESENCE_RECONNECT_DELAY_SECONDS * 1000)
+        discord_latency_header: str = json.dumps(NODE_DISCORD_HEARTBEAT_LATENCY_HEADER)
         return f"""
             (() => {{
                 const controllerKey = {json.dumps(controller_key)};
@@ -690,6 +692,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                 const latencyRefreshIntervalMs = {latency_refresh_interval_ms};
                 const latencyTimeoutMs = {latency_timeout_ms};
                 const reconnectDelayMs = {reconnect_delay_ms};
+                const discordLatencyHeader = {discord_latency_header};
                 const bootstrapProbeCount = 4;
                 const bootstrapProbeDelayMs = 850;
                 const getElementMaybe = (elementId) => getElement(elementId) || getHtmlElement(elementId);
@@ -821,6 +824,32 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         return null;
                     }}
                 }};
+                const sampleHttpLatency = async (url, connection) => {{
+                    const abortController = new AbortController();
+                    const timeoutHandle = window.setTimeout(() => abortController.abort(), latencyTimeoutMs);
+                    const startedAt = performance.now();
+                    try {{
+                        const response = await fetch(url, {{
+                            cache: 'no-store',
+                            signal: abortController.signal,
+                        }});
+                        if (!response.ok) {{
+                            return null;
+                        }}
+                        const rawDiscordLatencyMs = response.headers.get(discordLatencyHeader);
+                        const parsedDiscordLatencyMs = rawDiscordLatencyMs === null ? null : Number(rawDiscordLatencyMs);
+                        connection.discordLatencyMs = typeof parsedDiscordLatencyMs === 'number'
+                            && Number.isFinite(parsedDiscordLatencyMs)
+                            && parsedDiscordLatencyMs >= 0
+                            ? Math.round(parsedDiscordLatencyMs)
+                            : null;
+                        return Math.max(1, Math.round(performance.now() - startedAt));
+                    }} catch (_error) {{
+                        return null;
+                    }} finally {{
+                        window.clearTimeout(timeoutHandle);
+                    }}
+                }};
                 const sampleLatencyMeasurement = async (nodeName) => {{
                     const connection = controllerState.connectionsByNode[nodeName];
                     const spec = getSpec(nodeName);
@@ -828,23 +857,10 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         return null;
                     }}
                     if (spec.presence_health_url) {{
-                        const abortController = new AbortController();
-                        const timeoutHandle = window.setTimeout(() => abortController.abort(), latencyTimeoutMs);
-                        const startedAt = performance.now();
-                        try {{
-                            const response = await fetch(spec.presence_health_url, {{
-                                cache: 'no-store',
-                                signal: abortController.signal,
-                            }});
-                            if (!response.ok) {{
-                                return null;
-                            }}
-                            return Math.max(1, Math.round(performance.now() - startedAt));
-                        }} catch (_error) {{
-                            return null;
-                        }} finally {{
-                            window.clearTimeout(timeoutHandle);
-                        }}
+                        return await sampleHttpLatency(spec.presence_health_url, connection);
+                    }}
+                    if (spec.direct_latency_probe_url) {{
+                        return await sampleHttpLatency(spec.direct_latency_probe_url, connection);
                     }}
                     if (spec.portal_node_latencies_url && !spec.presence_stream_url) {{
                         return await samplePortalNodeLatency(nodeName);
@@ -961,41 +977,70 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                     }}
                     connection.socket.send(JSON.stringify({{type: 'node_latencies'}}));
                 }};
+                const beginLatencySample = (nodeName) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    if (!connection || connection.latencySampleInFlight) {{
+                        return null;
+                    }}
+                    connection.latencySampleInFlight = true;
+                    return connection;
+                }};
+                const finishLatencySample = (nodeName, connection) => {{
+                    if (controllerState.connectionsByNode[nodeName] === connection) {{
+                        connection.latencySampleInFlight = false;
+                    }}
+                }};
                 const runLatencyBootstrap = async (nodeName) => {{
                     const spec = getSpec(nodeName);
                     if (!spec || !spec.show_latency) {{
                         return;
                     }}
-                    const measurements = [];
-                    for (let attemptIndex = 0; attemptIndex < bootstrapProbeCount; attemptIndex += 1) {{
-                        const latency = await sampleLatencyMeasurement(nodeName);
-                        if (typeof latency === 'number' && Number.isFinite(latency)) {{
-                            measurements.push(latency);
-                        }}
-                        if (attemptIndex + 1 < bootstrapProbeCount) {{
-                            await sleep(bootstrapProbeDelayMs);
-                        }}
-                    }}
-                    const summary = summariseLatencyMeasurements(measurements);
-                    if ((spec.presence_health_url || spec.portal_node_latencies_url) && summary === null) {{
-                        renderDownState(nodeName);
+                    const connection = beginLatencySample(nodeName);
+                    if (!connection) {{
                         return;
                     }}
-                    await renderAliveState(nodeName, summary);
-                    requestPortalNodeLatencies(nodeName);
+                    try {{
+                        const measurements = [];
+                        for (let attemptIndex = 0; attemptIndex < bootstrapProbeCount; attemptIndex += 1) {{
+                            const latency = await sampleLatencyMeasurement(nodeName);
+                            if (typeof latency === 'number' && Number.isFinite(latency)) {{
+                                measurements.push(latency);
+                            }}
+                            if (attemptIndex + 1 < bootstrapProbeCount) {{
+                                await sleep(bootstrapProbeDelayMs);
+                            }}
+                        }}
+                        const summary = summariseLatencyMeasurements(measurements);
+                        if ((spec.presence_health_url || spec.direct_latency_probe_url || spec.portal_node_latencies_url) && summary === null) {{
+                            renderDownState(nodeName);
+                            return;
+                        }}
+                        await renderAliveState(nodeName, summary);
+                        requestPortalNodeLatencies(nodeName);
+                    }} finally {{
+                        finishLatencySample(nodeName, connection);
+                    }}
                 }};
                 const runLatencySample = async (nodeName) => {{
                     const spec = getSpec(nodeName);
                     if (!spec || !spec.show_latency) {{
                         return;
                     }}
-                    const latency = await sampleLatencyMeasurement(nodeName);
-                    if ((spec.presence_health_url || spec.portal_node_latencies_url) && latency === null) {{
-                        renderDownState(nodeName);
+                    const connection = beginLatencySample(nodeName);
+                    if (!connection) {{
                         return;
                     }}
-                    await renderAliveState(nodeName, latency);
-                    requestPortalNodeLatencies(nodeName);
+                    try {{
+                        const latency = await sampleLatencyMeasurement(nodeName);
+                        if ((spec.presence_health_url || spec.direct_latency_probe_url || spec.portal_node_latencies_url) && latency === null) {{
+                            renderDownState(nodeName);
+                            return;
+                        }}
+                        await renderAliveState(nodeName, latency);
+                        requestPortalNodeLatencies(nodeName);
+                    }} finally {{
+                        finishLatencySample(nodeName, connection);
+                    }}
                 }};
                 const scheduleReconnect = (nodeName) => {{
                     const connection = controllerState.connectionsByNode[nodeName];
@@ -1015,14 +1060,14 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         closeConnection(nodeName);
                         return;
                     }}
-                    if (!spec.presence_stream_url && !spec.presence_health_url && !spec.portal_node_latencies_url) {{
+                    if (!spec.presence_stream_url && !spec.direct_latency_probe_url && !spec.presence_health_url && !spec.portal_node_latencies_url) {{
                         renderBadge(spec, spec.pending_text, spec.pending_class_name);
                         closeConnection(nodeName);
                         return;
                     }}
                     const existingConnection = controllerState.connectionsByNode[nodeName];
-                    if (existingConnection && existingConnection.socket) {{
-                        if (existingConnection.socket.readyState === WebSocket.OPEN || existingConnection.socket.readyState === WebSocket.CONNECTING) {{
+                    if (existingConnection) {{
+                        if (!existingConnection.socket || existingConnection.socket.readyState === WebSocket.OPEN || existingConnection.socket.readyState === WebSocket.CONNECTING) {{
                             renderBadge(spec, existingConnection.lastText || spec.pending_text, existingConnection.lastClassName || spec.pending_class_name);
                             return;
                         }}
@@ -1040,10 +1085,11 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         discordLatencyMs: null,
                         portalNodeLatencies: {{}},
                         portalLatencyRequestInFlight: false,
+                        latencySampleInFlight: false,
                     }};
                     controllerState.connectionsByNode[nodeName] = connection;
                     renderBadge(spec, spec.pending_text, spec.pending_class_name);
-                    if (spec.presence_health_url || (spec.portal_node_latencies_url && !spec.presence_stream_url)) {{
+                    if (spec.presence_health_url || spec.direct_latency_probe_url || (spec.portal_node_latencies_url && !spec.presence_stream_url)) {{
                         if (spec.show_latency) {{
                             void runLatencyBootstrap(nodeName);
                             connection.latencyIntervalId = window.setInterval(() => {{

@@ -1939,6 +1939,7 @@ class ModWebTests(unittest.TestCase):
                     alive_text="Erin: Alive",
                     down_text="Erin: Down",
                     presence_stream_url=None,
+                    direct_latency_probe_url="https://erin.example/api/node/ping",
                     presence_health_url="/mod-web/health",
                     portal_node_latencies_url="/mod-web/portal-node-latencies",
                     pending_class_name="badge-down",
@@ -1958,6 +1959,7 @@ class ModWebTests(unittest.TestCase):
         self.assertIn('"down_text":"Yuki: Down"', script)
         self.assertIn('"presence_stream_url":"/api/node/presence/stream"', script)
         self.assertIn('"presence_stream_url":null', script)
+        self.assertIn('"direct_latency_probe_url":"https://erin.example/api/node/ping"', script)
         self.assertIn('"presence_health_url":"/mod-web/health"', script)
         self.assertIn('"portal_node_latencies_url":"/mod-web/portal-node-latencies"', script)
         self.assertIn('"show_latency":true', script)
@@ -1979,7 +1981,12 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("${spec.node_label}: ${latencyTextValue}", script)
         self.assertIn("textElement.textContent = text;", script)
         self.assertNotIn("_mod_web_latency_probe", script)
-        self.assertIn("fetch(spec.presence_health_url", script)
+        self.assertIn("sampleHttpLatency(spec.presence_health_url, connection)", script)
+        self.assertIn("sampleHttpLatency(spec.direct_latency_probe_url, connection)", script)
+        self.assertIn("const sampleHttpLatency = async (url, connection) =>", script)
+        self.assertIn("window.setTimeout(() => abortController.abort(), latencyTimeoutMs)", script)
+        self.assertIn("const beginLatencySample = (nodeName) =>", script)
+        self.assertIn("latencySampleInFlight", script)
         self.assertIn("fetch(spec.portal_node_latencies_url", script)
         self.assertIn("bootstrapProbeCount = 4", script)
         self.assertIn("bootstrapProbeDelayMs = 850", script)
@@ -1997,7 +2004,7 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("payload.discord_latencies?.[nodeName]", script)
         self.assertIn("!spec.portal_node_latencies_url", script)
 
-    def test_home_node_latency_badge_proxies_remote_latency_through_portal(self) -> None:
+    def test_home_node_latency_badge_measures_remote_latency_from_the_browser(self) -> None:
         service = ModWebService()
         section = ModWebNodeAppSection(
             node=ModWebNodeLink(
@@ -2007,36 +2014,26 @@ class ModWebTests(unittest.TestCase):
                 api_base_url="https://erin.example/api/node",
                 api_url="/api/node-proxy/erin/apps",
                 is_current=False,
+                latency_probe_url="https://erin.example/api/node/ping",
                 presence_stream_url="https://erin.example/api/node/presence/stream",
             ),
             app_links=(),
         )
-        portal_node = ModWebNodeLink(
-            node_name="portal",
-            label="Portal",
-            url="/mod-web/nodes/portal",
-            api_base_url="/api/node",
-            api_url="/api/node/apps",
-            is_current=True,
-            presence_health_url="/mod-web/health",
-            portal_node_latencies_url="/mod-web/portal-node-latencies",
+        badge_spec = service._home_node_latency_badge_spec(
+            badge_element=cast(Any, SimpleNamespace(id=100)),
+            text_element=cast(Any, SimpleNamespace(id=101)),
+            tooltip_element=cast(Any, SimpleNamespace(id=102)),
+            section=section,
+            extra_classes="mod-node-status-badge",
         )
-
-        with patch.object(ModWebService, "_current_node_link", return_value=portal_node):
-            badge_spec = service._home_node_latency_badge_spec(
-                badge_element=cast(Any, SimpleNamespace(id=100)),
-                text_element=cast(Any, SimpleNamespace(id=101)),
-                tooltip_element=cast(Any, SimpleNamespace(id=102)),
-                section=section,
-                extra_classes="mod-node-status-badge",
-            )
 
         self.assertIsNotNone(badge_spec)
         if badge_spec is None:
-            self.fail("Expected a Portal-proxied latency badge spec.")
+            self.fail("Expected a browser-measured latency badge spec.")
         self.assertIsNone(badge_spec.presence_stream_url)
         self.assertIsNone(badge_spec.presence_health_url)
-        self.assertEqual(badge_spec.portal_node_latencies_url, "/mod-web/portal-node-latencies")
+        self.assertEqual(badge_spec.direct_latency_probe_url, "https://erin.example/api/node/ping")
+        self.assertIsNone(badge_spec.portal_node_latencies_url)
         self.assertTrue(badge_spec.show_latency)
 
     def test_custom_node_names_preserve_portal_and_discord_badge_tooltips(self) -> None:

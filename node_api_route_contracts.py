@@ -11,6 +11,7 @@ from node_auth import NodeAccessGrant, NodeApiScope
 
 
 HttpExceptionFactory: TypeAlias = Callable[[int, str], Exception]
+NODE_DISCORD_HEARTBEAT_LATENCY_HEADER: str = "X-Yukibot-Discord-Latency-Ms"
 
 
 class MappingResponse(Protocol):

@@ -156,6 +156,7 @@ from node_api_node_routes import register_node_management_routes
 from node_api_relay import (
     RelayTTSQueue,
 )
+from node_api_route_contracts import NODE_DISCORD_HEARTBEAT_LATENCY_HEADER
 from node_api_settings import (
     NodeSettingList,
     NodeSettingMutationResult,
@@ -208,7 +209,6 @@ _NODE_TOKEN_TTL_SECONDS = 15 * 60
 _NODE_RESTART_DELAY_SECONDS = 0.25
 _APP_PLAYER_COUNT_TIMEOUT_SECONDS = 1.5
 _PORTAL_NODE_LATENCY_TIMEOUT_SECONDS = 4.0
-_NODE_DISCORD_HEARTBEAT_LATENCY_HEADER = "X-Yukibot-Discord-Latency-Ms"
 _APP_FOOTPRINT_CACHE_TTL_SECONDS = 60.0
 _APP_TRANSITION_TTL_SECONDS = 15.0
 _NODE_APP_ENTRY_CACHE_TTL_SECONDS = 5.0
@@ -661,8 +661,9 @@ class NodeApiService:
         nicegui_app.add_middleware(
             CORSMiddleware,
             allow_origins=("*",),
-            allow_methods=("POST",),
+            allow_methods=("GET", "POST"),
             allow_headers=("Authorization",),
+            expose_headers=(NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,),
         )
 
         register_core_routes(
@@ -2242,7 +2243,7 @@ class NodeApiService:
         discord_latency_ms = self._discord_heartbeat_latency_ms()
         if discord_latency_ms is None:
             return {}
-        return {_NODE_DISCORD_HEARTBEAT_LATENCY_HEADER: str(discord_latency_ms)}
+        return {NODE_DISCORD_HEARTBEAT_LATENCY_HEADER: str(discord_latency_ms)}
 
     async def portal_node_latency_probes_async(self) -> dict[str, PortalNodeLatencyProbe]:
         """Measure the Portal-to-node and node-to-Discord latency for dashboard badges."""
@@ -2286,7 +2287,7 @@ class NodeApiService:
             response.raise_for_status()
         except requests.RequestException:
             return PortalNodeLatencyProbe(latency_ms=None, discord_latency_ms=None)
-        raw_discord_latency_ms = response.headers.get(_NODE_DISCORD_HEARTBEAT_LATENCY_HEADER)
+        raw_discord_latency_ms = response.headers.get(NODE_DISCORD_HEARTBEAT_LATENCY_HEADER)
         try:
             discord_latency_ms = int(raw_discord_latency_ms) if raw_discord_latency_ms is not None else None
         except ValueError:

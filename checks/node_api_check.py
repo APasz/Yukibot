@@ -1613,6 +1613,22 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(response.headers["access-control-allow-origin"], "*")
         self.assertIn("Authorization", response.headers["access-control-allow-headers"])
 
+    def test_node_ping_allows_cross_origin_latency_measurement(self) -> None:
+        app = FastAPI()
+        NodeApiService().register_routes(app)
+
+        response = TestClient(app).get(
+            "/api/node/ping",
+            headers={"Origin": "https://portal.example"},
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.headers["access-control-allow-origin"], "*")
+        self.assertEqual(
+            response.headers["access-control-expose-headers"],
+            "X-Yukibot-Discord-Latency-Ms",
+        )
+
     def test_mod_mutation_result_round_trips_mapping(self) -> None:
         result = NodeModMutationResult(
             app_name="minecraft_alpha",
