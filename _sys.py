@@ -791,21 +791,38 @@ async def scheduled_restart(
     if silent:
         Path("silent_restart").touch()
     await _prepare_restart(bot=bot, manager=manager)
-    await bot.update_presence(
-        activity=hikari.Activity(name=f"!!! Scheduled {restart_kind} restart", type=hikari.ActivityType.CUSTOM),
-        status=hikari.Status.DO_NOT_DISTURB,
-    )
+    try:
+        await bot.update_presence(
+            activity=hikari.Activity(name=f"!!! Scheduled {restart_kind} restart", type=hikari.ActivityType.CUSTOM),
+            status=hikari.Status.DO_NOT_DISTURB,
+        )
+    except Exception as xcp:
+        log.warning(
+            "Skipping Discord presence update before scheduled %s restart: %s: %s",
+            restart_kind,
+            type(xcp).__name__,
+            xcp,
+        )
     if message_channel_id is not None:
         flags: hikari.MessageFlag | hikari.UndefinedType = (
             hikari.MessageFlag.SUPPRESS_NOTIFICATIONS if suppress_notifications else hikari.UNDEFINED
         )
-        message = await bot.rest.create_message(
-            message_channel_id,
-            reason,
-            flags=flags,
-        )
-        Path("restart_message_id").write_text(f"{int(message_channel_id)}:{message.id}")
-        await asyncio.sleep(0.1)
+        try:
+            message = await bot.rest.create_message(
+                message_channel_id,
+                reason,
+                flags=flags,
+            )
+        except Exception as xcp:
+            log.warning(
+                "Skipping Discord restart notice before scheduled %s restart: %s: %s",
+                restart_kind,
+                type(xcp).__name__,
+                xcp,
+            )
+        else:
+            Path("restart_message_id").write_text(f"{int(message_channel_id)}:{message.id}")
+            await asyncio.sleep(0.1)
     await _finish_restart(restart_sys=restart_sys, ctx=None)
 
 

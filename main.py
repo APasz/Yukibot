@@ -45,10 +45,12 @@ from cmd_online import CMD_Online, OnlineEditorService
 from cmd_ops import available_maintenance_restart_targets, group_ops, reset_voice_runtime_services
 from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, VoiceTTSService, group_voice
 from config import Activity_Provider, Name_Cache, NodeCapacityProfile
+from discord_startup import DiscordClientStartupSupervisor
 from font_assets import font_assets
 from maintenance import MaintenanceService
 from mirror_models import MirrorAutoSyncOutcome, MirrorAutoSyncResult
 from mirror_service import MirrorService
+from node_api_route_contracts import DiscordServiceState
 from node_api_system import NodeSystemAction
 from node_api_relay import RemoteRelayTTSForwarder
 from node_api_http import NodeApiHttpService
@@ -260,18 +262,6 @@ def _build_shutdown_notice(*, started_at: datetime, now: datetime) -> BotLifecyc
         stage=BotLifecycleStage.STOPPING,
         source=RelayNoticeSource.BOT,
         uptime_seconds=uptime_seconds,
-    )
-
-
-def _build_bot_error_notice(error_text: str) -> BotLifecycleNotice:
-    summary = error_text.strip()
-    if not summary:
-        raise ValueError("Bot lifecycle error notice text must not be blank.")
-    return BotLifecycleNotice(
-        stage=BotLifecycleStage.ERROR,
-        source=RelayNoticeSource.BOT,
-        severity=RelayNoticeSeverity.ERROR,
-        summary=summary,
     )
 
 
@@ -551,6 +541,8 @@ def main():
     authority_server = AuthorityServer(name_cache)
     node_api_server = NodeApiHttpService()
     bot_runtime_loop: asyncio.AbstractEventLoop | None = None
+    maintenance_restart_task: asyncio.Task[None] | None = None
+    restart_auto_launch = RestartAutoLaunchSelection()
 
     def _schedule_node_system_action(
         action: NodeSystemAction,
@@ -652,6 +644,17 @@ def main():
     registry.register_value(MaintenanceService, maintenance)
     registry.register_value(File_Cleaner, file_cleaner)
 
+    async def _on_discord_client_started() -> None:
+        if voice_tts is not None:
+            await voice_tts.sync_voice_target_choices(client, reason="discord_client_started")
+
+    discord_startup_supervisor = DiscordClientStartupSupervisor(
+        start_client=client.start,
+        probe_gateway=bot.rest.fetch_gateway_bot_info,
+        update_state=node_api_server.set_discord_service_state,
+        on_started=_on_discord_client_started,
+    )
+
     command_groups: dict[config.CommandGroup, lightbulb.Group | type[lightbulb.SlashCommand]] = {
         config.CommandGroup.APP: group_app,
         config.CommandGroup.ALIAS: CMD_Alias,
@@ -694,20 +697,27 @@ def main():
 
     @bot.listen(hikari.StartingEvent)
     async def on_starting(event: hikari.StartingEvent):
-        nonlocal bot_runtime_loop
+        nonlocal bot_runtime_loop, maintenance_restart_task, restart_auto_launch
         bot_runtime_loop = asyncio.get_running_loop()
         log.info("Starting")
         try:
-            await client.start()
             _clear_managed_files_once(file_cleaner, stats, profile=profile)
             am = await di_inject_providers()
             await app_manager.post_init(bot, am)
-            font_assets.schedule_startup_refresh(google_font_urls=app_manager.node_font_sources().google_font_urls)
-            if profile.has_service(config.BotService.GAME_RELAY):
-                dc_relay.set_event_loop()
+            record_process_start(start_time)
+            node_api_server.set_discord_service_state(DiscordServiceState.STARTING)
             await node_api_server.start(app_manager, acl=acl)
+            restart_auto_launch = _consume_restart_auto_launch_selection(app_manager)
+            if restart_auto_launch.apps:
+                try:
+                    await _launch_restart_auto_apps(app_manager, restart_auto_launch.apps)
+                except Exception as xcp:
+                    log.exception("AUTO_LAUNCH: %s", ", ".join(app.name for app in restart_auto_launch.apps))
+                    starting_xcp.append(str(xcp))
+            font_assets.schedule_startup_refresh(google_font_urls=app_manager.node_font_sources().google_font_urls)
 
             if profile.has_service(config.BotService.GAME_RELAY):
+                dc_relay.set_event_loop()
                 log.info("Starting Discord relay service")
                 await dc_relay.setup()
                 bot.subscribe(hikari.MessageCreateEvent, dc_relay.on_dcdm_message)  # type: ignore
@@ -722,14 +732,20 @@ def main():
                 log.info("Music service ready")
             if voice_tts:
                 log.info("Starting voice TTS service")
-                await voice_tts.setup(client)
+                await voice_tts.setup()
                 bot.subscribe(hikari.GuildMessageCreateEvent, voice_tts.on_message)  # type: ignore
                 bot.subscribe(hikari.VoiceStateUpdateEvent, voice_tts.on_voice_state_update)  # type: ignore
                 log.info("Voice TTS service ready")
             await authority_server.start()
+            await discord_startup_supervisor.start()
+            maintenance_restart_task = asyncio.create_task(
+                _maintenance_restart_loop(),
+                name="maintenance-restarts",
+            )
+            await discord_startup_supervisor.wait_for_gateway()
         except Exception as xcp:
             starting_xcp.append(str(xcp))
-            raise xcp
+            raise
 
     async def di_inject_providers() -> Activity_Manager:
         async with client.di.enter_context(lightbulb.di.Contexts.DEFAULT) as ctx:
@@ -874,8 +890,7 @@ def main():
             await run_blocking(names.refresh_from_authority)
         await sync_bot_metadata(bot, initial=False)
 
-    @client.task(lightbulb.uniformtrigger(minutes=1, wait_first=False), max_failures=100)
-    async def task_maintenance_restarts(maintenance: MaintenanceService, manager: App_Manager):
+    async def _run_maintenance_restart_cycle() -> None:
         maintenance.reload()
         available_targets = available_maintenance_restart_targets(profile)
         now = datetime.now().astimezone()
@@ -883,14 +898,14 @@ def main():
         for warning in due_warnings:
             warning_notice = maintenance.build_restart_warning_notice(warning)
             warning_text = render_system_notice_text(warning_notice)
-            sent_count = await manager.notify_running_app_relays(
+            sent_count = await app_manager.notify_running_app_relays(
                 warning_text,
                 notice=warning_notice,
             )
             auto_start_apps: tuple[str, ...] = ()
             tts_notice_count = 0
             if warning.lead_minutes == 1:
-                auto_start_apps = manager.set_running_restart_auto_start_apps()
+                auto_start_apps = app_manager.set_running_restart_auto_start_apps()
                 if voice_tts is not None:
                     tts_notice_count = await voice_tts.notify_connected_tts_channels(warning_text)
             log.info(
@@ -945,17 +960,27 @@ def main():
         )
         await _sys.scheduled_restart(
             bot=bot,
-            manager=manager,
+            manager=app_manager,
             restart_type=effective_target.value,
             reason=render_system_notice_text(restart_notice),
             message_channel_id=config.STARTED_CHANNEL,
             suppress_notifications=True,
         )
 
+    async def _maintenance_restart_loop() -> None:
+        while True:
+            try:
+                await _run_maintenance_restart_cycle()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Maintenance restart cycle failed")
+            await asyncio.sleep(60)
+
     @bot.listen(hikari.StartedEvent)
     async def on_started(event: hikari.StartedEvent):
         log.info("Started")
-        record_process_start(start_time)
+        discord_startup_supervisor.mark_gateway_ready()
         # await client.sync_application_commands()
         await sync_bot_metadata(bot, initial=True)
         if profile.has_service(config.BotService.GAME_RELAY):
@@ -968,11 +993,10 @@ def main():
         if synced_name_count:
             log.info(f"Synced {synced_name_count} cached member identities on startup")
 
-        auto_launch = _consume_restart_auto_launch_selection(app_manager)
         silent = Path("silent_restart")
         if config.STARTED_CHANNEL and not silent.exists():
             startup_notice = _build_startup_notice(
-                auto_launch=auto_launch,
+                auto_launch=restart_auto_launch,
                 startup_disabled_lines=app_manager.startup_disabled_notice_lines(),
                 error_lines=tuple(starting_xcp),
             )
@@ -987,14 +1011,6 @@ def main():
             if mess:
                 await mess.edit(f"{mess.content or ''} ...Done! :D")
 
-        if auto_launch.apps:
-            try:
-                await _launch_restart_auto_apps(app_manager, auto_launch.apps)
-            except Exception as xcp:
-                log.exception("AUTO_LAUNCH: %s", ", ".join(app.name for app in auto_launch.apps))
-                error_notice = _build_bot_error_notice(str(xcp))
-                await _post_started_channel_notice(bot, error_notice, error_context="AUTO LAUNCH ERROR MESSAGE")
-
         # await se_app.setup()
 
     @bot.listen(hikari.StoppingEvent)
@@ -1002,6 +1018,12 @@ def main():
         log.info("Ending")
         print("Ending")
         config.IS_SHUTTINGDOWN = True
+        await discord_startup_supervisor.close()
+        maintenance_task = maintenance_restart_task
+        if maintenance_task is not None:
+            maintenance_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await maintenance_task
         if voice_tts:
             await voice_tts.close()
         if music:

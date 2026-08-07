@@ -159,6 +159,7 @@ from node_api_mod import (
     NodeModSummary,
     NodeModUploadBatchResult,
 )
+from node_api_route_contracts import DiscordServiceState
 from node_api_settings import NodeSettingChoice, NodeSettingEntry
 from node_auth import NodeApiScope, verify_node_token
 from relay_notices import (
@@ -1994,15 +1995,19 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("summariseLatencyMeasurements", script)
         self.assertIn("connectionsByNode", script)
         self.assertIn("pendingSamples", script)
-        self.assertIn("Discord: ${formatTooltipLatency(connection.discordLatencyMs)}", script)
+        self.assertIn("Discord: ${discordServiceText(connection.discordServiceState, connection.discordLatencyMs)}", script)
         self.assertIn("Portal → ${target.node_label}", script)
-        self.assertIn(r"\nDiscord: ${formatTooltipLatency(connection.discordLatencyMs)}", script)
+        self.assertIn(r"\nDiscord: ${discordServiceText(connection.discordServiceState, connection.discordLatencyMs)}", script)
         self.assertIn(r".join('\n')", script)
         self.assertIn("type: 'node_latencies'", script)
         self.assertIn("payload.type === 'node_latencies'", script)
         self.assertIn("const samplePortalNodeLatency = async (nodeName) =>", script)
         self.assertIn("payload.latencies[nodeName]", script)
         self.assertIn("payload.discord_latencies?.[nodeName]", script)
+        self.assertIn("payload.discord_service_states", script)
+        self.assertIn("discordServiceStateHeader", script)
+        self.assertIn("connection.discordLatencies?.[target.node_name] ?? null", script)
+        self.assertIn("return latencyMs === null ? 'unavailable (commands synced)' : formatTooltipLatency(latencyMs);", script)
         self.assertIn("!spec.portal_node_latencies_url", script)
 
     def test_home_node_latency_badge_measures_remote_latency_from_the_browser(self) -> None:
@@ -2324,6 +2329,76 @@ class ModWebTests(unittest.TestCase):
             status,
             ModWebNodeStatus(node=node, alive=False, detail="Unexpected HTTP 401"),
         )
+
+    def test_probe_node_status_reads_discord_service_state(self) -> None:
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+
+        class ResponseContext:
+            async def __aenter__(self) -> SimpleNamespace:
+                return SimpleNamespace(
+                    status=204,
+                    headers={"X-Yukibot-Discord-Service-State": "degraded"},
+                )
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        session = Mock()
+        session.get.return_value = ResponseContext()
+        with patch.object(ModWebService, "_remote_http_client", new=AsyncMock(return_value=session)):
+            status = asyncio.run(ModWebService()._probe_node_status_async(node))
+
+        self.assertTrue(status.alive)
+        self.assertEqual(status.discord_service_state, DiscordServiceState.DEGRADED)
+
+    def test_node_discord_service_health_badge_marks_degraded_discord_amber(self) -> None:
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+
+        badge = ModWebService._node_discord_service_health_badge(
+            ModWebNodeStatus(
+                node=node,
+                alive=True,
+                discord_service_state=DiscordServiceState.DEGRADED,
+            )
+        )
+
+        self.assertEqual(badge.text, "Discord command API degraded")
+        self.assertEqual(badge.tone, "warn")
+
+    def test_node_discord_service_health_badge_marks_gateway_outage_without_marking_node_down(self) -> None:
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+
+        badge = ModWebService._node_discord_service_health_badge(
+            ModWebNodeStatus(
+                node=node,
+                alive=True,
+                discord_service_state=DiscordServiceState.GATEWAY_DEGRADED,
+            )
+        )
+
+        self.assertEqual(badge.text, "Discord gateway unavailable")
+        self.assertEqual(badge.tone, "warn")
 
     def test_probe_node_status_uses_presence_timeout(self) -> None:
         node: ModWebNodeLink = ModWebNodeLink(

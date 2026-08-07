@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from node_api_route_contracts import NODE_DISCORD_SERVICE_STATE_HEADER, DiscordServiceState
+
 from .constants import (
     _REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
     _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
@@ -250,6 +252,12 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 timeout=self._aiohttp_client_timeout(_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT),
             ) as response:
                 status_code = response.status
+                response_headers = getattr(response, "headers", None)
+                raw_discord_service_state = (
+                    response_headers.get(NODE_DISCORD_SERVICE_STATE_HEADER)
+                    if response_headers is not None and hasattr(response_headers, "get")
+                    else None
+                )
         except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
             if log_failures and not (self._shutting_down or config.IS_SHUTTINGDOWN):
                 log.warning("Remote mod web login status probe failed: node=%s error=%s", node.node_name, xcp)
@@ -257,7 +265,21 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         if status_code == 204:
             self._record_remote_node_success(node)
             latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
-            return ModWebNodeStatus(node=node, alive=True, detail="HTTP 204", latency_ms=latency_ms)
+            try:
+                discord_service_state = (
+                    DiscordServiceState(raw_discord_service_state)
+                    if raw_discord_service_state is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                discord_service_state = None
+            return ModWebNodeStatus(
+                node=node,
+                alive=True,
+                detail="HTTP 204",
+                latency_ms=latency_ms,
+                discord_service_state=discord_service_state,
+            )
         return ModWebNodeStatus(node=node, alive=False, detail=f"Unexpected HTTP {status_code}")
 
     async def _render_mods_page(self, *, ui: ModWebUi, app_name: str, request: Request) -> None:
@@ -603,6 +625,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             initial_app_entries=app_entries,
             initial_system_capabilities=initial_system_capabilities,
             load_system_tab=_load_system_tab,
+            refresh_node_status=lambda: self._probe_node_status_async(node, log_failures=False),
             subscribe_node_state_updates=subscribe_node_state_updates,
         )
 

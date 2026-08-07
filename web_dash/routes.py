@@ -308,6 +308,10 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 "node": config.MOD_WEB_SERVER.node_name,
                 "latencies": {node_name: probe.latency_ms for node_name, probe in probes.items()},
                 "discord_latencies": {node_name: probe.discord_latency_ms for node_name, probe in probes.items()},
+                "discord_service_states": {
+                    node_name: probe.discord_service_state.value if probe.discord_service_state is not None else None
+                    for node_name, probe in probes.items()
+                },
             }
 
         @nicegui_app.get("/mod-web/assets/toasts.js")

@@ -99,6 +99,27 @@ class ScheduledRestartTests(unittest.IsolatedAsyncioTestCase):
         finish_restart.assert_awaited_once_with(restart_sys=False, ctx=None)
         bot.rest.create_message.assert_not_called()
 
+    async def test_scheduled_restart_proceeds_when_discord_requests_fail(self) -> None:
+        bot = SimpleNamespace(
+            update_presence=AsyncMock(side_effect=RuntimeError("Discord API returned 503")),
+            rest=SimpleNamespace(create_message=AsyncMock(side_effect=RuntimeError("Discord API returned 503"))),
+        )
+
+        with (
+            patch("_sys._prepare_restart", new=AsyncMock()),
+            patch("_sys._finish_restart", new=AsyncMock()) as finish_restart,
+            patch("_sys.mark_pending_process_restart"),
+        ):
+            await _sys.scheduled_restart(
+                bot=bot,
+                manager=object(),
+                restart_type="bot",
+                reason="Scheduled maintenance restarting `bot` at `04:30`.",
+                message_channel_id=1234,
+            )
+
+        finish_restart.assert_awaited_once_with(restart_sys=False, ctx=None)
+
 
 if __name__ == "__main__":
     unittest.main()

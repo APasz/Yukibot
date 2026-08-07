@@ -4,9 +4,12 @@ from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from node_api_route_contracts import DiscordServiceState
+
 from . import avatars as mod_web_avatars
 from .constants import (
     _APP_SECTION_QUERY_PARAM,
+    _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
     _MOD_WEB_REPOSITORY_URL,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
@@ -54,6 +57,7 @@ from .runtime_imports import (
     RestartTarget,
     Select,
     Tooltip,
+    Timer,
     Utilities,
     app_scope_from_name,
     asyncio,
@@ -1162,6 +1166,58 @@ class ModWebHomeMixin(ModWebServiceSupport):
             tooltip_text=f"Initial remote health probe: {status.detail or 'healthy'}.",
         )
 
+    @staticmethod
+    def _node_discord_service_health_badge(status: ModWebNodeStatus) -> _ModWebBadgeSpec:
+        if not status.alive:
+            return _ModWebBadgeSpec(
+                text="Discord status unavailable",
+                tone="grey",
+                tooltip_text="The node API is unreachable, so Discord service status is unknown.",
+            )
+        match status.discord_service_state:
+            case DiscordServiceState.READY:
+                return _ModWebBadgeSpec(
+                    text="Discord commands ready",
+                    tone="black",
+                    tooltip_text="Discord commands are synchronised and the gateway is ready.",
+                )
+            case DiscordServiceState.COMMANDS_READY:
+                return _ModWebBadgeSpec(
+                    text="Discord gateway starting",
+                    tone="warn",
+                    tooltip_text="Discord commands are synchronised; waiting for the gateway to become ready.",
+                )
+            case DiscordServiceState.STARTING:
+                return _ModWebBadgeSpec(
+                    text="Discord commands starting",
+                    tone="warn",
+                    tooltip_text="Discord command synchronisation is in progress.",
+                )
+            case DiscordServiceState.DEGRADED:
+                return _ModWebBadgeSpec(
+                    text="Discord command API degraded",
+                    tone="warn",
+                    tooltip_text="Discord command synchronisation is retrying; node and game services remain online.",
+                )
+            case DiscordServiceState.GATEWAY_DEGRADED:
+                return _ModWebBadgeSpec(
+                    text="Discord gateway unavailable",
+                    tone="warn",
+                    tooltip_text="Waiting for Discord's gateway; node and game services remain online.",
+                )
+            case DiscordServiceState.FAILED:
+                return _ModWebBadgeSpec(
+                    text="Discord startup failed",
+                    tone="red",
+                    tooltip_text="Discord startup needs operator action; node and game services remain online.",
+                )
+            case None:
+                return _ModWebBadgeSpec(
+                    text="Discord status unknown",
+                    tone="grey",
+                    tooltip_text="This node did not report a Discord command-service state.",
+                )
+
     def _render_live_home_node_stats_renderer(
         self,
         *,
@@ -1456,6 +1512,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         initial_app_entries: tuple[NodeAppEntry, ...],
         initial_system_capabilities: NodeSystemCapabilities | None,
         load_system_tab: Callable[[str], Awaitable[ModWebNodeSystemTabLoadResult]],
+        refresh_node_status: Callable[[], Awaitable[ModWebNodeStatus]],
         subscribe_node_state_updates: Callable[
             [Callable[[NodeStateStreamEvent], None]],
             Callable[[], None],
@@ -1468,6 +1525,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             initial_system_history,
             initial_system_summary,
         )
+        current_node_status = initial_node_status
         can_view_operator_signals = self._user_has_level(user, Power_Level.sudo)
         include_resource_points = can_view_operator_signals and not self._node_is_portal(node)
         operational_badge_bindings: list[tuple[Element, Label]] = []
@@ -1593,10 +1651,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                         current_usage_badge_bindings.append(_render_live_signal_badge(badge))
 
                                 _render_current_usage_badges(current_usage_badges)
-                                self._badge_spec(
-                                    ui=ui,
-                                    badge=self._node_network_health_badge(initial_node_status),
-                                )
+
+                                @ui.refreshable
+                                def _render_node_connectivity_badges(status: ModWebNodeStatus) -> None:
+                                    self._badge_spec(ui=ui, badge=self._node_network_health_badge(status))
+                                    self._badge_spec(ui=ui, badge=self._node_discord_service_health_badge(status))
+
+                                _render_node_connectivity_badges(current_node_status)
                             with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                                 ui.label("10-minute load trend").classes("mod-subtitle text-xs shrink-0")
 
@@ -1841,6 +1902,20 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
             page_closed = False
             loop: AbstractEventLoop = asyncio.get_running_loop()
+
+            async def _refresh_node_connectivity_badges() -> None:
+                nonlocal current_node_status
+                next_node_status = await refresh_node_status()
+                if page_closed or next_node_status == current_node_status:
+                    return
+                current_node_status = next_node_status
+                _render_node_connectivity_badges.refresh(current_node_status)
+
+            connectivity_refresh_timer: Timer = ui.timer(
+                _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
+                lambda: asyncio.create_task(_refresh_node_connectivity_badges()),
+            )
+            self._register_timer_cleanup(ui=ui, timer=connectivity_refresh_timer)
 
             def _apply_update(event: NodeStateStreamEvent) -> None:
                 nonlocal current_app_entries, current_history, current_system_summary

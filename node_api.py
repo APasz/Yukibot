@@ -157,7 +157,11 @@ from node_api_node_routes import register_node_management_routes
 from node_api_relay import (
     RelayTTSQueue,
 )
-from node_api_route_contracts import NODE_DISCORD_HEARTBEAT_LATENCY_HEADER
+from node_api_route_contracts import (
+    NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
+    NODE_DISCORD_SERVICE_STATE_HEADER,
+    DiscordServiceState,
+)
 from node_api_settings import (
     NodeSettingList,
     NodeSettingMutationResult,
@@ -230,6 +234,7 @@ class PortalNodeLatencyProbe:
 
     latency_ms: int | None
     discord_latency_ms: int | None
+    discord_service_state: DiscordServiceState | None
 
 
 _LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
@@ -486,6 +491,7 @@ _BulkMetadataOperationResult = TypeVar("_BulkMetadataOperationResult")
 class NodeApiService:
     def __init__(self) -> None:
         self._manager: App_Manager | None = None
+        self._discord_service_state: DiscordServiceState | None = None
         self._chat_relay: WebChatRelayPublisher | None = None
         self._relay_tts_service: RelayTTSQueue | None = None
         self._acl: Access_Control | None = None
@@ -583,6 +589,11 @@ class NodeApiService:
         self._manager = manager
         self._invalidate_state_caches()
 
+    def set_discord_service_state(self, state: DiscordServiceState | None) -> None:
+        """Record command-service availability without affecting node liveness."""
+
+        self._discord_service_state = state
+
     def _invalidate_state_caches(self, *, app_name: str | None = None) -> None:
         self._app_state_cache.invalidate(app_name)
         with self._system_summary_cache_lock:
@@ -664,7 +675,10 @@ class NodeApiService:
             allow_origins=("*",),
             allow_methods=("GET", "POST"),
             allow_headers=("Authorization",),
-            expose_headers=(NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,),
+            expose_headers=(
+                NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
+                NODE_DISCORD_SERVICE_STATE_HEADER,
+            ),
         )
 
         register_core_routes(
@@ -2215,6 +2229,9 @@ class NodeApiService:
                     "node": self.node_name,
                     "sample_id": sample_id,
                 }
+                discord_service_state = self._discord_service_state
+                if discord_service_state is not None:
+                    response["discord_service_state"] = discord_service_state.value
                 discord_latency_ms = self._discord_heartbeat_latency_ms()
                 if discord_latency_ms is not None:
                     response["discord_latency_ms"] = discord_latency_ms
@@ -2241,10 +2258,14 @@ class NodeApiService:
     def _node_ping_headers(self) -> dict[str, str]:
         """Return non-sensitive node liveness metadata for the public ping route."""
 
+        headers: dict[str, str] = {}
+        discord_service_state = self._discord_service_state
+        if discord_service_state is not None:
+            headers[NODE_DISCORD_SERVICE_STATE_HEADER] = discord_service_state.value
         discord_latency_ms = self._discord_heartbeat_latency_ms()
-        if discord_latency_ms is None:
-            return {}
-        return {NODE_DISCORD_HEARTBEAT_LATENCY_HEADER: str(discord_latency_ms)}
+        if discord_latency_ms is not None:
+            headers[NODE_DISCORD_HEARTBEAT_LATENCY_HEADER] = str(discord_latency_ms)
+        return headers
 
     async def portal_node_latency_probes_async(self) -> dict[str, PortalNodeLatencyProbe]:
         """Measure the Portal-to-node and node-to-Discord latency for dashboard badges."""
@@ -2287,7 +2308,18 @@ class NodeApiService:
             response = requests.get(ping_url, timeout=_PORTAL_NODE_LATENCY_TIMEOUT_SECONDS)
             response.raise_for_status()
         except requests.RequestException:
-            return PortalNodeLatencyProbe(latency_ms=None, discord_latency_ms=None)
+            return PortalNodeLatencyProbe(
+                latency_ms=None,
+                discord_latency_ms=None,
+                discord_service_state=None,
+            )
+        raw_discord_service_state = response.headers.get(NODE_DISCORD_SERVICE_STATE_HEADER)
+        try:
+            discord_service_state = (
+                DiscordServiceState(raw_discord_service_state) if raw_discord_service_state is not None else None
+            )
+        except ValueError:
+            discord_service_state = None
         raw_discord_latency_ms = response.headers.get(NODE_DISCORD_HEARTBEAT_LATENCY_HEADER)
         try:
             discord_latency_ms = int(raw_discord_latency_ms) if raw_discord_latency_ms is not None else None
@@ -2298,6 +2330,7 @@ class NodeApiService:
         return PortalNodeLatencyProbe(
             latency_ms=max(1, round((time.perf_counter() - started_at) * 1000)),
             discord_latency_ms=discord_latency_ms,
+            discord_service_state=discord_service_state,
         )
 
     async def _serve_node_state_stream(self, *, websocket: WebSocket) -> None:

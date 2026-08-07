@@ -220,13 +220,6 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notice.stage, BotLifecycleStage.STOPPING)
         self.assertEqual(render_system_notice_text(notice), "Shutting Down; uptime: 1h 2m 3s")
 
-    def test_build_bot_error_notice_renders_error_summary(self) -> None:
-        notice = main._build_bot_error_notice("launcher failed")
-
-        self.assertEqual(notice.stage, BotLifecycleStage.ERROR)
-        self.assertEqual(notice.severity, RelayNoticeSeverity.ERROR)
-        self.assertEqual(render_system_notice_text(notice), "Error: launcher failed")
-
     async def test_launch_restart_auto_app_waits_then_launches(self) -> None:
         auto_app = _build_fake_app(friendly="Minecraft Alpha")
         manager = _LaunchManager()

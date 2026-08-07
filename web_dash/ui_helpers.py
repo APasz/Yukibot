@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, Literal
 
 from font_assets import font_assets
-from node_api_route_contracts import NODE_DISCORD_HEARTBEAT_LATENCY_HEADER
+from node_api_route_contracts import (
+    NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
+    NODE_DISCORD_SERVICE_STATE_HEADER,
+)
 
 from .constants import (
     _APP_LIST_API_QUERY_PARAM,
@@ -685,6 +688,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         latency_timeout_ms: int = int(_HOME_NODE_LATENCY_TIMEOUT_SECONDS * 1000)
         reconnect_delay_ms: int = int(_NODE_PRESENCE_RECONNECT_DELAY_SECONDS * 1000)
         discord_latency_header: str = json.dumps(NODE_DISCORD_HEARTBEAT_LATENCY_HEADER)
+        discord_service_state_header: str = json.dumps(NODE_DISCORD_SERVICE_STATE_HEADER)
         return f"""
             (() => {{
                 const controllerKey = {json.dumps(controller_key)};
@@ -693,6 +697,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                 const latencyTimeoutMs = {latency_timeout_ms};
                 const reconnectDelayMs = {reconnect_delay_ms};
                 const discordLatencyHeader = {discord_latency_header};
+                const discordServiceStateHeader = {discord_service_state_header};
                 const bootstrapProbeCount = 4;
                 const bootstrapProbeDelayMs = 850;
                 const getElementMaybe = (elementId) => getElement(elementId) || getHtmlElement(elementId);
@@ -739,14 +744,35 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                     return `${{latencyMs}} ms`;
                 }};
                 const formatTooltipLatency = (latencyMs) => formatLatency(latencyMs) || 'unavailable';
+                const discordServiceText = (state, latencyMs) => {{
+                    if (state === 'ready') {{
+                        return latencyMs === null ? 'unavailable (commands synced)' : formatTooltipLatency(latencyMs);
+                    }}
+                    if (state === 'commands_ready') {{
+                        return 'unavailable (gateway starting)';
+                    }}
+                    if (state === 'starting') {{
+                        return 'command sync starting';
+                    }}
+                    if (state === 'degraded') {{
+                        return 'command sync degraded — retrying';
+                    }}
+                    if (state === 'gateway_degraded') {{
+                        return 'gateway unavailable — retrying';
+                    }}
+                    if (state === 'failed') {{
+                        return 'startup failed — operator action required';
+                    }}
+                    return formatTooltipLatency(latencyMs);
+                }};
                 const tooltipText = (spec, connection) => {{
                     if (spec.tooltip_mode === 'discord') {{
-                        return `${{spec.node_label}} response: ${{formatTooltipLatency(connection.lastLatencyMs)}}\\nDiscord: ${{formatTooltipLatency(connection.discordLatencyMs)}}`;
+                        return `${{spec.node_label}} response: ${{formatTooltipLatency(connection.lastLatencyMs)}}\\nDiscord: ${{discordServiceText(connection.discordServiceState, connection.discordLatencyMs)}}`;
                     }}
                     if (spec.tooltip_mode === 'portal') {{
                         return specs
                             .filter((target) => target.tooltip_mode === 'discord')
-                            .map((target) => `Portal → ${{target.node_label}}: ${{formatTooltipLatency(connection.portalNodeLatencies?.[target.node_name])}}`)
+                            .map((target) => `Portal → ${{target.node_label}}: ${{formatTooltipLatency(connection.portalNodeLatencies?.[target.node_name])}}; Discord: ${{discordServiceText(connection.discordServiceStates?.[target.node_name], connection.discordLatencies?.[target.node_name] ?? null)}}`)
                             .join('\\n') || spec.pending_text;
                     }}
                     return connection.lastText || spec.pending_text;
@@ -811,6 +837,14 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                             return null;
                         }}
                         connection.portalNodeLatencies = payload.latencies;
+                        connection.discordServiceStates = payload.discord_service_states
+                            && typeof payload.discord_service_states === 'object'
+                            ? payload.discord_service_states
+                            : {{}};
+                        connection.discordLatencies = payload.discord_latencies
+                            && typeof payload.discord_latencies === 'object'
+                            ? payload.discord_latencies
+                            : {{}};
                         const discordLatencyMs = payload.discord_latencies?.[nodeName];
                         connection.discordLatencyMs = typeof discordLatencyMs === 'number' && Number.isFinite(discordLatencyMs)
                             ? Math.max(0, Math.round(discordLatencyMs))
@@ -837,7 +871,9 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                             return null;
                         }}
                         const rawDiscordLatencyMs = response.headers.get(discordLatencyHeader);
+                        const rawDiscordServiceState = response.headers.get(discordServiceStateHeader);
                         const parsedDiscordLatencyMs = rawDiscordLatencyMs === null ? null : Number(rawDiscordLatencyMs);
+                        connection.discordServiceState = rawDiscordServiceState === null ? null : rawDiscordServiceState;
                         connection.discordLatencyMs = typeof parsedDiscordLatencyMs === 'number'
                             && Number.isFinite(parsedDiscordLatencyMs)
                             && parsedDiscordLatencyMs >= 0
@@ -964,6 +1000,14 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                                     return;
                                 }}
                                 connection.portalNodeLatencies = payload.latencies;
+                                connection.discordServiceStates = payload.discord_service_states
+                                    && typeof payload.discord_service_states === 'object'
+                                    ? payload.discord_service_states
+                                    : {{}};
+                                connection.discordLatencies = payload.discord_latencies
+                                    && typeof payload.discord_latencies === 'object'
+                                    ? payload.discord_latencies
+                                    : {{}};
                                 refreshTooltip(nodeName);
                             }})
                             .catch(() => {{}})
@@ -1083,6 +1127,9 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         lastClassName: spec.pending_class_name,
                         lastLatencyMs: null,
                         discordLatencyMs: null,
+                        discordServiceState: null,
+                        discordServiceStates: {{}},
+                        discordLatencies: {{}},
                         portalNodeLatencies: {{}},
                         portalLatencyRequestInFlight: false,
                         latencySampleInFlight: false,
@@ -1152,6 +1199,9 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         }}
                         if (typeof payload.discord_latency_ms === 'number' && Number.isFinite(payload.discord_latency_ms)) {{
                             connection.discordLatencyMs = payload.discord_latency_ms;
+                        }}
+                        if (typeof payload.discord_service_state === 'string') {{
+                            connection.discordServiceState = payload.discord_service_state;
                         }}
                         const sampleId = payload.sample_id;
                         if (sampleId == null) {{

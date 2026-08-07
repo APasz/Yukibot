@@ -1626,7 +1626,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(response.headers["access-control-allow-origin"], "*")
         self.assertEqual(
             response.headers["access-control-expose-headers"],
-            "X-Yukibot-Discord-Latency-Ms",
+            "X-Yukibot-Discord-Latency-Ms, X-Yukibot-Discord-Service-State",
         )
 
     def test_mod_mutation_result_round_trips_mapping(self) -> None:
@@ -4814,6 +4814,15 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(headers, {"X-Yukibot-Discord-Latency-Ms": "42"})
 
+    def test_node_ping_headers_include_discord_service_state(self) -> None:
+        service = NodeApiService()
+        service.set_discord_service_state(node_api.DiscordServiceState.DEGRADED)
+
+        self.assertEqual(
+            service._node_ping_headers(),
+            {"X-Yukibot-Discord-Service-State": "degraded"},
+        )
+
     def test_portal_latency_probe_reads_node_discord_latency_from_ping_header(self) -> None:
         class _PingResponse:
             headers = {"X-Yukibot-Discord-Latency-Ms": "42"}
@@ -4826,6 +4835,18 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertGreaterEqual(probe.latency_ms or 0, 1)
         self.assertEqual(probe.discord_latency_ms, 42)
+
+    def test_portal_latency_probe_reads_discord_service_state_from_ping_header(self) -> None:
+        class _PingResponse:
+            headers = {"X-Yukibot-Discord-Service-State": "degraded"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+        with patch("node_api.requests.get", return_value=_PingResponse()):
+            probe = NodeApiService._measure_node_latency_probe("https://erin.example/api/node/ping")
+
+        self.assertEqual(probe.discord_service_state, node_api.DiscordServiceState.DEGRADED)
 
     def test_portal_node_latencies_are_returned_by_presence_stream(self) -> None:
         sent_payloads: list[object] = []
