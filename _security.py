@@ -9,6 +9,7 @@ from typing import NoReturn, overload
 
 import config
 from _audit import audit_log
+from _authority import AuthorityResource
 
 log = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ class Access_Control:
 
     def __init__(self, pointer: Path | None = None):
         if pointer is None and config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
-            self.pointer = config.authority_cache_path(config.AuthorityResource.USERS)
+            self.pointer = config.authority_cache_path(AuthorityResource.USERS)
         else:
             self.pointer = pointer or Path("users.json")
         self._roles: dict[int, Power_Level] = {}
@@ -187,7 +188,7 @@ class Access_Control:
     def reload(self) -> bool:
         raw: object = {}
         try:
-            raw = config.load_authority_json(config.AuthorityResource.USERS, self.pointer)
+            raw = config.load_authority_json(AuthorityResource.USERS, self.pointer)
         except Exception as e:
             log.exception(f"Failed to load permissions from authority/source {self.pointer}: {e}")
             return False
@@ -399,7 +400,7 @@ class Access_Control:
 
     def _write_roles(self, roles: dict[int, Power_Level]) -> None:
         payload = self._serializable_roles(roles)
-        saved = config.save_authority_json(config.AuthorityResource.USERS, self.pointer, payload)
+        saved = config.save_authority_json(AuthorityResource.USERS, self.pointer, payload)
         parsed_roles, problems = self._parse_roles(saved)
         for problem in problems:
             log.warning(problem)

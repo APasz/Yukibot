@@ -18,7 +18,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mappi
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from re import Match, Pattern
-from typing import Any, Generic, TypeAlias, TypeVar, cast, overload
+from typing import Generic, TypeAlias, TypeVar, assert_never, cast, overload
 from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
@@ -27,8 +27,6 @@ import httpx
 from modmux import Muxer, parse_url
 from modmux.models import ModID, Provider
 from modmux.modmux_errors import ModMuxError
-from modmux.providers.wube import WubeCreds
-from pydantic import SecretStr
 
 import config
 from _async_utils import run_blocking
@@ -169,6 +167,14 @@ _FACTORIO_UPDATE_BRANCHES: tuple[FactorioUpdateBranch, ...] = (
     FactorioUpdateBranch.STABLE,
     FactorioUpdateBranch.EXPERIMENTAL,
 )
+
+
+def _ignore_save_selection(_filename: str | None, _create_fresh_world: bool) -> None:
+    return None
+
+
+def _ignore_fresh_save_file(_filename: str) -> None:
+    return None
 
 
 def _json_object(value: object, *, label: str) -> dict[str, object]:
@@ -599,7 +605,7 @@ def _factorio_required_dependencies(info_json: Mapping[str, object]) -> tuple[st
         raise ValueError("Factorio mod portal release dependencies are invalid.")
     dependencies: list[str] = []
     seen: set[str] = set()
-    for raw_dependency in raw_dependencies:
+    for raw_dependency in cast(list[object], raw_dependencies):
         mod_id = _factorio_required_dependency_mod_id(raw_dependency)
         if mod_id is None or mod_id in seen:
             continue
@@ -685,11 +691,7 @@ def _select_factorio_mod_portal_release(
 
 
 def _factorio_mod_download_url(release: FactorioModPortalRelease, credentials: FactorioModPortalCredentials) -> str:
-    wube_credentials = WubeCreds(
-        api_key=SecretStr(credentials.token),
-        user_id=SecretStr(credentials.username),
-    )
-    query = urlencode(wube_credentials.download_params())
+    query = urlencode({"username": credentials.username, "token": credentials.token})
     separator = "&" if "?" in release.download_url else "?"
     return f"{_FACTORIO_MOD_PORTAL_BASE_URL}{release.download_url}{separator}{query}"
 
@@ -1475,9 +1477,9 @@ class Factorio_Settings(App_Settings):
         self._saves_directory = saves_directory or pointer.parent.parent / "saves"
         self._save_file_getter = save_file_getter or (lambda: None)
         self._create_fresh_world_getter = create_fresh_world_getter or (lambda: False)
-        self._save_selection_setter = save_selection_setter or (lambda _filename, _create_fresh_world: None)
+        self._save_selection_setter = save_selection_setter or _ignore_save_selection
         self._fresh_save_file_getter = fresh_save_file_getter or (lambda: "New World.zip")
-        self._fresh_save_file_setter = fresh_save_file_setter or (lambda _filename: None)
+        self._fresh_save_file_setter = fresh_save_file_setter or _ignore_fresh_save_file
         self._save_selection_setting = Setting[str](
             StringSettingSpec(
                 ChoiceSpec(
@@ -1512,7 +1514,7 @@ class Factorio_Settings(App_Settings):
         )
 
     @property
-    def options(self) -> list[Setting[Any]]:
+    def options(self) -> list[Setting[object]]:
         self._refresh_save_selection_choices()
         return super().options
 
@@ -2010,7 +2012,8 @@ class Factorio(App[App_Config]):
                 encoding=config.STR_ENCODE,
             )
         except subprocess.CalledProcessError as xcp:
-            detail = (xcp.stderr or xcp.stdout or "Factorio did not provide an error message.").strip()
+            error_output: object = cast(object, xcp.stderr) or cast(object, xcp.stdout)
+            detail = str(error_output or "Factorio did not provide an error message.").strip()
             raise RuntimeError(f"Failed to create fresh Factorio world {filename}: {detail}") from xcp
         if not save_path.is_file():
             raise RuntimeError(f"Factorio did not create the requested fresh world save: {filename}")
@@ -2121,7 +2124,7 @@ class Factorio(App[App_Config]):
         override = getattr(self, "_factorio_yuki_bridge_enabled", None)
         if isinstance(override, bool):
             return override
-        mod_manager = getattr(self, "mods", None)
+        mod_manager = self.mods
         if mod_manager is None:
             return False
         for mod in mod_manager.list_mods():
@@ -2145,10 +2148,8 @@ class Factorio(App[App_Config]):
         return self.yuki_bridge_enabled and isinstance(getattr(self, "_bridge_map_exchange_string", None), str)
 
     @property
-    def activity_providers(self) -> tuple[AppActivityProvider[Any], ...]:
-        activities = getattr(self, "_activities", None)
-        if activities is not None:
-            activities.configure_providers()
+    def activity_providers(self) -> tuple[AppActivityProvider["Factorio"], ...]:
+        self._activities.configure_providers()
         return super().activity_providers
 
     @property
@@ -2369,7 +2370,10 @@ class Factorio(App[App_Config]):
         await self._bridge_events_tail.start(self._bridge_tail_matchers)
 
     async def _stop_bridge_events_tail(self) -> None:
-        bridge_events_tail = getattr(self, "_bridge_events_tail", None)
+        try:
+            bridge_events_tail = self._bridge_events_tail
+        except AttributeError:
+            return
         if bridge_events_tail is None:
             return
         await bridge_events_tail.stop()
@@ -2635,8 +2639,6 @@ class Factorio_Updater(Update_Manager):
         return result.version_text
 
     def _begin_selected_operation(self, kind: AppUpdateOperationKind) -> FactorioUpdateBranch:
-        if kind not in (AppUpdateOperationKind.UPDATE, AppUpdateOperationKind.VERIFY):
-            raise ValueError(f"Unsupported Factorio update operation: {kind.value}")
         if self.app.check_running():
             raise RuntimeError(f"{self.app.friendly} must be stopped before {kind.value}.")
         branch = self._factorio_update_config().selected_branch
@@ -2999,7 +3001,7 @@ def _parse_factorio_bridge_event_payload(line: str, *, include_wrapped_event: bo
     else:
         return None
     try:
-        payload = _optional_mapping(json.loads(payload_text))
+        payload = _optional_mapping(cast(object, json.loads(payload_text)))
     except json.JSONDecodeError:
         return None
     return payload
@@ -3099,14 +3101,14 @@ def _factorio_bridge_surface_evolution(entry: object) -> FactorioSurfaceEvolutio
 
 
 def _factorio_bridge_evolution_snapshot(payload: Mapping[str, object]) -> FactorioActivitySnapshot | None:
-    if payload is None or payload.get("kind") != "evolution":
+    if payload.get("kind") != "evolution":
         return None
     raw_surfaces = payload.get("surfaces")
     if not isinstance(raw_surfaces, list):
         return None
     surface_evolutions = tuple(
         surface_evolution
-        for item in raw_surfaces
+        for item in cast(list[object], raw_surfaces)
         if (surface_evolution := _factorio_bridge_surface_evolution(item)) is not None
     )
     if not surface_evolutions:
@@ -3120,7 +3122,7 @@ def _factorio_bridge_evolution_snapshot(payload: Mapping[str, object]) -> Factor
 
 def _parse_factorio_bridge_evolution_snapshot(text: str) -> FactorioActivitySnapshot | None:
     try:
-        payload = _optional_mapping(json.loads(text))
+        payload = _optional_mapping(cast(object, json.loads(text)))
     except json.JSONDecodeError:
         return None
     if payload is None:
@@ -3272,7 +3274,15 @@ class FactorioActivities:
                     primary_evolution = self.snapshot.primary_evolution
                     surface_evolutions = self.snapshot.surface_evolutions
                 elif bridge_enabled:
-                    evolution_snapshot = _parse_factorio_bridge_evolution_snapshot(responses.get("evolution") or "")
+                    evolution_response = responses.get("evolution") or ""
+                    evolution_snapshot = _parse_factorio_bridge_evolution_snapshot(evolution_response)
+                    if evolution_snapshot is None:
+                        fallback_surface_evolutions = _parse_factorio_surface_evolutions(evolution_response)
+                        if fallback_surface_evolutions:
+                            evolution_snapshot = FactorioActivitySnapshot(
+                                primary_evolution=fallback_surface_evolutions[0].evolution,
+                                surface_evolutions=fallback_surface_evolutions,
+                            )
                     if evolution_snapshot is not None:
                         primary_evolution = evolution_snapshot.primary_evolution
                         surface_evolutions = evolution_snapshot.surface_evolutions
@@ -3627,7 +3637,7 @@ class Players:
             self._relay_session_notice(player=player_name, action=action, source=source)
             log.debug(f"Players.add.{self._players=}")
             return
-        if action is PlayerSessionAction.LEFT:
+        elif action is PlayerSessionAction.LEFT:
             if player_name not in self._players:
                 return
             self._players.discard(player_name)
@@ -3635,7 +3645,8 @@ class Players:
             self._relay_session_notice(player=player_name, action=action, source=source)
             log.debug(f"Players.discard.{self._players=}")
             return
-        raise ValueError(f"Unsupported Factorio player session action: {action}")
+        else:
+            assert_never(action)
 
     def _relay_session_notice(self, *, player: str, action: PlayerSessionAction, source: RelayNoticeSource) -> None:
         if action is PlayerSessionAction.JOINED:
@@ -3645,7 +3656,7 @@ class Players:
             if self.app.relay_notice_player_left_enabled is False:
                 return
         else:
-            raise ValueError(f"Unsupported Factorio player session action: {action}")
+            assert_never(action)
         notice = self.app.player_session_notice(action=action, source=source)
         app_friendly = getattr(self.app, "friendly", self.app.name)
         DC_Relay.add(

@@ -13,8 +13,9 @@ import config
 from _async_utils import run_blocking
 from _manager import App_Manager
 from _security import Access_Control
-from node_api import NodeApiService, NodeSystemActionHandler
+from node_api import NodeApiService
 from node_api_relay import RelayTTSQueue
+from node_api_system import NodeSystemActionHandler
 from maintenance import MaintenanceService
 from restart_targets import RestartTarget
 from web_dash.nicegui_protocols import WebChatRelayPublisher

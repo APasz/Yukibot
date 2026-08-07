@@ -96,6 +96,7 @@ from chat_hub import (
     ChatHub,
     ChatRoomUpdate,
 )
+from deployment_metadata import DeploymentMetadata
 from font_assets import font_assets
 from maintenance import MaintenanceService
 from map_annotations import (
@@ -1152,7 +1153,7 @@ class NodeApiService:
         running_app_ids: tuple[str, ...] = ()
         running_app_scopes: tuple[str, ...] = ()
         start_blocked_app_ids: tuple[str, ...] = ()
-        deployment_metadata: config.DeploymentMetadata | None = config.MOD_WEB_DEPLOYMENT_METADATA
+        deployment_metadata: DeploymentMetadata | None = config.MOD_WEB_DEPLOYMENT_METADATA
         deployment_version: str | None = (
             deployment_metadata.version
             if deployment_metadata is not None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Protocol, cast
+
 # ruff: noqa: F403, F405
 from .status_support import *
 
@@ -10,6 +12,14 @@ from .status_support import *
 class _FakeChatMessageModeSpec:
     label: str
     help_text: str
+
+
+class _FakeChatPreviewStatusSupport(Protocol):
+    """Status-service operations supplied by sibling mixins."""
+
+    def _user_can_use_fake_chat_preview(self, user: ModWebUser) -> bool: ...
+
+    def _fake_chat_preview_notice_source(self, source_kind: ChatEndpointKind) -> RelayNoticeSource: ...
 
 
 _FAKE_CHAT_MESSAGE_MODE_SPECS: Mapping[_ModWebFakeChatMessageMode, _FakeChatMessageModeSpec] = {
@@ -97,7 +107,8 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
         app_friendly: str,
         publish_event: Callable[[ChatEvent], Awaitable[ChatEvent]],
     ) -> None:
-        if not self._user_can_use_fake_chat_preview(user):
+        status_support = cast(_FakeChatPreviewStatusSupport, cast(object, self))
+        if not status_support._user_can_use_fake_chat_preview(user):
             return
         open_preview = self._build_fake_chat_preview_panel(
             ui=ui,
@@ -478,7 +489,8 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
             room_id=resolved_room_id,
         )
         author: ChatAuthor = self._fake_chat_preview_author(state)
-        notice_source = self._fake_chat_preview_notice_source(state.source_kind)
+        status_support = cast(_FakeChatPreviewStatusSupport, cast(object, self))
+        notice_source = status_support._fake_chat_preview_notice_source(state.source_kind)
         app_name: str = self._fake_chat_preview_app_name(room_id=resolved_room_id)
         notice: RelayNotice | None = self._fake_chat_preview_notice(state=state, notice_source=notice_source)
         if notice is not None:
@@ -705,7 +717,7 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
         app: object | None = self._chat_room_app(room_id)
         if app is None:
             return room_id
-        friendly: Any | None = getattr(app, "friendly", None)
+        friendly: object = getattr(app, "friendly", None)
         if isinstance(friendly, str) and friendly.strip():
             return friendly.strip()
         return room_id

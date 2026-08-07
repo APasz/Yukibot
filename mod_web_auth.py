@@ -15,8 +15,8 @@ from urllib.parse import urlencode
 
 import requests
 from diskcache import Cache
-from fastapi import Request  # pyright: ignore[reportMissingImports]
-from starlette.responses import RedirectResponse, Response  # pyright: ignore[reportMissingImports]
+from fastapi import Request
+from starlette.responses import RedirectResponse, Response
 
 import config
 from _async_utils import run_blocking

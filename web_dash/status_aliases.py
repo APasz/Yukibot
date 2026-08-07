@@ -2,30 +2,34 @@
 
 from __future__ import annotations
 
+from typing import Protocol, cast
+
 # ruff: noqa: F403, F405
 from .status_support import *
+
+
+class _AliasPersistenceSupport(Protocol):
+    """Alias persistence operations supplied by the composed status service."""
+
+    async def _sync_name_cache_with_authority_if_remote_async(self, *, name_cache: config.Name_Cache) -> None: ...
+
+    def _persist_alias_draft(
+        self,
+        *,
+        name_cache: config.Name_Cache,
+        target_user_id: int,
+        draft: _AliasDraft,
+        scopes: tuple[str, ...],
+        sync_authority: bool = True,
+    ) -> tuple[str, ...]: ...
 
 
 class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
     def _alias_known_scopes(self) -> tuple[str, ...]:
         scopes: set[str] = {scope.value for scope in config.AppScopes}
         manager = self._manager
-        if manager is None:
-            return tuple(sorted(scopes, key=str.casefold))
-        list_known_scopes = getattr(manager, "list_known_scopes", None)
-        if callable(list_known_scopes):
-            known_scopes = list_known_scopes()
-            if isinstance(known_scopes, tuple) and all(isinstance(scope, str) for scope in known_scopes):
-                scopes.update(scope.strip().lower() for scope in known_scopes if scope.strip())
-                return tuple(sorted(scopes, key=str.casefold))
-        apps = getattr(manager, "apps", None)
-        if isinstance(apps, dict):
-            scopes.update(app.scope.strip().lower() for app in apps.values() if app.scope.strip())
-        list_create_scopes = getattr(manager, "list_create_scopes", None)
-        if callable(list_create_scopes):
-            create_scopes = list_create_scopes()
-            if isinstance(create_scopes, tuple) and all(isinstance(scope, str) for scope in create_scopes):
-                scopes.update(scope.strip().lower() for scope in create_scopes if scope.strip())
+        if manager is not None:
+            scopes.update(scope.strip().lower() for scope in manager.list_known_scopes() if scope.strip())
         return tuple(sorted(scopes, key=str.casefold))
 
     @staticmethod
@@ -40,7 +44,7 @@ class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
 
     def _alias_target_options(self, *, name_cache: config.Name_Cache, viewer: ModWebUser) -> dict[str, str]:
         user_ids: set[int] = {viewer.discord_id}
-        user_ids.update(user_id for user_id in name_cache.by_id if isinstance(user_id, int))
+        user_ids.update(name_cache.by_id)
         ordered_user_ids = sorted(
             user_ids,
             key=lambda user_id: self._alias_target_label(name_cache=name_cache, user_id=user_id, viewer=viewer).casefold(),
@@ -84,6 +88,7 @@ class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
         selected_user_id: int | None,
     ) -> None:
         can_switch_user = self._user_has_level(user, Power_Level.sudo)
+        alias_persistence = cast(_AliasPersistenceSupport, cast(object, self))
 
         def _render_alias_page() -> None:
             name_cache = config.Name_Cache()
@@ -148,7 +153,7 @@ class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
                 target_user_id = _target_user_id()
                 draft = _draft_for_user(target_user_id)
                 try:
-                    changed_fields = self._persist_alias_draft(
+                    changed_fields = alias_persistence._persist_alias_draft(
                         name_cache=name_cache,
                         target_user_id=target_user_id,
                         draft=draft,
@@ -156,7 +161,7 @@ class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
                         sync_authority=False,
                     )
                     if changed_fields:
-                        await self._sync_name_cache_with_authority_if_remote_async(name_cache=name_cache)
+                        await alias_persistence._sync_name_cache_with_authority_if_remote_async(name_cache=name_cache)
                 except ValueError as xcp:
                     ui.notify(str(xcp), type="negative")
                     return
@@ -231,7 +236,7 @@ class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
                                             display_name=display_name,
                                         )
                                         if changed:
-                                            await self._sync_name_cache_with_authority_if_remote_async(
+                                            await alias_persistence._sync_name_cache_with_authority_if_remote_async(
                                                 name_cache=name_cache
                                             )
                                     except ValueError as xcp:
@@ -270,11 +275,11 @@ class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
                                     .classes("mod-app-details-field min-w-0")
                                 )
                                 form_controls[control_key] = control
-                                def on_clear() -> None:
+                                def _clear_alias_input(_: object) -> None:
                                     _set_control_value(control, "")
                                     _capture_alias_draft()
 
-                                clear_button = ui.button("", on_click=lambda _: on_clear()).props(
+                                clear_button = ui.button("", on_click=_clear_alias_input).props(
                                     f'icon={clear_icon} flat dense round aria-label="{clear_tooltip}"'
                                 ).classes("mod-list-button secondary w-full min-w-0 px-2 py-2")
                                 self._attach_text_tooltip(ui=ui, target=clear_button, text=clear_tooltip)
@@ -321,19 +326,24 @@ class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
                                             .classes("mod-app-details-field min-w-0")
                                         )
                                         form_controls["add_alias"] = add_alias_control
+
+                                        def _reset_general_alias_input(_: object) -> None:
+                                            _set_control_value(add_alias_control, "")
+                                            _capture_alias_draft()
+
                                         reset_alias_button = ui.button(
                                             "",
-                                            on_click=lambda _:
-                                            (
-                                                _set_control_value(add_alias_control, ""),
-                                                _capture_alias_draft(),
-                                            ),
+                                            on_click=_reset_general_alias_input,
                                         ).props('icon=restart_alt flat dense round aria-label="Reset alias input"').classes(
                                             "mod-list-button secondary w-full min-w-0 px-2 py-2"
                                         )
+
+                                        def _add_general_alias_click(_: object) -> None:
+                                            _add_general_alias()
+
                                         add_alias_button = ui.button(
                                             "",
-                                            on_click=lambda _: _add_general_alias(),
+                                            on_click=_add_general_alias_click,
                                         ).props('icon=add flat dense round aria-label="Add general alias"').classes(
                                             "mod-list-button w-full min-w-0 px-2 py-2"
                                         )
@@ -351,19 +361,20 @@ class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
                                         for alias in current_aliases:
                                             with ui.row().classes("w-full items-center justify-between gap-2"):
                                                 ui.label(alias).classes("mod-subtitle text-sm break-all")
+
+                                                def _remove_general_alias(_: object, alias: str = alias) -> None:
+                                                    _capture_alias_draft()
+                                                    self._remove_alias_general_name(
+                                                        ui=ui,
+                                                        name_cache=name_cache,
+                                                        user_id=target_user_id,
+                                                        alias=alias,
+                                                        refresh=refresh_alias_body,
+                                                    )
+
                                                 remove_button = ui.button(
                                                     "",
-                                                    on_click=lambda _, alias=alias:
-                                                    (
-                                                        _capture_alias_draft(),
-                                                        self._remove_alias_general_name(
-                                                            ui=ui,
-                                                            name_cache=name_cache,
-                                                            user_id=target_user_id,
-                                                            alias=alias,
-                                                            refresh=refresh_alias_body,
-                                                        ),
-                                                    ),
+                                                    on_click=_remove_general_alias,
                                                 ).props('icon=delete flat dense round aria-label="Remove alias"').classes(
                                                     "mod-list-button secondary shrink-0 px-2 py-2"
                                                 )
@@ -539,4 +550,3 @@ class ModWebStatusAliasesMixin(ModWebStatusFeatureSupport):
             type="positive",
         )
         refresh()
-

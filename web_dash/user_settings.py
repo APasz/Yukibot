@@ -10,8 +10,9 @@ from re import Pattern
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from _utils import Utilities
 import config
+from _authority import AuthorityResource
+from _utils import Utilities
 
 _SETTINGS_SCHEMA_VERSION = 1
 _HEX_COLOR_PATTERN: Pattern[str] = re.compile(r"#[0-9a-fA-F]{6}$")
@@ -205,7 +206,7 @@ class ModWebUserSettingsStore:
     def _load(self) -> dict[int, ModWebUserSettings]:
         if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.LOCAL and not self._path.exists():
             return {}
-        payload: dict[str, object] = config.load_authority_json(config.AuthorityResource.USER_SETTINGS, self._path)
+        payload: dict[str, object] = config.load_authority_json(AuthorityResource.USER_SETTINGS, self._path)
         if not payload:
             return {}
         return self._parse_payload(payload)
@@ -213,7 +214,7 @@ class ModWebUserSettingsStore:
     def _save(self, settings_by_user_id: Mapping[int, ModWebUserSettings]) -> None:
         payload: dict[str, object] = self._serialize_payload(settings_by_user_id)
         saved_payload: dict[str, object] = config.save_authority_json(
-            config.AuthorityResource.USER_SETTINGS,
+            AuthorityResource.USER_SETTINGS,
             self._path,
             payload,
         )

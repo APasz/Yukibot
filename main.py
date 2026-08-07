@@ -26,15 +26,18 @@ import config
 from _activity import Activity_Manager, Provider_CPU, Provider_DISK, Provider_RAM
 from _async_utils import run_blocking
 from _authority_server import AuthorityServer
-from _discord import DC_Relay, Distils, Resolutator, cached_member_role_color, color_int_to_hex
+from _discord import DC_Relay, Distils, cached_member_role_color, color_int_to_hex
 from _file import File_Utils
 from _manager import App_Manager, AppStartBlocker, AppStartBlockerKind, ManagedApp, Provider_Player, Provider_Process
+from _resolator import Resolutator
 from _security import Access_Control
 from _sys import Stats_System
 from _utils import File_Cleaner, Utilities
 from apps._app import App
 from cmd_alias import AliasEditorService, CMD_Alias
-from cmd_app import AppConsoleService, AppManageService, group_app
+from cmd_app import group_app
+from cmd_app_console import AppConsoleService
+from cmd_app_manage import AppManageService
 from cmd_dashboard import CMD_Dashboard, DashboardEditorService
 from cmd_misc import group_misc
 from cmd_music import MusicService, group_music
@@ -46,7 +49,7 @@ from font_assets import font_assets
 from maintenance import MaintenanceService
 from mirror_models import MirrorAutoSyncOutcome, MirrorAutoSyncResult
 from mirror_service import MirrorService
-from node_api import NodeSystemAction
+from node_api_system import NodeSystemAction
 from node_api_relay import RemoteRelayTTSForwarder
 from node_api_http import NodeApiHttpService
 from online import Online_Tracker

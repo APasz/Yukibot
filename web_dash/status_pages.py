@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from deployment_metadata import DeploymentMetadata
+
 # ruff: noqa: F403, F405
 from .status_support import *
 from .ui_helpers import ModWebUiHelpersMixin
@@ -701,7 +703,7 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
 
     @staticmethod
     def _about_deployment_text() -> str | None:
-        metadata: config.DeploymentMetadata | None = config.MOD_WEB_DEPLOYMENT_METADATA
+        metadata: DeploymentMetadata | None = config.MOD_WEB_DEPLOYMENT_METADATA
         build_sha: str | None = config.MOD_WEB_BUILD_SHA
         if metadata is None:
             return f"Build {build_sha[:7]}" if build_sha is not None else None
