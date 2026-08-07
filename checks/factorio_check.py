@@ -7,7 +7,7 @@ import tarfile
 import unittest
 import zipfile
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -47,6 +47,7 @@ from apps.factorio import (
     _ensure_factorio_binary_executable,
     _factorio_download_archive_path,
     _factorio_latest_headless_versions,
+    _factorio_mod_portal_metadata,
     _factorio_mod_portal_release_from_mapping,
     _format_factorio_bridge_say_command,
     _format_factorio_console_message,
@@ -76,6 +77,19 @@ async def _run_blocking_directly(
     **kwargs: object,
 ) -> object:
     return func(*args, **kwargs)
+
+
+def _factorio_portal_metadata_from_session(
+    session: Any,
+) -> Callable[[object, str], Awaitable[dict[str, object]]]:
+    """Adapt legacy portal payload fixtures to the ModMux metadata boundary."""
+
+    async def get_metadata(_muxer: object, mod_id: str) -> dict[str, object]:
+        response = session.get(f"https://mods.factorio.com/api/mods/{mod_id}/full")
+        async with response:
+            return await response.json()
+
+    return get_metadata
 
 
 class _FakeFactorioUpdateApp:
@@ -335,6 +349,19 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mods.factorio.com"):
             parse_factorio_mod_portal_url("https://example.com/mod/invincible-construction-bots")
 
+    def test_factorio_mod_portal_metadata_uses_modmux_wube_provider(self) -> None:
+        payload: dict[str, object] = {"name": "example", "releases": []}
+        muxer = MagicMock()
+        muxer.get_mod = AsyncMock(return_value=SimpleNamespace(raw=payload))
+
+        metadata = asyncio.run(_factorio_mod_portal_metadata(muxer, "example"))
+
+        self.assertEqual(metadata, payload)
+        muxer.get_mod.assert_awaited_once_with(
+            Provider.WUBE,
+            ModID(provider=Provider.WUBE, id="example"),
+        )
+
     def test_select_factorio_mod_portal_release_prefers_matching_major_minor(self) -> None:
         old_release = _factorio_mod_portal_release_from_mapping(
             {
@@ -493,7 +520,10 @@ class FactorioVersionDetectionTests(unittest.TestCase):
                 return _FakeResponse(payloads[mod_id])
 
         session = _FakeSession()
-        with patch("apps.factorio.aiohttp.ClientSession", return_value=session):
+        with patch(
+            "apps.factorio._factorio_mod_portal_metadata",
+            new=AsyncMock(side_effect=_factorio_portal_metadata_from_session(session)),
+        ):
             resolution = asyncio.run(
                 resolve_factorio_mod_portal_candidates(
                     page_url="https://mods.factorio.com/mod/root",
@@ -560,7 +590,11 @@ class FactorioVersionDetectionTests(unittest.TestCase):
                 }
                 return _FakeResponse(payloads[mod_id])
 
-        with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+        session = _FakeSession()
+        with patch(
+            "apps.factorio._factorio_mod_portal_metadata",
+            new=AsyncMock(side_effect=_factorio_portal_metadata_from_session(session)),
+        ):
             resolution = asyncio.run(
                 resolve_factorio_mod_portal_candidates(
                     page_url="https://mods.factorio.com/mod/root",
@@ -635,7 +669,11 @@ class FactorioVersionDetectionTests(unittest.TestCase):
                 }
                 return _FakeResponse(payloads[mod_id])
 
-        with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+        session = _FakeSession()
+        with patch(
+            "apps.factorio._factorio_mod_portal_metadata",
+            new=AsyncMock(side_effect=_factorio_portal_metadata_from_session(session)),
+        ):
             resolution = asyncio.run(
                 resolve_factorio_mod_portal_candidates(
                     page_url="https://mods.factorio.com/mod/root",
@@ -700,7 +738,11 @@ class FactorioVersionDetectionTests(unittest.TestCase):
             def get(self, _url: str, **_kwargs: object) -> _FakeResponse:
                 return _FakeResponse()
 
-        with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+        session = _FakeSession()
+        with patch(
+            "apps.factorio._factorio_mod_portal_metadata",
+            new=AsyncMock(side_effect=_factorio_portal_metadata_from_session(session)),
+        ):
             versions = asyncio.run(
                 list_factorio_mod_portal_release_options(
                     page_url="https://mods.factorio.com/mod/root",
@@ -769,7 +811,11 @@ class FactorioVersionDetectionTests(unittest.TestCase):
                 }
                 return _FakeResponse(payloads[mod_id])
 
-        with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+        session = _FakeSession()
+        with patch(
+            "apps.factorio._factorio_mod_portal_metadata",
+            new=AsyncMock(side_effect=_factorio_portal_metadata_from_session(session)),
+        ):
             resolution = asyncio.run(
                 resolve_factorio_mod_portal_candidates(
                     page_url="https://mods.factorio.com/mod/root",
@@ -1150,7 +1196,14 @@ class FactorioVersionDetectionTests(unittest.TestCase):
                 return _FakeResponse(status=200)
 
         with TemporaryDirectory() as temp_dir:
-            with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+            session = _FakeSession()
+            with (
+                patch(
+                    "apps.factorio._factorio_mod_portal_metadata",
+                    new=AsyncMock(side_effect=_factorio_portal_metadata_from_session(session)),
+                ),
+                patch("apps.factorio.aiohttp.ClientSession", return_value=session),
+            ):
                 result = asyncio.run(
                     download_factorio_mod_from_portal(
                         page_url="https://mods.factorio.com/mod/example",

@@ -383,6 +383,13 @@ class _ModWebModToolbarBindings:
 
 
 @dataclass(frozen=True, slots=True)
+class _ModWebModUpdateBatchResult:
+    checked_mod_count: int
+    update_mod_names: frozenset[str]
+    failed_mod_names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _ModWebStatusPageConfig:
     title: str
     support_text: str
@@ -1099,6 +1106,7 @@ __all__: tuple[str, ...] = (
     "_ModWebLinkSpec",
     "_ModWebLoginAdministrator",
     "_ModWebModToolbarBindings",
+    "_ModWebModUpdateBatchResult",
     "_ModWebNodePresenceBadgeSpec",
     "_ModWebNotificationPreviewSpec",
     "_ModWebNotificationTrayItem",

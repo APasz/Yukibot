@@ -14,7 +14,7 @@ import threading
 import time
 import zipfile
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from re import Match, Pattern
@@ -23,9 +23,12 @@ from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
 import hikari
+import httpx
 from modmux import Muxer, parse_url
 from modmux.models import ModID, Provider
 from modmux.modmux_errors import ModMuxError
+from modmux.providers.wube import WubeCreds
+from pydantic import SecretStr
 
 import config
 from _async_utils import run_blocking
@@ -117,6 +120,7 @@ _FACTORIO_MOD_VERSION_RE: Pattern[str] = re.compile(
 )
 _FACTORIO_MOD_PORTAL_HOST = "mods.factorio.com"
 _FACTORIO_MOD_PORTAL_BASE_URL = f"https://{_FACTORIO_MOD_PORTAL_HOST}"
+_FACTORIO_MOD_PORTAL_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
 _FACTORIO_MOD_PORTAL_ID_RE: Pattern[str] = re.compile(r"^[A-Za-z0-9_-]+$")
 _FACTORIO_MOD_DEPENDENCY_RE: Pattern[str] = re.compile(r"^(?P<mod_id>[A-Za-z0-9_-]+)(?=\s|[<>=!~]|$)")
 _FACTORIO_CONFIG_FILENAMES: tuple[str, ...] = (
@@ -681,17 +685,34 @@ def _select_factorio_mod_portal_release(
 
 
 def _factorio_mod_download_url(release: FactorioModPortalRelease, credentials: FactorioModPortalCredentials) -> str:
-    query = urlencode({"username": credentials.username, "token": credentials.token})
+    wube_credentials = WubeCreds(
+        api_key=SecretStr(credentials.token),
+        user_id=SecretStr(credentials.username),
+    )
+    query = urlencode(wube_credentials.download_params())
     separator = "&" if "?" in release.download_url else "?"
     return f"{_FACTORIO_MOD_PORTAL_BASE_URL}{release.download_url}{separator}{query}"
 
 
-async def _factorio_mod_portal_metadata(session: aiohttp.ClientSession, mod_id: str) -> Mapping[str, object]:
-    metadata_url = f"{_FACTORIO_MOD_PORTAL_BASE_URL}/api/mods/{quote(mod_id, safe='')}/full"
-    async with session.get(metadata_url) as response:
-        if response.status != 200:
-            raise RuntimeError(f"Factorio mod portal metadata fetch failed for {mod_id} with HTTP {response.status}.")
-        payload = _json_object(cast(object, await response.json()), label="Factorio mod portal response")
+@contextlib.asynccontextmanager
+async def _factorio_mod_portal_muxer() -> AsyncGenerator[Muxer]:
+    """Create the ModMux client used for public Factorio mod portal metadata."""
+    async with httpx.AsyncClient(timeout=_FACTORIO_MOD_PORTAL_TIMEOUT) as http:
+        async with Muxer(http=http) as muxer:
+            yield muxer
+
+
+async def _factorio_mod_portal_metadata(muxer: Muxer, mod_id: str) -> Mapping[str, object]:
+    """Fetch complete Factorio portal metadata through ModMux.
+
+    ModMux normalises the latest release, while this workflow needs the raw
+    release list to select an archive for the server's Factorio version.
+    """
+    try:
+        mod = await muxer.get_mod(Provider.WUBE, ModID(provider=Provider.WUBE, id=mod_id))
+    except ModMuxError as xcp:
+        raise RuntimeError(f"Factorio mod portal metadata fetch failed for {mod_id}: {xcp}") from xcp
+    payload = _json_object(mod.raw, label="Factorio mod portal response")
     portal_mod_name = payload.get("name")
     if portal_mod_name != mod_id:
         raise ValueError("Factorio mod portal response did not match the requested mod.")
@@ -721,9 +742,9 @@ def _factorio_mod_portal_candidate(
     )
 
 
-async def _resolve_factorio_mod_portal_candidates_with_session(
+async def _resolve_factorio_mod_portal_candidates_with_muxer(
     *,
-    session: aiohttp.ClientSession,
+    muxer: Muxer,
     requested_mod_id: str,
     factorio_version: AppVersion | None,
     requested_mod_version: str | None,
@@ -740,7 +761,7 @@ async def _resolve_factorio_mod_portal_candidates_with_session(
         if mod_id in seen:
             continue
         seen.add(mod_id)
-        payload = await _factorio_mod_portal_metadata(session, mod_id)
+        payload = await _factorio_mod_portal_metadata(muxer, mod_id)
         release = _select_factorio_mod_portal_release(
             _factorio_mod_portal_releases(payload),
             factorio_version=factorio_version,
@@ -773,10 +794,9 @@ async def resolve_factorio_mod_portal_candidates(
     requested_mod_version: str | None = None,
 ) -> FactorioModPortalResolution:
     mod_id = parse_factorio_mod_portal_url(page_url)
-    timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=300)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        resolution, _releases = await _resolve_factorio_mod_portal_candidates_with_session(
-            session=session,
+    async with _factorio_mod_portal_muxer() as muxer:
+        resolution, _releases = await _resolve_factorio_mod_portal_candidates_with_muxer(
+            muxer=muxer,
             requested_mod_id=mod_id,
             factorio_version=factorio_version,
             requested_mod_version=requested_mod_version,
@@ -790,9 +810,8 @@ async def list_factorio_mod_portal_release_options(
     factorio_version: AppVersion | None,
 ) -> tuple[FactorioModPortalReleaseOption, ...]:
     mod_id = parse_factorio_mod_portal_url(page_url)
-    timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=300)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        payload = await _factorio_mod_portal_metadata(session, mod_id)
+    async with _factorio_mod_portal_muxer() as muxer:
+        payload = await _factorio_mod_portal_metadata(muxer, mod_id)
     releases = tuple(
         release
         for release in _factorio_mod_portal_releases(payload)
@@ -855,23 +874,24 @@ async def download_factorio_mods_from_portal(
 ) -> tuple[FactorioModPortalDownload, ...]:
     mod_id = parse_factorio_mod_portal_url(page_url)
     selected_ids: set[str] | None = None if selected_mod_ids is None else set(selected_mod_ids)
-    timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=300)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        resolution, releases = await _resolve_factorio_mod_portal_candidates_with_session(
-            session=session,
+    async with _factorio_mod_portal_muxer() as muxer:
+        resolution, releases = await _resolve_factorio_mod_portal_candidates_with_muxer(
+            muxer=muxer,
             requested_mod_id=mod_id,
             factorio_version=factorio_version,
             requested_mod_version=requested_mod_version,
         )
-        if selected_ids is None:
-            selected_ids = {mod_id}
-        if mod_id not in selected_ids:
-            raise ValueError("The requested Factorio mod must be included in the selected downloads.")
-        available_ids = {candidate.mod_id for candidate in resolution.candidates}
-        unknown_ids = selected_ids - available_ids
-        if unknown_ids:
-            raise ValueError(f"Unknown Factorio mod dependency selection: {', '.join(sorted(unknown_ids))}")
+    if selected_ids is None:
+        selected_ids = {mod_id}
+    if mod_id not in selected_ids:
+        raise ValueError("The requested Factorio mod must be included in the selected downloads.")
+    available_ids = {candidate.mod_id for candidate in resolution.candidates}
+    unknown_ids = selected_ids - available_ids
+    if unknown_ids:
+        raise ValueError(f"Unknown Factorio mod dependency selection: {', '.join(sorted(unknown_ids))}")
 
+    timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=300)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         downloads: list[FactorioModPortalDownload] = []
         for candidate in resolution.candidates:
             if candidate.mod_id not in selected_ids:

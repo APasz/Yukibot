@@ -934,16 +934,12 @@ wheels = [
 
 [[package]]
 name = "modmux"
-version = "0.6.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.7.0"
+source = { git = "https://github.com/APasz/ModMux.git?tag=v0.7.0#20c76d800ac1cbf23b00eb5500db16131a06bc11" }
 dependencies = [
     { name = "aiolimiter" },
     { name = "httpx" },
     { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/1d/94/1f08d3a380573e34c00a72f1f0656d16f57e3dae09d01c8388d171a866c5/modmux-0.6.1.tar.gz", hash = "sha256:b1061d59e76905d5da89385c7949e9d2c6c0202f52b3937edd3f93a3aea6d9b0", size = 36858, upload-time = "2026-05-23T02:55:09.433Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/88/09ceb63da9f966315517aeda17b23d6694743b938e99681bccaf608785ef/modmux-0.6.1-py3-none-any.whl", hash = "sha256:acbcefcad079085126ef740a873dd6ff2c2273c4dbeaa63869d4e468c8d97944", size = 52560, upload-time = "2026-05-23T02:55:08.424Z" },
 ]
 
 [[package]]
@@ -1994,7 +1990,7 @@ requires-dist = [
     { name = "hikari-ui", directory = "../hikari_editor" },
     { name = "hikari-wave", specifier = ">=0.7.0a1" },
     { name = "httpx" },
-    { name = "modmux" },
+    { name = "modmux", git = "https://github.com/APasz/ModMux.git?tag=v0.7.0" },
     { name = "nicegui" },
     { name = "pathvalidate" },
     { name = "piper-tts" },

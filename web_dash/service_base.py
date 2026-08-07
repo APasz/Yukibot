@@ -109,6 +109,7 @@ from .types import (
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
     _ModWebKillControlState,
+    _ModWebModUpdateBatchResult,
     _ModWebStartStopControlState,
     _ModWebStatusPageConfig,
 )
@@ -491,6 +492,11 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_cancel_bulk_mod_metadata"]
     ) -> Callable[..., Awaitable[bool]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_check_all_mod_updates"]
+    ) -> Callable[..., Awaitable[_ModWebModUpdateBatchResult]]: ...
 
     @overload
     def __getattr__(

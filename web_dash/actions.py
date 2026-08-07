@@ -97,6 +97,7 @@ from .types import (
     ModWebNodeLink,
     ModWebPageModel,
     _ModWebKillControlState,
+    _ModWebModUpdateBatchResult,
     _ModWebStartStopControlState,
 )
 
@@ -680,6 +681,39 @@ class ModWebActionsMixin(ModWebServiceSupport):
             user=user,
         )
         return NodeModUpdateCheckResult.from_mapping(payload)
+
+    async def _check_all_mod_updates(
+        self,
+        *,
+        model: ModWebPageModel,
+        entries: tuple[NodeModEntry, ...],
+        user: ModWebUser,
+        on_checking: Callable[[NodeModEntry], None] | None = None,
+    ) -> _ModWebModUpdateBatchResult:
+        update_mod_names: set[str] = set()
+        failed_mod_names: list[str] = []
+        for entry in entries:
+            if on_checking is not None:
+                on_checking(entry)
+            try:
+                result = await self._check_mod_update(model=model, entry=entry, user=user)
+            except Exception as xcp:
+                log.warning(
+                    "Bulk mod update check failed: node=%s app=%s mod=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    entry.name,
+                    xcp,
+                )
+                failed_mod_names.append(entry.name)
+                continue
+            if result.status is NodeModUpdateStatus.UPDATE_AVAILABLE:
+                update_mod_names.add(entry.name)
+        return _ModWebModUpdateBatchResult(
+            checked_mod_count=len(entries),
+            update_mod_names=frozenset(update_mod_names),
+            failed_mod_names=tuple(failed_mod_names),
+        )
 
     async def _mod_versions(
         self,
@@ -3058,6 +3092,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         app_friendly: str,
         model: ModWebPageModel,
         user: ModWebUser,
+        has_update: bool = False,
     ) -> Checkbox | None:
         row_classes = ["mod-row", "w-full"]
         if not entry.downloadable:
@@ -3092,6 +3127,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.label(entry.name).classes("mod-row-file")
             with ui.row().classes("mod-row-meta"):
                 ui.label(entry.size_text).classes("mod-pill size")
+                if has_update:
+                    ui.label("Update").classes("mod-pill size update")
                 if entry.placement is ModPlacement.CLIENT_ONLY:
                     ui.label(entry.placement.label).classes("mod-pill")
                 if entry.client_pack.policy is not ClientPackPolicy.REQUIRED:

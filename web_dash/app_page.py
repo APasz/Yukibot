@@ -112,6 +112,7 @@ from .runtime_imports import (
     assert_never,
     asyncio,
     cast,
+    config,
     dataclass,
     escape,
     json,
@@ -169,6 +170,7 @@ class _ModWebSectionChromeBindings:
     endpoint_count_label: Label | None = None
     endpoint_count_tooltip: "Tooltip | None" = None
     endpoint_count_tooltip_content: Html | None = None
+    mod_update_check_badge: Label | None = None
 
 
 class _VirtualModRow(TypedDict):
@@ -176,6 +178,7 @@ class _VirtualModRow(TypedDict):
     friendly: str
     file: str
     size: str
+    update_available: bool
     placement: str
     policy: str
     type: str
@@ -3582,6 +3585,12 @@ class ModWebAppPageMixin(
                 with ui.row().classes("mod-section-chrome-badge-row items-center justify-start gap-2 flex-wrap"):
                     for badge in section_badges:
                         self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                    mod_update_check_badge: Label | None = None
+                    if tab.builtin_kind is ModWebAppSectionKind.MODS:
+                        mod_update_check_badge = self._badge(ui=ui, text="Checking", tone="grey")
+                        self._set_element_visibility(mod_update_check_badge, visible=False)
+            else:
+                mod_update_check_badge = None
             if section_actions:
                 with ui.row().classes("mod-section-chrome-actions items-center justify-start gap-2 flex-wrap"):
                     for action in section_actions:
@@ -3593,7 +3602,7 @@ class ModWebAppPageMixin(
                             extra_classes=action.extra_classes,
                             new_tab=action.new_tab,
                         )
-            return _ModWebSectionChromeBindings()
+            return _ModWebSectionChromeBindings(mod_update_check_badge=mod_update_check_badge)
 
         def render_section(
             *,
@@ -3623,6 +3632,7 @@ class ModWebAppPageMixin(
                     chat_endpoint_count_label=chrome_bindings.endpoint_count_label,
                     chat_endpoint_tooltip=chrome_bindings.endpoint_count_tooltip,
                     chat_endpoint_tooltip_content=chrome_bindings.endpoint_count_tooltip_content,
+                    mod_update_check_badge=chrome_bindings.mod_update_check_badge,
                 )
             if section_runtime_model is not None:
                 section_runtime_appliers.append(section_runtime_model)
@@ -3750,6 +3760,7 @@ class ModWebAppPageMixin(
         chat_endpoint_count_label: Label | None = None,
         chat_endpoint_tooltip: Tooltip | None = None,
         chat_endpoint_tooltip_content: Html | None = None,
+        mod_update_check_badge: Label | None = None,
     ) -> Callable[[ModWebBasePageModel], None] | None:
         if tab.builtin_kind is None:
             if tab.render_handler_name is None:
@@ -3770,7 +3781,12 @@ class ModWebAppPageMixin(
             case ModWebAppSectionKind.MODS:
                 if not isinstance(model, ModWebPageModel):
                     raise TypeError("The Mods section requires a full mod page model.")
-                self._render_mods_section(ui=ui, model=model, user=user)
+                self._render_mods_section(
+                    ui=ui,
+                    model=model,
+                    user=user,
+                    mod_update_check_badge=mod_update_check_badge,
+                )
                 return None
             case ModWebAppSectionKind.CONFIGS:
                 self._render_config_editor(ui=ui, model=model, user=user)
@@ -4068,6 +4084,7 @@ class ModWebAppPageMixin(
         ui: ModWebUi,
         model: ModWebPageModel,
         user: ModWebUser,
+        mod_update_check_badge: Label | None = None,
     ) -> None:
         capabilities = mod_capabilities_for_scope(model.app_scope)
         is_minecraft_app: bool = (
@@ -4145,6 +4162,8 @@ class ModWebAppPageMixin(
         metadata_operation_id: str | None = None
         metadata_cancel_requested = False
         metadata_active_status = ""
+        available_update_mod_names: set[str] = set()
+        checking_all_mod_updates = False
 
         def set_metadata_status(text: str, *, running: bool) -> None:
             nonlocal metadata_active_status
@@ -4268,6 +4287,62 @@ class ModWebAppPageMixin(
                     total_count=len(model.mods.mods),
                 )
             )
+
+        def set_current_update_check(entry: NodeModEntry | None) -> None:
+            if mod_update_check_badge is None:
+                return
+            if entry is None:
+                self._set_element_visibility(mod_update_check_badge, visible=False)
+                return
+            mod_update_check_badge.set_text(f"Checking {entry.friendly}")
+            self._set_element_visibility(mod_update_check_badge, visible=True)
+
+        async def check_all_mod_updates() -> None:
+            nonlocal checking_all_mod_updates
+            if checking_all_mod_updates:
+                ui.notify("Mod update checks are already running.", type="warning")
+                return
+            checking_all_mod_updates = True
+            total_mod_count = len(model.mods.mods)
+            ui.notify(
+                f"Checking {total_mod_count} mod{'s' if total_mod_count != 1 else ''} for updates…",
+                type="info",
+            )
+            try:
+                batch_result = await self._check_all_mod_updates(
+                    model=model,
+                    entries=model.mods.mods,
+                    user=user,
+                    on_checking=set_current_update_check,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Bulk mod update check failed: node=%s app=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    xcp,
+                )
+                ui.notify(f"Mod update checks failed: {xcp}", type="negative")
+                return
+            finally:
+                checking_all_mod_updates = False
+                set_current_update_check(None)
+            available_update_mod_names.clear()
+            available_update_mod_names.update(batch_result.update_mod_names)
+            _mod_download_rows.refresh(current_search_query)
+            available_update_count = len(batch_result.update_mod_names)
+            failure_count = len(batch_result.failed_mod_names)
+            message = (
+                f"Checked {batch_result.checked_mod_count} mod"
+                f"{'s' if batch_result.checked_mod_count != 1 else ''}: "
+                f"{available_update_count} update{'s' if available_update_count != 1 else ''} available."
+            )
+            if failure_count:
+                message = (
+                    f"{message} {failure_count} mod"
+                    f"{'s' if failure_count != 1 else ''} could not be checked."
+                )
+            ui.notify(message, type="warning" if failure_count else "positive")
 
         def selected_downloadable_mod_names_in_page_order() -> tuple[str, ...]:
             return tuple[str, ...](
@@ -6327,6 +6402,7 @@ class ModWebAppPageMixin(
                                 "friendly": entry.friendly,
                                 "file": entry.name,
                                 "size": entry.size_text,
+                                "update_available": entry.name in available_update_mod_names,
                                 "placement": entry.placement.label,
                                 "policy": (
                                     ""
@@ -6463,6 +6539,7 @@ class ModWebAppPageMixin(
                                   </div>
                                   <div class="mod-row-meta">
                                     <span class="mod-pill size">{{ props.row.size }}</span>
+                                    <span v-if="props.row.update_available" class="mod-pill size update">Update</span>
                                     <span v-if="props.row.show_placement" class="mod-pill">
                                       {{ props.row.placement }}
                                     </span>
@@ -6531,6 +6608,7 @@ class ModWebAppPageMixin(
                                 app_friendly=model.app_friendly,
                                 model=model,
                                 user=user,
+                                has_update=entry.name in available_update_mod_names,
                             )
                             if checkbox is not None:
                                 checkboxes[entry.name] = checkbox
@@ -6568,6 +6646,13 @@ class ModWebAppPageMixin(
                             user,
                             required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
                         )
+                        else None
+                    ),
+                    check_all_updates=(
+                        check_all_mod_updates
+                        if model.app_scope == config.AppScopes.factorio.value
+                        and bool(model.mods.mods)
+                        and self._user_has_level(user, Power_Level.user)
                         else None
                     ),
                     cancel_metadata=cancel_metadata_operation,
@@ -7274,6 +7359,7 @@ class ModWebAppPageMixin(
         open_modlist: Callable[[], None] | None = None,
         open_client_pack_config: Callable[[], None] | None = None,
         find_metadata: Callable[[], None] | None = None,
+        check_all_updates: Callable[[], Awaitable[None]] | None = None,
         cancel_metadata: Callable[[], None] | None = None,
         upload_mod: Callable[[], object] | None = None,
         add_mod_link: Callable[[], object] | None = None,
@@ -7391,6 +7477,7 @@ class ModWebAppPageMixin(
                     or can_add_mod_link
                     or open_client_pack_config is not None
                     or find_metadata is not None
+                    or check_all_updates is not None
                     or can_delete_mods
                 )
                 if has_menu_actions:
@@ -7429,6 +7516,10 @@ class ModWebAppPageMixin(
                                     ui.menu_item("Find Metadata", on_click=find_metadata).classes(
                                         "mod-chat-entry-menu-item mod-toolbar-menu-item"
                                     )
+                                if check_all_updates is not None:
+                                    ui.menu_item("Check All", on_click=check_all_updates).classes(
+                                        "mod-chat-entry-menu-item mod-toolbar-menu-item"
+                                    )
                                 if can_delete_mods:
                                     delete_control = cast(
                                         _ModWebEnableableControl,
@@ -7451,6 +7542,10 @@ class ModWebAppPageMixin(
                             )
                         if find_metadata is not None:
                             ui.button("Find Metadata", on_click=find_metadata).classes(
+                                "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                            )
+                        if check_all_updates is not None:
+                            ui.button("Check All", on_click=check_all_updates).classes(
                                 "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                             )
                         if can_delete_mods:

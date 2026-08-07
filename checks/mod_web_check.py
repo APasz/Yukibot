@@ -71,6 +71,7 @@ from apps._updater import (
     AppUpdateState,
     AppUpdateStatus,
 )
+from apps.factorio.node_api import NodeModUpdateCheckResult, NodeModUpdateStatus
 from apps.minecraft import (
     Minecraft,
     MinecraftCookingRecipe,
@@ -10816,6 +10817,128 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(dialog.open.call_count, 2)
 
+    def test_check_all_mod_updates_marks_available_entries_and_continues_after_failures(self) -> None:
+        service = ModWebService()
+        entries = (
+            self._mod_entry(name="available.zip", friendly="Available"),
+            self._mod_entry(name="unavailable.zip", friendly="Unavailable"),
+            self._mod_entry(name="current.zip", friendly="Current"),
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="factorio_alpha")),
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+
+        def update_result(entry: NodeModEntry, status: NodeModUpdateStatus) -> NodeModUpdateCheckResult:
+            return NodeModUpdateCheckResult(
+                app_name="factorio_alpha",
+                app_friendly="Factorio Alpha",
+                node="yuki",
+                mod_name=entry.name,
+                mod_friendly=entry.friendly,
+                status=status,
+                current_version="1.0.0",
+                latest_version="1.1.0",
+                latest_file_name="latest.zip",
+                page_url="https://mods.factorio.com/mod/example",
+                message="Update status.",
+            )
+
+        check_update = AsyncMock(
+            side_effect=(
+                update_result(entries[0], NodeModUpdateStatus.UPDATE_AVAILABLE),
+                RuntimeError("Portal unavailable"),
+                update_result(entries[2], NodeModUpdateStatus.CURRENT),
+            )
+        )
+        checked_mod_names: list[str] = []
+
+        with patch.object(service, "_check_mod_update", new=check_update):
+            result = asyncio.run(
+                service._check_all_mod_updates(
+                    model=model,
+                    entries=entries,
+                    user=user,
+                    on_checking=lambda entry: checked_mod_names.append(entry.name),
+                )
+            )
+
+        self.assertEqual(result.checked_mod_count, 3)
+        self.assertEqual(result.update_mod_names, frozenset({"available.zip"}))
+        self.assertEqual(result.failed_mod_names, ("unavailable.zip",))
+        self.assertEqual(checked_mod_names, [entry.name for entry in entries])
+        self.assertEqual(
+            [call_args.kwargs["entry"] for call_args in check_update.await_args_list],
+            list(entries),
+        )
+
+    def test_mod_toolbar_places_check_all_in_overflow_menu(self) -> None:
+        service = ModWebService()
+        entry = self._mod_entry(name="example.zip")
+        model = cast(
+            ModWebPageModel,
+            cast(
+                object,
+                SimpleNamespace(
+                    mods=SimpleNamespace(mods=(entry,)),
+                    client_pack_content_dirty=False,
+                ),
+            ),
+        )
+        ui = MagicMock()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+
+        async def check_all_updates() -> None:
+            return None
+
+        with patch.object(service, "_user_has_level", return_value=False):
+            service._render_mod_toolbar(
+                ui=cast(ModWebUi, ui),
+                model=model,
+                user=user,
+                toggle_selection=lambda: None,
+                download_selected=None,
+                delete_selected=lambda: None,
+                check_all_updates=check_all_updates,
+            )
+
+        check_all_call = next(
+            call_args
+            for call_args in ui.menu_item.call_args_list
+            if call_args.args[0] == "Check All"
+        )
+        self.assertIs(check_all_call.kwargs["on_click"], check_all_updates)
+
+    def test_mod_download_row_renders_update_badge(self) -> None:
+        service = ModWebService()
+        ui = MagicMock()
+        update_label = MagicMock()
+        ui.label.side_effect = (
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            update_label,
+            MagicMock(),
+            MagicMock(),
+        )
+        entry = self._mod_entry(name="available.zip", friendly="Available")
+
+        service._render_mod_download_row(
+            ui=cast(ModWebUi, ui),
+            entry=entry,
+            download_url=None,
+            on_change=Mock(),
+            can_select=True,
+            app_friendly="Factorio Alpha",
+            model=cast(ModWebPageModel, object()),
+            user=cast(ModWebUser, object()),
+            has_update=True,
+        )
+
+        self.assertIn(call("Update"), ui.label.call_args_list)
+        update_label.classes.assert_called_once_with("mod-pill size update")
+
     def test_mod_download_row_client_mod_uses_default_row_border_classes(self) -> None:
         service = ModWebService()
         ui = MagicMock()
@@ -10925,6 +11048,8 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("data-mod-download", virtual_row_template)
         self.assertNotIn("$parent.$emit", virtual_row_template)
         self.assertIn('class="mod-pill size"', virtual_row_template)
+        self.assertIn("props.row.update_available", virtual_row_template)
+        self.assertTrue(all(row["update_available"] is False for row in ui.table.call_args.kwargs["rows"]))
         self.assertIn("'mod-setting-badge', 'mod-mod-type-badge'", virtual_row_template)
         table.on.assert_called_once()
         self.assertEqual(table.on.call_args.args[0], "click")
