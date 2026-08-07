@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,8 @@ from apps.minecraft import MinecraftRecipeMutation
 from .constants import (
     _BULK_METADATA_REQUEST_TIMEOUT_SECONDS,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
+    _MOD_UPDATE_CHECK_CACHE_MAX_ENTRIES,
+    _MOD_UPDATE_CHECK_CACHE_TTL_SECONDS,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     log,
 )
@@ -98,6 +101,8 @@ from .types import (
     ModWebPageModel,
     _ModWebKillControlState,
     _ModWebModUpdateBatchResult,
+    _ModWebModUpdateCacheEntry,
+    _ModWebModUpdateCacheKey,
     _ModWebStartStopControlState,
 )
 
@@ -123,6 +128,115 @@ def _launcher_provider_selection_payload(
 
 
 class ModWebActionsMixin(ModWebServiceSupport):
+    @staticmethod
+    def _mod_update_cache_key(
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+    ) -> _ModWebModUpdateCacheKey:
+        return _ModWebModUpdateCacheKey(
+            node_name=model.node_name.casefold(),
+            app_name=model.app_name.casefold(),
+            mod_name=entry.name,
+            installed_version=entry.version,
+        )
+
+    def _cached_mod_update_names(
+        self,
+        *,
+        model: ModWebPageModel,
+        entries: tuple[NodeModEntry, ...],
+    ) -> frozenset[str]:
+        now = time.monotonic()
+        with self._mod_update_check_cache_lock:
+            return frozenset(
+                entry.name
+                for entry in entries
+                if (
+                    cached := self._cached_mod_update_result_locked(
+                        cache_key=self._mod_update_cache_key(model=model, entry=entry),
+                        now=now,
+                    )
+                ) is not None
+                and cached.status is NodeModUpdateStatus.UPDATE_AVAILABLE
+            )
+
+    def _cached_mod_update_result(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+    ) -> NodeModUpdateCheckResult | None:
+        cache_key = self._mod_update_cache_key(model=model, entry=entry)
+        now = time.monotonic()
+        with self._mod_update_check_cache_lock:
+            return self._cached_mod_update_result_locked(cache_key=cache_key, now=now)
+
+    def _cached_mod_update_result_locked(
+        self,
+        *,
+        cache_key: _ModWebModUpdateCacheKey,
+        now: float,
+    ) -> NodeModUpdateCheckResult | None:
+        cached = self._mod_update_check_cache.get(cache_key)
+        if cached is None:
+            return None
+        if cached.expires_at_seconds <= now:
+            del self._mod_update_check_cache[cache_key]
+            return None
+        return cached.result
+
+    @staticmethod
+    def _actionable_mod_update_result(result: NodeModUpdateCheckResult | None) -> NodeModUpdateCheckResult | None:
+        if result is None or result.status is not NodeModUpdateStatus.UPDATE_AVAILABLE:
+            return None
+        if any(dependency.action is NodeModUpdateDependencyAction.BLOCKED for dependency in result.dependencies):
+            return None
+        return result
+
+    def _cache_mod_update_result(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+        result: NodeModUpdateCheckResult,
+    ) -> None:
+        cache_key = self._mod_update_cache_key(model=model, entry=entry)
+        now = time.monotonic()
+        cache_entry = _ModWebModUpdateCacheEntry(
+            result=result,
+            expires_at_seconds=now + _MOD_UPDATE_CHECK_CACHE_TTL_SECONDS,
+        )
+        with self._mod_update_check_cache_lock:
+            expired_keys = tuple(
+                key
+                for key, cached in self._mod_update_check_cache.items()
+                if cached.expires_at_seconds <= now
+            )
+            for expired_key in expired_keys:
+                del self._mod_update_check_cache[expired_key]
+            if cache_key not in self._mod_update_check_cache and len(self._mod_update_check_cache) >= _MOD_UPDATE_CHECK_CACHE_MAX_ENTRIES:
+                oldest_key = min(
+                    self._mod_update_check_cache,
+                    key=lambda key: self._mod_update_check_cache[key].expires_at_seconds,
+                )
+                del self._mod_update_check_cache[oldest_key]
+            self._mod_update_check_cache[cache_key] = cache_entry
+
+    def _invalidate_mod_update_cache(self, *, model: ModWebPageModel, mod_name: str | None = None) -> None:
+        node_name = model.node_name.casefold()
+        app_name = model.app_name.casefold()
+        with self._mod_update_check_cache_lock:
+            cache_keys = tuple(
+                key
+                for key in self._mod_update_check_cache
+                if key.node_name == node_name
+                and key.app_name == app_name
+                and (mod_name is None or key.mod_name == mod_name)
+            )
+            for cache_key in cache_keys:
+                del self._mod_update_check_cache[cache_key]
+
     @staticmethod
     async def _run_with_loading_button(
         *,
@@ -637,7 +751,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
         if not self._user_has_level(user, required_level):
             raise PermissionError(f"{required_level.name.title()} access is required for this mod action.")
         node = self._remote_node_link(model.node_name)
-        return await self._remote_mod_mutation_async(node, model.app_name, mod_name, action, user)
+        result = await self._remote_mod_mutation_async(node, model.app_name, mod_name, action, user)
+        self._invalidate_mod_update_cache(model=model, mod_name=mod_name)
+        return result
 
     async def _remote_mod_mutation_async(
         self,
@@ -680,7 +796,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.MODS_READ,),
             user=user,
         )
-        return NodeModUpdateCheckResult.from_mapping(payload)
+        result = NodeModUpdateCheckResult.from_mapping(payload)
+        if version is None:
+            self._cache_mod_update_result(model=model, entry=entry, result=result)
+        return result
 
     async def _check_all_mod_updates(
         self,
@@ -758,7 +877,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
             method="POST",
             json_payload={"version": version},
         )
-        return NodeModUploadBatchResult.from_mapping(payload)
+        result = NodeModUploadBatchResult.from_mapping(payload)
+        self._invalidate_mod_update_cache(model=model, mod_name=entry.name)
+        return result
 
     async def _update_mod_properties(
         self,
@@ -796,7 +917,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 "launcher_urls": launcher_urls.model_dump(mode="json"),
             },
         )
-        return NodeModMutationResult.from_mapping(payload)
+        result = NodeModMutationResult.from_mapping(payload)
+        self._invalidate_mod_update_cache(model=model, mod_name=entry.name)
+        return result
 
     async def _update_mod_notes(
         self,
@@ -1457,7 +1580,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
             and entry.placement is ModPlacement.SERVER_ENABLED
             and self._user_has_level(user, Power_Level.user)
         )
-        available_update_result: NodeModUpdateCheckResult | None = None
+        cached_update_result = self._cached_mod_update_result(model=model, entry=entry) if can_check_update else None
+        available_update_result: NodeModUpdateCheckResult | None = self._actionable_mod_update_result(
+            cached_update_result
+        )
         check_update_versions: NodeModPortalVersionList | None = None
         active_metadata_panel: Literal["overrides", "launcher"] | None = None
 
@@ -2514,11 +2640,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 dependency.action is NodeModUpdateDependencyAction.BLOCKED
                 for dependency in result.dependencies
             )
-            available_update_result = (
-                result
-                if result.status is NodeModUpdateStatus.UPDATE_AVAILABLE and not has_blocked_dependencies
-                else None
-            )
+            available_update_result = self._actionable_mod_update_result(result)
             check_update_button.set_text(
                 update_check_button_text(result)
                 if available_update_result is not None
@@ -2737,10 +2859,18 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                 )
                             with ui.row().classes("w-full gap-2 items-center flex-wrap"):
                                 check_update_button = ui.button(
-                                    "Check Update",
+                                    (
+                                        update_check_button_text(cached_update_result)
+                                        if available_update_result is not None and cached_update_result is not None
+                                        else "Check Update"
+                                    ),
                                     on_click=check_update,
                                 ).classes("mod-list-button secondary")
-                                check_update_status_label = ui.label("Not checked").classes(
+                                check_update_status_label = ui.label(
+                                    update_check_status_text(cached_update_result)
+                                    if cached_update_result is not None
+                                    else "Not checked"
+                                ).classes(
                                     "mod-subtitle text-sm grow"
                                 )
                     if can_edit_properties:

@@ -51,6 +51,7 @@ from .runtime_imports import (
     NodeModList,
     NodeModMutationResult,
     NodeModPortalVersionList,
+    NodeModUpdateCheckResult,
     NodeModUploadBatchResult,
     NodeRestartScheduleState,
     NodeRestartState,
@@ -110,6 +111,8 @@ from .types import (
     _ModWebChatSurfaceConfig,
     _ModWebKillControlState,
     _ModWebModUpdateBatchResult,
+    _ModWebModUpdateCacheEntry,
+    _ModWebModUpdateCacheKey,
     _ModWebStartStopControlState,
     _ModWebStatusPageConfig,
 )
@@ -138,6 +141,10 @@ class ModWebServiceSupport:
     )
     _remote_node_monitors: dict[str, RemoteNodeMonitor] = cast(dict[str, RemoteNodeMonitor], cast(object, None))
     _remote_node_monitors_lock: threading.RLock = cast(threading.RLock, cast(object, None))
+    _mod_update_check_cache_lock: threading.RLock = cast(threading.RLock, cast(object, None))
+    _mod_update_check_cache: dict[_ModWebModUpdateCacheKey, _ModWebModUpdateCacheEntry] = cast(
+        dict[_ModWebModUpdateCacheKey, _ModWebModUpdateCacheEntry], cast(object, None)
+    )
     _remote_node_state_broker: SharedAsyncStreamBroker[
         RemoteNodeStreamKey, NodeStateStreamEvent
     ] = cast(SharedAsyncStreamBroker[RemoteNodeStreamKey, NodeStateStreamEvent], cast(object, None))
@@ -497,6 +504,14 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_check_all_mod_updates"]
     ) -> Callable[..., Awaitable[_ModWebModUpdateBatchResult]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_cached_mod_update_names"]) -> Callable[..., frozenset[str]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_cached_mod_update_result"]
+    ) -> Callable[..., NodeModUpdateCheckResult | None]: ...
 
     @overload
     def __getattr__(

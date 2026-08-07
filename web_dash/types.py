@@ -35,6 +35,7 @@ from .runtime_imports import (
     NodeFactorioGenerationState,
     NodeFactorioModSettings,
     NodeModList,
+    NodeModUpdateCheckResult,
     NodeSaveList,
     NodeSettingList,
     NodeRestartScheduleState,
@@ -387,6 +388,20 @@ class _ModWebModUpdateBatchResult:
     checked_mod_count: int
     update_mod_names: frozenset[str]
     failed_mod_names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebModUpdateCacheKey:
+    node_name: str
+    app_name: str
+    mod_name: str
+    installed_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebModUpdateCacheEntry:
+    result: NodeModUpdateCheckResult
+    expires_at_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -1107,6 +1122,8 @@ __all__: tuple[str, ...] = (
     "_ModWebLoginAdministrator",
     "_ModWebModToolbarBindings",
     "_ModWebModUpdateBatchResult",
+    "_ModWebModUpdateCacheEntry",
+    "_ModWebModUpdateCacheKey",
     "_ModWebNodePresenceBadgeSpec",
     "_ModWebNotificationPreviewSpec",
     "_ModWebNotificationTrayItem",

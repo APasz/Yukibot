@@ -10873,6 +10873,132 @@ class ModWebTests(unittest.TestCase):
             list(entries),
         )
 
+    def test_mod_update_badges_reuse_cached_results_after_page_refresh(self) -> None:
+        service = ModWebService()
+        entry = self._mod_entry(name="available.zip", friendly="Available", version="1.0.0")
+        model = cast(
+            ModWebPageModel,
+            cast(
+                object,
+                SimpleNamespace(
+                    node_name="yuki",
+                    app_name="factorio_alpha",
+                    app_friendly="Factorio Alpha",
+                    app_scope=config.AppScopes.factorio.value,
+                ),
+            ),
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        update_result = NodeModUpdateCheckResult(
+            app_name="factorio_alpha",
+            app_friendly="Factorio Alpha",
+            node="yuki",
+            mod_name=entry.name,
+            mod_friendly=entry.friendly,
+            status=NodeModUpdateStatus.UPDATE_AVAILABLE,
+            current_version="1.0.0",
+            latest_version="1.1.0",
+            latest_file_name="available_1.1.0.zip",
+            page_url="https://mods.factorio.com/mod/available",
+            message="Update available.",
+        )
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link"),
+            patch.object(service, "_remote_json_async", new=AsyncMock(return_value=update_result.to_mapping())) as remote_json,
+        ):
+            asyncio.run(service._check_mod_update(model=model, entry=entry, user=user))
+
+        self.assertEqual(remote_json.await_count, 1)
+        self.assertEqual(
+            service._cached_mod_update_names(model=model, entries=(entry,)),
+            frozenset({entry.name}),
+        )
+        self.assertEqual(
+            service._cached_mod_update_names(
+                model=model,
+                entries=(replace(entry, version="1.1.0"),),
+            ),
+            frozenset(),
+        )
+        other_entry = self._mod_entry(name="other.zip", friendly="Other", version="1.0.0")
+        service._cache_mod_update_result(
+            model=model,
+            entry=other_entry,
+            result=replace(update_result, mod_name=other_entry.name, mod_friendly=other_entry.friendly),
+        )
+        service._invalidate_mod_update_cache(model=model, mod_name=entry.name)
+        self.assertEqual(
+            service._cached_mod_update_names(model=model, entries=(entry, other_entry)),
+            frozenset({other_entry.name}),
+        )
+
+    def test_mod_info_dialog_uses_cached_update_result(self) -> None:
+        service = ModWebService()
+        entry = self._mod_entry(name="available.zip", friendly="Available", version="1.0.0")
+        model = cast(
+            ModWebPageModel,
+            cast(
+                object,
+                SimpleNamespace(
+                    node_name="yuki",
+                    app_name="factorio_alpha",
+                    app_friendly="Factorio Alpha",
+                    app_scope=config.AppScopes.factorio.value,
+                ),
+            ),
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        cached_result = NodeModUpdateCheckResult(
+            app_name="factorio_alpha",
+            app_friendly="Factorio Alpha",
+            node="yuki",
+            mod_name=entry.name,
+            mod_friendly=entry.friendly,
+            status=NodeModUpdateStatus.UPDATE_AVAILABLE,
+            current_version="1.0.0",
+            latest_version="1.1.0",
+            latest_file_name="available_1.1.0.zip",
+            page_url="https://mods.factorio.com/mod/available",
+            message="Update available.",
+        )
+        service._cache_mod_update_result(model=model, entry=entry, result=cached_result)
+        ui = MagicMock()
+        ui.refreshable.side_effect = lambda func: func
+        button_texts: list[str] = []
+        label_texts: list[str] = []
+
+        def button(text: str, **_kwargs: object) -> MagicMock:
+            button_texts.append(text)
+            control = MagicMock()
+            control.classes.return_value = control
+            return control
+
+        def label(text: str) -> MagicMock:
+            label_texts.append(text)
+            control = MagicMock()
+            control.classes.return_value = control
+            return control
+
+        ui.button.side_effect = button
+        ui.label.side_effect = label
+
+        with (
+            patch.object(service, "_user_has_level", side_effect=lambda _user, level: level is Power_Level.user),
+            patch.object(service, "_available_mod_actions", return_value=()),
+            patch.object(service, "_is_builtin_mod", return_value=True),
+        ):
+            service._render_mod_info_dialog(
+                ui=cast(ModWebUi, ui),
+                entry=entry,
+                model=model,
+                user=user,
+            )
+
+        self.assertIn("1.0.0 -> 1.1.0", button_texts)
+        self.assertIn("Update available.", label_texts)
+
     def test_mod_toolbar_places_check_all_in_overflow_menu(self) -> None:
         service = ModWebService()
         entry = self._mod_entry(name="example.zip")

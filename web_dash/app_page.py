@@ -4162,7 +4162,11 @@ class ModWebAppPageMixin(
         metadata_operation_id: str | None = None
         metadata_cancel_requested = False
         metadata_active_status = ""
-        available_update_mod_names: set[str] = set()
+        available_update_mod_names: set[str] = (
+            set(self._cached_mod_update_names(model=model, entries=model.mods.mods))
+            if model.app_scope == config.AppScopes.factorio.value and self._user_has_level(user, Power_Level.user)
+            else set()
+        )
         checking_all_mod_updates = False
 
         def set_metadata_status(text: str, *, running: bool) -> None:
