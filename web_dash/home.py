@@ -1195,9 +1195,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 )
             case DiscordServiceState.DEGRADED:
                 return _ModWebBadgeSpec(
-                    text="Discord command API degraded",
+                    text="Discord API degraded",
                     tone="warn",
-                    tooltip_text="Discord command synchronisation is retrying; node and game services remain online.",
+                    tooltip_text="Discord API checks are retrying; node and game services remain online.",
                 )
             case DiscordServiceState.GATEWAY_DEGRADED:
                 return _ModWebBadgeSpec(
@@ -1918,12 +1918,23 @@ class ModWebHomeMixin(ModWebServiceSupport):
             self._register_timer_cleanup(ui=ui, timer=connectivity_refresh_timer)
 
             def _apply_update(event: NodeStateStreamEvent) -> None:
-                nonlocal current_app_entries, current_history, current_system_summary
+                nonlocal current_app_entries, current_history, current_node_status, current_system_summary
                 if can_view_operator_signals:
                     nonlocal current_scope_badges, operational_badge_specs
                     nonlocal current_usage_badges, load_trend_badges, warning_badges
                 if page_closed:
                     return
+                if event.discord_health is not None:
+                    next_node_status = ModWebNodeStatus(
+                        node=current_node_status.node,
+                        alive=current_node_status.alive,
+                        detail=current_node_status.detail,
+                        latency_ms=current_node_status.latency_ms,
+                        discord_service_state=event.discord_health.service_state,
+                    )
+                    if next_node_status != current_node_status:
+                        current_node_status = next_node_status
+                        _render_node_connectivity_badges.refresh(current_node_status)
                 if can_view_operator_signals and event.app_entries is not None:
                     current_app_entries = event.app_entries
                     next_scope_badges = self._node_system_scope_badges(current_app_entries)

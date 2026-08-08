@@ -2005,6 +2005,7 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("payload.latencies[nodeName]", script)
         self.assertIn("payload.discord_latencies?.[nodeName]", script)
         self.assertIn("payload.discord_service_states", script)
+        self.assertNotIn("payload.discord_health", script)
         self.assertIn("discordServiceStateHeader", script)
         self.assertIn("connection.discordLatencies?.[target.node_name] ?? null", script)
         self.assertIn("return latencyMs === null ? 'unavailable (commands synced)' : formatTooltipLatency(latencyMs);", script)
@@ -2376,7 +2377,7 @@ class ModWebTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(badge.text, "Discord command API degraded")
+        self.assertEqual(badge.text, "Discord API degraded")
         self.assertEqual(badge.tone, "warn")
 
     def test_node_discord_service_health_badge_marks_gateway_outage_without_marking_node_down(self) -> None:
@@ -17366,6 +17367,7 @@ class ModWebTests(unittest.TestCase):
             render_page = Mock()
             remote_mod_list = AsyncMock(side_effect=AssertionError("Mods should be deferred"))
             remote_config_list = AsyncMock(return_value=configs)
+            remote_factorio_mod_settings = AsyncMock(return_value=None)
             with (
                 patch.object(service, "_authorised_page_user", new=AsyncMock(return_value=user)),
                 patch.object(service, "_user_has_level", return_value=True),
@@ -17377,6 +17379,11 @@ class ModWebTests(unittest.TestCase):
                 ),
                 patch.object(service, "_remote_mod_list_async", new=remote_mod_list),
                 patch.object(service, "_remote_config_list_async", new=remote_config_list),
+                patch.object(
+                    service,
+                    "_remote_factorio_mod_settings_async",
+                    new=remote_factorio_mod_settings,
+                ),
                 patch.object(
                     service,
                     "_remote_app_runtime_summary_async",
@@ -17403,6 +17410,7 @@ class ModWebTests(unittest.TestCase):
 
             remote_mod_list.assert_not_awaited()
             remote_config_list.assert_awaited_once_with(node, "factorio_alpha", user)
+            remote_factorio_mod_settings.assert_awaited_once_with(node, "factorio_alpha", user)
             model = cast(ModWebPageModel, render_page.call_args.kwargs["model"])
             self.assertEqual(model.configs, configs)
             self.assertEqual(model.mods.mods, ())

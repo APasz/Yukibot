@@ -160,6 +160,7 @@ from node_api_relay import (
 from node_api_route_contracts import (
     NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
     NODE_DISCORD_SERVICE_STATE_HEADER,
+    DiscordHealthSnapshot,
     DiscordServiceState,
 )
 from node_api_settings import (
@@ -491,7 +492,9 @@ _BulkMetadataOperationResult = TypeVar("_BulkMetadataOperationResult")
 class NodeApiService:
     def __init__(self) -> None:
         self._manager: App_Manager | None = None
+        self._discord_health_lock = threading.RLock()
         self._discord_service_state: DiscordServiceState | None = None
+        self._discord_health: DiscordHealthSnapshot | None = None
         self._chat_relay: WebChatRelayPublisher | None = None
         self._relay_tts_service: RelayTTSQueue | None = None
         self._acl: Access_Control | None = None
@@ -527,6 +530,7 @@ class NodeApiService:
             list_apps=lambda: self.list_apps(),
             build_system_summary=lambda: self.build_system_summary(),
             stream_system_summary=self._stream_system_summary,
+            discord_health=lambda: self._discord_service_health()[1],
             app_runtime_interval_seconds=_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS,
             node_state_interval_seconds=_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS,
         )
@@ -592,7 +596,20 @@ class NodeApiService:
     def set_discord_service_state(self, state: DiscordServiceState | None) -> None:
         """Record command-service availability without affecting node liveness."""
 
-        self._discord_service_state = state
+        with self._discord_health_lock:
+            self._discord_service_state = state
+            self._discord_health = None
+
+    def set_discord_health(self, health: DiscordHealthSnapshot) -> None:
+        """Record a detailed Discord health observation for diagnostic clients."""
+
+        with self._discord_health_lock:
+            self._discord_service_state = health.service_state
+            self._discord_health = health
+
+    def _discord_service_health(self) -> tuple[DiscordServiceState | None, DiscordHealthSnapshot | None]:
+        with self._discord_health_lock:
+            return (self._discord_service_state, self._discord_health)
 
     def _invalidate_state_caches(self, *, app_name: str | None = None) -> None:
         self._app_state_cache.invalidate(app_name)
@@ -2229,7 +2246,7 @@ class NodeApiService:
                     "node": self.node_name,
                     "sample_id": sample_id,
                 }
-                discord_service_state = self._discord_service_state
+                discord_service_state, _ = self._discord_service_health()
                 if discord_service_state is not None:
                     response["discord_service_state"] = discord_service_state.value
                 discord_latency_ms = self._discord_heartbeat_latency_ms()
@@ -2259,7 +2276,7 @@ class NodeApiService:
         """Return non-sensitive node liveness metadata for the public ping route."""
 
         headers: dict[str, str] = {}
-        discord_service_state = self._discord_service_state
+        discord_service_state, _ = self._discord_service_health()
         if discord_service_state is not None:
             headers[NODE_DISCORD_SERVICE_STATE_HEADER] = discord_service_state.value
         discord_latency_ms = self._discord_heartbeat_latency_ms()
@@ -2371,6 +2388,7 @@ class NodeApiService:
                     node_name=self.node_name,
                     app_entries=await self.list_apps(),
                     system_summary=self._stream_system_summary(self.build_system_summary()),
+                    discord_health=self._discord_service_health()[1],
                 )
             )
             while True:
@@ -2599,8 +2617,10 @@ class NodeApiService:
             is_initial=first.is_initial or second.is_initial,
             apps_changed=first.apps_changed or second.apps_changed,
             system_changed=first.system_changed or second.system_changed,
+            health_changed=first.health_changed or second.health_changed,
             app_entries=second.app_entries if second.app_entries is not None else first.app_entries,
             system_summary=second.system_summary if second.system_summary is not None else first.system_summary,
+            discord_health=second.discord_health if second.health_changed else first.discord_health,
         )
 
     @staticmethod

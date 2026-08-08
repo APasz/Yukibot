@@ -651,7 +651,9 @@ def main():
     discord_startup_supervisor = DiscordClientStartupSupervisor(
         start_client=client.start,
         probe_gateway=bot.rest.fetch_gateway_bot_info,
-        update_state=node_api_server.set_discord_service_state,
+        probe_rest=bot.rest.fetch_my_user,
+        heartbeat_latency=lambda: bot.heartbeat_latency,
+        update_health=node_api_server.set_discord_health,
         on_started=_on_discord_client_started,
     )
 
@@ -1012,6 +1014,18 @@ def main():
                 await mess.edit(f"{mess.content or ''} ...Done! :D")
 
         # await se_app.setup()
+
+    @bot.listen(hikari.ShardDisconnectedEvent)
+    async def _on_discord_gateway_shard_disconnected(event: hikari.ShardDisconnectedEvent) -> None:
+        discord_startup_supervisor.mark_gateway_shard_disconnected(event.shard.id)
+
+    @bot.listen(hikari.ShardReadyEvent)
+    async def _on_discord_gateway_shard_ready(event: hikari.ShardReadyEvent) -> None:
+        discord_startup_supervisor.mark_gateway_shard_ready(event.shard.id)
+
+    @bot.listen(hikari.ShardResumedEvent)
+    async def _on_discord_gateway_shard_resumed(event: hikari.ShardResumedEvent) -> None:
+        discord_startup_supervisor.mark_gateway_shard_ready(event.shard.id)
 
     @bot.listen(hikari.StoppingEvent)
     async def on_stopping(event: hikari.StoppingEvent):

@@ -755,7 +755,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         return 'command sync starting';
                     }}
                     if (state === 'degraded') {{
-                        return 'command sync degraded — retrying';
+                        return 'Discord API degraded — retrying';
                     }}
                     if (state === 'gateway_degraded') {{
                         return 'gateway unavailable — retrying';

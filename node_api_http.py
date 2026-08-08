@@ -15,7 +15,7 @@ from _manager import App_Manager
 from _security import Access_Control
 from node_api import NodeApiService
 from node_api_relay import RelayTTSQueue
-from node_api_route_contracts import DiscordServiceState
+from node_api_route_contracts import DiscordHealthSnapshot, DiscordServiceState
 from node_api_system import NodeSystemActionHandler
 from maintenance import MaintenanceService
 from restart_targets import RestartTarget
@@ -44,6 +44,9 @@ class NodeApiHttpService:
 
     def set_discord_service_state(self, state: DiscordServiceState | None) -> None:
         self._node_api.set_discord_service_state(state)
+
+    def set_discord_health(self, health: DiscordHealthSnapshot) -> None:
+        self._node_api.set_discord_health(health)
 
     def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self._node_api.set_chat_relay_service(chat_relay)

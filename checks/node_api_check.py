@@ -227,6 +227,7 @@ from node_api_mod import (
 )
 from node_api_mod_service import NodeModService
 from node_api_relay import NodeRelayTTSRequest, RemoteRelayTTSForwarder
+from node_api_route_contracts import DiscordHealthComponentState, DiscordHealthSnapshot, DiscordServiceState
 from node_auth import NodeAccessGrant, NodeApiScope, verify_node_token
 from restart_state import RestartKind, RestartRecord
 from restart_targets import RestartTarget
@@ -1886,10 +1887,24 @@ class NodeApiTests(unittest.TestCase):
             running_names=("Minecraft Alpha",),
             running_app_ids=("minecraft_alpha",),
         )
+        discord_health = DiscordHealthSnapshot(
+            service_state=DiscordServiceState.GATEWAY_DEGRADED,
+            command_state=DiscordHealthComponentState.READY,
+            gateway_state=DiscordHealthComponentState.DEGRADED,
+            rest_state=DiscordHealthComponentState.READY,
+            state_changed_at=datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc),
+            last_rest_success_at=datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc),
+            last_rest_failure_at=None,
+            next_retry_at=datetime(2026, 8, 8, 0, 1, tzinfo=timezone.utc),
+            last_error="1 gateway shard reconnecting.",
+            gateway_latency_ms=None,
+            reconnecting_shard_ids=(0,),
+        )
         event = NodeStateStreamEvent.initial(
             node_name="erin",
             app_entries=(app_entry,),
             system_summary=system_summary,
+            discord_health=discord_health,
         )
 
         mapped = event.to_mapping()
@@ -4794,6 +4809,60 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(
             sent_payloads,
             [{"type": "pong", "node": service.node_name, "sample_id": "sample-1"}],
+        )
+
+    def test_serve_presence_stream_does_not_expose_diagnostic_discord_health(self) -> None:
+        sent_payloads: list[object] = []
+
+        class _PresenceWebSocket:
+            def __init__(self) -> None:
+                self._messages = iter(
+                    (
+                        {"type": "websocket.receive", "text": json.dumps({"type": "ping"})},
+                        {"type": "websocket.disconnect"},
+                    )
+                )
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive(self) -> dict[str, str]:
+                return next(self._messages)
+
+            async def send_json(self, payload: object) -> None:
+                sent_payloads.append(payload)
+
+            async def close(self) -> None:
+                return None
+
+        health = DiscordHealthSnapshot(
+            service_state=DiscordServiceState.GATEWAY_DEGRADED,
+            command_state=DiscordHealthComponentState.READY,
+            gateway_state=DiscordHealthComponentState.DEGRADED,
+            rest_state=DiscordHealthComponentState.READY,
+            state_changed_at=datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc),
+            last_rest_success_at=datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc),
+            last_rest_failure_at=None,
+            next_retry_at=None,
+            last_error="1 gateway shard reconnecting.",
+            gateway_latency_ms=None,
+            reconnecting_shard_ids=(0,),
+        )
+        service = NodeApiService()
+        service.set_discord_health(health)
+
+        asyncio.run(service._serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
+
+        self.assertEqual(
+            sent_payloads,
+            [
+                {
+                    "type": "pong",
+                    "node": service.node_name,
+                    "sample_id": None,
+                    "discord_service_state": "gateway_degraded",
+                }
+            ],
         )
 
     def test_discord_heartbeat_latency_is_reported_for_bot_nodes(self) -> None:

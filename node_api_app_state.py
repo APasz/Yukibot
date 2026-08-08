@@ -41,7 +41,7 @@ from apps._node_api import (
     string_tuple,
 )
 from apps._updater import AppUpdateInfo, AppUpdateStatus
-from node_api_route_contracts import HttpExceptionFactory
+from node_api_route_contracts import DiscordHealthSnapshot, HttpExceptionFactory
 from node_api_system import NodeSystemSummary
 from node_auth import NodeApiScope
 
@@ -1292,18 +1292,22 @@ class NodeStateStreamEvent:
     is_initial: bool = False
     apps_changed: bool = False
     system_changed: bool = False
+    health_changed: bool = False
     app_entries: tuple[NodeAppEntry, ...] | None = None
     system_summary: NodeSystemSummary | None = None
+    discord_health: DiscordHealthSnapshot | None = None
 
     def __post_init__(self) -> None:
         if not self.node_name.strip():
             raise ValueError("Node state stream event node name is invalid.")
-        if not self.is_initial and not self.apps_changed and not self.system_changed:
-            raise ValueError("Node state stream event must signal initial, app, or system changes.")
+        if not self.is_initial and not self.apps_changed and not self.system_changed and not self.health_changed:
+            raise ValueError("Node state stream event must signal initial, app, system, or health changes.")
         if self.app_entries is not None and not (self.is_initial or self.apps_changed):
             raise ValueError("Node state stream event app entries require initial or app changes.")
         if self.system_summary is not None and not (self.is_initial or self.system_changed):
             raise ValueError("Node state stream event system summary requires initial or system changes.")
+        if self.discord_health is not None and not (self.is_initial or self.health_changed):
+            raise ValueError("Node state stream event Discord health requires initial or health changes.")
         if self.app_entries is not None:
             for entry in self.app_entries:
                 if entry.node.casefold() != self.node_name.casefold():
@@ -1316,16 +1320,19 @@ class NodeStateStreamEvent:
         node_name: str,
         app_entries: tuple[NodeAppEntry, ...] | None = None,
         system_summary: NodeSystemSummary | None = None,
+        discord_health: DiscordHealthSnapshot | None = None,
     ) -> "NodeStateStreamEvent":
-        if app_entries is None and system_summary is None:
-            raise ValueError("Initial node state events require app or system state.")
+        if app_entries is None and system_summary is None and discord_health is None:
+            raise ValueError("Initial node state events require app, system, or Discord health state.")
         return cls(
             node_name=node_name,
             is_initial=True,
             apps_changed=app_entries is not None,
             system_changed=system_summary is not None,
+            health_changed=discord_health is not None,
             app_entries=app_entries,
             system_summary=system_summary,
+            discord_health=discord_health,
         )
 
     @classmethod
@@ -1347,6 +1354,10 @@ class NodeStateStreamEvent:
         return cls(node_name=node_name, system_changed=True, system_summary=system_summary)
 
     @classmethod
+    def health(cls, *, node_name: str, discord_health: DiscordHealthSnapshot | None) -> "NodeStateStreamEvent":
+        return cls(node_name=node_name, health_changed=True, discord_health=discord_health)
+
+    @classmethod
     def both(
         cls,
         *,
@@ -1366,10 +1377,13 @@ class NodeStateStreamEvent:
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeStateStreamEvent":
         raw_entries = payload.get("app_entries")
         raw_system_summary = payload.get("system_summary")
+        raw_discord_health = payload.get("discord_health")
         if raw_entries is not None and (not isinstance(raw_entries, Sequence) or isinstance(raw_entries, (str, bytes))):
             raise ValueError("Node state stream event app entries are invalid.")
         if raw_system_summary is not None and not isinstance(raw_system_summary, Mapping):
             raise ValueError("Node state stream event system summary is invalid.")
+        if raw_discord_health is not None and not isinstance(raw_discord_health, Mapping):
+            raise ValueError("Node state stream event Discord health is invalid.")
         parsed_entries: tuple[NodeAppEntry, ...] | None = None
         if raw_entries is not None:
             parsed_entry_list: list[NodeAppEntry] = []
@@ -1383,9 +1397,13 @@ class NodeStateStreamEvent:
             is_initial=required_bool(payload, "initial"),
             apps_changed=required_bool(payload, "apps_changed"),
             system_changed=required_bool(payload, "system_changed"),
+            health_changed=required_bool(payload, "health_changed") if "health_changed" in payload else False,
             app_entries=parsed_entries,
             system_summary=NodeSystemSummary.from_mapping(raw_system_summary)
             if raw_system_summary is not None
+            else None,
+            discord_health=DiscordHealthSnapshot.from_mapping(raw_discord_health)
+            if raw_discord_health is not None
             else None,
         )
 
@@ -1395,8 +1413,10 @@ class NodeStateStreamEvent:
             "initial": self.is_initial,
             "apps_changed": self.apps_changed,
             "system_changed": self.system_changed,
+            "health_changed": self.health_changed,
             "app_entries": [entry.to_mapping() for entry in self.app_entries] if self.app_entries is not None else None,
             "system_summary": self.system_summary.to_mapping() if self.system_summary is not None else None,
+            "discord_health": self.discord_health.to_mapping() if self.discord_health is not None else None,
         }
 
 
@@ -1422,6 +1442,7 @@ class _NodeLocalAppRuntimeWatchState:
 class NodeStateTopic(StrEnum):
     APPS = "apps"
     SYSTEM = "system"
+    HEALTH = "health"
 
 
 _ALL_NODE_STATE_TOPICS: frozenset[NodeStateTopic] = frozenset(NodeStateTopic)
@@ -1621,6 +1642,7 @@ class NodeAppStateSubscriptionService:
         list_apps: Callable[[], Awaitable[tuple[NodeAppEntry, ...]]],
         build_system_summary: Callable[[], NodeSystemSummary],
         stream_system_summary: Callable[[NodeSystemSummary], NodeSystemSummary],
+        discord_health: Callable[[], DiscordHealthSnapshot | None],
         app_runtime_interval_seconds: float,
         node_state_interval_seconds: float,
     ) -> None:
@@ -1633,6 +1655,7 @@ class NodeAppStateSubscriptionService:
         self._list_apps = list_apps
         self._build_system_summary = build_system_summary
         self._stream_system_summary = stream_system_summary
+        self._discord_health = discord_health
         self._app_runtime_interval_seconds = app_runtime_interval_seconds
         self._node_state_interval_seconds = node_state_interval_seconds
         self._runtime_watchers: dict[str, _NodeLocalAppRuntimeWatchState] = {}
@@ -1809,6 +1832,7 @@ class NodeAppStateSubscriptionService:
         current_task = asyncio.current_task()
         last_entries: tuple[NodeAppEntry, ...] | None = None
         last_system_summary: NodeSystemSummary | None = None
+        last_discord_health: DiscordHealthSnapshot | None = None
         has_state = False
         try:
             while not self._is_shutting_down():
@@ -1819,12 +1843,14 @@ class NodeAppStateSubscriptionService:
                 try:
                     needs_apps = any(NodeStateTopic.APPS in subscription.topics for subscription in subscriptions)
                     needs_system = any(NodeStateTopic.SYSTEM in subscription.topics for subscription in subscriptions)
+                    needs_health = any(NodeStateTopic.HEALTH in subscription.topics for subscription in subscriptions)
                     app_entries = await self._list_apps() if needs_apps else last_entries
                     system_summary = (
                         self._stream_system_summary(self._build_system_summary())
                         if needs_system
                         else last_system_summary
                     )
+                    discord_health = self._discord_health() if needs_health else last_discord_health
                 except asyncio.CancelledError:
                     raise
                 except Exception as xcp:
@@ -1839,32 +1865,41 @@ class NodeAppStateSubscriptionService:
                 system_changed = system_summary is not None and (
                     (not has_state) or system_summary != last_system_summary
                 )
+                health_changed = (
+                    needs_health
+                    and discord_health is not None
+                    and ((not has_state) or discord_health != last_discord_health)
+                )
                 for subscription in subscriptions:
                     include_apps = NodeStateTopic.APPS in subscription.topics
                     include_system = NodeStateTopic.SYSTEM in subscription.topics
+                    include_health = NodeStateTopic.HEALTH in subscription.topics
                     event: NodeStateStreamEvent | None = None
                     if not subscription.initial_sent:
-                        event = NodeStateStreamEvent.initial(
+                        event = NodeStateStreamEvent(
                             node_name=self._node_name(),
+                            is_initial=True,
+                            apps_changed=include_apps,
+                            system_changed=include_system,
+                            health_changed=include_health and discord_health is not None,
                             app_entries=app_entries if include_apps else None,
                             system_summary=system_summary if include_system else None,
+                            discord_health=discord_health if include_health else None,
                         )
-                    elif include_apps and apps_changed and include_system and system_changed:
-                        if app_entries is None or system_summary is None:
-                            raise RuntimeError("Combined node state update is incomplete.")
-                        event = NodeStateStreamEvent.both(
-                            node_name=self._node_name(),
-                            app_entries=app_entries,
-                            system_summary=system_summary,
-                        )
-                    elif include_apps and apps_changed:
-                        if app_entries is None:
-                            raise RuntimeError("App node state update is incomplete.")
-                        event = NodeStateStreamEvent.apps(node_name=self._node_name(), app_entries=app_entries)
-                    elif include_system and system_changed:
-                        if system_summary is None:
-                            raise RuntimeError("System node state update is incomplete.")
-                        event = NodeStateStreamEvent.system(node_name=self._node_name(), system_summary=system_summary)
+                    else:
+                        event_apps_changed = include_apps and apps_changed
+                        event_system_changed = include_system and system_changed
+                        event_health_changed = include_health and health_changed
+                        if event_apps_changed or event_system_changed or event_health_changed:
+                            event = NodeStateStreamEvent(
+                                node_name=self._node_name(),
+                                apps_changed=event_apps_changed,
+                                system_changed=event_system_changed,
+                                health_changed=event_health_changed,
+                                app_entries=app_entries if event_apps_changed else None,
+                                system_summary=system_summary if event_system_changed else None,
+                                discord_health=discord_health if event_health_changed else None,
+                            )
                     if event is None:
                         continue
                     try:
@@ -1879,6 +1914,8 @@ class NodeAppStateSubscriptionService:
                     last_entries = app_entries
                 if needs_system:
                     last_system_summary = system_summary
+                if needs_health:
+                    last_discord_health = discord_health
                 has_state = True
                 await asyncio.sleep(self._node_state_interval_seconds)
         except asyncio.CancelledError:

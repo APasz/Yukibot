@@ -7,7 +7,7 @@ from collections.abc import Mapping
 import hikari
 
 from discord_startup import DiscordClientStartupSupervisor
-from node_api_route_contracts import DiscordServiceState
+from node_api_route_contracts import DiscordHealthComponentState, DiscordHealthSnapshot, DiscordServiceState
 
 
 def _discord_unavailable_error(
@@ -66,7 +66,6 @@ class DiscordClientStartupSupervisorTests(unittest.IsolatedAsyncioTestCase):
             [
                 DiscordServiceState.STARTING,
                 DiscordServiceState.DEGRADED,
-                DiscordServiceState.STARTING,
                 DiscordServiceState.COMMANDS_READY,
             ],
         )
@@ -153,6 +152,162 @@ class DiscordClientStartupSupervisorTests(unittest.IsolatedAsyncioTestCase):
                 DiscordServiceState.READY,
             ],
         )
+
+    async def test_runtime_shard_disconnect_recovers_without_affecting_local_services(self) -> None:
+        states: list[DiscordServiceState] = []
+        health_states: list[DiscordHealthComponentState] = []
+
+        async def start_client() -> None:
+            return None
+
+        supervisor = DiscordClientStartupSupervisor(
+            start_client=start_client,
+            update_state=states.append,
+            update_health=lambda health: health_states.append(health.gateway_state),
+        )
+        self.addAsyncCleanup(supervisor.close)
+
+        self.assertTrue(await supervisor.start())
+        supervisor.mark_gateway_ready()
+        supervisor.mark_gateway_shard_disconnected(0)
+        supervisor.mark_gateway_shard_ready(0)
+
+        self.assertEqual(
+            states,
+            [
+                DiscordServiceState.STARTING,
+                DiscordServiceState.COMMANDS_READY,
+                DiscordServiceState.READY,
+                DiscordServiceState.GATEWAY_DEGRADED,
+                DiscordServiceState.READY,
+            ],
+        )
+        self.assertEqual(health_states[-1], DiscordHealthComponentState.READY)
+
+    async def test_ongoing_rest_probe_marks_degraded_then_recovers(self) -> None:
+        gateway_attempts = 0
+        probe_attempts = 0
+        states: list[DiscordServiceState] = []
+        health_snapshots: list[DiscordHealthSnapshot] = []
+        recovered = asyncio.Event()
+
+        async def start_client() -> None:
+            return None
+
+        async def probe_gateway() -> object:
+            nonlocal gateway_attempts
+            gateway_attempts += 1
+            return object()
+
+        async def probe_rest() -> object:
+            nonlocal probe_attempts
+            probe_attempts += 1
+            if probe_attempts == 1:
+                raise _discord_unavailable_error(url="https://discord.test/users/@me")
+            return object()
+
+        def update_state(state: DiscordServiceState) -> None:
+            states.append(state)
+            if state is DiscordServiceState.READY and DiscordServiceState.DEGRADED in states:
+                recovered.set()
+
+        supervisor = DiscordClientStartupSupervisor(
+            start_client=start_client,
+            probe_gateway=probe_gateway,
+            probe_rest=probe_rest,
+            update_state=update_state,
+            update_health=health_snapshots.append,
+            initial_retry_delay_seconds=0.001,
+            maximum_retry_delay_seconds=0.001,
+            health_probe_interval_seconds=0.001,
+        )
+        self.addAsyncCleanup(supervisor.close)
+
+        self.assertTrue(await supervisor.start())
+        self.assertTrue(await supervisor.wait_for_gateway())
+        supervisor.mark_gateway_ready()
+        await asyncio.wait_for(recovered.wait(), timeout=0.5)
+
+        self.assertEqual(gateway_attempts, 1)
+        self.assertEqual(probe_attempts, 2)
+        self.assertEqual(states[-3:], [DiscordServiceState.READY, DiscordServiceState.DEGRADED, DiscordServiceState.READY])
+        self.assertEqual(health_snapshots[-1].rest_state, DiscordHealthComponentState.READY)
+        self.assertIsNone(health_snapshots[-1].next_retry_at)
+
+    async def test_ongoing_heartbeat_failures_mark_gateway_degraded_then_recover(self) -> None:
+        heartbeat_samples = iter((float("nan"), float("nan"), 0.025))
+        states: list[DiscordServiceState] = []
+        recovered = asyncio.Event()
+
+        async def start_client() -> None:
+            return None
+
+        def heartbeat_latency() -> float:
+            try:
+                return next(heartbeat_samples)
+            except StopIteration:
+                return 0.025
+
+        def update_state(state: DiscordServiceState) -> None:
+            states.append(state)
+            if state is DiscordServiceState.READY and DiscordServiceState.GATEWAY_DEGRADED in states:
+                recovered.set()
+
+        supervisor = DiscordClientStartupSupervisor(
+            start_client=start_client,
+            heartbeat_latency=heartbeat_latency,
+            update_state=update_state,
+            health_probe_interval_seconds=0.001,
+            unhealthy_heartbeat_sample_limit=2,
+        )
+        self.addAsyncCleanup(supervisor.close)
+
+        self.assertTrue(await supervisor.start())
+        supervisor.mark_gateway_ready()
+        await asyncio.wait_for(recovered.wait(), timeout=0.5)
+
+        self.assertEqual(
+            states[-3:],
+            [
+                DiscordServiceState.READY,
+                DiscordServiceState.GATEWAY_DEGRADED,
+                DiscordServiceState.READY,
+            ],
+        )
+
+    async def test_rest_health_updates_preserve_the_pending_command_retry_timestamp(self) -> None:
+        health_snapshots: list[DiscordHealthSnapshot] = []
+        rest_health_observed = asyncio.Event()
+
+        async def start_client() -> None:
+            raise _discord_unavailable_error()
+
+        async def probe_rest() -> object:
+            return object()
+
+        def update_health(health: DiscordHealthSnapshot) -> None:
+            health_snapshots.append(health)
+            if (
+                health.command_state is DiscordHealthComponentState.DEGRADED
+                and health.rest_state is DiscordHealthComponentState.READY
+            ):
+                rest_health_observed.set()
+
+        supervisor = DiscordClientStartupSupervisor(
+            start_client=start_client,
+            probe_rest=probe_rest,
+            update_health=update_health,
+            initial_retry_delay_seconds=1.0,
+            maximum_retry_delay_seconds=1.0,
+            health_probe_interval_seconds=0.001,
+        )
+        self.addAsyncCleanup(supervisor.close)
+
+        self.assertFalse(await supervisor.start())
+        supervisor.mark_gateway_ready()
+        await asyncio.wait_for(rest_health_observed.wait(), timeout=0.5)
+
+        self.assertIsNotNone(health_snapshots[-1].next_retry_at)
 
     async def test_terminal_gateway_failure_keeps_startup_open_until_shutdown(self) -> None:
         states: list[DiscordServiceState] = []
