@@ -377,8 +377,12 @@ class _ModWebAppHeroCornerBindings:
 
 @dataclass(frozen=True, slots=True)
 class _ModWebModToolbarBindings:
+    normal_action_buttons: tuple[Button, ...]
+    select_all_button: Button | None
+    clear_selection_button: Button | None
     selection_button: Button | None
     download_button: Button | None
+    selection_delete_button: Button | None
     delete_control: _ModWebEnableableControl | None
     result_count_label: Label | None
     metadata_status_button: Button | None

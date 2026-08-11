@@ -476,6 +476,11 @@ class ModWebTheme:
                     border-width: 0 !important;
                     box-shadow: none !important;
                 }}
+                .mod-card.mod-mod-list-card {{
+                    border: none !important;
+                    box-shadow: none !important;
+                    outline: none !important;
+                }}
                 .mod-card-hero {{
                     border: 3px solid transparent !important;
                     background:
@@ -1515,10 +1520,15 @@ class ModWebTheme:
                     flex: 1 1 11rem;
                     min-width: 11rem;
                 }}
-                .mod-mods-toolbar-actions .mod-toolbar-selection-button {{
-                    flex: 0 0 auto;
-                    min-width: 4.75rem;
-                    width: auto;
+                .mod-mods-toolbar-actions .mod-toolbar-selection-action {{
+                    flex: 1 1 12rem;
+                    min-width: 12rem;
+                    width: 0;
+                }}
+                .mod-mods-toolbar-actions .mod-toolbar-selection-utility {{
+                    flex: 0 1 8.25rem;
+                    min-width: 8.25rem;
+                    width: 8.25rem;
                     padding-inline: 0.62rem !important;
                 }}
                 .mod-mods-toolbar-actions .mod-toolbar-menu-button {{
@@ -3682,6 +3692,20 @@ class ModWebTheme:
                     color: var(--mod-dim);
                 }}
                 .mod-list-pagination {{ margin: 0.75rem auto 0; color: var(--mod-text); }}
+                .mod-row .mod-row-selection-checkbox {{
+                    display: flex;
+                    flex: 0 0 2.5rem;
+                    align-items: center;
+                    justify-content: center;
+                    width: 2.5rem;
+                    min-width: 2.5rem;
+                    min-height: 2.5rem;
+                    margin-block: -0.25rem;
+                    border-radius: 0.5rem;
+                }}
+                .mod-row .mod-row-selection-checkbox:hover {{
+                    background: var(--mod-accent-faint) !important;
+                }}
                 .mod-row .q-checkbox__inner {{ color: var(--mod-accent) !important; }}
                 .mod-row-main {{
                     width: 100%;
@@ -6804,10 +6828,15 @@ class ModWebTheme:
                         width: 0;
                         min-width: 0;
                     }}
-                    .mod-mods-toolbar-actions .mod-toolbar-selection-button {{
-                        flex: 0 0 auto;
-                        width: auto;
-                        min-width: 4.75rem;
+                    .mod-mods-toolbar-actions .mod-toolbar-selection-action {{
+                        flex: 1 1 calc(50% - 0.25rem);
+                        width: 0;
+                        min-width: 0;
+                    }}
+                    .mod-mods-toolbar-actions .mod-toolbar-selection-utility {{
+                        flex: 1 1 calc(33.333% - 0.34rem);
+                        width: 0;
+                        min-width: 0;
                     }}
                     .mod-mods-toolbar-actions .mod-toolbar-menu-button {{
                         flex: 0 0 2.5rem;
@@ -6985,9 +7014,13 @@ class ModWebTheme:
                     .mod-mods-toolbar-actions .mod-toolbar-button {{
                         width: 100%;
                     }}
-                    .mod-mods-toolbar-actions .mod-toolbar-selection-button {{
-                        width: auto;
-                        justify-self: end;
+                    .mod-mods-toolbar-actions :is(
+                        .mod-toolbar-selection-action,
+                        .mod-toolbar-selection-utility
+                    ) {{
+                        width: 100%;
+                        min-width: 0;
+                        justify-self: stretch;
                     }}
                     .mod-mods-toolbar-actions .mod-toolbar-menu-button {{
                         grid-column: 2;

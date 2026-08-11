@@ -47,7 +47,6 @@ from apps._config import (
     LauncherMetadataProviderCandidates,
     LauncherMetadataResolution,
     LauncherProviderUrls,
-    ModDistributionMode,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPageCandidate,
@@ -10879,6 +10878,7 @@ class ModWebTests(unittest.TestCase):
                 download_url=None,
                 on_change=Mock(),
                 can_select=True,
+                show_selection=True,
                 app_friendly="Minecraft Alpha",
                 model=model,
                 user=user,
@@ -11103,7 +11103,10 @@ class ModWebTests(unittest.TestCase):
                 ui=cast(ModWebUi, ui),
                 model=model,
                 user=user,
-                toggle_selection=lambda: None,
+                selection_mode=False,
+                select_all=lambda: None,
+                clear_selection=lambda: None,
+                cancel_selection=lambda: None,
                 download_selected=None,
                 delete_selected=lambda: None,
                 check_all_updates=check_all_updates,
@@ -11136,6 +11139,7 @@ class ModWebTests(unittest.TestCase):
             download_url=None,
             on_change=Mock(),
             can_select=True,
+            show_selection=True,
             app_friendly="Factorio Alpha",
             model=cast(ModWebPageModel, object()),
             user=cast(ModWebUser, object()),
@@ -11144,6 +11148,24 @@ class ModWebTests(unittest.TestCase):
 
         self.assertIn(call("Update"), ui.label.call_args_list)
         update_label.classes.assert_called_once_with("mod-pill size update")
+
+    def test_mod_download_row_hides_selection_checkbox_until_requested(self) -> None:
+        service = ModWebService()
+        ui = MagicMock()
+
+        service._render_mod_download_row(
+            ui=cast(ModWebUi, ui),
+            entry=self._mod_entry(name="example.zip"),
+            download_url=None,
+            on_change=Mock(),
+            can_select=True,
+            show_selection=False,
+            app_friendly="Factorio Alpha",
+            model=cast(ModWebPageModel, object()),
+            user=cast(ModWebUser, object()),
+        )
+
+        ui.checkbox.assert_not_called()
 
     def test_mod_download_row_client_mod_uses_default_row_border_classes(self) -> None:
         service = ModWebService()
@@ -11163,6 +11185,7 @@ class ModWebTests(unittest.TestCase):
             download_url=None,
             on_change=Mock(),
             can_select=True,
+            show_selection=True,
             app_friendly="Minecraft Alpha",
             model=cast(ModWebPageModel, object()),
             user=cast(ModWebUser, object()),
@@ -11228,8 +11251,12 @@ class ModWebTests(unittest.TestCase):
                 service,
                 "_render_mod_toolbar",
                 return_value=SimpleNamespace(
+                    normal_action_buttons=(),
+                    select_all_button=None,
+                    clear_selection_button=None,
                     selection_button=None,
                     download_button=None,
+                    selection_delete_button=None,
                     delete_control=None,
                     result_count_label=None,
                     metadata_status_button=None,
@@ -11329,8 +11356,12 @@ class ModWebTests(unittest.TestCase):
                 service,
                 "_render_mod_toolbar",
                 return_value=SimpleNamespace(
+                    normal_action_buttons=(),
+                    select_all_button=None,
+                    clear_selection_button=None,
                     selection_button=None,
                     download_button=None,
+                    selection_delete_button=None,
                     delete_control=None,
                     result_count_label=None,
                     metadata_status_button=None,
@@ -12173,7 +12204,7 @@ class ModWebTests(unittest.TestCase):
             self.assertIsNotNone(configure_button.on_click)
             assert configure_button.on_click is not None
             configure_button.on_click()
-            client_pack_button = next(button for button in ui.buttons if button.text == "Client Pack")
+            client_pack_button = next(button for button in ui.buttons if button.text == "Download Client Pack")
             self.assertIsNotNone(client_pack_button.on_click)
             assert client_pack_button.on_click is not None
             client_pack_button.on_click()
@@ -12301,23 +12332,27 @@ class ModWebTests(unittest.TestCase):
                 if button.class_value is not None and "mod-toolbar-button" in button.class_value
             ]
             self.assertNotIn("Enabled ZIP", toolbar_text)
-            self.assertIn("Client Pack", toolbar_text)
+            self.assertIn("Download Client Pack", toolbar_text)
+            self.assertIn("Select", toolbar_text)
             self.assertIn("Modlist", toolbar_text)
             self.assertNotIn("Configure <!>", toolbar_text)
             self.assertNotIn("Upload", toolbar_text)
-            self.assertNotIn("Delete", toolbar_text)
             self.assertNotIn("Find Metadata", toolbar_text)
             self.assertIn("Metadata: Running", toolbar_text)
-            self.assertIn("Clear", toolbar_text)
-            self.assertIn("Download All/2", toolbar_text)
-            self.assertEqual(
-                toolbar_text[toolbar_text.index("Clear") : toolbar_text.index("Clear") + 2],
-                ["Clear", "Download All/2"],
+            self.assertNotIn("Download All/2", toolbar_text)
+            client_pack_toolbar_button = next(
+                button for button in ui.buttons if button.text == "Download Client Pack"
             )
+            self.assertIn("mod-toolbar-primary", client_pack_toolbar_button.class_value or "")
+            select_toolbar_button = next(
+                button for button in ui.buttons if button.text == "Select"
+            )
+            self.assertIn("secondary", select_toolbar_button.class_value or "")
+            self.assertNotIn("mod-toolbar-primary", select_toolbar_button.class_value or "")
             self.assertEqual(
                 [item.text for item in ui.menu_items],
                 [
-                    "Client Pack",
+                    "Select",
                     "Modlist",
                     "Upload",
                     "Configure <!>",
@@ -12328,7 +12363,7 @@ class ModWebTests(unittest.TestCase):
             mobile_menu_items = [
                 item
                 for item in ui.menu_items
-                if item.text in {"Client Pack", "Modlist"}
+                if item.text in {"Select", "Modlist"}
             ]
             self.assertTrue(
                 all("mod-toolbar-menu-mobile-only" in (item.class_value or "") for item in mobile_menu_items)
@@ -12406,8 +12441,21 @@ class ModWebTests(unittest.TestCase):
                 if button.class_value is not None and "mod-toolbar-menu-button" in button.class_value
             )
             self.assertIn("icon=menu", menu_button.props_value or "")
-            selection_button = next(button for button in ui.buttons if button.text == "Clear")
-            self.assertIn("mod-toolbar-selection-button", selection_button.class_value or "")
+            initial_selection_controls = [
+                button
+                for button in ui.buttons
+                if button.class_value is not None
+                and "mod-toolbar-button" in button.class_value
+                and button.text in {
+                    "Download 0",
+                    "Delete",
+                    "Select all",
+                    "Clear",
+                    "Done",
+                }
+            ]
+            self.assertEqual(len(initial_selection_controls), 5)
+            self.assertTrue(all(not button.visible for button in initial_selection_controls))
             all_button_text = [button.text for button in ui.buttons]
             self.assertNotIn("Publish & Download", all_button_text)
             self.assertIn("Changes", all_button_text)
@@ -12524,6 +12572,56 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(rendered_mod_names, ["beta-forge.jar", "alpha-fabric.jar"])
             self.assertIn('url.searchParams.delete("search")', ui.javascript_calls[-1])
 
+            self.assertIsNotNone(select_toolbar_button.on_click)
+            assert select_toolbar_button.on_click is not None
+            select_toolbar_button.on_click()
+            selection_toolbar_text = [
+                button.text
+                for button in ui.buttons
+                if button.class_value is not None and "mod-toolbar-button" in button.class_value
+            ]
+            self.assertIn("Select all", selection_toolbar_text)
+            self.assertIn("Clear", selection_toolbar_text)
+            self.assertIn("Done", selection_toolbar_text)
+            selected_download_button = next(
+                button for button in ui.buttons if button.text == "Download 0"
+            )
+            self.assertFalse(selected_download_button.enabled)
+            self.assertTrue(selected_download_button.visible)
+            self.assertIn("mod-toolbar-primary", selected_download_button.class_value or "")
+            self.assertIn("mod-toolbar-selection-action", selected_download_button.class_value or "")
+            selection_delete_button = next(
+                button
+                for button in ui.buttons
+                if button.text == "Delete"
+                and button.class_value is not None
+                and "mod-toolbar-button" in button.class_value
+            )
+            self.assertTrue(selection_delete_button.visible)
+            self.assertIn("danger", selection_delete_button.class_value or "")
+            self.assertIn("mod-toolbar-selection-action", selection_delete_button.class_value or "")
+            self.assertFalse(client_pack_toolbar_button.visible)
+            self.assertFalse(select_toolbar_button.visible)
+
+            selection_utility_buttons = [
+                button
+                for button in ui.buttons
+                if button.text in {"Select all", "Clear", "Done"}
+            ]
+            self.assertTrue(
+                all(
+                    "mod-toolbar-selection-utility" in (button.class_value or "")
+                    for button in selection_utility_buttons
+                )
+            )
+            exit_selection_button = next(button for button in ui.buttons if button.text == "Done")
+            self.assertIsNotNone(exit_selection_button.on_click)
+            assert exit_selection_button.on_click is not None
+            exit_selection_button.on_click()
+            self.assertTrue(client_pack_toolbar_button.visible)
+            self.assertTrue(select_toolbar_button.visible)
+            self.assertTrue(all(not button.visible for button in initial_selection_controls))
+
         fallback_model = replace(
             model,
             client_pack_file_previews=(),
@@ -12547,7 +12645,9 @@ class ModWebTests(unittest.TestCase):
             self.assertIsNotNone(configure_button.on_click)
             assert configure_button.on_click is not None
             configure_button.on_click()
-            client_pack_button = next(button for button in fallback_ui.buttons if button.text == "Client Pack")
+            client_pack_button = next(
+                button for button in fallback_ui.buttons if button.text == "Download Client Pack"
+            )
             self.assertIsNotNone(client_pack_button.on_click)
             assert client_pack_button.on_click is not None
             client_pack_button.on_click()
@@ -12606,6 +12706,10 @@ class ModWebTests(unittest.TestCase):
 
             def set_enabled(self, enabled: bool) -> None:
                 self.enabled = enabled
+
+            def set_visibility(self, visible: bool) -> None:
+                del visible
+                return None
 
         class FakeLabel:
             def __init__(self, text: str) -> None:
@@ -15827,10 +15931,6 @@ class ModWebTests(unittest.TestCase):
             "Excluded — Built-in",
         )
 
-    def test_selection_toggle_label_switches_between_select_all_and_clear(self) -> None:
-        self.assertEqual(ModWebService._selection_toggle_label(selected_count=0), "Select All")
-        self.assertEqual(ModWebService._selection_toggle_label(selected_count=2), "Clear")
-
     def test_render_modlist_supports_all_formats_and_field_options(self) -> None:
         alpha = self._mod_entry(
             name="alpha.jar",
@@ -16195,36 +16295,6 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(badge, _ModWebBadgeSpec(text="4 Mods", tone="black"))
-
-    def test_download_selection_label_uses_all_for_none_or_full_selection(self) -> None:
-        self.assertEqual(
-            ModWebService._download_selection_label(selected_count=0, downloadable_count=7),
-            "Download All/7",
-        )
-        self.assertEqual(
-            ModWebService._download_selection_label(selected_count=7, downloadable_count=7),
-            "Download All/7",
-        )
-        self.assertEqual(
-            ModWebService._download_selection_label(selected_count=3, downloadable_count=7),
-            "Download 3/7",
-        )
-
-    def test_server_mod_is_selected_for_direct_download_by_default(self) -> None:
-        regular = self._mod_entry(name="regular.jar")
-        server = self._mod_entry(name="server.jar", mod_type=ModType.SERVER)
-        builtin = self._mod_entry(
-            name="builtin.jar",
-            mod_type=ModType.BUILTIN,
-            downloadable=False,
-        )
-
-        selected_names = ModWebService._default_mod_download_names(
-            (regular, server, builtin),
-            ModDistributionMode.MINECRAFT_LAUNCHER_PACK,
-        )
-
-        self.assertEqual(selected_names, frozenset({regular.name, server.name}))
 
     def test_hero_card_style_uses_app_color_when_available(self) -> None:
         self.assertEqual(

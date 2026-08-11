@@ -14,7 +14,6 @@ from apps._config import (
     CLIENT_PACK_FILENAME_TEMPLATE_MAX_LENGTH,
     CLIENT_PACK_METADATA_DESCRIPTION_MAX_LENGTH,
     CLIENT_PACK_METADATA_NAME_MAX_LENGTH,
-    ModDistributionMode,
     ModDownloadBlockReason,
     app_title_font_default_label,
     app_title_font_options,
@@ -185,6 +184,7 @@ class _VirtualModRow(TypedDict):
     type_tone: str
     downloadable: bool
     download_block_label: str
+    selection_mode: bool
     selectable: bool
     show_download_block: bool
     show_placement: bool
@@ -4065,19 +4065,6 @@ class ModWebAppPageMixin(
             app_scope is not None and app_scope.casefold() == "minecraft" and any(script.included for script in scripts)
         )
 
-    @staticmethod
-    def _default_mod_download_names(
-        mods: tuple[NodeModEntry, ...],
-        distribution_mode: ModDistributionMode,
-    ) -> frozenset[str]:
-        return frozenset(
-            entry.name
-            for entry in mods
-            if entry.downloadable
-            and entry.mod_type is not ModType.BUILTIN
-            and (distribution_mode is not ModDistributionMode.RAW_ENABLED or entry.enabled)
-        )
-
     def _render_mods_section(
         self,
         *,
@@ -4108,9 +4095,8 @@ class ModWebAppPageMixin(
         downloadable_names: tuple[str, ...] = tuple[str, ...](
             entry.name for entry in model.mods.mods if entry.downloadable
         )
-        selected_mod_names: set[str] = set(
-            self._default_mod_download_names(model.mods.mods, capabilities.mode)
-        )
+        selected_mod_names: set[str] = set()
+        mod_selection_mode: bool = False
         optional_client_entries: tuple[NodeModEntry, ...] = tuple(
             entry
             for entry in model.mods.mods
@@ -4148,11 +4134,14 @@ class ModWebAppPageMixin(
             if entry.name in downloadable_name_set or entry.name in deletable_name_set
         )
         selectable_name_set: frozenset[str] = frozenset(selectable_names)
-        downloadable_count: int = model.mods.summary.downloadable_count
         can_upload_mod: bool = self._user_has_level(user, Power_Level.user)
         can_install_factorio_mod_link: bool = can_upload_mod and model.app_scope == "factorio"
-        selection_button = None
-        download_button = None
+        selection_button: Button | None = None
+        select_all_button: Button | None = None
+        clear_selection_button: Button | None = None
+        download_button: Button | None = None
+        selection_delete_button: Button | None = None
+        normal_action_buttons: tuple[Button, ...] = ()
         delete_control: _ModWebEnableableControl | None = None
         result_count_label: Label | None = None
         delete_selected_button: Button | None = None
@@ -4174,7 +4163,7 @@ class ModWebAppPageMixin(
             metadata_active_status = text
             if metadata_status_button is not None:
                 metadata_status_button.set_text(f"Metadata: {text}")
-                metadata_status_button.set_visibility(True)
+                metadata_status_button.set_visibility(not mod_selection_mode)
                 metadata_status_button.set_enabled(running)
 
         def start_metadata_operation(
@@ -4363,24 +4352,34 @@ class ModWebAppPageMixin(
             )
 
         def update_count() -> None:
-            if selection_button is None:
-                return
-            selected_count: int = len(selected_mod_names)
             selected_downloadable_count: int = len(selected_downloadable_mod_names_in_page_order())
             selected_deletable_count: int = len(selected_deletable_mod_names_in_page_order())
-            selection_button.set_text(self._selection_toggle_label(selected_count=selected_count))
+            for normal_action_button in normal_action_buttons:
+                normal_action_button.set_visibility(not mod_selection_mode)
+            if metadata_status_button is not None:
+                metadata_status_button.set_visibility(
+                    not mod_selection_mode and bool(metadata_active_status)
+                )
+            if select_all_button is not None:
+                select_all_button.set_visibility(mod_selection_mode)
+                select_all_button.set_enabled(bool(selectable_names))
+            if clear_selection_button is not None:
+                clear_selection_button.set_visibility(mod_selection_mode)
+                clear_selection_button.set_enabled(bool(selected_mod_names))
+            if selection_button is not None:
+                selection_button.set_visibility(mod_selection_mode)
+                selection_button.set_text("Done")
+                selection_button.set_enabled(True)
             if download_button is not None:
-                download_button.set_text(
-                    self._download_selection_label(
-                        selected_count=selected_downloadable_count,
-                        downloadable_count=downloadable_count,
-                    )
+                download_button.set_visibility(mod_selection_mode)
+                download_button.set_text(f"Download {selected_downloadable_count}")
+                download_button.set_enabled(selected_downloadable_count > 0)
+            if selection_delete_button is not None:
+                selection_delete_button.set_visibility(mod_selection_mode)
+                selection_delete_button.set_text(
+                    self._delete_selection_label(selected_count=selected_deletable_count)
                 )
-                can_download: bool = downloadable_count > 0 and (
-                    not selected_mod_names or selected_downloadable_count > 0
-                )
-                download_button.set_enabled(can_download)
-            selection_button.set_enabled(bool(selectable_names))
+                selection_delete_button.set_enabled(selected_deletable_count > 0)
             if delete_control is not None:
                 delete_control.set_enabled(selected_deletable_count > 0)
 
@@ -4415,61 +4414,53 @@ class ModWebAppPageMixin(
                 virtual_mod_table.update()
             update_count()
 
-        def toggle_selection() -> None:
-            if selected_mod_names:
-                clear_selection()
-            else:
-                select_all()
+        def start_mod_selection() -> None:
+            nonlocal mod_selection_mode
+            mod_selection_mode = True
+            clear_selection()
+            _mod_download_rows.refresh(current_search_query)
 
-        async def download_selected() -> None:
-            mod_names: tuple[str, ...] = selected_downloadable_mod_names_in_page_order()
-            if mod_names:
-                excluded_names = tuple(
-                    mod_name for mod_name in downloadable_names if mod_name not in selected_mod_names
-                )
-                selected_query_length = len(urlencode({"mod_name": mod_names}, doseq=True))
-                excluded_query_length = len(urlencode({"mod_name": excluded_names}, doseq=True))
-                use_excluded_names = excluded_query_length < selected_query_length
-                query: str = urlencode(
-                    self._download_query(
-                        enabled_only=False,
-                        selected_only=True,
-                        excluded_only=use_excluded_names,
-                        mod_names=excluded_names if use_excluded_names else mod_names,
-                    ),
-                    doseq=True,
-                )
-                await self._start_download(
-                    ui=ui,
-                    user=user,
-                    model=model,
-                    url=f"{self._download_base_url(model)}?{query}",
-                    message=self._download_feedback_message(
-                        kind=ModDownloadKind.SELECTED,
-                        app_friendly=model.app_friendly,
-                        selected_count=len(mod_names),
-                    ),
-                    filenames=(f"{model.app_name}-selected-mods.zip",),
-                )
-                return
-            if selected_mod_names:
-                ui.notify("No selected mods are downloadable.", type="warning")
-                return
+        def exit_mod_selection() -> None:
+            nonlocal mod_selection_mode
+            mod_selection_mode = False
+            clear_selection()
+            _mod_download_rows.refresh(current_search_query)
+
+        async def download_selected_mods(mod_names: tuple[str, ...]) -> None:
+            excluded_names = tuple(
+                mod_name for mod_name in downloadable_names if mod_name not in selected_mod_names
+            )
+            selected_query_length = len(urlencode({"mod_name": mod_names}, doseq=True))
+            excluded_query_length = len(urlencode({"mod_name": excluded_names}, doseq=True))
+            use_excluded_names = excluded_query_length < selected_query_length
+            query: str = urlencode(
+                self._download_query(
+                    enabled_only=False,
+                    selected_only=True,
+                    excluded_only=use_excluded_names,
+                    mod_names=excluded_names if use_excluded_names else mod_names,
+                ),
+                doseq=True,
+            )
             await self._start_download(
                 ui=ui,
                 user=user,
                 model=model,
-                url=(
-                    model.download_enabled_url
-                    if capabilities.mode is ModDistributionMode.RAW_ENABLED
-                    else model.download_all_url
-                ),
+                url=f"{self._download_base_url(model)}?{query}",
                 message=self._download_feedback_message(
-                    kind=ModDownloadKind.ALL,
+                    kind=ModDownloadKind.SELECTED,
                     app_friendly=model.app_friendly,
+                    selected_count=len(mod_names),
                 ),
-                filenames=(f"{model.app_name}-mods.zip",),
+                filenames=(f"{model.app_name}-selected-mods.zip",),
             )
+
+        async def download_selected() -> None:
+            mod_names: tuple[str, ...] = selected_downloadable_mod_names_in_page_order()
+            if not mod_names:
+                ui.notify("Select at least one downloadable mod.", type="warning")
+                return
+            await download_selected_mods(mod_names)
 
         async def _delete_selected() -> None:
             mod_names: tuple[str, ...] = selected_deletable_mod_names_in_page_order()
@@ -6363,7 +6354,9 @@ class ModWebAppPageMixin(
                             on_click=delete_selected,
                         ).classes("mod-list-button danger")
 
-        with ui.card().classes(self._flat_tab_card_classes()) as rendered_metadata_container:
+        with ui.card().classes(
+            f"{self._flat_tab_card_classes()} mod-mod-list-card"
+        ) as rendered_metadata_container:
             metadata_ui_container = rendered_metadata_container
             with ui.column().classes(self._tab_section_body_classes()):
                 mods_description: str | None = self._mods_card_description(model.mods.summary)
@@ -6422,7 +6415,8 @@ class ModWebAppPageMixin(
                                 "type_tone": self._mod_type_badge_tone(entry.mod_type),
                                 "downloadable": capabilities.supports_raw_download and entry.downloadable,
                                 "download_block_label": entry.download_block_label or "Not downloadable",
-                                "selectable": entry.name in selectable_name_set,
+                                "selection_mode": mod_selection_mode,
+                                "selectable": mod_selection_mode and entry.name in selectable_name_set,
                                 "show_download_block": not entry.downloadable
                                 and not (
                                     entry.mod_type is ModType.SERVER
@@ -6514,7 +6508,7 @@ class ModWebAppPageMixin(
                                 rows=cast(list[dict[object, object]], cast(object, rows)),
                                 columns=columns,
                                 row_key="name",
-                                selection="multiple",
+                                selection="multiple" if mod_selection_mode else None,
                                 pagination=0,
                                 on_select=sync_virtual_selection,
                             )
@@ -6525,13 +6519,14 @@ class ModWebAppPageMixin(
                             .classes("mod-virtual-list mod-virtual-mod-table w-full")
                         )
                         virtual_mod_rows = rows
-                        initially_selected_rows = [
-                            row for row in rows if str(row["name"]) in selected_mod_names
-                        ]
-                        virtual_mod_table.selected = cast(
-                            list[dict[object, object]],
-                            cast(object, initially_selected_rows),
-                        )
+                        if mod_selection_mode:
+                            initially_selected_rows = [
+                                row for row in rows if str(row["name"]) in selected_mod_names
+                            ]
+                            virtual_mod_table.selected = cast(
+                                list[dict[object, object]],
+                                cast(object, initially_selected_rows),
+                            )
                         virtual_mod_table.add_slot(
                             "body",
                             """
@@ -6539,9 +6534,9 @@ class ModWebAppPageMixin(
                               <q-td :colspan="props.cols.length + 1" class="mod-virtual-row-cell">
                                 <div :class="['mod-row', 'mod-row-clickable', props.row.state_class]"
                                      :data-mod-name="props.row.name">
-                                  <q-checkbox v-if="props.row.selectable" v-model="props.selected"
-                                              dense @click.stop />
-                                  <q-checkbox v-else :model-value="false" dense disable @click.stop />
+                                  <q-checkbox v-if="props.row.selection_mode && props.row.selectable"
+                                              v-model="props.selected" dense @click.stop
+                                              class="mod-row-selection-checkbox" />
                                   <div class="mod-row-main">
                                     <div class="mod-row-title">{{ props.row.friendly }}</div>
                                     <div class="mod-row-file">{{ props.row.file }}</div>
@@ -6614,6 +6609,7 @@ class ModWebAppPageMixin(
                                 ),
                                 on_change=_create_mod_selection_handler(entry.name),
                                 can_select=entry.name in selectable_name_set,
+                                show_selection=mod_selection_mode,
                                 app_friendly=model.app_friendly,
                                 model=model,
                                 user=user,
@@ -6639,7 +6635,11 @@ class ModWebAppPageMixin(
                     ui=ui,
                     model=model,
                     user=user,
-                    toggle_selection=toggle_selection,
+                    selection_mode=mod_selection_mode,
+                    select_all=select_all,
+                    clear_selection=clear_selection,
+                    start_selection=start_mod_selection if capabilities.supports_raw_download else None,
+                    cancel_selection=exit_mod_selection,
                     download_selected=download_selected if capabilities.supports_raw_download else None,
                     open_client_pack=open_client_pack_dialog if supports_client_pack else None,
                     open_modlist=modlist_dialog.open,
@@ -6675,8 +6675,12 @@ class ModWebAppPageMixin(
                     sort_order=current_sort_order,
                     on_sort=_sort_mod_rows if show_sort else None,
                 )
-                selection_button: Button | None = toolbar_bindings.selection_button
-                download_button: Button | None = toolbar_bindings.download_button
+                normal_action_buttons = toolbar_bindings.normal_action_buttons
+                select_all_button = toolbar_bindings.select_all_button
+                clear_selection_button = toolbar_bindings.clear_selection_button
+                selection_button = toolbar_bindings.selection_button
+                download_button = toolbar_bindings.download_button
+                selection_delete_button = toolbar_bindings.selection_delete_button
                 delete_control = toolbar_bindings.delete_control
                 result_count_label = toolbar_bindings.result_count_label
                 metadata_status_button = toolbar_bindings.metadata_status_button
@@ -7361,9 +7365,13 @@ class ModWebAppPageMixin(
         ui: ModWebUi,
         model: ModWebPageModel,
         user: ModWebUser,
-        toggle_selection: Callable[[], None],
+        selection_mode: bool,
+        select_all: Callable[[], None],
+        clear_selection: Callable[[], None],
+        cancel_selection: Callable[[], None],
         download_selected: Callable[[], Awaitable[None]] | None,
         delete_selected: Callable[[], None],
+        start_selection: Callable[[], None] | None = None,
         open_client_pack: Callable[[], None] | None = None,
         open_modlist: Callable[[], None] | None = None,
         open_client_pack_config: Callable[[], None] | None = None,
@@ -7393,15 +7401,23 @@ class ModWebAppPageMixin(
             and not show_sort
         ):
             return _ModWebModToolbarBindings(
+                normal_action_buttons=(),
+                select_all_button=None,
+                clear_selection_button=None,
                 selection_button=None,
                 download_button=None,
+                selection_delete_button=None,
                 delete_control=None,
                 result_count_label=None,
                 metadata_status_button=None,
             )
 
+        normal_action_buttons: list[Button] = []
         selection_button: Button | None = None
+        select_all_button: Button | None = None
+        clear_selection_button: Button | None = None
         download_button: Button | None = None
+        selection_delete_button: Button | None = None
         delete_control: _ModWebEnableableControl | None = None
         result_count_label: Label | None = None
         metadata_status_button: Button | None = None
@@ -7460,28 +7476,63 @@ class ModWebAppPageMixin(
                     )
                     metadata_status_button.set_visibility(False)
                 if show_bulk_mod_actions:
-                    selection_button = ui.button("", on_click=toggle_selection).classes(
-                        "mod-list-button secondary mod-toolbar-button mod-toolbar-selection-button"
-                    )
-                    if download_selected is not None:
-                        download_button = ui.button("", on_click=download_selected).classes(
+                    if open_client_pack is not None:
+                        client_pack_button = ui.button("Download Client Pack", on_click=open_client_pack).classes(
                             "mod-list-button mod-toolbar-button mod-toolbar-button-fill mod-toolbar-primary"
                         )
-                    if open_client_pack is not None:
-                        ui.button("Client Pack", on_click=open_client_pack).classes(
-                            f"mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill{mobile_secondary_class}"
+                        normal_action_buttons.append(client_pack_button)
+                    if start_selection is not None:
+                        select_button_classes = (
+                            "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                            f"{mobile_secondary_class}"
+                            if open_client_pack is not None
+                            else "mod-list-button mod-toolbar-button mod-toolbar-button-fill mod-toolbar-primary"
                         )
+                        select_button = ui.button("Select", on_click=start_selection).classes(
+                            select_button_classes
+                        )
+                        normal_action_buttons.append(select_button)
+                    if start_selection is not None and download_selected is not None:
+                        download_button = ui.button("", on_click=download_selected).classes(
+                            "mod-list-button mod-toolbar-button mod-toolbar-button-fill "
+                            "mod-toolbar-primary mod-toolbar-selection-action"
+                        )
+                        if can_delete_mods:
+                            selection_delete_button = ui.button("", on_click=delete_selected).classes(
+                                "mod-list-button danger mod-toolbar-button mod-toolbar-button-fill "
+                                "mod-toolbar-selection-action"
+                            )
+                        select_all_button = ui.button("Select all", on_click=select_all).classes(
+                            "mod-list-button secondary mod-toolbar-button "
+                            "mod-toolbar-selection-utility"
+                        )
+                        clear_selection_button = ui.button("Clear", on_click=clear_selection).classes(
+                            "mod-list-button secondary mod-toolbar-button "
+                            "mod-toolbar-selection-utility"
+                        )
+                        selection_button = ui.button("", on_click=cancel_selection).classes(
+                            "mod-list-button secondary mod-toolbar-button "
+                            "mod-toolbar-selection-utility"
+                        )
+                        download_button.set_visibility(selection_mode)
+                        if selection_delete_button is not None:
+                            selection_delete_button.set_visibility(selection_mode)
+                        select_all_button.set_visibility(selection_mode)
+                        clear_selection_button.set_visibility(selection_mode)
+                        selection_button.set_visibility(selection_mode)
                     if open_modlist is not None:
-                        ui.button("Modlist", on_click=open_modlist).classes(
+                        modlist_button = ui.button("Modlist", on_click=open_modlist).classes(
                             f"mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill{mobile_secondary_class}"
                         )
+                        normal_action_buttons.append(modlist_button)
                 if can_add_mod_link:
-                    ui.button("Add Link", on_click=add_mod_link).classes(
+                    add_link_button = ui.button("Add Link", on_click=add_mod_link).classes(
                         f"mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill{mobile_secondary_class}"
                     )
+                    normal_action_buttons.append(add_link_button)
                 has_menu_actions = (
                     can_upload_mod
-                    or open_client_pack is not None
+                    or start_selection is not None
                     or open_modlist is not None
                     or can_add_mod_link
                     or open_client_pack_config is not None
@@ -7492,14 +7543,16 @@ class ModWebAppPageMixin(
                 if has_menu_actions:
                     configure_label = "Configure <!>" if model.client_pack_content_dirty else "Configure"
                     if menu_supported:
-                        with (
+                        menu_button = (
                             ui.button("")
                             .props("icon=menu flat aria-label=Mod actions")
                             .classes("mod-list-button secondary mod-toolbar-button mod-toolbar-menu-button")
-                        ):
+                        )
+                        normal_action_buttons.append(menu_button)
+                        with menu_button:
                             with ui.menu().classes("mod-chat-entry-menu mod-toolbar-menu"):
-                                if open_client_pack is not None:
-                                    ui.menu_item("Client Pack", on_click=open_client_pack).classes(
+                                if start_selection is not None:
+                                    ui.menu_item("Select", on_click=start_selection).classes(
                                         "mod-chat-entry-menu-item mod-toolbar-menu-item "
                                         "mod-toolbar-menu-mobile-only"
                                     )
@@ -7542,28 +7595,38 @@ class ModWebAppPageMixin(
                                     )
                     else:
                         if can_upload_mod:
-                            ui.button("Upload", on_click=upload_mod).classes(
+                            upload_button = ui.button("Upload", on_click=upload_mod).classes(
                                 "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                             )
+                            normal_action_buttons.append(upload_button)
                         if open_client_pack_config is not None:
-                            ui.button(configure_label, on_click=open_client_pack_config).classes(
+                            configure_button = ui.button(configure_label, on_click=open_client_pack_config).classes(
                                 "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                             )
+                            normal_action_buttons.append(configure_button)
                         if find_metadata is not None:
-                            ui.button("Find Metadata", on_click=find_metadata).classes(
+                            find_metadata_button = ui.button("Find Metadata", on_click=find_metadata).classes(
                                 "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                             )
+                            normal_action_buttons.append(find_metadata_button)
                         if check_all_updates is not None:
-                            ui.button("Check All", on_click=check_all_updates).classes(
+                            check_all_button = ui.button("Check All", on_click=check_all_updates).classes(
                                 "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                             )
+                            normal_action_buttons.append(check_all_button)
                         if can_delete_mods:
-                            delete_control = ui.button("Delete", on_click=delete_selected).classes(
+                            delete_button = ui.button("Delete", on_click=delete_selected).classes(
                                 "mod-list-button danger mod-toolbar-button mod-toolbar-button-fill"
                             )
+                            delete_control = delete_button
+                            normal_action_buttons.append(delete_button)
         return _ModWebModToolbarBindings(
+            normal_action_buttons=tuple(normal_action_buttons),
+            select_all_button=select_all_button,
+            clear_selection_button=clear_selection_button,
             selection_button=selection_button,
             download_button=download_button,
+            selection_delete_button=selection_delete_button,
             delete_control=delete_control,
             result_count_label=result_count_label,
             metadata_status_button=metadata_status_button,

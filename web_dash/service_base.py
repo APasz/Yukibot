@@ -379,9 +379,6 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_default_mod_web_node_name"]) -> Callable[..., str]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_download_selection_label"]) -> Callable[..., str]: ...
-
-    @overload
     def __getattr__(self, name: Literal["_delete_selection_label"]) -> Callable[..., str]: ...
 
     @overload
@@ -1084,9 +1081,6 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_resolve_exception_handler_result"]) -> Callable[..., Awaitable[object]]: ...
-
-    @overload
-    def __getattr__(self, name: Literal["_selection_toggle_label"]) -> Callable[..., str]: ...
 
     @overload
     def __getattr__(

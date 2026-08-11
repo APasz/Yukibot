@@ -364,9 +364,17 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertNotIn("mod-list-item-enter", css)
         self.assertRegex(
             css,
-            r"(?s)\.mod-mods-toolbar-actions \.mod-toolbar-selection-button \{.*?"
-            r"min-width: 4\.75rem;.*?width: auto;",
+            r"(?s)\.mod-mods-toolbar-actions \.mod-toolbar-selection-action \{.*?"
+            r"min-width: 12rem;.*?width: 0;",
         )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mods-toolbar-actions \.mod-toolbar-selection-utility \{.*?"
+            r"min-width: 8\.25rem;.*?width: 8\.25rem;",
+        )
+        self.assertIn(".mod-row .mod-row-selection-checkbox", css)
+        self.assertRegex(css, r"(?s)\.mod-row \{.*?border: 1px solid #25252c !important;")
+        self.assertRegex(css, r"(?s)\.mod-card\.mod-mod-list-card \{.*?border: none !important;")
         self.assertRegex(
             css,
             r"(?s)\.mod-mods-toolbar-actions \.mod-toolbar-menu-button \{.*?"

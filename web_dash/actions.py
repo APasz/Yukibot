@@ -1163,20 +1163,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
         return entry.mod_type is ModType.BUILTIN
 
     @staticmethod
-    def _selection_toggle_label(*, selected_count: int) -> str:
-        return "Clear" if selected_count > 0 else "Select All"
-
-    @staticmethod
-    def _download_selection_label(*, selected_count: int, downloadable_count: int) -> str:
-        if downloadable_count <= 0:
-            return "Download 0/0"
-        if selected_count <= 0 or selected_count >= downloadable_count:
-            current = "All"
-        else:
-            current: str = str(selected_count)
-        return f"Download {current}/{downloadable_count}"
-
-    @staticmethod
     def _delete_selection_label(*, selected_count: int) -> str:
         if selected_count <= 0:
             return "Delete"
@@ -3219,6 +3205,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         download_url: str | None,
         on_change: Callable[["ValueChangeEventArguments"], None],
         can_select: bool,
+        show_selection: bool,
         app_friendly: str,
         model: ModWebPageModel,
         user: ModWebUser,
@@ -3245,12 +3232,13 @@ class ModWebActionsMixin(ModWebServiceSupport):
         row = ui.row().classes(" ".join((*row_classes, "mod-row-clickable")))
         row.on("click", open_mod_info_dialog)
         with row:
-            if can_select:
-                checkbox = ui.checkbox(value=False, on_change=on_change).props("dense")
-                checkbox.on("click", js_handler="(event) => event.stopPropagation()")
-            else:
-                checkbox = ui.checkbox(value=False).props("dense")
-                checkbox.disable()
+            checkbox: Checkbox | None = None
+            if show_selection and can_select:
+                checkbox = (
+                    ui.checkbox(value=False, on_change=on_change)
+                    .props("dense")
+                    .classes("mod-row-selection-checkbox")
+                )
                 checkbox.on("click", js_handler="(event) => event.stopPropagation()")
             with ui.column().classes("mod-row-main gap-0"):
                 ui.label(entry.friendly).classes("mod-row-title")
@@ -3297,7 +3285,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     tone=self._mod_type_badge_tone(entry.mod_type),
                     extra_classes="mod-setting-badge mod-mod-type-badge",
                 )
-        return checkbox if can_select else None
+        return checkbox
 
     async def _start_download(
         self,
