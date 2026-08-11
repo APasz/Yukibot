@@ -16,7 +16,7 @@ from _mod_ops import (
     WritableArchiveEntry,
     compress_archive_entries,
 )
-from apps._config import ClientPackKubeJsScript, ClientPackPolicy, ModSide
+from apps._config import ClientPackKubeJsScript, ModSide
 
 _KUBEJS_CLIENT_PACK_SCRIPT_DIRECTORIES = ("server_scripts", "startup_scripts")
 _NO_EXCLUDED_KUBEJS_SCRIPTS: frozenset[str] = frozenset()
@@ -168,18 +168,15 @@ def _modrinth_dependencies(spec: MinecraftPackSpec) -> dict[str, str]:
 
 
 def _modrinth_env(entry: ModArchiveEntry, purpose: PackPurpose) -> dict[str, str]:
-    client_requirement = (
-        "required" if entry.client_pack_policy is ClientPackPolicy.REQUIRED else "optional"
-    )
     match entry.mod_type.side:
         case ModSide.CLIENT:
-            return {"client": client_requirement, "server": "unsupported"}
+            return {"client": "required", "server": "unsupported"}
         case ModSide.SERVER:
             if purpose is PackPurpose.CLIENT:
-                return {"client": client_requirement, "server": "required"}
+                return {"client": "required", "server": "required"}
             return {"client": "unsupported", "server": "required"}
         case ModSide.BOTH:
-            return {"client": client_requirement, "server": "required"}
+            return {"client": "required", "server": "required"}
 
 
 def _modrinth_entries(
@@ -328,10 +325,7 @@ def _curseforge_entries(
             {
                 "projectID": metadata.project_id,
                 "fileID": metadata.file_id,
-                "required": (
-                    spec.purpose is not PackPurpose.CLIENT
-                    or entry.client_pack_policy is ClientPackPolicy.REQUIRED
-                ),
+                "required": True,
             }
         )
     if unsupported_mods:

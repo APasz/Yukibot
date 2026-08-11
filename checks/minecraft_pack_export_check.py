@@ -203,7 +203,7 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             files["mods/remote-client.jar"]["env"],
-            {"client": "optional", "server": "unsupported"},
+            {"client": "required", "server": "unsupported"},
         )
         self.assertEqual(
             files["mods/remote-shared.jar"]["hashes"],
@@ -240,7 +240,7 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
             manifest["files"],
             [
                 {"projectID": 101, "fileID": 1001, "required": True},
-                {"projectID": 202, "fileID": 2002, "required": False},
+                {"projectID": 202, "fileID": 2002, "required": True},
             ],
         )
 
