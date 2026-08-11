@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import uuid
 import zipfile
 from collections import Counter
 from collections.abc import Collection
@@ -117,34 +119,103 @@ class ClientPackValidationError(ValueError):
     """The persisted client-pack policy or submitted selection is invalid."""
 
 
+def _client_pack_manifest_metadata(entry: ModArchiveEntry) -> dict[str, object]:
+    curseforge = entry.platforms.curseforge
+    modrinth = entry.platforms.modrinth
+    return {
+        "bundle_eligible": entry.bundle_eligible,
+        "client_pack_policy": entry.client_pack_policy.value,
+        "mod_type": entry.mod_type.value,
+        "curseforge": (
+            None
+            if curseforge is None
+            else curseforge.model_dump(mode="json", include={"project_id", "file_id"})
+        ),
+        "modrinth": (
+            None
+            if modrinth is None
+            else modrinth.model_dump(
+                mode="json",
+                include={"filename", "sha1", "sha512", "size", "download_url"},
+            )
+        ),
+    }
+
+
 def client_pack_content_hash(entries: Collection[WritableArchiveEntry], *, format_name: str) -> str:
     digest = hashlib.sha256()
     _update_content_hash(digest, format_name.encode("utf-8"))
+    seen_archive_roots: set[str] = set()
+    seen_archive_paths: set[str] = set()
+
+    def reserve_archive_path(archive_path: PurePosixPath) -> None:
+        rendered = archive_path.as_posix()
+        key = rendered.casefold().rstrip("/")
+        if key in seen_archive_paths:
+            raise ClientPackValidationError(f"Duplicate client-pack archive member path: {rendered}")
+        seen_archive_paths.add(key)
+
     for entry in sorted(entries, key=lambda item: item.archive_path.as_posix().casefold()):
+        try:
+            _validate_archive_path(entry.archive_path)
+        except ValueError as xcp:
+            raise ClientPackValidationError(str(xcp)) from xcp
+        archive_root_key = entry.archive_path.as_posix().casefold()
+        if archive_root_key in seen_archive_roots:
+            raise ClientPackValidationError(f"Duplicate client-pack archive path: {entry.archive_path}")
+        seen_archive_roots.add(archive_root_key)
         if isinstance(entry, ArchiveDataEntry):
+            reserve_archive_path(entry.archive_path)
+            _update_content_hash(digest, b"data")
             _update_content_hash(digest, entry.archive_path.as_posix().encode("utf-8"))
             _update_content_hash(digest, entry.content)
             continue
-        source = entry.source_path
-        if source.is_dir():
-            files = tuple(
-                sorted(
-                    (path for path in source.rglob("*") if path.is_file()),
-                    key=lambda path: path.as_posix(),
-                )
+        if isinstance(entry, ModArchiveEntry):
+            _update_content_hash(
+                digest,
+                json.dumps(
+                    _client_pack_manifest_metadata(entry),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
             )
+        source = entry.source_path
+        if source.is_symlink():
+            raise ClientPackValidationError(f"Client-pack entry cannot be a symbolic link: {source}")
+        if source.is_dir():
+            directories: list[Path] = []
+            files: list[Path] = []
+            for path in source.rglob("*"):
+                if path.is_symlink():
+                    raise ClientPackValidationError(
+                        f"Client-pack entry cannot contain symbolic links: {path}"
+                    )
+                if path.is_dir():
+                    directories.append(path)
+                if path.is_file():
+                    files.append(path)
+                elif not path.is_dir():
+                    raise ClientPackValidationError(f"Unsupported client-pack source: {path}")
+            for path in sorted(directories, key=lambda item: item.as_posix()):
+                relative = PurePosixPath(path.relative_to(source).as_posix())
+                archive_path = entry.archive_path / relative
+                reserve_archive_path(archive_path)
+                _update_content_hash(digest, b"directory")
+                _update_content_hash(digest, archive_path.as_posix().encode("utf-8"))
+            files.sort(key=lambda path: path.as_posix())
         elif source.is_file():
-            files = (source,)
+            files = [source]
         else:
             raise ClientPackValidationError(f"Client-pack entry is missing: {source}")
         for path in files:
-            relative = (
-                PurePosixPath(path.relative_to(source).as_posix())
+            archive_path = (
+                entry.archive_path_for_relative(PurePosixPath(path.relative_to(source).as_posix()))
                 if source.is_dir()
-                else PurePosixPath(path.name)
+                else entry.archive_path
             )
-            archive_path = entry.archive_path_for_relative(relative).as_posix()
-            _update_content_hash(digest, archive_path.encode("utf-8"))
+            reserve_archive_path(archive_path)
+            _update_content_hash(digest, b"file")
+            _update_content_hash(digest, archive_path.as_posix().encode("utf-8"))
             with path.open("rb") as handle:
                 while chunk := handle.read(1024 * 1024):
                     _update_content_hash(digest, chunk)
@@ -411,6 +482,7 @@ async def compress_archive_entries(
     *,
     default_suffix: str = ".zip",
     overwrite: bool = True,
+    unique_output: bool = False,
 ) -> Path:
     ordered_entries = tuple(entries)
     if not ordered_entries:
@@ -418,6 +490,11 @@ async def compress_archive_entries(
     resolved_name = archive_name if archive_name.endswith(default_suffix) else f"{archive_name}{default_suffix}"
     archive_path = config.DIR_ZIPS / resolved_name
     archive_path.parent.mkdir(parents=True, exist_ok=True)
+    if unique_output:
+        archive_path = archive_path.with_name(
+            f"{archive_path.stem}-{uuid.uuid4().hex}{archive_path.suffix}"
+        )
+        overwrite = False
     if archive_path.exists():
         if not overwrite:
             raise FileExistsError(f"Mod archive already exists: {archive_path}")
@@ -435,8 +512,14 @@ async def compress_mod_archive_entries(
     archive_name: str,
     *,
     overwrite: bool = True,
+    unique_output: bool = False,
 ) -> Path:
-    return await compress_archive_entries(entries, archive_name, overwrite=overwrite)
+    return await compress_archive_entries(
+        entries,
+        archive_name,
+        overwrite=overwrite,
+        unique_output=unique_output,
+    )
 
 
 def require_downloadable(mod: Mod) -> None:

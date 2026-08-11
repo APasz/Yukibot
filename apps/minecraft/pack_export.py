@@ -64,11 +64,7 @@ class MinecraftPackSpec:
         ):
             if not value.strip():
                 raise MinecraftPackExportError(f"Minecraft pack {field_name} must not be empty")
-        if (
-            self.format is not PackFormat.GENERIC_ZIP
-            and self.loader not in {None, "vanilla"}
-            and not self.loader_version
-        ):
+        if self.format is not PackFormat.GENERIC_ZIP and self.loader not in {None, "vanilla"} and not self.loader_version:
             raise MinecraftPackExportError("Minecraft loader version is required for launcher pack exports")
 
 
@@ -341,7 +337,7 @@ def _curseforge_entries(
     if unsupported_mods:
         names = ", ".join(sorted(unsupported_mods, key=str.casefold))
         raise MinecraftPackExportError(
-            "CurseForge export cannot include these non-CurseForge mods because bundling is disabled: "
+            "CurseForge Launcher export cannot include non-downloadable local mods without metadata: "
             f"{names}"
         )
     loader_id = _curseforge_loader_id(spec)
@@ -372,6 +368,7 @@ async def export_minecraft_pack(
     archive_name: str,
     *,
     http: httpx.AsyncClient | None = None,
+    unique_output: bool = False,
 ) -> Path:
     if not entries:
         raise MinecraftPackExportError("Minecraft pack requires at least one entry")
@@ -401,4 +398,5 @@ async def export_minecraft_pack(
         export_entries,
         archive_name,
         default_suffix=spec.format.suffix,
+        unique_output=unique_output,
     )

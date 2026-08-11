@@ -671,7 +671,11 @@ async def _curseforge_metadata_from_reference(
             reference.project_id,
             reference.file_id,
         )
-        return CurseForgeModMetadata(project_id=reference.project_id, file_id=reference.file_id)
+        return CurseForgeModMetadata(
+            project_id=reference.project_id,
+            file_id=reference.file_id,
+            verified=False,
+        )
 
     response = await http.get(
         f"https://api.curseforge.com/v1/mods/{reference.project_id}/files/{reference.file_id}",
@@ -692,6 +696,7 @@ async def _curseforge_metadata_from_reference(
         project_id=project_id,
         file_id=file_id,
         description=await _curseforge_project_description(project_id, http=http),
+        verified=True,
     )
 
 
@@ -705,12 +710,11 @@ async def _resolve_curseforge(
     if not file_reference.isdecimal():
         raise ValueError("CurseForge file URL must end with a numeric file ID.")
     project_id = await _resolve_curseforge_project_id(mod_id, http=http)
-    return CurseForgeModMetadata(
-        page_url=page_url,
-        project_id=project_id,
-        file_id=int(file_reference),
-        description=await _curseforge_project_description(project_id, http=http),
+    metadata = await _curseforge_metadata_from_reference(
+        CurseForgeFileReference(project_id=project_id, file_id=int(file_reference)),
+        http=http,
     )
+    return metadata.model_copy(update={"page_url": page_url})
 
 
 async def _resolve_curseforge_project_id(
@@ -1512,6 +1516,7 @@ async def _bulk_curseforge_exact_matches(
                 project_id=project_id,
                 file_id=file_id,
                 description=_optional_text(project.get("summary")),
+                verified=True,
             ),
         )
     log.info(

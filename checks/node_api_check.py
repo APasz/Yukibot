@@ -8,7 +8,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast, get_type_hints
@@ -130,7 +130,7 @@ from apps.minecraft import (
     MinecraftShapelessRecipe,
     Minecraft_Setting_Group,
 )
-from apps.minecraft.pack_export import PackFormat, PackPurpose
+from apps.minecraft.pack_export import MinecraftPackExportError, PackFormat, PackPurpose
 from apps.satisfactory import (
     Satisfactory,
     SatisfactoryBlueprintOwnershipStore,
@@ -6164,6 +6164,31 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(archive_name, "Example_Pack-2026-07-04.2.mrpack")
 
+    def test_minecraft_client_pack_content_hash_includes_pack_author(self) -> None:
+        app = Mock(spec=Minecraft)
+        app.friendly = "Minecraft Alpha"
+        app.cfg = SimpleNamespace(
+            version=AppVersion(main="1.21.1", loader="fabric", framework="0.16.10"),
+            client_pack_metadata=ClientPackMetadataConfig(
+                name="Example Pack",
+                description="Example description",
+            ),
+            notes=None,
+            pack_author="First Author",
+        )
+        service = NodeClientPackService(
+            node_name=lambda: "erin",
+            invalidate_app_state=lambda _app_name: None,
+            invalidate_mod_inventory=lambda _app_name: None,
+        )
+        entries = (ArchiveDataEntry(PurePosixPath("overrides/options.txt"), b"options"),)
+
+        first_hash = asyncio.run(service.content_hash(app=cast(App, app), entries=entries))
+        app.cfg.pack_author = "Second Author"
+        second_hash = asyncio.run(service.content_hash(app=cast(App, app), entries=entries))
+
+        self.assertNotEqual(first_hash, second_hash)
+
     def test_client_pack_changes_are_dirty_before_first_publication(self) -> None:
         app = _build_app(Mock())
         persisted_overrides: list[dict[str, object]] = []
@@ -6179,6 +6204,22 @@ class NodeApiTests(unittest.TestCase):
     def test_publish_client_pack_requires_changelog(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires a changelog"):
             NodeClientPackPublishRequest(changelog="   ")
+
+    def test_client_pack_publish_flag_requires_a_client_pack_request(self) -> None:
+        app = _build_app(Mock(reload_mods=AsyncMock()))
+
+        with self.assertRaisesRegex(HTTPException, "requires a client-pack request") as raised:
+            asyncio.run(
+                NodeApiService().build_mod_download_response(
+                    app=app,
+                    request=NodeDownloadRequest(
+                        publish_client_pack=True,
+                        publish_changelog="This is not a client-pack request.",
+                    ),
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
 
     def test_publish_client_pack_config_saves_default_pack_without_downloading(
         self,
@@ -6231,6 +6272,72 @@ class NodeApiTests(unittest.TestCase):
             (ClientPackModSnapshot(name="alpha.jar", friendly="Alpha", version="1.0.0"),),
         )
         self.assertFalse(app.cfg.client_pack_content_dirty)
+
+    def test_publish_minecraft_client_pack_config_requires_curseforge_preflight(
+        self,
+    ) -> None:
+        manager = Mock()
+        manager.reload_mods = AsyncMock()
+        app = Mock(spec=Minecraft)
+        app.name = "minecraft_alpha"
+        app.friendly = "Minecraft Alpha"
+        app.next_client_pack_version = "2026-08-11"
+        app.has_mod_manager = manager
+        app.mod_capabilities = SimpleNamespace(supports_client_pack=True)
+        app.cfg = App_Config(
+            name=app.name,
+            instance_key="alpha",
+            friendly_name=app.friendly,
+            directory=Path("."),
+            apps_dir=Path("."),
+            mods_dir=None,
+            scope="minecraft",
+            version=AppVersion(main="1.21.1", loader="fabric", framework="0.16.10"),
+        )
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+
+        with (
+            patch.object(
+                service._client_packs,
+                "entries",
+                return_value=(ArchiveDataEntry(PurePosixPath("overrides/options.txt"), b"options"),),
+            ),
+            patch.object(
+                service._client_packs,
+                "content_hash",
+                new=AsyncMock(return_value="a" * 64),
+            ),
+            patch.object(
+                service._client_packs,
+                "default_mod_snapshots",
+                return_value=(),
+            ),
+            patch(
+                "node_api_client_pack.export_minecraft_pack",
+                new=AsyncMock(
+                    side_effect=MinecraftPackExportError("Unsupported CurseForge loader: unsupported")
+                ),
+            ) as export_pack,
+        ):
+            with self.assertRaisesRegex(HTTPException, "CurseForge client-pack preflight failed") as raised:
+                asyncio.run(
+                    service.publish_client_pack_config(
+                        app=cast(App, app),
+                        update=NodeClientPackPublishRequest(changelog="Initial release."),
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.admin)
+        export_pack.assert_awaited_once()
+        export_spec = export_pack.await_args.args[1]
+        self.assertEqual(export_spec.format, PackFormat.CURSEFORGE)
+        self.assertEqual(export_spec.purpose, PackPurpose.CLIENT)
+        app.publish_client_pack.assert_not_called()
 
     def test_publish_client_pack_keeps_version_when_content_hash_is_unchanged(
         self,
@@ -8500,6 +8607,7 @@ class NodeApiTests(unittest.TestCase):
             ("DirectoryMod",),
         )
         self.assertEqual(archive_name, "Minecraft_Alpha_DirectoryMod.zip")
+        self.assertTrue(compress.await_args.kwargs["unique_output"])
 
     def test_single_disabled_file_mod_download_uses_logical_filename(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -8790,6 +8898,10 @@ class NodeApiTests(unittest.TestCase):
                         ),
                     )
                 )
+                self.assertNotEqual(Path(response.path).name, response.filename)
+                self.assertTrue(
+                    Path(response.path).stem.startswith(f"{Path(response.filename).stem}-")
+                )
                 with zipfile.ZipFile(Path(response.path)) as archive:
                     self.assertEqual(
                         sorted(archive.namelist()),
@@ -8808,6 +8920,7 @@ class NodeApiTests(unittest.TestCase):
                 )
                 with zipfile.ZipFile(Path(selected_response.path)) as archive:
                     self.assertIn("server.jar", archive.namelist())
+                self.assertNotEqual(Path(response.path), Path(selected_response.path))
 
     def test_client_pack_archive_includes_client_overrides(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -8893,6 +9006,82 @@ class NodeApiTests(unittest.TestCase):
                     )
                     index = json.loads(archive.read("modrinth.index.json"))
                     self.assertRegex(index["versionId"], r"^\d{4}-\d{2}-\d{2}(?:\.\d+)?$")
+
+    def test_client_pack_archive_supports_curseforge_launcher_import(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            zips_path = temp_path / "zips"
+            (temp_path / "client.jar.client").write_bytes(b"client")
+            client = _TestMod(
+                Mod_Config(
+                    name="client.jar",
+                    directory=temp_path,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.list_mods.return_value = (client,)
+            app = _build_app(mod_manager)
+            app.cfg.version = AppVersion(main="1.21.1", loader="vanilla")
+
+            with patch.object(config, "DIR_ZIPS", zips_path):
+                response = asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(
+                            client_pack=True,
+                            pack_format=PackFormat.CURSEFORGE,
+                            publish_client_pack=True,
+                            publish_changelog="Publish CurseForge Launcher pack.",
+                        ),
+                    )
+                )
+                with zipfile.ZipFile(Path(response.path)) as archive:
+                    self.assertEqual(
+                        set(archive.namelist()),
+                        {"manifest.json", "overrides/mods/client.jar"},
+                    )
+                    manifest = json.loads(archive.read("manifest.json"))
+
+            self.assertEqual(manifest["minecraft"]["modLoaders"], [])
+            self.assertEqual(manifest["files"], [])
+            self.assertIsNotNone(app.cfg.client_pack_published_hash)
+
+    def test_failed_curseforge_export_does_not_publish_client_pack(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "client.jar.client").write_bytes(b"client")
+            client = _TestMod(
+                Mod_Config(
+                    name="client.jar",
+                    directory=temp_path,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.list_mods.return_value = (client,)
+            app = _build_app(mod_manager)
+            app.cfg.version = AppVersion(main="1.21.1", loader="unsupported", framework="1.0.0")
+
+            with self.assertRaisesRegex(HTTPException, "Unsupported CurseForge loader") as raised:
+                asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(
+                            client_pack=True,
+                            pack_format=PackFormat.CURSEFORGE,
+                            publish_client_pack=True,
+                            publish_changelog="This must not publish.",
+                        ),
+                    )
+                )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIsNone(app.cfg.client_pack_published_hash)
+        self.assertIsNone(app.cfg.client_pack_published_version)
+        self.assertEqual(app.cfg.client_pack_releases, ())
 
     def test_client_pack_download_blocks_after_published_content_changes(self) -> None:
         with TemporaryDirectory() as temp_dir:

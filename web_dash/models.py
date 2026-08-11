@@ -2649,6 +2649,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         pack_purpose: PackPurpose | None = None,
         pack_format: PackFormat = PackFormat.GENERIC_ZIP,
         publish_client_pack: bool = False,
+        publish_changelog: str | None = None,
         include_kubejs_scripts: bool = True,
         include_servers_dat: bool = True,
         include_options_txt: bool = True,
@@ -2667,6 +2668,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             query["pack_purpose"] = pack_purpose.value
         if publish_client_pack:
             query["publish_client_pack"] = "true"
+        if publish_changelog is not None:
+            query["publish_changelog"] = publish_changelog
         if pack_purpose is PackPurpose.CLIENT:
             query["include_kubejs_scripts"] = str(include_kubejs_scripts).lower()
             query["include_servers_dat"] = str(include_servers_dat).lower()

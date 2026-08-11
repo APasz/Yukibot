@@ -1417,6 +1417,7 @@ class CurseForgeFileReference(BaseModel):
 class CurseForgeModMetadata(CurseForgeFileReference):
     page_url: str | None = None
     description: str | None = None
+    verified: bool = False
 
     @field_validator("page_url", mode="before")
     @classmethod

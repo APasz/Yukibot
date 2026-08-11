@@ -1027,6 +1027,11 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
                 )
             if request.url.host == "api.curseforge.com" and request.url.path == "/v1/mods/search":
                 return httpx.Response(200, json={"data": [{"id": 32274}]})
+            if (
+                request.url.host == "api.curseforge.com"
+                and request.url.path == "/v1/mods/32274/files/5789363"
+            ):
+                return httpx.Response(200, json={"data": {"modId": 32274, "id": 5789363}})
             if request.url.host == "api.curseforge.com" and request.url.path == "/v1/mods/32274":
                 return httpx.Response(
                     200,
@@ -1071,6 +1076,7 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata.curseforge.page_url, curseforge_page)
         self.assertEqual(metadata.curseforge.project_id, 32274)
         self.assertEqual(metadata.curseforge.file_id, 5789363)
+        self.assertTrue(metadata.curseforge.verified)
 
         persisted = ModPlatformMetadata.model_validate(metadata.model_dump(mode="json"))
         assert persisted.modrinth is not None
@@ -1251,6 +1257,7 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata.curseforge.project_id, 32274)
         self.assertEqual(metadata.curseforge.file_id, 5789363)
         self.assertIsNone(metadata.curseforge.page_url)
+        self.assertFalse(metadata.curseforge.verified)
         self.assertIn("unverified", captured.output[0])
 
     async def test_curseforge_reference_is_validated_when_api_key_is_available(self) -> None:
@@ -1287,6 +1294,7 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata.curseforge.file_id, 5789363)
         self.assertEqual(metadata.curseforge.description, "JourneyMap")
         self.assertIsNone(metadata.curseforge.page_url)
+        self.assertTrue(metadata.curseforge.verified)
         self.assertEqual(requested_paths, ["/v1/mods/32274/files/5789363", "/v1/mods/32274"])
 
     async def test_curseforge_reference_rejects_mismatched_api_response(self) -> None:

@@ -5791,6 +5791,11 @@ class ModWebAppPageMixin(
                                 ).props("filled square dense hide-bottom-space color=accent options-dark").classes(
                                     "mod-config-select mod-client-pack-select w-full"
                                 )
+                                if is_minecraft_app:
+                                    ui.label(
+                                        "If you choose CurseForge and it warns about bundled local files, choose "
+                                        "All Files only when you obtained the ZIP from this trusted server."
+                                    ).classes("mod-client-pack-section-hint mod-subtitle text-xs")
                         if show_client_pack_kubejs_toggle:
                             with ui.column().classes("mod-client-pack-section w-full"):
                                 ui.label("KubeJS").classes("mod-stat-label")

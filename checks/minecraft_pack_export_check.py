@@ -11,7 +11,13 @@ from unittest.mock import patch
 
 import config
 import httpx
-from _mod_ops import ArchiveEntry, ModArchiveEntry
+from _mod_ops import (
+    ArchiveDataEntry,
+    ArchiveEntry,
+    ClientPackValidationError,
+    ModArchiveEntry,
+    client_pack_content_hash,
+)
 from apps._config import (
     ClientPackConfig,
     ClientPackPolicy,
@@ -78,7 +84,7 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def _entries(self) -> tuple[ArchiveEntry, ...]:
+    def _entries(self, *, include_bundled: bool = True) -> tuple[ArchiveEntry, ...]:
         shared = self._mod(
             "shared.jar",
             platforms=ModPlatformMetadata(
@@ -96,6 +102,7 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
                     page_url="https://www.curseforge.com/minecraft/mc-mods/shared/files/1001",
                     project_id=101,
                     file_id=1001,
+                    verified=True,
                 ),
             ),
         )
@@ -119,16 +126,18 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
                     page_url="https://www.curseforge.com/minecraft/mc-mods/client/files/2002",
                     project_id=202,
                     file_id=2002,
+                    verified=True,
                 ),
             ),
         )
-        bundled = self._mod("bundled.jar")
-        return (
+        entries: tuple[ArchiveEntry, ...] = (
             ModArchiveEntry.from_mod(shared),
             ModArchiveEntry.from_mod(client),
-            ModArchiveEntry.from_mod(bundled),
-            ArchiveEntry(self.overrides, PurePosixPath("overrides")),
         )
+        if include_bundled:
+            bundled = self._mod("bundled.jar")
+            entries += (ModArchiveEntry.from_mod(bundled),)
+        return (*entries, ArchiveEntry(self.overrides, PurePosixPath("overrides")))
 
     @staticmethod
     def _spec(format: PackFormat) -> MinecraftPackSpec:
@@ -202,7 +211,7 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(files["mods/remote-shared.jar"]["fileSize"], 101)
 
-    async def test_exports_curseforge_manifest_and_bundles_non_platform_mods(self) -> None:
+    async def test_exports_curseforge_manifest_and_bundles_local_mods(self) -> None:
         with patch.object(config, "DIR_ZIPS", self.zips):
             archive_path = await export_minecraft_pack(
                 self._entries(),
@@ -337,13 +346,13 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
         first = self._mod(
             "first.jar",
             platforms=ModPlatformMetadata(
-                curseforge=CurseForgeModMetadata(project_id=101, file_id=1001)
+                curseforge=CurseForgeModMetadata(project_id=101, file_id=1001, verified=True)
             ),
         )
         second = self._mod(
             "second.jar",
             platforms=ModPlatformMetadata(
-                curseforge=CurseForgeModMetadata(project_id=101, file_id=1002)
+                curseforge=CurseForgeModMetadata(project_id=101, file_id=1002, verified=True)
             ),
         )
 
@@ -357,17 +366,140 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
                 "duplicate",
             )
 
-    async def test_curseforge_export_lists_non_bundleable_non_curseforge_mods(self) -> None:
+    async def test_curseforge_export_allows_unverified_metadata(self) -> None:
+        unverified = self._mod(
+            "unverified.jar",
+            platforms=ModPlatformMetadata(
+                curseforge=CurseForgeModMetadata(project_id=101, file_id=1001)
+            ),
+        )
+
+        with patch.object(config, "DIR_ZIPS", self.zips):
+            archive_path = await export_minecraft_pack(
+                (ModArchiveEntry.from_mod(unverified),),
+                self._spec(PackFormat.CURSEFORGE),
+                "unverified",
+            )
+
+        with zipfile.ZipFile(archive_path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertEqual(manifest["files"], [{"projectID": 101, "fileID": 1001, "required": True}])
+
+    async def test_curseforge_export_allows_vanilla_profiles(self) -> None:
+        spec = replace(self._spec(PackFormat.CURSEFORGE), loader="vanilla", loader_version=None)
+
+        with patch.object(config, "DIR_ZIPS", self.zips):
+            archive_path = await export_minecraft_pack(
+                self._entries(),
+                spec,
+                "vanilla",
+            )
+
+        with zipfile.ZipFile(archive_path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        self.assertEqual(manifest["minecraft"]["modLoaders"], [])
+
+    async def test_curseforge_export_rejects_non_downloadable_local_mod(self) -> None:
         blocked = self._mod(
             "blocked.jar",
             download_block_reason=ModDownloadBlockReason.OTHER,
         )
 
-        with self.assertRaisesRegex(MinecraftPackExportError, "bundling is disabled: blocked.jar"):
+        with self.assertRaisesRegex(MinecraftPackExportError, "non-downloadable local mods without metadata: blocked.jar"):
             await export_minecraft_pack(
                 (ModArchiveEntry.from_mod(blocked),),
                 self._spec(PackFormat.CURSEFORGE),
                 "blocked",
+            )
+
+    async def test_export_uses_unique_output_when_requested(self) -> None:
+        entries = (ArchiveEntry(self.overrides, PurePosixPath("overrides")),)
+
+        with patch.object(config, "DIR_ZIPS", self.zips):
+            first = await export_minecraft_pack(
+                entries,
+                self._spec(PackFormat.GENERIC_ZIP),
+                "example",
+                unique_output=True,
+            )
+            second = await export_minecraft_pack(
+                entries,
+                self._spec(PackFormat.GENERIC_ZIP),
+                "example",
+                unique_output=True,
+            )
+
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.is_file())
+        self.assertTrue(second.is_file())
+
+    def test_client_pack_hash_rejects_symlink_sources(self) -> None:
+        outside = self.root / "outside.txt"
+        outside.write_text("secret", encoding="utf-8")
+        (self.overrides / "linked.txt").symlink_to(outside)
+
+        with self.assertRaisesRegex(ClientPackValidationError, "symbolic links"):
+            client_pack_content_hash(
+                (ArchiveEntry(self.overrides, PurePosixPath("overrides")),),
+                format_name="test",
+            )
+
+    def test_client_pack_hash_includes_launcher_manifest_metadata(self) -> None:
+        mod = self._mod(
+            "manifest.jar",
+            platforms=ModPlatformMetadata(
+                curseforge=CurseForgeModMetadata(project_id=101, file_id=1001, verified=True)
+            ),
+        )
+        entry = ModArchiveEntry.from_mod(mod)
+        changed_entry = replace(
+            entry,
+            client_pack_policy=ClientPackPolicy.OPTIONAL,
+            platforms=ModPlatformMetadata(
+                curseforge=CurseForgeModMetadata(project_id=101, file_id=1002, verified=True)
+            ),
+        )
+        unverified_entry = replace(
+            entry,
+            platforms=ModPlatformMetadata(
+                curseforge=CurseForgeModMetadata(project_id=101, file_id=1001, verified=False)
+            ),
+        )
+
+        original_hash = client_pack_content_hash((entry,), format_name="test")
+        changed_hash = client_pack_content_hash((changed_entry,), format_name="test")
+        unverified_hash = client_pack_content_hash((unverified_entry,), format_name="test")
+
+        self.assertNotEqual(original_hash, changed_hash)
+        self.assertEqual(original_hash, unverified_hash)
+
+    def test_client_pack_hash_rejects_duplicate_archive_members(self) -> None:
+        source = self.overrides / "servers.dat"
+        source.write_bytes(b"manual-server")
+
+        with self.assertRaisesRegex(ClientPackValidationError, "Duplicate client-pack archive"):
+            client_pack_content_hash(
+                (
+                    ArchiveEntry(source, PurePosixPath("overrides/servers.dat")),
+                    ArchiveDataEntry(PurePosixPath("overrides/servers.dat"), b"generated-server"),
+                ),
+                format_name="test",
+            )
+
+    def test_client_pack_hash_rejects_file_directory_member_collision(self) -> None:
+        nested_directory = self.overrides / "nested"
+        nested_directory.mkdir()
+        (nested_directory / "config.json").write_text("{}", encoding="utf-8")
+        conflicting_file = self.root / "nested"
+        conflicting_file.write_bytes(b"not a directory")
+
+        with self.assertRaisesRegex(ClientPackValidationError, "Duplicate client-pack archive member path"):
+            client_pack_content_hash(
+                (
+                    ArchiveEntry(self.overrides, PurePosixPath("overrides")),
+                    ArchiveEntry(conflicting_file, PurePosixPath("overrides/nested")),
+                ),
+                format_name="test",
             )
 
     async def test_client_export_includes_server_only_entry(self) -> None:

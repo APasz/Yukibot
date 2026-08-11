@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import struct
@@ -71,7 +72,11 @@ class NodeClientPackService:
         self._node_name = node_name
         self._invalidate_app_state = invalidate_app_state
         self._invalidate_mod_inventory = invalidate_mod_inventory
+        self._client_pack_locks: dict[str, asyncio.Lock] = {}
         self._log = logging.getLogger(__name__)
+
+    def _client_pack_lock(self, app_name: str) -> asyncio.Lock:
+        return self._client_pack_locks.setdefault(app_name, asyncio.Lock())
 
     async def content_hash(
         self,
@@ -86,6 +91,8 @@ class NodeClientPackService:
             "name": metadata.name if metadata is not None else app.friendly,
             "summary": metadata.description if metadata is not None else app.cfg.notes,
         }
+        if isinstance(app, Minecraft):
+            hash_context_payload["author"] = getattr(app.cfg, "pack_author", "Yukibot")
         if metadata is not None and app.cfg.client_pack_metadata is not None:
             hash_context_payload["filename_template"] = metadata.filename_template
             hash_context_payload["include_servers_dat"] = metadata.include_servers_dat
@@ -263,43 +270,46 @@ class NodeClientPackService:
         acl: Access_Control,
         http_exception: HttpExceptionFactory,
     ) -> dict[str, object]:
+        if not app.mod_capabilities.supports_client_pack:
+            raise http_exception(400, f"{app.friendly} does not support client pack generation.")
         manager = app.has_mod_manager
         await manager.reload_mods()
         await acl.perm_check(actor_user_id, Power_Level.admin)
-        excluded_kubejs_scripts: tuple[str, ...] | None = None
-        if update.metadata is not None and not isinstance(app, Minecraft):
-            raise http_exception(409, "Client-pack metadata is only supported for Minecraft apps.")
-        if update.kubejs_scripts is not None:
-            if not isinstance(app, Minecraft):
-                raise http_exception(
-                    409,
-                    "KubeJS client-pack scripts are only supported for Minecraft apps.",
+        async with self._client_pack_lock(app.name):
+            excluded_kubejs_scripts: tuple[str, ...] | None = None
+            if update.metadata is not None and not isinstance(app, Minecraft):
+                raise http_exception(409, "Client-pack metadata is only supported for Minecraft apps.")
+            if update.kubejs_scripts is not None:
+                if not isinstance(app, Minecraft):
+                    raise http_exception(
+                        409,
+                        "KubeJS client-pack scripts are only supported for Minecraft apps.",
+                    )
+                discovered_paths = {script.relative_path for script in self.kubejs_scripts(app)}
+                submitted_paths = {script.relative_path for script in update.kubejs_scripts}
+                if submitted_paths != discovered_paths:
+                    raise http_exception(
+                        409,
+                        "KubeJS scripts changed since the client-pack configuration was loaded; reload and try again.",
+                    )
+                excluded_kubejs_scripts = tuple(
+                    sorted(
+                        (script.relative_path for script in update.kubejs_scripts if not script.included),
+                        key=str.casefold,
+                    )
                 )
-            discovered_paths = {script.relative_path for script in self.kubejs_scripts(app)}
-            submitted_paths = {script.relative_path for script in update.kubejs_scripts}
-            if submitted_paths != discovered_paths:
-                raise http_exception(
-                    409,
-                    "KubeJS scripts changed since the client-pack configuration was loaded; reload and try again.",
+            try:
+                updated_mods = await manager.update_client_pack_configs(
+                    {item.mod_name: item.client_pack for item in update.mods}
                 )
-            excluded_kubejs_scripts = tuple(
-                sorted(
-                    (script.relative_path for script in update.kubejs_scripts if not script.included),
-                    key=str.casefold,
-                )
-            )
-        try:
-            updated_mods = await manager.update_client_pack_configs(
-                {item.mod_name: item.client_pack for item in update.mods}
-            )
-        except (ModuleNotFoundError, ValueError) as xcp:
-            raise http_exception(409, str(xcp)) from xcp
-        if excluded_kubejs_scripts is not None:
-            app.cfg.client_pack_excluded_kubejs_scripts = excluded_kubejs_scripts
-        if update.metadata is not None:
-            app.cfg.client_pack_metadata = update.metadata
-        app.invalidate_client_pack_content()
-        app.persist_instance_config_overrides()
+            except (ModuleNotFoundError, ValueError) as xcp:
+                raise http_exception(409, str(xcp)) from xcp
+            if excluded_kubejs_scripts is not None:
+                app.cfg.client_pack_excluded_kubejs_scripts = excluded_kubejs_scripts
+            if update.metadata is not None:
+                app.cfg.client_pack_metadata = update.metadata
+            app.invalidate_client_pack_content()
+            app.persist_instance_config_overrides()
         self._invalidate_app_state(app.name)
         self._invalidate_mod_inventory(app.name)
         self._log.info(
@@ -324,35 +334,103 @@ class NodeClientPackService:
         acl: Access_Control,
         http_exception: HttpExceptionFactory,
     ) -> dict[str, object]:
+        if not app.mod_capabilities.supports_client_pack:
+            raise http_exception(400, f"{app.friendly} does not support client pack generation.")
         await acl.perm_check(actor_user_id, Power_Level.admin)
-        await app.has_mod_manager.reload_mods()
-        try:
-            entries = self.entries(ClientPackSelection(), app=app, include_kubejs_scripts=True)
-        except (
-            ClientPackValidationError,
-            ModuleNotFoundError,
-            NonDownloadableModError,
-        ) as xcp:
-            self._log.warning(
-                "Client-pack publication rejected: app=%s actor=%s error=%s",
-                app.name,
-                actor_user_id,
-                xcp,
+        async with self._client_pack_lock(app.name):
+            await app.has_mod_manager.reload_mods()
+            try:
+                entries = self.entries(ClientPackSelection(), app=app, include_kubejs_scripts=True)
+                content_hash = await self.content_hash(app=app, entries=entries)
+                snapshots = self.default_mod_snapshots(app)
+            except (
+                ClientPackValidationError,
+                ModuleNotFoundError,
+                NonDownloadableModError,
+            ) as xcp:
+                self._log.warning(
+                    "Client-pack publication rejected: app=%s actor=%s error=%s",
+                    app.name,
+                    actor_user_id,
+                    xcp,
+                )
+                raise http_exception(409, str(xcp)) from xcp
+            if not entries:
+                raise http_exception(409, "The default client pack contains no mods.")
+            try:
+                await self._preflight_curseforge_client_pack(app=app, entries=entries)
+            except (MinecraftPackExportError, ValueError) as xcp:
+                self._log.warning(
+                    "Client-pack CurseForge preflight rejected publication: app=%s actor=%s error=%s",
+                    app.name,
+                    actor_user_id,
+                    xcp,
+                )
+                raise http_exception(409, f"CurseForge client-pack preflight failed: {xcp}") from xcp
+            version = app.publish_client_pack(
+                content_hash,
+                changelog=update.changelog,
+                mods=snapshots,
             )
-            raise http_exception(409, str(xcp)) from xcp
-        if not entries:
-            raise http_exception(409, "The default client pack contains no mods.")
-        version = app.publish_client_pack(
-            await self.content_hash(app=app, entries=entries),
-            changelog=update.changelog,
-            mods=self.default_mod_snapshots(app),
-        )
         self._invalidate_app_state(app.name)
         return {
             "app_name": app.name,
             "published_version": version,
             "message": f"Published client pack version {version}.",
         }
+
+    async def _preflight_curseforge_client_pack(
+        self,
+        *,
+        app: App,
+        entries: tuple[ArchiveEntry | ArchiveDataEntry, ...],
+    ) -> None:
+        if not isinstance(app, Minecraft):
+            return
+        archive_path: Path | None = None
+        try:
+            archive_path = await export_minecraft_pack(
+                entries,
+                self._minecraft_pack_spec(
+                    app=app,
+                    purpose=PackPurpose.CLIENT,
+                    pack_format=PackFormat.CURSEFORGE,
+                    version_id=app.cfg.client_pack_published_version or app.next_client_pack_version,
+                ),
+                f"{app.name}-curseforge-preflight",
+                unique_output=True,
+            )
+        finally:
+            if archive_path is not None:
+                archive_path.unlink(missing_ok=True)
+
+    def _minecraft_pack_spec(
+        self,
+        *,
+        app: App,
+        purpose: PackPurpose,
+        pack_format: PackFormat,
+        version_id: str,
+    ) -> MinecraftPackSpec:
+        version = app.cfg.version
+        if version is None:
+            raise MinecraftPackExportError("Minecraft version metadata is required for launcher pack exports.")
+        client_pack_metadata = self.metadata(app) if purpose is PackPurpose.CLIENT else None
+        return MinecraftPackSpec(
+            purpose=purpose,
+            format=pack_format,
+            name=(client_pack_metadata.name if client_pack_metadata is not None else app.friendly),
+            version_id=version_id,
+            minecraft_version=version.main,
+            loader=version.loader,
+            loader_version=version.framework,
+            author=getattr(app.cfg, "pack_author", "Yukibot"),
+            summary=(
+                client_pack_metadata.description or None
+                if client_pack_metadata is not None
+                else app.cfg.notes
+            ),
+        )
 
     async def single_mod_download_file(
         self,
@@ -375,6 +453,7 @@ class NodeClientPackService:
             archive_path = await compress_mod_archive_entries(
                 (ModArchiveEntry.from_mod(mod),),
                 self.single_mod_archive_name(app=app, mod=mod),
+                unique_output=True,
             )
             self._log.info(
                 "Node API zipped directory mod: app=%s mod=%s source=%s archive=%s",
@@ -383,7 +462,11 @@ class NodeClientPackService:
                 mod.path,
                 archive_path,
             )
-            return NodeDownloadFile(path=archive_path, filename=archive_path.name, is_archive=True)
+            return NodeDownloadFile(
+                path=archive_path,
+                filename=self.single_mod_archive_name(app=app, mod=mod),
+                is_archive=True,
+            )
         self._log.warning(
             "Node API single mod path is unsupported: app=%s mod=%s path=%s",
             app.name,
@@ -398,11 +481,22 @@ class NodeClientPackService:
         app: App,
         request: NodeDownloadRequest,
         http_exception: HttpExceptionFactory,
+        _publish_lock_held: bool = False,
     ) -> FileResponse:
+        if request.publish_client_pack and not _publish_lock_held:
+            async with self._client_pack_lock(app.name):
+                return await self.build_mod_download_response(
+                    app=app,
+                    request=request,
+                    http_exception=http_exception,
+                    _publish_lock_held=True,
+                )
         await app.has_mod_manager.reload_mods()
 
         capabilities = app.mod_capabilities
         pack_purpose = request.resolved_pack_purpose
+        if request.publish_client_pack and pack_purpose is not PackPurpose.CLIENT:
+            raise http_exception(400, "Client-pack publication requires a client-pack request.")
         if pack_purpose is PackPurpose.CLIENT:
             if not capabilities.supports_client_pack:
                 raise http_exception(400, f"{app.friendly} does not support client pack generation.")
@@ -503,23 +597,32 @@ class NodeClientPackService:
             )
             raise http_exception(404, detail)
 
+        current_hash: str | None = None
         generated_pack_version: str | None = None
+        publication_mods: tuple[ClientPackModSnapshot, ...] | None = None
+        publication_changelog: str | None = None
         if pack_purpose is PackPurpose.CLIENT:
-            published_entries = self.entries(
-                app=app,
-                selection=ClientPackSelection(),
-                include_kubejs_scripts=True,
-            )
-            current_hash = await self.content_hash(app=app, entries=published_entries)
+            try:
+                published_entries = self.entries(
+                    app=app,
+                    selection=ClientPackSelection(),
+                    include_kubejs_scripts=True,
+                )
+                current_hash = await self.content_hash(app=app, entries=published_entries)
+            except ClientPackValidationError as xcp:
+                raise http_exception(400, str(xcp)) from xcp
             if app.cfg.client_pack_current_hash != current_hash:
                 app.record_client_pack_content_hash(current_hash)
             if request.publish_client_pack:
-                generated_pack_version = app.publish_client_pack(
-                    current_hash,
-                    changelog=request.publish_changelog or "",
-                    mods=self.default_mod_snapshots(app),
-                )
-                self._invalidate_app_state(app.name)
+                publication_mods = self.default_mod_snapshots(app)
+                publication_changelog = request.publish_changelog or ""
+                if (
+                    app.cfg.client_pack_published_hash == current_hash
+                    and app.cfg.client_pack_published_version is not None
+                ):
+                    generated_pack_version = app.cfg.client_pack_published_version
+                else:
+                    generated_pack_version = app.next_client_pack_version
             elif app.cfg.client_pack_published_hash != current_hash:
                 raise http_exception(
                     409,
@@ -539,41 +642,56 @@ class NodeClientPackService:
             request=request,
             client_pack_version=generated_pack_version,
         )
-        if pack_purpose is not None:
-            version = app.cfg.version
-            if version is None and request.pack_format is not PackFormat.GENERIC_ZIP:
-                raise http_exception(
-                    400,
-                    "Minecraft version metadata is required for launcher pack exports.",
-                )
-            if version is None:
-                archive_path = await compress_mod_archive_entries(entries, archive_name)
-            else:
-                client_pack_metadata = self.metadata(app) if pack_purpose is PackPurpose.CLIENT else None
-                try:
+        try:
+            if pack_purpose is not None:
+                version = app.cfg.version
+                if version is None and request.pack_format is not PackFormat.GENERIC_ZIP:
+                    raise http_exception(
+                        400,
+                        "Minecraft version metadata is required for launcher pack exports.",
+                    )
+                if version is None:
+                    archive_path = await compress_mod_archive_entries(
+                        entries,
+                        archive_name,
+                        unique_output=True,
+                    )
+                else:
                     archive_path = await export_minecraft_pack(
                         entries,
-                        MinecraftPackSpec(
+                        self._minecraft_pack_spec(
+                            app=app,
                             purpose=pack_purpose,
-                            format=request.pack_format,
-                            name=(client_pack_metadata.name if client_pack_metadata is not None else app.friendly),
+                            pack_format=request.pack_format,
                             version_id=generated_pack_version or version.main,
-                            minecraft_version=version.main,
-                            loader=version.loader,
-                            loader_version=version.framework,
-                            author=getattr(app.cfg, "pack_author", "Yukibot"),
-                            summary=(
-                                client_pack_metadata.description or None
-                                if client_pack_metadata is not None
-                                else app.cfg.notes
-                            ),
                         ),
                         archive_name,
+                        unique_output=True,
                     )
-                except MinecraftPackExportError as xcp:
-                    raise http_exception(400, str(xcp)) from xcp
-        else:
-            archive_path = await compress_mod_archive_entries(entries, archive_name)
+            else:
+                archive_path = await compress_mod_archive_entries(
+                    entries,
+                    archive_name,
+                    unique_output=True,
+                )
+        except (MinecraftPackExportError, ValueError) as xcp:
+            raise http_exception(400, str(xcp)) from xcp
+        if publication_changelog is not None:
+            assert publication_mods is not None
+            assert current_hash is not None
+            try:
+                published_version = app.publish_client_pack(
+                    current_hash,
+                    changelog=publication_changelog,
+                    mods=publication_mods,
+                )
+            except ValueError as xcp:
+                archive_path.unlink(missing_ok=True)
+                raise http_exception(400, str(xcp)) from xcp
+            if published_version != generated_pack_version:
+                archive_path.unlink(missing_ok=True)
+                raise RuntimeError("Client-pack publication version changed while its archive was being built.")
+            self._invalidate_app_state(app.name)
         self._log.info(
             "Node API sending mod archive: app=%s enabled_only=%s selected=%s entries=%s archive=%s",
             app.name,
@@ -582,7 +700,7 @@ class NodeClientPackService:
             len(entries),
             archive_path,
         )
-        return FileResponse(path=archive_path, filename=archive_path.name)
+        return FileResponse(path=archive_path, filename=archive_name)
 
     def archive_name(
         self,

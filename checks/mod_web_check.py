@@ -10709,6 +10709,8 @@ class ModWebTests(unittest.TestCase):
             client_pack=True,
             pack_purpose=PackPurpose.CLIENT,
             pack_format=PackFormat.MODRINTH,
+            publish_client_pack=True,
+            publish_changelog="Initial release.",
         )
 
         self.assertEqual(
@@ -10719,6 +10721,8 @@ class ModWebTests(unittest.TestCase):
                 "client_pack": "true",
                 "pack_purpose": "client",
                 "pack_format": "mrpack",
+                "publish_client_pack": "true",
+                "publish_changelog": "Initial release.",
                 "include_kubejs_scripts": "true",
                 "include_servers_dat": "true",
                 "include_options_txt": "true",
@@ -12175,6 +12179,12 @@ class ModWebTests(unittest.TestCase):
             client_pack_button.on_click()
             for dialog in ui.dialogs:
                 dialog.opened = 0
+
+            self.assertIn(
+                "If you choose CurseForge and it warns about bundled local files, choose All Files only when "
+                "you obtained the ZIP from this trusted server.",
+                [label.text for label in ui.labels],
+            )
 
             changelog_handler = ui.textareas[-2].handlers["change"]
             changelog_handler(SimpleNamespace(value="Persisted after Save."))
