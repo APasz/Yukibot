@@ -41,7 +41,6 @@ from .runtime_imports import (
     ModPlacement,
     ModType,
     ModWebUser,
-    NodeApiScope,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
     NodeBlueprintEntry,
@@ -2744,7 +2743,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             next_config_id: str | None = preferred_config_id if preferred_config_id in options else None
             if next_config_id is None and options:
                 next_config_id = next(iter(options))
-            select_control = cast(_ModWebSelectOptionsControl, config_select)
+            select_control = cast(_ModWebSelectOptionsControl, cast(object, config_select))
             select_control.set_options(options, value=next_config_id)
             set_selected_config(next_config_id)
             return next_config_id
@@ -2920,36 +2919,24 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         )
 
     def _save_download_url(self, *, model: ModWebBasePageModel, save: NodeSaveEntry, user: ModWebUser) -> str:
-        node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return self._remote_download_url(
-            node=node,
-            app_name=model.app_name,
-            path=f"/apps/{quote(model.app_name, safe='')}/saves/{quote(save.id, safe='/')}/download",
-            query={},
-            user=user,
-            scopes=(NodeApiScope.SAVES_DOWNLOAD,),
+        del user
+        return (
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(model.node_name, safe='')}"
+            f"/apps/{quote(model.app_name, safe='')}/saves/{quote(save.id, safe='/')}/download"
         )
 
     def _config_root_download_url(self, *, model: ModWebBasePageModel, root_id: str, user: ModWebUser) -> str:
-        node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return self._remote_download_url(
-            node=node,
-            app_name=model.app_name,
-            path=f"/apps/{quote(model.app_name, safe='')}/configs/roots/{quote(root_id, safe='')}/download",
-            query={},
-            user=user,
-            scopes=(NodeApiScope.CONFIGS_READ,),
+        del user
+        return (
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(model.node_name, safe='')}"
+            f"/apps/{quote(model.app_name, safe='')}/configs/roots/{quote(root_id, safe='')}/download"
         )
 
     def _factorio_mod_settings_download_url(self, *, model: ModWebBasePageModel, user: ModWebUser) -> str:
-        node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return self._remote_download_url(
-            node=node,
-            app_name=model.app_name,
-            path=f"/apps/{quote(model.app_name, safe='')}/factorio/mod-settings/download",
-            query={},
-            user=user,
-            scopes=(NodeApiScope.CONFIGS_READ,),
+        del user
+        return (
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(model.node_name, safe='')}"
+            f"/apps/{quote(model.app_name, safe='')}/factorio/mod-settings/download"
         )
 
     async def _read_config_content(

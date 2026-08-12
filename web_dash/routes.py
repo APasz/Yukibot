@@ -300,9 +300,10 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             )
 
         @nicegui_app.get(_PORTAL_NODE_LATENCIES_PATH)
-        async def _portal_node_latencies() -> dict[str, object]:
+        async def _portal_node_latencies(request: Request) -> dict[str, object]:
             if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
                 raise _http_exception(404, "Portal node latency measurements are only available on Portal.")
+            self._require_http_user(request=request, required_level=Power_Level.visitor)
             probes = await self._node_api.portal_node_latency_probes_async()
             return {
                 "node": config.MOD_WEB_SERVER.node_name,
@@ -840,7 +841,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             return mods.to_mapping()
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods/download")
-        def _proxy_mods_download(
+        async def _proxy_mods_download(
             node_name: str,
             app_name: str,
             request: Request,
@@ -851,7 +852,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             pack_purpose: PackPurpose | None = None,
             pack_format: PackFormat = PackFormat.GENERIC_ZIP,
             publish_client_pack: bool = False,
-        ) -> RedirectResponse:
+        ) -> StarletteResponse:
             user = self._require_http_user(
                 request=request,
                 required_level=(
@@ -873,7 +874,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             scopes = (NodeApiScope.MODS_DOWNLOAD,)
             if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN} or publish_client_pack:
                 scopes = (NodeApiScope.MODS_DOWNLOAD, NodeApiScope.MODS_WRITE)
-            return self._remote_download_redirect(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/mods/download",
@@ -894,19 +895,18 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         @nicegui_app.get(
             f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/configs/roots/{{root_id}}/download"
         )
-        def _proxy_config_root_download(
+        async def _proxy_config_root_download(
             node_name: str,
             app_name: str,
             root_id: str,
             request: Request,
-        ) -> RedirectResponse:
+        ) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            return self._remote_download_redirect(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/configs/roots/{quote(root_id, safe='')}/download",
-                query={},
                 user=user,
                 scopes=(NodeApiScope.CONFIGS_READ,),
             )
@@ -921,19 +921,18 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         @nicegui_app.get(
             f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/saves/{{save_id:path}}/download"
         )
-        def _proxy_save_download(
+        async def _proxy_save_download(
             node_name: str,
             app_name: str,
             save_id: str,
             request: Request,
-        ) -> RedirectResponse:
+        ) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.user)
             node = self._remote_node_link(node_name)
-            return self._remote_download_redirect(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/saves/{quote(save_id, safe='/')}/download",
-                query={},
                 user=user,
                 scopes=(NodeApiScope.SAVES_DOWNLOAD,),
             )
@@ -1003,15 +1002,38 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             return result.to_mapping()
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods/{{mod_name}}/download")
-        def _proxy_mod_download(node_name: str, app_name: str, mod_name: str, request: Request) -> RedirectResponse:
+        async def _proxy_mod_download(
+            node_name: str,
+            app_name: str,
+            mod_name: str,
+            request: Request,
+        ) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            return self._remote_download_redirect(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/mods/{quote(mod_name, safe='')}/download",
-                query={},
                 user=user,
+                scopes=(NodeApiScope.MODS_DOWNLOAD,),
+            )
+
+        @nicegui_app.get(
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/factorio/mod-settings/download"
+        )
+        async def _proxy_factorio_mod_settings_download(
+            node_name: str,
+            app_name: str,
+            request: Request,
+        ) -> StarletteResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            return await self._remote_stream_response_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/factorio/mod-settings/download",
+                user=user,
+                scopes=(NodeApiScope.CONFIGS_READ,),
             )
 
         if config.mirror_hosting_enabled():

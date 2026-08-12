@@ -7,6 +7,9 @@ from pathlib import Path, PurePosixPath
 import shutil
 import zipfile
 
+import config
+from archive_safety import validated_zip_entries
+
 
 class AppSaveRootMode(StrEnum):
     SELF = "self"
@@ -150,26 +153,19 @@ def resolve_app_save_target(
 
 
 def replace_directory_from_zip(*, archive_path: Path, destination: Path) -> None:
-    if not zipfile.is_zipfile(archive_path):
-        raise ValueError(f"Save upload is not a zip archive: {archive_path.name}")
+    extracted_entries = validated_zip_entries(
+        archive_path,
+        archive_label="Save upload",
+        limits=config.NODE_API_ARCHIVE_LIMITS,
+    )
 
-    extracted_entries: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
+    file_entries = [path for member, path in extracted_entries if not member.is_dir()]
+    if not file_entries:
+        raise ValueError("Save archive does not contain any files.")
+    prefix_parts = _common_archive_prefix(file_entries)
+
+    destination.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive_path, "r") as archive:
-        for member in archive.infolist():
-            raw_name = member.filename.strip("/")
-            if not raw_name:
-                continue
-            normalised_path = PurePosixPath(raw_name)
-            if normalised_path.is_absolute() or any(part in {"", ".", ".."} for part in normalised_path.parts):
-                raise ValueError(f"Save archive member path is invalid: {member.filename}")
-            extracted_entries.append((member, normalised_path))
-
-        file_entries = [path for member, path in extracted_entries if not member.is_dir()]
-        if not file_entries:
-            raise ValueError("Save archive does not contain any files.")
-        prefix_parts = _common_archive_prefix(file_entries)
-
-        destination.mkdir(parents=True, exist_ok=True)
         for member, normalised_path in extracted_entries:
             relative_path = _strip_archive_prefix(normalised_path, prefix_parts)
             if relative_path is None:

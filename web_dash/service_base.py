@@ -70,7 +70,6 @@ from .runtime_imports import (
     NodeSystemSummary,
     Path,
     Power_Level,
-    RedirectResponse,
     RestartTarget,
     StarletteResponse,
     Tooltip,
@@ -717,12 +716,6 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_remote_console_stdout_async"]
     ) -> Callable[..., Awaitable[NodeConsoleStdoutSnapshot]]: ...
-
-    @overload
-    def __getattr__(self, name: Literal["_remote_download_redirect"]) -> Callable[..., RedirectResponse]: ...
-
-    @overload
-    def __getattr__(self, name: Literal["_remote_download_url"]) -> Callable[..., str]: ...
 
     @overload
     def __getattr__(self, name: Literal["_direct_mod_upload_target"]) -> Callable[..., ModWebDirectUploadTarget]: ...

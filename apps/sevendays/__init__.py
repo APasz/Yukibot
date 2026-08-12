@@ -20,6 +20,7 @@ import hikari
 
 import config
 from _async_utils import run_blocking
+from archive_safety import validated_zip_entries
 from _discord import (
     App_Bound,
     DC_Bound,
@@ -753,20 +754,11 @@ def extract_sevendays_save_archive(
 
 
 def _sevendays_save_archive_entries(archive_path: Path) -> list[tuple[zipfile.ZipInfo, PurePosixPath]]:
-    if not zipfile.is_zipfile(archive_path):
-        raise ValueError(f"7 Days to Die save upload is not a zip archive: {archive_path.name}")
-
-    entries: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
-    with zipfile.ZipFile(archive_path, "r") as archive:
-        for member in archive.infolist():
-            raw_name = member.filename.strip("/")
-            if not raw_name:
-                continue
-            path = PurePosixPath(raw_name)
-            if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-                raise ValueError(f"7 Days to Die save archive member path is invalid: {member.filename}")
-            entries.append((member, path))
-    return entries
+    return validated_zip_entries(
+        archive_path,
+        archive_label="7 Days to Die save upload",
+        limits=config.NODE_API_ARCHIVE_LIMITS,
+    )
 
 
 def _sevendays_save_marker_prefix(path: PurePosixPath) -> tuple[str, ...] | None:

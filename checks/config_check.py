@@ -38,6 +38,15 @@ class ConfigEnvFlagTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INDEV must be a boolean flag"):
             config._parse_env_flag("development", var_name="INDEV")
 
+    def test_node_api_token_secret_must_not_reuse_data_authority_token(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be distinct"):
+            config._resolve_node_api_token_secret("shared-secret", "shared-secret")
+
+        self.assertEqual(
+            config._resolve_node_api_token_secret("node-api-secret", "authority-secret"),
+            "node-api-secret",
+        )
+
 class AppModCapabilitiesTests(unittest.TestCase):
     def test_minecraft_supports_launcher_client_packs(self) -> None:
         capabilities = mod_capabilities_for_scope("minecraft")

@@ -36,6 +36,7 @@ from _authority import (
     response_data,
     write_json_object,
 )
+from archive_safety import ZipArchiveLimits
 from deployment_metadata import DeploymentMetadata, load_deployment_metadata, parse_optional_deployment_revision
 from logging_support import HumanLogFormatter, MachineJsonFormatter, SessionRotatingFileHandler
 from restart_targets import RestartTarget
@@ -123,6 +124,7 @@ class EnvSettings(BaseSettings):
     public_base_url: str | None = None
     node_name: str | None = None
     node_api_token_secret: str | None = None
+    node_api_upload_max_bytes: str | None = None
     node_api_bind_host: str | None = None
     node_api_port: str | None = None
     node_api_public_base_url: str | None = None
@@ -1907,6 +1909,28 @@ def _parse_optional_port(raw: str | None, *, var_name: str) -> int | None:
     return value
 
 
+def _parse_positive_int(raw: str | None, *, var_name: str, default: int) -> int:
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as xcp:
+        raise ValueError(f"{var_name} must be an integer") from xcp
+    if value <= 0:
+        raise ValueError(f"{var_name} must be greater than 0")
+    return value
+
+
+def _resolve_node_api_token_secret(
+    node_api_token_secret: str | None,
+    data_authority_token: str | None,
+) -> str | None:
+    """Keep the node API signing secret isolated from authority credentials."""
+    if node_api_token_secret is not None and node_api_token_secret == data_authority_token:
+        raise ValueError("NODE_API_TOKEN_SECRET must be distinct from DATA_AUTHORITY_TOKEN.")
+    return node_api_token_secret
+
+
 def _parse_timeout_seconds(raw: str | None, *, default: float) -> float:
     if raw is None:
         return default
@@ -2476,7 +2500,16 @@ PUBLIC_ADDR = resolve_public_addr(RAW_PUBLIC_BASE_URL, public_ip=PUBLIC_IP)
 PUBLIC_BASE_URL = resolve_public_base_url(RAW_PUBLIC_BASE_URL)
 PUBLIC_UPLOADS_BASE_URL = resolve_public_uploads_base_url(PUBLIC_BASE_URL)
 NODE_NAME = _env_settings.node_name or ACTIVE_BOT_PROFILE.name.value
-NODE_API_TOKEN_SECRET = _env_settings.node_api_token_secret or DATA_AUTHORITY_TOKEN
+NODE_API_TOKEN_SECRET = _resolve_node_api_token_secret(
+    _env_settings.node_api_token_secret,
+    DATA_AUTHORITY_TOKEN,
+)
+NODE_API_UPLOAD_MAX_BYTES = _parse_positive_int(
+    _env_settings.node_api_upload_max_bytes,
+    var_name="NODE_API_UPLOAD_MAX_BYTES",
+    default=1 * 1024 * 1024 * 1024,
+)
+NODE_API_ARCHIVE_LIMITS = ZipArchiveLimits()
 NODE_API_BIND_HOST = _parse_bind_host(_env_settings.node_api_bind_host)
 NODE_API_PORT = _parse_optional_port(_env_settings.node_api_port, var_name="NODE_API_PORT")
 MOD_WEB_BIND_HOST = _parse_bind_host(_env_settings.mod_web_bind_host) or "0.0.0.0"

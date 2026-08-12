@@ -123,6 +123,9 @@ from .runtime_imports import (
     urlsplit,
     urlunsplit,
 )
+
+
+_DEVELOPMENT_UNAUTHENTICATED_NODE_TOKEN = "development-unauthenticated"
 from .service_base import ModWebServiceSupport
 from .types import (
     ModWebBasePageModel,
@@ -2466,11 +2469,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
         path: str,
         scopes: tuple[NodeApiScope, ...],
         user: ModWebUser,
+        query: Mapping[str, object] | None = None,
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> StarletteResponse:
         token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
         node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
         url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
+        if query:
+            url = f"{url}?{urlencode(query, doseq=True)}"
         session = await self._remote_http_client()
         response_context = session.get(
             url,
@@ -2491,9 +2497,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
 
         forwarded_headers = {
             header_name: header_value
-            for header_name in ("Cache-Control", "ETag", "Last-Modified", "Expires")
+            for header_name in ("Cache-Control", "Content-Disposition", "ETag", "Expires", "Last-Modified")
             if (header_value := response.headers.get(header_name))
         }
+        forwarded_headers["Referrer-Policy"] = "no-referrer"
 
         async def _stream_body() -> AsyncIterator[bytes]:
             try:
@@ -2547,42 +2554,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
         await upload_file.save(temp_path)
         return temp_path
 
-    def _remote_download_redirect(
-        self,
-        *,
-        node: ModWebNodeLink,
-        app_name: str,
-        path: str,
-        query: Mapping[str, object],
-        user: ModWebUser,
-        scopes: tuple[NodeApiScope, ...] = (NodeApiScope.MODS_DOWNLOAD,),
-    ) -> RedirectResponse:
-        return RedirectResponse(
-            self._remote_download_url(node=node, app_name=app_name, path=path, query=query, user=user, scopes=scopes),
-            status_code=302,
-        )
-
-    def _remote_download_url(
-        self,
-        *,
-        node: ModWebNodeLink,
-        app_name: str,
-        path: str,
-        query: Mapping[str, object],
-        user: ModWebUser,
-        scopes: tuple[NodeApiScope, ...] = (NodeApiScope.MODS_DOWNLOAD,),
-    ) -> str:
-        token: str = self._remote_token(
-            node=node,
-            app_name=app_name,
-            scopes=scopes,
-            user=user,
-        )
-        query_with_token: dict[str, object] = dict[str, object](query)
-        query_with_token["access_token"] = token
-        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
-        return f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}?{urlencode(query_with_token, doseq=True)}"
-
     def _remote_token(
         self,
         *,
@@ -2593,7 +2564,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
     ) -> str:
         secret: str | None = config.MOD_WEB_SERVER.token_secret
         if secret is None:
-            raise RuntimeError("NODE_API_TOKEN_SECRET or DATA_AUTHORITY_TOKEN is required to proxy remote nodes.")
+            if config.INDEV or config.ALLOW_UNAUTH_NODE_API:
+                return _DEVELOPMENT_UNAUTHENTICATED_NODE_TOKEN
+            raise RuntimeError("NODE_API_TOKEN_SECRET is required to proxy remote nodes.")
         return issue_node_token(
             secret=secret,
             grant=NodeAccessGrant(
@@ -2611,7 +2584,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
 
         secret: str | None = config.MOD_WEB_SERVER.token_secret
         if secret is None:
-            raise RuntimeError("NODE_API_TOKEN_SECRET or DATA_AUTHORITY_TOKEN is required to monitor remote nodes.")
+            raise RuntimeError("NODE_API_TOKEN_SECRET is required to monitor remote nodes.")
         return issue_node_token(
             secret=secret,
             grant=NodeAccessGrant(

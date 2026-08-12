@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+from itertools import islice
 import json
 import logging
 import mimetypes
@@ -39,6 +40,7 @@ from _minecraft_heads import minecraft_avatar_uri, minecraft_dev_bypass_head_dat
 from _resolator import Resolutator
 from _security import Access_Control
 from _utils import Utilities
+from safe_http import PublicAddressResolver, validate_public_http_url
 from chat_hub import (
     ChatAttachment,
     ChatAuthor,
@@ -121,6 +123,8 @@ _ATTACHMENT_EXTENSION_RE: Pattern[str] = re.compile(r"\.[A-Za-z0-9]{1,16}$")
 _ATTACHMENT_UNSAFE_NAME_CHARS_RE: Pattern[str] = re.compile(r"[\r\n\t,\[\]]+")
 _ATTACHMENT_MULTI_SPACE_RE: Pattern[str] = re.compile(r"\s+")
 _TENOR_GRABBER_MODULE: ModuleType = tenorgrabber
+_MAX_LINK_ENRICHMENTS_PER_MESSAGE = 8
+_LINK_ENRICHMENT_CONNECTION_LIMIT = 4
 
 
 def color_int_to_hex(color: int | None) -> str | None:
@@ -657,18 +661,24 @@ class Message:
     @staticmethod
     def _media_provider_for_url(url: str) -> MediaProvider:
         host = (urlparse(url).hostname or "").casefold()
-        if "tenor.com" in host:
+        if Message._host_is_in_domain(host, "tenor.com"):
             return MediaProvider.TENOR
-        if "giphy.com" in host:
+        if Message._host_is_in_domain(host, "giphy.com"):
             return MediaProvider.GIPHY
-        if "klipy.com" in host:
-            return MediaProvider.KLIPY
-        if "static.klipy.com" in host:
+        if Message._host_is_in_domain(host, "klipy.com"):
             return MediaProvider.KLIPY
         return MediaProvider.DIRECT if host else MediaProvider.UNKNOWN
 
     @staticmethod
+    def _host_is_in_domain(host: str, domain: str) -> bool:
+        """Return whether a hostname is the provider domain or one of its subdomains."""
+        return host == domain or host.endswith(f".{domain}")
+
+    @staticmethod
     def _resolve_tenor_media_url(url: str) -> str | None:
+        host = (urlparse(url).hostname or "").casefold()
+        if not Message._host_is_in_domain(host, "tenor.com"):
+            return None
         getgiflink = cast(Callable[[str], object] | None, getattr(_TENOR_GRABBER_MODULE, "getgiflink", None))
         if getgiflink is None:
             return None
@@ -679,7 +689,7 @@ class Message:
     def _tenor_view_post_id(url: str) -> str | None:
         parsed = urlparse(url)
         host = (parsed.hostname or "").casefold()
-        if "tenor.com" not in host:
+        if not Message._host_is_in_domain(host, "tenor.com"):
             return None
         path_parts = [part for part in parsed.path.split("/") if part]
         if not path_parts:
@@ -845,7 +855,7 @@ class Message:
     def _resolve_giphy_media_url(url: str) -> str | None:
         parsed = urlparse(url)
         host = (parsed.hostname or "").casefold()
-        if "giphy.com" not in host:
+        if not Message._host_is_in_domain(host, "giphy.com"):
             return None
         path_parts = [part for part in parsed.path.split("/") if part]
         if not path_parts:
@@ -866,6 +876,7 @@ class Message:
 
     async def _fetch_page_html(self, session: aiohttp.ClientSession, url: str) -> str | None:
         try:
+            validate_public_http_url(url)
             async with session.get(
                 url,
                 allow_redirects=True,
@@ -878,13 +889,14 @@ class Message:
                     )
                 },
             ) as resp:
+                validate_public_http_url(str(resp.url))
                 if resp.status >= 400:
                     return None
                 content_type = resp.headers.get("Content-Type", "").lower()
                 if "text/html" not in content_type:
                     return None
                 return await resp.text()
-        except Exception:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             return None
 
     async def _resolve_special_media_url(
@@ -920,15 +932,22 @@ class Message:
 
     async def _resolve_url_metadata(self, session: aiohttp.ClientSession, url: str) -> tuple[str, str | None]:
         try:
+            validate_public_http_url(url)
             async with session.head(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                validate_public_http_url(str(resp.url))
                 return str(resp.url), resp.headers.get("Content-Type", "").lower()
-        except Exception:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             return url, None
 
     async def _enrich_links(self, links: dict[str, str | None]) -> set[URLish]:
         enriched: set[URLish] = set()
 
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(
+            resolver=PublicAddressResolver(),
+            limit=_LINK_ENRICHMENT_CONNECTION_LIMIT,
+            limit_per_host=2,
+        )
+        async with aiohttp.ClientSession(connector=connector) as session:
 
             async def enrich_one(url: str, label: str | None) -> None:
                 provider = self._media_provider_for_url(url)
@@ -969,7 +988,12 @@ class Message:
                     )
                 enriched.add(urlish)
 
-            await asyncio.gather(*(enrich_one(url, label) for url, label in links.items()))
+            await asyncio.gather(
+                *(
+                    enrich_one(url, label)
+                    for url, label in islice(links.items(), _MAX_LINK_ENRICHMENTS_PER_MESSAGE)
+                )
+            )
 
         return enriched
 

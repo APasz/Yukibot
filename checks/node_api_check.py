@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast, get_type_hints
 from unittest.mock import AsyncMock, Mock, patch
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import hikari
 import requests
@@ -595,6 +595,9 @@ class NodeApiTests(unittest.TestCase):
             )
 
         self.assertIsNone(grant)
+
+    def test_request_token_ignores_query_parameter_value(self) -> None:
+        self.assertEqual(NodeApiService._request_token(self._request(), "query-token"), "")
 
     def test_app_color_hex_formats_embed_color(self) -> None:
         self.assertEqual(NodeApiService.app_color_hex(0x22C55E), "#22C55E")
@@ -1285,7 +1288,7 @@ class NodeApiTests(unittest.TestCase):
         )
         self.assertEqual(deleted_recipe_book.mutations, ())
 
-    def test_single_mod_download_url_is_signed_and_escaped(self) -> None:
+    def test_single_mod_download_url_omits_bearer_token_and_escapes_path(self) -> None:
         server = replace(
             config.MOD_WEB_SERVER,
             node_name="erin",
@@ -1297,21 +1300,11 @@ class NodeApiTests(unittest.TestCase):
             url = service.single_mod_download_url("minecraft alpha", "Some Mod+1.0.jar", subject="42")
 
         parsed = urlsplit(url)
-        query = parse_qs(parsed.query)
-        token = query["access_token"][0]
-
         self.assertEqual(
             parsed.path,
             "/api/node/apps/minecraft%20alpha/mods/Some%20Mod%2B1.0.jar/download",
         )
-        grant = verify_node_token(
-            secret="secret",
-            token=token,
-            node="erin",
-            app="minecraft alpha",
-            required_scopes=(NodeApiScope.MODS_DOWNLOAD,),
-        )
-        self.assertEqual(grant.subject, "42")
+        self.assertEqual(parsed.query, "")
 
     def test_ping_url_uses_base_path_without_token(self) -> None:
         server = replace(
@@ -1341,7 +1334,7 @@ class NodeApiTests(unittest.TestCase):
                 "/api/node/presence/stream",
             )
 
-    def test_map_api_url_is_signed_and_escaped(self) -> None:
+    def test_map_api_url_omits_bearer_token_and_escapes_path(self) -> None:
         server = replace(
             config.MOD_WEB_SERVER,
             node_name="erin",
@@ -1353,18 +1346,8 @@ class NodeApiTests(unittest.TestCase):
             url = service.map_api_url("minecraft alpha", subject="42", base_url="/api/node")
 
         parsed = urlsplit(url)
-        query = parse_qs(parsed.query)
-        token = query["access_token"][0]
-
         self.assertEqual(parsed.path, "/api/node/apps/minecraft%20alpha/map")
-        grant = verify_node_token(
-            secret="secret",
-            token=token,
-            node="erin",
-            app="minecraft alpha",
-            required_scopes=(NodeApiScope.MAP_READ,),
-        )
-        self.assertEqual(grant.subject, "42")
+        self.assertEqual(parsed.query, "")
 
     def test_mod_download_url_omits_token_when_secret_is_unset(self) -> None:
         server = replace(
@@ -1407,7 +1390,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(form.action_url, "/api/node/apps/minecraft%20alpha/mods/download")
         self.assertIsNotNone(form.access_token)
 
-    def test_config_file_url_is_signed_and_escaped(self) -> None:
+    def test_config_file_url_omits_bearer_token_and_escapes_path(self) -> None:
         server = replace(
             config.MOD_WEB_SERVER,
             node_name="erin",
@@ -1419,23 +1402,13 @@ class NodeApiTests(unittest.TestCase):
             url = service.config_file_url("minecraft alpha", "mod-configs/Foo Bar/config.toml", subject="42")
 
         parsed = urlsplit(url)
-        query = parse_qs(parsed.query)
-        token = query["access_token"][0]
-
         self.assertEqual(
             parsed.path,
             "/api/node/apps/minecraft%20alpha/configs/mod-configs/Foo%20Bar/config.toml",
         )
-        grant = verify_node_token(
-            secret="secret",
-            token=token,
-            node="erin",
-            app="minecraft alpha",
-            required_scopes=(NodeApiScope.CONFIGS_READ,),
-        )
-        self.assertEqual(grant.subject, "42")
+        self.assertEqual(parsed.query, "")
 
-    def test_config_root_download_url_is_signed_and_escaped(self) -> None:
+    def test_config_root_download_url_omits_bearer_token_and_escapes_path(self) -> None:
         server = replace(
             config.MOD_WEB_SERVER,
             node_name="erin",
@@ -1447,23 +1420,13 @@ class NodeApiTests(unittest.TestCase):
             url = service.config_root_download_url("minecraft alpha", "mod-configs", subject="42")
 
         parsed = urlsplit(url)
-        query = parse_qs(parsed.query)
-        token = query["access_token"][0]
-
         self.assertEqual(
             parsed.path,
             "/api/node/apps/minecraft%20alpha/configs/roots/mod-configs/download",
         )
-        grant = verify_node_token(
-            secret="secret",
-            token=token,
-            node="erin",
-            app="minecraft alpha",
-            required_scopes=(NodeApiScope.CONFIGS_READ,),
-        )
-        self.assertEqual(grant.subject, "42")
+        self.assertEqual(parsed.query, "")
 
-    def test_settings_url_is_signed_and_escaped(self) -> None:
+    def test_settings_url_omits_bearer_token_and_escapes_path(self) -> None:
         server = replace(
             config.MOD_WEB_SERVER,
             node_name="erin",
@@ -1475,20 +1438,10 @@ class NodeApiTests(unittest.TestCase):
             url = service.list_settings_url("minecraft alpha", subject="42")
 
         parsed = urlsplit(url)
-        query = parse_qs(parsed.query)
-        token = query["access_token"][0]
-
         self.assertEqual(parsed.path, "/api/node/apps/minecraft%20alpha/settings")
-        grant = verify_node_token(
-            secret="secret",
-            token=token,
-            node="erin",
-            app="minecraft alpha",
-            required_scopes=(NodeApiScope.SETTINGS_READ,),
-        )
-        self.assertEqual(grant.subject, "42")
+        self.assertEqual(parsed.query, "")
 
-    def test_save_download_url_is_signed_and_escaped(self) -> None:
+    def test_save_download_url_omits_bearer_token_and_escapes_path(self) -> None:
         server = replace(
             config.MOD_WEB_SERVER,
             node_name="erin",
@@ -1500,21 +1453,11 @@ class NodeApiTests(unittest.TestCase):
             url = service.save_download_url("minecraft alpha", "world/Current World", subject="42")
 
         parsed = urlsplit(url)
-        query = parse_qs(parsed.query)
-        token = query["access_token"][0]
-
         self.assertEqual(
             parsed.path,
             "/api/node/apps/minecraft%20alpha/saves/world/Current%20World/download",
         )
-        grant = verify_node_token(
-            secret="secret",
-            token=token,
-            node="erin",
-            app="minecraft alpha",
-            required_scopes=(NodeApiScope.SAVES_DOWNLOAD,),
-        )
-        self.assertEqual(grant.subject, "42")
+        self.assertEqual(parsed.query, "")
 
     def test_registered_routes_expose_real_fastapi_request_annotations(self) -> None:
         handlers: dict[str, object] = {}
@@ -4917,7 +4860,7 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(probe.discord_service_state, node_api.DiscordServiceState.DEGRADED)
 
-    def test_portal_node_latencies_are_returned_by_presence_stream(self) -> None:
+    def test_presence_stream_does_not_trigger_portal_latency_probes(self) -> None:
         sent_payloads: list[object] = []
 
         class _PresenceWebSocket:
@@ -4945,28 +4888,21 @@ class NodeApiTests(unittest.TestCase):
                 return None
 
         service = NodeApiService()
-        portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
-        with (
-            patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile),
-            patch.object(
-                service,
-                "portal_node_latencies_async",
-                new=AsyncMock(return_value={"yuki": 12, "erin": 34}),
-            ),
-        ):
+        portal_latencies = AsyncMock(return_value={"yuki": 12, "erin": 34})
+        with patch.object(service, "portal_node_latencies_async", new=portal_latencies):
             asyncio.run(service._serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
 
         self.assertEqual(
             sent_payloads,
             [
                 {
-                    "type": "node_latencies",
+                    "type": "pong",
                     "node": service.node_name,
                     "sample_id": None,
-                    "latencies": {"yuki": 12, "erin": 34},
                 }
             ],
         )
+        portal_latencies.assert_not_awaited()
 
     def test_serve_presence_stream_ignores_disconnect_while_closing_websocket(
         self,

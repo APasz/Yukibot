@@ -53,11 +53,12 @@ Sister bots also push a typed bot-metadata snapshot to Yuki through the same aut
 - `NODE_API_PUBLIC_BASE_URL` controls the published public base used for node API links and registry metadata when a dedicated node API server is enabled. If unset, it defaults to the mod web public base.
 - `MOD_WEB_BIND_HOST` controls the interface NiceGUI binds to and defaults to `0.0.0.0`.
 - `NODE_NAME` identifies the local host in node API tokens and defaults to the active bot profile name.
-- `NODE_API_TOKEN_SECRET` signs direct node API links. If unset, Yukibot falls back to `DATA_AUTHORITY_TOKEN`; if both are unset, node API requests fail closed.
+- `NODE_API_TOKEN_SECRET` signs Node API bearer tokens. It must be an independently generated secret and must not match `DATA_AUTHORITY_TOKEN`; requests fail closed when it is absent outside explicitly unauthenticated development mode.
+- `NODE_API_UPLOAD_MAX_BYTES` caps each Node API upload (default: 1 GiB). ZIP save uploads additionally enforce file-count, individual-file, extracted-size, and compression-ratio limits.
 - Unauthenticated node API access is allowed only in `INDEV` or when `ALLOW_UNAUTH_NODE_API=true` is explicitly set.
 - `MOD_WEB_DISCORD_CLIENT_ID` and `MOD_WEB_DISCORD_CLIENT_SECRET` enable Discord login for the mod web UI.
 - The Discord OAuth redirect defaults to `{MOD_WEB_PUBLIC_BASE_URL}/auth/discord/callback`; override it with `MOD_WEB_AUTH_REDIRECT_URL` only when Discord is configured with a different public callback.
-- `MOD_WEB_SESSION_CACHE_DIR` defaults to `.cache/mod_web_sessions`; Portal persists browser sessions and pending OAuth state there so Portal restarts do not force users to sign in again.
+- `MOD_WEB_SESSION_CACHE_DIR` defaults to `.cache/mod_web_sessions`; Portal persists browser sessions and pending OAuth state there so Portal restarts do not force users to sign in again. The cache directory must be private to the service account; group- or world-writable directories are rejected.
 - `/mod-web/mirrors` is available only on the standalone Portal profile to `user` access and above. It can publish validated snapshots from public GitHub/GitLab repositories or uploaded ZIP archives; owners manage their own mirrors and `admin` access can manage all of them.
 - `MIRROR_STORAGE_DIR` defaults to `mirror_data` on Portal only. It holds the mirror catalogue, immutable upload sources, and the currently published snapshots, so it must be persistent storage on the Portal host. Yuki and Erin neither create this storage nor expose mirror routes.
 - ComputerCraft clients fetch a public Portal mirror at `/mirror/v1/projects/<mirror-id>/manifest.json` and `/mirror/v1/projects/<mirror-id>/files/<path>?revision=<manifest-revision>`. Manifest responses revalidate on every check; revision-qualified files are immutable and Portal retains the latest four snapshots for a safe update retry.
@@ -69,7 +70,7 @@ Sister bots also push a typed bot-metadata snapshot to Yuki through the same aut
 - Normal sign-ins use a browser-session cookie with a 16-hour server expiry. “Remember me” uses a persistent cookie with a 30-day absolute expiry.
 - Mod web browser sessions authenticate as Discord user IDs and authorise through `users.json` / `Access_Control`; `visitor` access can use chat-only web relay routes, while `user` and above can use the broader mod web tools.
 - `BYPASS_WEB_AUTH=true` skips Discord web auth only when `INDEV` is also set. It is intended for local development and is ignored outside `INDEV`.
-- When the standalone portal hosts the web UI, sibling nodes do not need Discord OAuth credentials; the portal reads their node API with short-lived tokens signed by the shared `NODE_API_TOKEN_SECRET` / `DATA_AUTHORITY_TOKEN`, and remote downloads redirect to the owning node with a scoped short-lived token.
+- When the standalone portal hosts the web UI, sibling nodes do not need Discord OAuth credentials; the portal reads their Node API with short-lived `NODE_API_TOKEN_SECRET` bearer tokens. Remote downloads are streamed through the portal, so those bearer tokens never enter browser URLs.
 - Mods with a `download_block_reason` in their mod DB entry are listed in the web UI but excluded from downloads; 7D2D built-in mods are marked this way automatically.
 - Downloadable mods may define `client_pack.policy` as `required` (the default), `optional`, or `alternative`. Optional mods start selected in the client-pack dialog.
 - Alternative mods must share a non-empty `client_pack.choice_group`; every group requires at least two mods and exactly one entry with `client_pack.default_choice` set to `true`.

@@ -22,6 +22,7 @@ import config
 from _async_utils import run_blocking
 from _audit import audit_log
 from _security import Access_Control, Power_Level
+from cache_safety import prepare_private_cache_directory
 
 log: Logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ class ModWebAuthService:
     def __init__(self, auth_config: config.ModWebAuthConfig | None = None) -> None:
         self._config = auth_config or config.MOD_WEB_AUTH
         cache_directory: Path | None = self._config.session_cache_directory
-        self._cache = Cache(directory=None if cache_directory is None else str(cache_directory))
+        self._cache = Cache(directory=prepare_private_cache_directory(cache_directory))
         self._session_memory_cache: OrderedDict[str, ModWebSession] = OrderedDict()
 
     @property

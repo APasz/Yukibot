@@ -6,6 +6,7 @@ from typing import cast
 from diskcache import Cache
 
 from apps._config import CLIENT_PACK_CHANGELOG_MAX_LENGTH
+from cache_safety import prepare_private_cache_directory
 
 type ClientPackDraftKey = tuple[str, str, str]
 
@@ -14,7 +15,7 @@ class ClientPackDraftStore:
     """Persistent shared client-pack changelog drafts owned by the dashboard."""
 
     def __init__(self, directory: Path | None) -> None:
-        self._cache = Cache(directory=None if directory is None else str(directory))
+        self._cache = Cache(directory=prepare_private_cache_directory(directory))
 
     @staticmethod
     def _key(node_name: str, app_name: str) -> ClientPackDraftKey:

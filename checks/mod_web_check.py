@@ -10593,7 +10593,7 @@ class ModWebTests(unittest.TestCase):
             "Forwarded from Yoko",
         )
 
-    def test_remote_download_url_points_at_owning_node_with_scoped_token(self) -> None:
+    def test_remote_stream_download_uses_authorization_header_without_url_token(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="yuki", token_secret="shared-secret")
         node = ModWebNodeLink(
             node_name="erin",
@@ -10605,18 +10605,52 @@ class ModWebTests(unittest.TestCase):
         )
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
 
-        with patch.object(config, "MOD_WEB_SERVER", server):
-            url = ModWebService()._remote_download_url(
-                node=node,
-                app_name="minecraft alpha",
-                path="/apps/minecraft%20alpha/mods/download",
-                query={"enabled_only": "true", "mod_name": ["one.jar", "two.jar"]},
-                user=user,
-            )
+        captured: dict[str, object] = {}
 
-        parsed = urlsplit(url)
+        class _ResponseContent:
+            async def iter_chunked(self, chunk_size: int):
+                del chunk_size
+                yield b"download"
+
+        class _ResponseContext:
+            async def __aenter__(self) -> object:
+                return SimpleNamespace(
+                    status=200,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "Content-Disposition": 'attachment; filename="mods.zip"',
+                    },
+                    content=_ResponseContent(),
+                )
+
+            async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+                del exc_type, exc, traceback
+
+        class _Session:
+            def get(self, url: str, *, headers: dict[str, str], timeout: object) -> _ResponseContext:
+                captured.update(url=url, headers=headers, timeout=timeout)
+                return _ResponseContext()
+
+        async def _request_download() -> tuple[bytes, object]:
+            service = ModWebService()
+            with (
+                patch.object(config, "MOD_WEB_SERVER", server),
+                patch.object(service, "_remote_http_client", new=AsyncMock(return_value=_Session())),
+            ):
+                response = await service._remote_stream_response_async(
+                    node=node,
+                    app_name="minecraft alpha",
+                    path="/apps/minecraft%20alpha/mods/download",
+                    query={"enabled_only": "true", "mod_name": ["one.jar", "two.jar"]},
+                    scopes=(NodeApiScope.MODS_DOWNLOAD,),
+                    user=user,
+                )
+                return b"".join([chunk async for chunk in response.body_iterator]), response
+
+        body, response = asyncio.run(_request_download())
+        parsed = urlsplit(cast(str, captured["url"]))
         query = parse_qs(parsed.query)
-        token = query["access_token"][0]
+        token = cast(dict[str, str], captured["headers"])["Authorization"].removeprefix("Bearer ")
         grant = verify_node_token(
             secret="shared-secret",
             token=token,
@@ -10625,11 +10659,14 @@ class ModWebTests(unittest.TestCase):
             required_scopes=(NodeApiScope.MODS_DOWNLOAD,),
         )
 
+        self.assertEqual(body, b"download")
         self.assertEqual(parsed.scheme, "https")
         self.assertEqual(parsed.netloc, "erin.example")
         self.assertEqual(parsed.path, "/api/node/apps/minecraft%20alpha/mods/download")
         self.assertEqual(query["enabled_only"], ["true"])
         self.assertEqual(query["mod_name"], ["one.jar", "two.jar"])
+        self.assertNotIn("access_token", query)
+        self.assertEqual(response.headers["referrer-policy"], "no-referrer")
         self.assertEqual(grant.subject, "web:42")
 
     def test_direct_upload_targets_point_at_node_with_scoped_tokens(self) -> None:
@@ -10779,7 +10816,7 @@ class ModWebTests(unittest.TestCase):
             Power_Level.sudo,
         )
 
-    def test_config_root_download_url_uses_configs_read_scope(self) -> None:
+    def test_config_root_download_url_uses_same_origin_proxy_without_url_token(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="yuki", token_secret="shared-secret")
         node = ModWebNodeLink(
             node_name="erin",
@@ -10813,28 +10850,15 @@ class ModWebTests(unittest.TestCase):
         )
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
 
-        with (
-            patch.object(config, "MOD_WEB_SERVER", server),
-            patch.object(ModWebService, "_remote_node_link", return_value=node),
-        ):
+        with patch.object(config, "MOD_WEB_SERVER", server):
             url = ModWebService()._config_root_download_url(model=model, root_id="mod-configs", user=user)
 
         parsed = urlsplit(url)
-        query = parse_qs(parsed.query)
-        token = query["access_token"][0]
-        grant = verify_node_token(
-            secret="shared-secret",
-            token=token,
-            node="erin",
-            app="minecraft alpha",
-            required_scopes=(NodeApiScope.CONFIGS_READ,),
-        )
-
         self.assertEqual(
             parsed.path,
-            "/api/node/apps/minecraft%20alpha/configs/roots/mod-configs/download",
+            "/api/node-proxy/erin/apps/minecraft%20alpha/configs/roots/mod-configs/download",
         )
-        self.assertEqual(grant.subject, "web:42")
+        self.assertEqual(parsed.query, "")
 
     def test_download_feedback_message_formats_selected_downloads(self) -> None:
         message = ModWebService._download_feedback_message(

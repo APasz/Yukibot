@@ -188,7 +188,7 @@ from node_api_system import (
     NodeSystemSummary,
 )
 from node_api_system_routes import register_system_routes
-from node_api_upload import persist_upload_to_temp
+from node_api_upload import NodeApiRequestBodyLimitMiddleware, persist_upload_to_temp
 from node_auth import (
     NodeAccessGrant,
     NodeApiScope,
@@ -227,6 +227,8 @@ _NODE_SYSTEM_HISTORY_MAX_SAMPLES = node_api_system.SYSTEM_HISTORY_RETENTION_SECO
     node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS
 )
 _NODE_SYSTEM_LOG_MAX_LINES = 500
+_MAX_PRESENCE_STREAM_CONNECTIONS = 64
+_MAX_PRESENCE_STREAM_MESSAGES_PER_MINUTE = 24
 
 
 @dataclass(frozen=True, slots=True)
@@ -514,6 +516,8 @@ class NodeApiService:
         self._system_summary_cache_lock = threading.RLock()
         self._system_history: deque[NodeSystemSample] = deque(maxlen=_NODE_SYSTEM_HISTORY_MAX_SAMPLES)
         self._system_history_lock = threading.RLock()
+        self._presence_stream_connection_count = 0
+        self._presence_stream_connection_lock = threading.Lock()
         self._system_history_task: asyncio.Task[None] | None = None
         self._app_mutations = node_api_app_state.NodeAppMutationService(
             node_name=lambda: self.node_name,
@@ -687,6 +691,11 @@ class NodeApiService:
         if self._routes_registered:
             return
 
+        nicegui_app.add_middleware(
+            NodeApiRequestBodyLimitMiddleware,
+            max_bytes=config.NODE_API_UPLOAD_MAX_BYTES,
+            api_prefix=_NODE_API_PREFIX,
+        )
         nicegui_app.add_middleware(
             CORSMiddleware,
             allow_origins=("*",),
@@ -2212,12 +2221,26 @@ class NodeApiService:
             await self._close_websocket_quietly(websocket)
 
     async def _serve_presence_stream(self, *, websocket: WebSocket) -> None:
+        if not self._try_reserve_presence_stream_connection():
+            await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER, reason="Presence stream capacity reached.")
+            return
         await websocket.accept()
+        message_times: deque[float] = deque()
         try:
             while True:
                 message = await websocket.receive()
                 if message.get("type") == "websocket.disconnect":
                     return
+                now = time.monotonic()
+                while message_times and now - message_times[0] >= 60.0:
+                    message_times.popleft()
+                if len(message_times) >= _MAX_PRESENCE_STREAM_MESSAGES_PER_MINUTE:
+                    await websocket.close(
+                        code=status.WS_1008_POLICY_VIOLATION,
+                        reason="Presence stream message rate exceeded.",
+                    )
+                    return
+                message_times.append(now)
                 sample_id: str | None = None
                 payload: Mapping[str, object] | None = None
                 payload_text = message.get("text")
@@ -2231,16 +2254,6 @@ class NodeApiService:
                         raw_sample_id = payload.get("sample_id")
                         if raw_sample_id is not None:
                             sample_id = str(raw_sample_id)
-                if payload is not None and payload.get("type") == "node_latencies":
-                    await websocket.send_json(
-                        {
-                            "type": "node_latencies",
-                            "node": self.node_name,
-                            "sample_id": sample_id,
-                            "latencies": await self.portal_node_latencies_async(),
-                        }
-                    )
-                    continue
                 response: dict[str, object] = {
                     "type": "pong",
                     "node": self.node_name,
@@ -2257,6 +2270,20 @@ class NodeApiService:
             return
         finally:
             await self._close_websocket_quietly(websocket)
+            self._release_presence_stream_connection()
+
+    def _try_reserve_presence_stream_connection(self) -> bool:
+        with self._presence_stream_connection_lock:
+            if self._presence_stream_connection_count >= _MAX_PRESENCE_STREAM_CONNECTIONS:
+                return False
+            self._presence_stream_connection_count += 1
+            return True
+
+    def _release_presence_stream_connection(self) -> None:
+        with self._presence_stream_connection_lock:
+            if self._presence_stream_connection_count <= 0:
+                raise RuntimeError("Presence stream connection count underflow.")
+            self._presence_stream_connection_count -= 1
 
     def _discord_heartbeat_latency_ms(self) -> int | None:
         if config.ACTIVE_BOT_PROFILE.name not in {
@@ -3846,12 +3873,8 @@ class NodeApiService:
         return self._app_operations.resolve_console_action(app, action_key)
 
     def apps_url(self, *, subject: str = "web", base_url: str | None = None) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=None,
-            scopes=(NodeApiScope.APPS_READ,),
-        )
-        return self._with_access_token(f"{self._base_url(base_url)}/apps", token)
+        del subject
+        return f"{self._base_url(base_url)}/apps"
 
     def ping_url(self, *, base_url: str | None = None) -> str:
         return f"{self._base_url(base_url)}/ping"
@@ -3860,20 +3883,12 @@ class NodeApiService:
         return f"{self._base_url(base_url)}/presence/stream"
 
     def map_api_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.MAP_READ,),
-        )
-        return self._with_access_token(f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/map", token)
+        del subject
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/map"
 
     def list_mods_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_READ,),
-        )
-        return self._with_access_token(f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/mods", token)
+        del subject
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/mods"
 
     def mod_download_url(
         self,
@@ -3883,16 +3898,9 @@ class NodeApiService:
         subject: str = "web",
         base_url: str | None = None,
     ) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_DOWNLOAD,),
-        )
+        del subject
         query: dict[str, str] = {"enabled_only": str(enabled_only).lower()}
-        return self._with_access_token(
-            f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/mods/download?{urlencode(query)}",
-            token,
-        )
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/mods/download?{urlencode(query)}"
 
     def mod_download_form(
         self, app_name: str, *, subject: str = "web", base_url: str | None = None
@@ -3915,23 +3923,12 @@ class NodeApiService:
         subject: str = "web",
         base_url: str | None = None,
     ) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_DOWNLOAD,),
-        )
-        return self._with_access_token(
-            f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/mods/{quote(mod_name, safe='')}/download",
-            token,
-        )
+        del subject
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/mods/{quote(mod_name, safe='')}/download"
 
     def list_configs_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_READ,),
-        )
-        return self._with_access_token(f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/configs", token)
+        del subject
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/configs"
 
     def config_file_url(
         self,
@@ -3942,15 +3939,8 @@ class NodeApiService:
         writable: bool = False,
         base_url: str | None = None,
     ) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE if writable else NodeApiScope.CONFIGS_READ,),
-        )
-        return self._with_access_token(
-            f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/configs/{quote(config_id, safe='/')}",
-            token,
-        )
+        del subject, writable
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/configs/{quote(config_id, safe='/')}"
 
     def config_root_download_url(
         self,
@@ -3960,23 +3950,12 @@ class NodeApiService:
         subject: str = "web",
         base_url: str | None = None,
     ) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_READ,),
-        )
-        return self._with_access_token(
-            f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/configs/roots/{quote(root_id, safe='')}/download",
-            token,
-        )
+        del subject
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/configs/roots/{quote(root_id, safe='')}/download"
 
     def list_saves_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.SAVES_READ,),
-        )
-        return self._with_access_token(f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/saves", token)
+        del subject
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/saves"
 
     def save_download_url(
         self,
@@ -3986,26 +3965,12 @@ class NodeApiService:
         subject: str = "web",
         base_url: str | None = None,
     ) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.SAVES_DOWNLOAD,),
-        )
-        return self._with_access_token(
-            f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/saves/{quote(save_id, safe='/')}/download",
-            token,
-        )
+        del subject
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/saves/{quote(save_id, safe='/')}/download"
 
     def list_settings_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.SETTINGS_READ,),
-        )
-        return self._with_access_token(
-            f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/settings",
-            token,
-        )
+        del subject
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/settings"
 
     def setting_url(
         self,
@@ -4016,15 +3981,8 @@ class NodeApiService:
         writable: bool = False,
         base_url: str | None = None,
     ) -> str:
-        token: str | None = self.issue_access_token(
-            subject=subject,
-            app_name=app_name,
-            scopes=(NodeApiScope.SETTINGS_WRITE if writable else NodeApiScope.SETTINGS_READ,),
-        )
-        return self._with_access_token(
-            f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/settings/{quote(setting_key, safe='')}",
-            token,
-        )
+        del subject, writable
+        return f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/settings/{quote(setting_key, safe='')}"
 
     def issue_access_token(
         self,
@@ -4345,22 +4303,12 @@ class NodeApiService:
         return f"{base_app_name}_{base_save_name}.zip"
 
     @staticmethod
-    def _request_token(request: Any, access_token: str | None) -> str:
-        if access_token:
-            return access_token
-
+    def _request_token(request: Any, _access_token: str | None) -> str:
         auth_header = request.headers.get("authorization", "")
         scheme, _, token = auth_header.partition(" ")
         if scheme.casefold() == "bearer" and token:
             return token.strip()
         return ""
-
-    @staticmethod
-    def _with_access_token(url: str, token: str | None) -> str:
-        if token is None:
-            return url
-        separator = "&" if "?" in url else "?"
-        return f"{url}{separator}{urlencode({'access_token': token})}"
 
     def _base_url(self, base_url: str | None) -> str:
         return (base_url or self.api_base_url).rstrip("/")

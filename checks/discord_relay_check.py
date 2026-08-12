@@ -18,6 +18,7 @@ from _discord import (
     DC_Bound,
     DC_Relay,
     Fileish,
+    MediaProvider,
     Message,
     OutboundRelayFormatter,
     RelayOutboundFormatOptions,
@@ -189,6 +190,13 @@ class DiscordRelayAttachmentNameTests(unittest.TestCase):
 
 
 class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
+    def test_provider_detection_rejects_lookalike_domains(self) -> None:
+        lookalike_url = "https://tenor.com.attacker.invalid/view/example-123"
+
+        self.assertEqual(Message._media_provider_for_url(lookalike_url), MediaProvider.DIRECT)
+        self.assertIsNone(Message._resolve_tenor_media_url(lookalike_url))
+        self.assertIsNone(Message._resolve_giphy_media_url("https://giphy.com.attacker.invalid/gifs/example"))
+
     async def test_event_from_dc_bound_preserves_explicit_player_id(self) -> None:
         message = DC_Bound(
             cast(Any, SimpleNamespace(name="minecraft_alpha", scope="minecraft")),
