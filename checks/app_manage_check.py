@@ -84,7 +84,13 @@ from cmd_app import (
     _state_value,
 )
 from cmd_dashboard import DashboardEditorService
-from relay_notices import AppLifecycleNotice, MaintenanceNotice, MaintenanceStage, RelayNoticeSeverity, RelayNoticeSource
+from relay_notices import (
+    AppLifecycleNotice,
+    MaintenanceNotice,
+    MaintenanceStage,
+    RelayNoticeSeverity,
+    RelayNoticeSource,
+)
 from restart_targets import RestartTarget
 
 
@@ -3515,7 +3521,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
-    def test_update_app_details_can_enable_steam_update_from_scope_preset(self) -> None:
+    def test_update_app_details_can_enable_custom_steam_version_from_scope_preset(self) -> None:
         manager = object.__new__(App_Manager)
         original_cwd = Path.cwd()
         with TemporaryDirectory() as temp_dir:
@@ -3539,24 +3545,25 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             manager._lookup = {}
             manager._register_lookup_aliases(app.name, app)
 
+            def _details(*, selected_branch: str) -> AppDetailsUpdate:
+                return AppDetailsUpdate(
+                    friendly_name="Dummy",
+                    notes=None,
+                    lifecycle_notice_started=True,
+                    lifecycle_notice_stopped=True,
+                    lifecycle_notice_crashed=True,
+                    running_cpu_points=3,
+                    running_ram_points=5,
+                    startup_cpu_points=None,
+                    startup_ram_points=None,
+                    steam_update_enabled=True,
+                    steam_update_selected_branch=selected_branch,
+                )
+
             os.chdir(temp_path)
             try:
-                manager.update_app_details(
-                    app,
-                    AppDetailsUpdate(
-                        friendly_name="Dummy",
-                        notes=None,
-                        lifecycle_notice_started=True,
-                        lifecycle_notice_stopped=True,
-                        lifecycle_notice_crashed=True,
-                        running_cpu_points=3,
-                        running_ram_points=5,
-                        startup_cpu_points=None,
-                        startup_ram_points=None,
-                        steam_update_enabled=True,
-                        steam_update_selected_branch="public",
-                    ),
-                )
+                manager.update_app_details(app, _details(selected_branch="alpha_21"))
+                manager.update_app_details(app, _details(selected_branch="alpha_22"))
             finally:
                 os.chdir(original_cwd)
 
@@ -3564,10 +3571,13 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(app.cfg.steam_update)
             assert app.cfg.steam_update is not None
             self.assertEqual(app.cfg.steam_update.app_id, 294420)
-            self.assertEqual(app.cfg.steam_update.selected_branch, "public")
+            self.assertEqual(app.cfg.steam_update.selected_branch, "alpha_22")
+            branch_ids = [branch.branch_id for branch in app.cfg.steam_update.branches]
+            self.assertEqual(branch_ids[:3], ["public", "latest_experimental", "v3.1.0"])
+            self.assertEqual(branch_ids[-2:], ["alpha_21", "alpha_22"])
             self.assertIsNotNone(app.updater)
             self.assertEqual(payload["alpha"]["steam_update"]["app_id"], 294420)
-            self.assertEqual(payload["alpha"]["steam_update"]["selected_branch"], "public")
+            self.assertEqual(payload["alpha"]["steam_update"]["selected_branch"], "alpha_22")
 
     def test_create_instance_requires_admin_password_for_satisfactory(self) -> None:
         manager = object.__new__(App_Manager)

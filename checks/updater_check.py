@@ -7,13 +7,22 @@ from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
 import config
-from apps._config import App_Config, AppVersion, SteamUpdateConfig
-from apps._updater import AppUpdateOperationKind, AppUpdateProviderKind, AppUpdateState, SteamCmd_Update_Manager
+from apps._config import App_Config, AppVersion, SteamUpdateConfig, steam_update_preset_for_scope
+from apps._updater import (
+    AppUpdateBranchState,
+    AppUpdateInfo,
+    AppUpdateOperationKind,
+    AppUpdateProviderKind,
+    AppUpdateState,
+    SteamCmd_Update_Manager,
+    _command_error_text,
+)
 
 
 class _FakeApp:
     def __init__(self, temp_path: Path) -> None:
         self.friendly = "7 Days Alpha"
+        self.scope = "sevendays"
         self.directory = temp_path
         self.dir_log = temp_path / "logs"
         self.dir_log.mkdir(parents=True, exist_ok=True)
@@ -52,6 +61,20 @@ class _FakeApp:
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_app_update_info_round_trips_version_branch(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="v3.1.0",
+            selected_branch_label="Version 3.1.0 Stable",
+            branches=(AppUpdateBranchState(branch_id="v3.1.0", label="Version 3.1.0 Stable", selected=True),),
+            supports_verify=True,
+        )
+
+        restored = AppUpdateInfo.from_mapping(update_info.to_mapping())
+
+        self.assertEqual(restored, update_info)
+
     def test_steam_update_config_rejects_unknown_selected_branch(self) -> None:
         with self.assertRaisesRegex(ValueError, "selected steam branch"):
             SteamUpdateConfig.model_validate(
@@ -61,6 +84,35 @@ class UpdaterTests(unittest.TestCase):
                     "selected_branch": "latest_experimental",
                 }
             )
+
+    def test_steam_update_config_registers_custom_selected_branch(self) -> None:
+        update_config = SteamUpdateConfig.model_validate(
+            {
+                "app_id": 294420,
+                "branches": [{"branch_id": "public", "label": "Stable"}],
+                "selected_branch": "public",
+            }
+        )
+
+        next_config = update_config.with_selected_branch(" alpha_21 ", add_if_missing=True)
+
+        self.assertEqual(next_config.selected_branch, "alpha_21")
+        self.assertEqual([branch.branch_id for branch in next_config.branches], ["public", "alpha_21"])
+        self.assertEqual(next_config.selected_branch_config.display_label, "alpha_21")
+
+    def test_steam_update_preset_includes_reported_version_branches(self) -> None:
+        preset = steam_update_preset_for_scope("sevendays")
+        self.assertIsNotNone(preset)
+        assert preset is not None
+
+        update_config = preset.build_config(selected_branch="v3.1.0")
+
+        self.assertEqual(update_config.selected_branch, "v3.1.0")
+        self.assertEqual(
+            [branch.branch_id for branch in update_config.branches[:4]],
+            ["public", "latest_experimental", "v3.1.0", "v3.0.1"],
+        )
+        self.assertEqual(update_config.selected_branch_config.display_label, "Version 3.1.0 Stable")
 
     def test_steamcmd_update_manager_select_branch_persists_choice(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -73,6 +125,59 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(app.persisted, 1)
         self.assertEqual(update_info.provider_kind, AppUpdateProviderKind.STEAMCMD)
         self.assertEqual(update_info.selected_branch_label, "Experimental")
+
+    def test_steamcmd_update_manager_lists_version_branches_for_existing_instance(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _FakeApp(Path(temp_dir))
+            updater = SteamCmd_Update_Manager(app)
+
+            update_info = updater.info()
+
+        branches = {branch.branch_id: branch for branch in update_info.branches}
+        self.assertEqual(branches["v3.1.0"].label, "Version 3.1.0 Stable")
+        self.assertEqual(branches["alpha21.2"].label, "Alpha 21.2 Stable")
+        self.assertEqual(len(branches), 21)
+
+    def test_steamcmd_update_manager_selects_and_persists_version_branch(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _FakeApp(Path(temp_dir))
+            updater = SteamCmd_Update_Manager(app)
+
+            update_info = updater.select_branch("v3.1.0")
+
+        assert app.cfg.steam_update is not None
+        self.assertEqual(app.cfg.steam_update.selected_branch, "v3.1.0")
+        self.assertEqual(
+            [branch.branch_id for branch in app.cfg.steam_update.branches],
+            ["public", "latest_experimental", "v3.1.0"],
+        )
+        self.assertEqual(app.persisted, 1)
+        self.assertEqual(update_info.selected_branch_label, "Version 3.1.0 Stable")
+        command = updater._steamcmd_command(branch=app.cfg.steam_update.selected_branch_config, validate=False)
+        self.assertEqual(command[command.index("-beta") + 1], "v3.1.0")
+
+    def test_steamcmd_command_error_redacts_beta_password(self) -> None:
+        error = _command_error_text(
+            command=[
+                "steamcmd",
+                "+login",
+                "account",
+                "login-secret",
+                "+app_update",
+                "294420",
+                "-beta",
+                "alpha_21",
+                "-betapassword",
+                "beta-secret",
+                "+quit",
+            ],
+            stdout_text="",
+            stderr_text="ERROR! Failed to install app",
+        )
+
+        self.assertNotIn("login-secret", error)
+        self.assertNotIn("beta-secret", error)
+        self.assertIn("******", error)
 
     def test_verify_selected_requires_app_to_be_stopped(self) -> None:
         with TemporaryDirectory() as temp_dir:

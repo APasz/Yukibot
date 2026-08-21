@@ -30,9 +30,7 @@ from .types import ModWebBasePageModel, _ModWebBadgeSpec
 
 @dataclass(frozen=True, slots=True)
 class _UpdateSectionViewState:
-    target_branch_label: str
-    configured_branch_text: str
-    pending_branch_text: str | None
+    target_change_pending: bool
     branch_selection_disabled: bool
     dry_preview_active: bool
     installed_version: str
@@ -50,7 +48,7 @@ class _UpdateSectionViewState:
     verify_block_reason: str | None
     update_button_label: str
     verify_button_label: str
-    action_status_text: str
+    action_status_text: str | None
     status_title: str
     show_log: bool
 
@@ -65,7 +63,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             _ModWebBadgeSpec(text=update_info.selected_branch_label, tone="black"),
         ]
         update_status = model.update_status
-        if update_status is not None:
+        if update_status is not None and update_status.state is not AppUpdateState.IDLE:
             badges.append(
                 _ModWebBadgeSpec(
                     text=ModWebAppPageUpdateMixin._update_status_badge_text(update_status),
@@ -78,6 +76,26 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
     def _details_steam_update_preset(app_name: str) -> SteamUpdatePreset | None:
         return steam_update_preset_for_scope(app_scope_from_name(app_name))
 
+    @staticmethod
+    def _update_branch_option_label(*, branch_id: str, label: str) -> str:
+        if label.casefold() == branch_id.casefold():
+            return label
+        return f"{label} ({branch_id})"
+
+    @classmethod
+    def _update_branch_options(cls, update_info: AppUpdateInfo) -> dict[str, str]:
+        return {
+            branch.branch_id: cls._update_branch_option_label(branch_id=branch.branch_id, label=branch.label)
+            for branch in update_info.branches
+        }
+
+    @staticmethod
+    def _update_target_select_props() -> str:
+        return (
+            "filled square dense hide-bottom-space color=accent options-dark options-dense "
+            "popup-content-class=mod-setting-menu"
+        )
+
     @classmethod
     def _details_steam_update_branch_options(
         cls,
@@ -86,11 +104,17 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         update_info: AppUpdateInfo | None,
     ) -> dict[str, str]:
         if update_info is not None:
-            return {branch.branch_id: f"{branch.label} ({branch.branch_id})" for branch in update_info.branches}
+            return cls._update_branch_options(update_info)
         preset = cls._details_steam_update_preset(app_name)
         if preset is None:
             return {}
-        return {branch.branch_id: f"{branch.display_label} ({branch.branch_id})" for branch in preset.branches}
+        return {
+            branch.branch_id: cls._update_branch_option_label(
+                branch_id=branch.branch_id,
+                label=branch.display_label,
+            )
+            for branch in preset.branches
+        }
 
     @classmethod
     def _details_steam_update_selected_branch(
@@ -122,8 +146,8 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
 
     @staticmethod
     def _update_status_badge_text(status: AppUpdateStatus) -> str:
-        if status.state is AppUpdateState.RUNNING and status.operation_kind is not None:
-            return status.operation_kind.value.title()
+        if status.state is AppUpdateState.RUNNING:
+            return "Running"
         if status.state is AppUpdateState.SUCCEEDED:
             return "Ready"
         return status.state.value.title()
@@ -141,7 +165,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
     @staticmethod
     def _update_log_markup(status: AppUpdateStatus) -> str:
         if not status.log_lines:
-            return "<pre class='mod-update-log'>Waiting for SteamCMD output...</pre>"
+            return "<pre class='mod-update-log'>Waiting for updater output...</pre>"
         log_html = "\n".join(escape(line) for line in status.log_lines)
         return f"<pre class='mod-update-log'>{log_html}</pre>"
 
@@ -165,23 +189,6 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         if target_branch_id.casefold() == update_info.selected_branch_id.casefold():
             return None
         return target_branch_id
-
-    @classmethod
-    def _update_branch_display_text(cls, update_info: AppUpdateInfo, branch_id: str) -> str:
-        resolved_branch_id = cls._resolve_update_target_branch_id(update_info, branch_id)
-        if resolved_branch_id.casefold() == update_info.selected_branch_id.casefold():
-            return f"{update_info.selected_branch_label} ({update_info.selected_branch_id})"
-        for branch in update_info.branches:
-            if branch.branch_id.casefold() == resolved_branch_id.casefold():
-                return f"{branch.label} ({branch.branch_id})"
-        return f"{update_info.selected_branch_label} ({update_info.selected_branch_id})"
-
-    @classmethod
-    def _pending_update_target_display_text(cls, update_info: AppUpdateInfo, selected_branch_id: str) -> str:
-        pending_branch_id = cls._pending_update_target_branch_id(update_info, selected_branch_id)
-        if pending_branch_id is None:
-            return "No pending change"
-        return cls._update_branch_display_text(update_info, pending_branch_id)
 
     @staticmethod
     def _update_progress_percent(status: AppUpdateStatus | None) -> float | None:
@@ -225,13 +232,20 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
     def _update_install_alignment_badge(
         cls,
         update_info: AppUpdateInfo,
+        *,
+        target_branch_id: str | None = None,
     ) -> _ModWebBadgeSpec:
         installed_branch_id = update_info.installed_branch_id
         if installed_branch_id is None:
             return _ModWebBadgeSpec(text="Manifest branch unknown", tone="grey")
-        if cls._update_branch_ids_match(installed_branch_id, update_info.selected_branch_id):
-            return _ModWebBadgeSpec(text="Installed matches configured target", tone="black")
-        return _ModWebBadgeSpec(text="Installed differs from configured target", tone="purple")
+        resolved_target_branch_id = (
+            update_info.selected_branch_id
+            if target_branch_id is None
+            else cls._resolve_update_target_branch_id(update_info, target_branch_id)
+        )
+        if cls._update_branch_ids_match(installed_branch_id, resolved_target_branch_id):
+            return _ModWebBadgeSpec(text="Target installed", tone="black")
+        return _ModWebBadgeSpec(text="Different branch installed", tone="purple")
 
     @staticmethod
     def _update_section_runtime_signature(app_stats: NodeAppRuntimeSummary | None) -> tuple[bool | None, str | None]:
@@ -378,32 +392,27 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             update_status=cls._prefer_newer_update_status(current_model.update_status, next_model.update_status),
         )
 
-    @classmethod
-    def _update_branch_label(cls, update_info: AppUpdateInfo, branch_id: str) -> str:
-        resolved_branch_id = cls._resolve_update_target_branch_id(update_info, branch_id)
-        if resolved_branch_id.casefold() == update_info.selected_branch_id.casefold():
-            return update_info.selected_branch_label
-        for branch in update_info.branches:
-            if branch.branch_id.casefold() == resolved_branch_id.casefold():
-                return branch.label
-        return update_info.selected_branch_label
-
     @staticmethod
     def _update_action_status_text(
         *,
         update_block_reason: str | None,
         verify_block_reason: str | None,
-    ) -> str:
+        target_change_pending: bool,
+    ) -> str | None:
         if update_block_reason is not None:
             return update_block_reason
         if verify_block_reason is not None:
-            return f"Update ready. {verify_block_reason}"
-        return "Ready to update or verify."
+            return verify_block_reason
+        if target_change_pending:
+            return "Target applies on the next action."
+        return None
 
     @staticmethod
     def _update_status_title(status: AppUpdateStatus | None) -> str:
-        if status is None or status.state is not AppUpdateState.FAILED:
-            return "Current operation" if status is not None and status.running else "Latest result"
+        if status is None:
+            return "Activity"
+        if status.state is not AppUpdateState.FAILED:
+            return "Current operation" if status.running else "Latest result"
         if status.operation_kind is None:
             return "Update failed"
         return f"{status.operation_kind.value.title()} failed"
@@ -419,13 +428,11 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         can_manage_updates: bool,
         dry_preview_active: bool,
     ) -> _UpdateSectionViewState:
-        resolved_selected_branch_id = cls._resolve_update_target_branch_id(update_info, selected_branch_id)
-        target_branch_label = cls._update_branch_label(update_info, resolved_selected_branch_id)
-        configured_branch_text = cls._update_branch_display_text(update_info, update_info.selected_branch_id)
-        pending_branch_text = cls._pending_update_target_display_text(update_info, selected_branch_id)
-        pending_branch_id = cls._pending_update_target_branch_id(update_info, selected_branch_id)
+        target_branch_id = cls._resolve_update_target_branch_id(update_info, selected_branch_id)
+        target_change_pending = target_branch_id.casefold() != update_info.selected_branch_id.casefold()
+        displayed_status = None if status is None or status.state is AppUpdateState.IDLE else status
         app_running = model.app_stats is not None and model.app_stats.running
-        update_running = status.running if status is not None else False
+        update_running = displayed_status.running if displayed_status is not None else False
         update_block_reason = cls._update_action_block_reason(
             action=NodeAppMutationAction.UPDATE,
             can_manage_updates=can_manage_updates,
@@ -441,20 +448,20 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             supports_verify=update_info.supports_verify,
         )
         failed_operation = (
-            status.operation_kind if status is not None and status.state is AppUpdateState.FAILED else None
+            displayed_status.operation_kind
+            if displayed_status is not None and displayed_status.state is AppUpdateState.FAILED
+            else None
         )
         update_button_prefix = "Retry update" if failed_operation is AppUpdateOperationKind.UPDATE else "Update"
-        verify_button_label = "Retry Verify" if failed_operation is AppUpdateOperationKind.VERIFY else "Verify"
+        verify_button_label = "Retry verify" if failed_operation is AppUpdateOperationKind.VERIFY else "Verify"
         installed_version = (
             "Unknown" if model.app_stats is None or model.app_stats.version is None else model.app_stats.version
         )
         installed_branch = update_info.installed_branch_id or "Manifest branch unavailable"
         manifest_build = "Unknown" if update_info.installed_build_id is None else str(update_info.installed_build_id)
-        progress_percent = cls._update_progress_percent(status)
+        progress_percent = cls._update_progress_percent(displayed_status)
         return _UpdateSectionViewState(
-            target_branch_label=target_branch_label,
-            configured_branch_text=configured_branch_text,
-            pending_branch_text=None if pending_branch_id is None else pending_branch_text,
+            target_change_pending=target_change_pending,
             branch_selection_disabled=not can_manage_updates or update_running,
             dry_preview_active=dry_preview_active,
             installed_version=installed_version,
@@ -462,22 +469,29 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             manifest_build=manifest_build,
             provider_label=update_info.provider_label,
             app_id=update_info.app_id,
-            install_alignment_badge=cls._update_install_alignment_badge(update_info),
-            status=status,
-            status_summary="No activity yet." if status is None else status.summary,
-            status_detail=None if status is None else status.detail,
+            install_alignment_badge=cls._update_install_alignment_badge(
+                update_info,
+                target_branch_id=target_branch_id,
+            ),
+            status=displayed_status,
+            status_summary="No update recorded." if displayed_status is None else displayed_status.summary,
+            status_detail=None if displayed_status is None else displayed_status.detail,
             progress_percent=progress_percent,
-            progress_text=cls._update_progress_text(status),
+            progress_text=cls._update_progress_text(displayed_status),
             update_block_reason=update_block_reason,
             verify_block_reason=verify_block_reason,
-            update_button_label=f"{update_button_prefix} to {target_branch_label}",
+            update_button_label=update_button_prefix,
             verify_button_label=verify_button_label,
             action_status_text=cls._update_action_status_text(
                 update_block_reason=update_block_reason,
                 verify_block_reason=verify_block_reason,
+                target_change_pending=target_change_pending,
             ),
-            status_title=cls._update_status_title(status),
-            show_log=status is not None and (bool(status.log_lines) or status.state is AppUpdateState.FAILED),
+            status_title=cls._update_status_title(displayed_status),
+            show_log=(
+                displayed_status is not None
+                and (bool(displayed_status.log_lines) or displayed_status.state is AppUpdateState.FAILED)
+            ),
         )
 
     @staticmethod
@@ -508,26 +522,22 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         on_refresh: Callable[[], Awaitable[None]] | None,
         on_dry_preview: Callable[[], None] | None,
     ) -> None:
-        with ui.card().classes("mod-card w-full"):
+        with ui.card().classes("mod-card w-full xl:col-span-12"):
             with ui.column().classes("w-full gap-3"):
-                ui.label(f"Update to {view_state.target_branch_label}").classes("text-sm font-black mod-title-small")
                 branch_select = (
                     ui.select(
                         branch_options,
                         value=selected_branch_id,
-                        label="Target branch",
+                        label="Target",
                         on_change=on_branch_change,
                     )
-                    .props("filled square dense hide-bottom-space color=accent options-dark")
+                    .props(self._update_target_select_props())
                     .classes("mod-app-details-field mod-update-toolbar-branch")
                 )
                 if view_state.branch_selection_disabled:
                     branch_select.disable()
-                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                    self._badge(ui=ui, text=f"Active {view_state.configured_branch_text}", tone="black")
-                    if view_state.pending_branch_text is not None:
-                        self._badge(ui=ui, text=f"Pending {view_state.pending_branch_text}", tone="purple")
-                    if view_state.dry_preview_active:
+                if view_state.dry_preview_active:
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                         self._badge(ui=ui, text="Dry preview active", tone="grey")
                 with ui.row().classes("w-full gap-2 flex-wrap"):
                     if on_dry_preview is not None:
@@ -548,7 +558,8 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                         update_button.disable()
                     if view_state.verify_block_reason is not None:
                         verify_button.disable()
-                ui.label(view_state.action_status_text).classes("mod-subtitle text-sm")
+                if view_state.action_status_text is not None:
+                    ui.label(view_state.action_status_text).classes("mod-subtitle text-xs")
 
     def _render_update_status_card(self, *, ui: ModWebUi, view_state: _UpdateSectionViewState) -> None:
         status = view_state.status
@@ -557,7 +568,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 ui.label(view_state.status_title).classes("text-sm font-black mod-title-small")
                 with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                     if status is None:
-                        self._badge(ui=ui, text="No attempt recorded", tone="grey")
+                        self._badge(ui=ui, text="No update recorded", tone="grey")
                     else:
                         self._badge(
                             ui=ui,
@@ -566,15 +577,20 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                         )
                         if status.operation_kind is not None:
                             self._badge(ui=ui, text=status.operation_kind.value.title(), tone="black")
-                        self._badge(ui=ui, text=view_state.progress_text, tone="grey")
+                        if view_state.progress_percent is not None:
+                            self._badge(ui=ui, text=view_state.progress_text, tone="grey")
+                if status is None:
+                    ui.label("Run Update or Verify to start.").classes("mod-subtitle text-sm")
+                    return
                 with ui.column().classes("w-full gap-2"):
                     ui.label(view_state.status_summary).classes("text-sm font-black mod-title-small break-all")
                     if view_state.status_detail is not None:
                         ui.label(view_state.status_detail).classes("mod-subtitle text-sm break-all")
-                    with ui.element("div").classes("w-full border border-white/10 bg-black/40 h-3 overflow-hidden"):
-                        ui.element("div").classes("h-full bg-white/70").style(
-                            f"width: {0.0 if view_state.progress_percent is None else view_state.progress_percent:.2f}%;"
-                        )
+                    if view_state.progress_percent is not None:
+                        with ui.element("div").classes("w-full border border-white/10 bg-black/40 h-3 overflow-hidden"):
+                            ui.element("div").classes("h-full bg-white/70").style(
+                                f"width: {view_state.progress_percent:.2f}%;"
+                            )
                     with ui.element("div").classes("grid grid-cols-1 md:grid-cols-3 gap-3 w-full"):
                         self._render_update_value(ui=ui, label="Progress", value=view_state.progress_text)
                         self._render_update_value(
@@ -582,7 +598,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                             label="Started",
                             value=(
                                 self._format_update_timestamp(status.started_at_unix_ms)
-                                if status is not None and status.started_at_unix_ms is not None
+                                if status.started_at_unix_ms is not None
                                 else "No start recorded"
                             ),
                         )
@@ -594,7 +610,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                                     started_at_unix_ms=status.started_at_unix_ms,
                                     finished_at_unix_ms=status.finished_at_unix_ms,
                                 )
-                                if status is not None and status.started_at_unix_ms is not None
+                                if status.started_at_unix_ms is not None
                                 else "Unavailable"
                             ),
                         )
@@ -631,13 +647,17 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         status = view_state.status
         if status is None or not view_state.show_log:
             return
-        with ui.card().classes("mod-card w-full"):
+        with ui.card().classes("mod-card w-full xl:col-span-12"):
             log_details = ui.element("details").classes("mod-update-log-details w-full")
             if status.state is AppUpdateState.FAILED:
                 log_details.props("open")
             with log_details:
                 with ui.element("summary").classes("mod-update-log-summary"):
-                    line_label = "No output captured" if not status.log_lines else f"SteamCMD log · {len(status.log_lines)} lines"
+                    line_label = (
+                        "No output captured"
+                        if not status.log_lines
+                        else f"{view_state.provider_label} log · {len(status.log_lines)} lines"
+                    )
                     ui.label(line_label).classes("mod-subtitle text-sm")
                 if status.log_lines:
                     ui.html(self._update_log_markup(status)).classes(
@@ -832,9 +852,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             section_update_status = (
                 dry_preview_status if dry_preview_status is not None else section_model.update_status
             )
-            branch_options = {
-                branch.branch_id: f"{branch.label} ({branch.branch_id})" for branch in section_update_info.branches
-            }
+            branch_options = self._update_branch_options(section_update_info)
             resolved_selected_branch_id = self._resolve_update_target_branch_id(section_update_info, selected_branch_id)
             view_state = self._update_section_view_state(
                 model=section_model,
@@ -850,12 +868,8 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                     self._render_flat_tab_header(
                         ui=ui,
                         title="Update",
-                        description="Choose a target, then update or verify while the app is stopped.",
-                        secondary_description=(
-                            "Branch changes apply when you run an action."
-                            if can_manage_updates
-                            else "Sudo access is required for update actions."
-                        ),
+                        description="Choose a version or beta, then update or verify while the app is stopped.",
+                        secondary_description=None if can_manage_updates else "Sudo access is required for update actions.",
                     )
                     with ui.element("div").classes("grid grid-cols-1 xl:grid-cols-12 gap-3 w-full"):
                         self._render_update_controls_card(

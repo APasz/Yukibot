@@ -89,6 +89,7 @@ from apps.minecraft.node_api import (
     NodeMinecraftRecipeBookState,
 )
 from apps.minecraft.pack_export import PackFormat, PackPurpose
+from apps.satisfactory.node_api import NodeBlueprintEntry, NodeBlueprintList
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
     ChatAttachment,
@@ -148,7 +149,6 @@ from node_api import (
 from node_api_app_state import ClientPackFilePreview, NodeAppMutationAction
 from node_api_console import NodeConsoleActionEntry, NodeConsoleActionParameter
 from node_api_files import NodeConfigEntry, NodeConfigList
-from apps.satisfactory.node_api import NodeBlueprintEntry, NodeBlueprintList
 from node_api_mod import (
     NodeBulkLauncherMetadataApplyResult,
     NodeModEntry,
@@ -202,8 +202,8 @@ from web_dash.home import (
     _format_restart_hours_input,
     _format_restart_state_line,
     _format_restart_timestamp,
-    _ModWebNodeSystemTab,
     _ModWebNodeDiskChoice,
+    _ModWebNodeSystemTab,
     _parse_restart_hours_input,
     _restart_anchor_timestamp,
     _restart_interval_from_parts,
@@ -212,8 +212,8 @@ from web_dash.home import (
 )
 from web_dash.links import current_node_app_url, mod_web_node_system_path
 from web_dash.nicegui_protocols import ModWebUi
-from web_dash.routes import _ModWebGZipMiddleware
 from web_dash.remote_node_monitor import RemoteNodeAvailability, RemoteNodeMonitor, RemoteNodeMonitorSnapshot
+from web_dash.routes import _ModWebGZipMiddleware
 from web_dash.service import ModWebService
 from web_dash.stream_broker import RemoteNodeStreamKey, SharedAsyncStreamBroker
 from web_dash.types import (
@@ -3822,6 +3822,30 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(resolved_branch_id, "public")
 
+    def test_resolve_update_target_branch_id_accepts_known_steam_version_branch(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(
+                AppUpdateBranchState(branch_id="public", label="Stable", selected=True),
+                AppUpdateBranchState(branch_id="v3.1.0", label="Version 3.1.0 Stable", selected=False),
+            ),
+            supports_verify=True,
+        )
+
+        resolved_branch_id = ModWebService._resolve_update_target_branch_id(update_info, " V3.1.0 ")
+
+        self.assertEqual(resolved_branch_id, "v3.1.0")
+        self.assertEqual(
+            ModWebService._update_branch_options(update_info),
+            {
+                "public": "Stable (public)",
+                "v3.1.0": "Version 3.1.0 Stable (v3.1.0)",
+            },
+        )
+
     def test_pending_update_target_branch_id_returns_pending_branch(self) -> None:
         update_info = AppUpdateInfo(
             provider_kind=AppUpdateProviderKind.STEAMCMD,
@@ -3859,28 +3883,14 @@ class ModWebTests(unittest.TestCase):
 
         self.assertIsNone(pending_branch_id)
 
-    def test_update_branch_display_text_includes_label_and_branch_id(self) -> None:
-        update_info = AppUpdateInfo(
-            provider_kind=AppUpdateProviderKind.STEAMCMD,
-            provider_label="SteamCMD",
-            selected_branch_id="public",
-            selected_branch_label="Stable",
-            branches=(
-                AppUpdateBranchState(branch_id="public", label="Stable", selected=True),
-                AppUpdateBranchState(
-                    branch_id="latest_experimental",
-                    label="Experimental",
-                    selected=False,
-                ),
-            ),
-            supports_verify=True,
-        )
+    def test_update_target_select_props_use_compact_standard_menu(self) -> None:
+        props = ModWebService._update_target_select_props()
 
-        branch_text = ModWebService._update_branch_display_text(update_info, "latest_experimental")
+        self.assertIn("options-dense", props)
+        self.assertIn("popup-content-class=mod-setting-menu", props)
+        self.assertNotIn("use-input", props)
 
-        self.assertEqual(branch_text, "Experimental (latest_experimental)")
-
-    def test_update_section_view_state_names_target_and_offers_update_retry(self) -> None:
+    def test_update_section_view_state_flags_pending_target_and_offers_update_retry(self) -> None:
         update_info = AppUpdateInfo(
             provider_kind=AppUpdateProviderKind.STEAMCMD,
             provider_label="SteamCMD",
@@ -3929,10 +3939,11 @@ class ModWebTests(unittest.TestCase):
             dry_preview_active=False,
         )
 
-        self.assertEqual(view_state.target_branch_label, "Experimental")
-        self.assertEqual(view_state.pending_branch_text, "Experimental (latest_experimental)")
-        self.assertEqual(view_state.update_button_label, "Retry update to Experimental")
+        self.assertTrue(view_state.target_change_pending)
+        self.assertEqual(view_state.install_alignment_badge, _ModWebBadgeSpec(text="Different branch installed", tone="purple"))
+        self.assertEqual(view_state.update_button_label, "Retry update")
         self.assertEqual(view_state.verify_button_label, "Verify")
+        self.assertEqual(view_state.action_status_text, "Target applies on the next action.")
         self.assertEqual(view_state.status_title, "Update failed")
         self.assertTrue(view_state.show_log)
         self.assertFalse(view_state.branch_selection_disabled)
@@ -3963,7 +3974,7 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(view_state.status_title, "Latest result")
-        self.assertEqual(view_state.update_button_label, "Update to Stable")
+        self.assertEqual(view_state.update_button_label, "Update")
         self.assertEqual(view_state.verify_button_label, "Verify")
         self.assertFalse(view_state.show_log)
         self.assertTrue(view_state.branch_selection_disabled)
@@ -3989,13 +4000,11 @@ class ModWebTests(unittest.TestCase):
             options,
             {
                 "public": "Stable (public)",
-                "experimental": "Experimental (experimental)",
+                "experimental": "Experimental",
             },
         )
 
-    def test_pending_update_target_display_text_reports_no_change_when_current(
-        self,
-    ) -> None:
+    def test_update_section_view_state_treats_idle_status_as_no_activity(self) -> None:
         update_info = AppUpdateInfo(
             provider_kind=AppUpdateProviderKind.STEAMCMD,
             provider_label="SteamCMD",
@@ -4005,9 +4014,47 @@ class ModWebTests(unittest.TestCase):
             supports_verify=True,
         )
 
-        pending_text = ModWebService._pending_update_target_display_text(update_info, "public")
+        model = replace(self._overview_model_with_config_and_chat(), update_info=update_info)
+        view_state = ModWebService._update_section_view_state(
+            model=model,
+            update_info=update_info,
+            status=AppUpdateStatus(state=AppUpdateState.IDLE, summary="Ready"),
+            selected_branch_id="public",
+            can_manage_updates=True,
+            dry_preview_active=False,
+        )
 
-        self.assertEqual(pending_text, "No pending change")
+        self.assertIsNone(view_state.status)
+        self.assertEqual(view_state.status_title, "Activity")
+        self.assertFalse(view_state.target_change_pending)
+        self.assertIsNone(view_state.action_status_text)
+
+    def test_update_section_badges_hide_idle_status(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+        )
+        model = replace(
+            self._overview_model_with_config_and_chat(),
+            update_info=update_info,
+            update_status=AppUpdateStatus(state=AppUpdateState.IDLE, summary="Ready"),
+        )
+
+        badges = ModWebService._update_section_badges(model)
+
+        self.assertEqual(badges, (_ModWebBadgeSpec(text="Stable", tone="black"),))
+
+    def test_update_status_badge_distinguishes_running_action(self) -> None:
+        status = AppUpdateStatus(
+            state=AppUpdateState.RUNNING,
+            summary="Downloading",
+            operation_kind=AppUpdateOperationKind.UPDATE,
+        )
+
+        self.assertEqual(ModWebService._update_status_badge_text(status), "Running")
 
     def test_update_progress_text_reports_unavailable_when_percent_missing(
         self,
@@ -4076,7 +4123,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(
             badge,
-            _ModWebBadgeSpec(text="Installed matches configured target", tone="black"),
+            _ModWebBadgeSpec(text="Target installed", tone="black"),
         )
 
     def test_update_section_badges_exclude_app_id_repeated_in_the_installed_card(
@@ -4119,7 +4166,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(
             badge,
-            _ModWebBadgeSpec(text="Installed differs from configured target", tone="purple"),
+            _ModWebBadgeSpec(text="Different branch installed", tone="purple"),
         )
 
     def test_update_section_view_signature_ignores_irrelevant_runtime_fields(

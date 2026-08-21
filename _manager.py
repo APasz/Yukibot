@@ -14,8 +14,8 @@ import hikari
 import lightbulb
 
 import config
-from _utils import format_player_capacity
 from _discord import App_Bound, DC_Bound, DC_Relay, RelayEmbedPayload
+from _utils import format_player_capacity
 from apps._app import App, AppRuntimeFaultKind
 from apps._config import (
     App_Config,
@@ -928,7 +928,10 @@ class App_Manager(metaclass=config.Singleton):
         if current_steam_update is not None:
             if selected_branch is None:
                 return current_steam_update
-            return current_steam_update.model_copy(update={"selected_branch": selected_branch})
+            preset = steam_update_preset_for_scope(app.scope)
+            if preset is None:
+                return current_steam_update.with_selected_branch(selected_branch, add_if_missing=True)
+            return preset.select_configured_branch(config=current_steam_update, branch_id=selected_branch)
         preset = steam_update_preset_for_scope(app.scope)
         if preset is None:
             raise ValueError(f"{app.friendly} does not support Steam update configuration.")

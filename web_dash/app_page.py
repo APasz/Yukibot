@@ -25,6 +25,7 @@ from apps._config import (
 from font_assets import font_assets
 from mod_web_theme import mod_web_tooltip_css
 
+from .app_page_factorio import ModWebAppPageFactorioMixin
 from .app_page_minecraft import (
     ModWebAppPageMinecraftMixin,
     _MinecraftRecipeBrowserEntry,
@@ -36,7 +37,6 @@ from .app_page_minecraft import (
     _MinecraftRecipeEditorSelection,
     _MinecraftRecipeEditorState,
 )
-from .app_page_factorio import ModWebAppPageFactorioMixin
 from .app_page_sevendays import ModWebAppPageSevenDaysMixin
 from .app_page_updates import ModWebAppPageUpdateMixin
 from .assets import extract_html_tag_contents
@@ -6918,7 +6918,7 @@ class ModWebAppPageMixin(
                 if next_steam_update_enabled:
                     next_steam_update_selected_branch = _value_as_text(steam_update_branch_select).strip()
                     if next_steam_update_selected_branch not in steam_update_branch_options:
-                        ui.notify("Steam update branch is invalid.", type="negative")
+                        ui.notify("Steam update version or beta is invalid.", type="negative")
                         return
             disabled_activity_provider_ids = tuple(
                 provider_id
@@ -7072,9 +7072,9 @@ class ModWebAppPageMixin(
                         if steam_update_preset is not None:
                             with ui.column().classes("mod-app-details-subsection"):
                                 ui.label("Update Configuration").classes("mod-stat-label")
-                                ui.label("Enable or repair the default Steam updater block for this instance.").classes(
-                                    "mod-subtitle text-xs"
-                                )
+                                ui.label(
+                                    "Enable Steam updates, then choose a listed release version or beta branch."
+                                ).classes("mod-subtitle text-xs")
                                 steam_update_enabled_checkbox = _properties_toggle(
                                     label="Enable Steam updates",
                                     value=model.update_info is not None,
@@ -7086,7 +7086,7 @@ class ModWebAppPageMixin(
                                     ui.select(
                                         steam_update_branch_options,
                                         value=steam_update_selected_branch,
-                                        label="Configured target branch",
+                                        label="Configured target version / beta",
                                     )
                                     .props("filled square dense hide-bottom-space color=accent options-dark")
                                     .classes("mod-app-details-field")

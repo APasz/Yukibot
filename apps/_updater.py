@@ -15,7 +15,7 @@ from typing import Protocol
 import _errors
 import config
 from _async_utils import run_blocking
-from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
+from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig, steam_update_preset_for_scope
 
 log = logging.getLogger(__name__)
 
@@ -354,7 +354,8 @@ class SteamCmd_Update_Manager(Update_Manager):
 
     def info(self) -> AppUpdateInfo:
         steam_update = self._steam_update_config()
-        selected_branch = steam_update.selected_branch_config
+        branches = self._available_branches(steam_update)
+        selected_branch = self._available_branch(branches, steam_update.selected_branch)
         installed_manifest = self._safe_read_installed_manifest()
         return AppUpdateInfo(
             provider_kind=AppUpdateProviderKind.STEAMCMD,
@@ -368,7 +369,7 @@ class SteamCmd_Update_Manager(Update_Manager):
                     label=branch.display_label,
                     selected=branch.branch_id.casefold() == steam_update.selected_branch.casefold(),
                 )
-                for branch in steam_update.branches
+                for branch in branches
             ),
             supports_verify=True,
             installed_build_id=installed_manifest.build_id if installed_manifest is not None else None,
@@ -379,10 +380,15 @@ class SteamCmd_Update_Manager(Update_Manager):
         if self.status().running:
             raise RuntimeError(f"Cannot change the Steam branch while {self.app.friendly} is updating.")
         steam_update = self._steam_update_config()
-        branch = steam_update.branch(branch_id)
-        if branch.branch_id.casefold() == steam_update.selected_branch.casefold():
+        preset = steam_update_preset_for_scope(self.app.scope)
+        next_update = (
+            steam_update.with_selected_branch(branch_id, add_if_missing=True)
+            if preset is None
+            else preset.select_configured_branch(config=steam_update, branch_id=branch_id)
+        )
+        branch = self._available_branch(self._available_branches(next_update), next_update.selected_branch)
+        if next_update == steam_update:
             return self.info()
-        next_update = steam_update.model_copy(update={"selected_branch": branch.branch_id})
         cfg = self._app_config()
         cfg.steam_update = next_update
         if hasattr(self.app, "persist_instance_config_overrides"):
@@ -437,7 +443,7 @@ class SteamCmd_Update_Manager(Update_Manager):
         if self.app.check_running():
             raise RuntimeError(f"{self.app.friendly} must be stopped before {kind.value}.")
         steam_update = self._steam_update_config()
-        branch = steam_update.selected_branch_config
+        branch = self._available_branch(self._available_branches(steam_update), steam_update.selected_branch)
         started_at_unix_ms = _unix_ms_now()
         with self._state_lock:
             if self._operation_running:
@@ -691,6 +697,23 @@ class SteamCmd_Update_Manager(Update_Manager):
             raise _errors.UnsupportedUpdate(f"{self.app.friendly} does not have a Steam update configuration.")
         return steam_update
 
+    def _available_branches(self, steam_update: SteamUpdateConfig) -> tuple[SteamUpdateBranch, ...]:
+        preset = steam_update_preset_for_scope(self.app.scope)
+        if preset is None:
+            return steam_update.branches
+        return preset.merged_branches(steam_update.branches)
+
+    @staticmethod
+    def _available_branch(
+        branches: tuple[SteamUpdateBranch, ...],
+        branch_id: str,
+    ) -> SteamUpdateBranch:
+        branch_key = branch_id.strip().casefold()
+        for branch in branches:
+            if branch.branch_id.casefold() == branch_key:
+                return branch
+        raise ValueError(f"Steam branch is unavailable: {branch_id}")
+
     def _app_config(self) -> App_Config:
         return self.app.cfg
 
@@ -806,8 +829,8 @@ def _command_error_text(*, command: list[str], stdout_text: str, stderr_text: st
     tail_lines = output_lines[-4:]
     tail_text = " | ".join(tail_lines)
     if tail_text:
-        return f"Command failed: {' '.join(command)} [{tail_text}]"
-    return f"Command failed: {' '.join(command)}"
+        return f"Command failed: {_display_command(command)} [{tail_text}]"
+    return f"Command failed: {_display_command(command)}"
 
 
 def _display_command(command: list[str]) -> str:
@@ -816,6 +839,8 @@ def _display_command(command: list[str]) -> str:
         if part == "+login" and index + 2 < len(parts):
             if parts[index + 1].casefold() != "anonymous":
                 parts[index + 2] = "******"
+        if part == "-betapassword" and index + 1 < len(parts):
+            parts[index + 1] = "******"
     return " ".join(parts)
 
 

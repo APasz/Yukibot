@@ -519,6 +519,25 @@ class SteamUpdateConfig(BaseModel):
                 return branch
         raise ValueError(f"Unknown Steam branch: {branch_id}")
 
+    def with_selected_branch(
+        self,
+        branch: SteamUpdateBranch | str,
+        *,
+        add_if_missing: bool = False,
+    ) -> "SteamUpdateConfig":
+        """Return this configuration with a selected, optionally newly registered Steam branch."""
+        requested_branch = branch if isinstance(branch, SteamUpdateBranch) else SteamUpdateBranch(branch_id=branch)
+        try:
+            selected_branch = self.branch(requested_branch.branch_id)
+        except ValueError:
+            if not add_if_missing:
+                raise
+            selected_branch = requested_branch
+            branches = (*self.branches, selected_branch)
+        else:
+            branches = self.branches
+        return self.model_copy(update={"branches": branches, "selected_branch": selected_branch.branch_id})
+
     @property
     def selected_branch_config(self) -> SteamUpdateBranch:
         return self.branch(self.selected_branch)
@@ -574,17 +593,87 @@ class SteamUpdatePreset:
     branches: tuple[SteamUpdateBranch, ...]
     default_selected_branch: str = "public"
 
+    def merged_branches(self, configured_branches: Iterable[SteamUpdateBranch]) -> tuple[SteamUpdateBranch, ...]:
+        configured_branch_list = tuple(configured_branches)
+        configured_by_key = {branch.branch_id.casefold(): branch for branch in configured_branch_list}
+        merged_branches: list[SteamUpdateBranch] = []
+        known_branch_keys: set[str] = set()
+        for preset_branch in self.branches:
+            branch_key = preset_branch.branch_id.casefold()
+            configured_branch = configured_by_key.get(branch_key)
+            if configured_branch is None:
+                merged_branches.append(preset_branch.model_copy(deep=True))
+            else:
+                merged_branches.append(
+                    preset_branch.model_copy(
+                        update={
+                            "label": configured_branch.label or preset_branch.label,
+                            "beta_password": configured_branch.beta_password,
+                        }
+                    )
+                )
+            known_branch_keys.add(branch_key)
+        for configured_branch in configured_branch_list:
+            if configured_branch.branch_id.casefold() not in known_branch_keys:
+                merged_branches.append(configured_branch.model_copy(deep=True))
+        return tuple(merged_branches)
+
+    def branch_for(
+        self,
+        *,
+        configured_branches: Iterable[SteamUpdateBranch],
+        branch_id: str,
+    ) -> SteamUpdateBranch:
+        requested_branch = SteamUpdateBranch(branch_id=branch_id)
+        requested_branch_key = requested_branch.branch_id.casefold()
+        for branch in self.merged_branches(configured_branches):
+            if branch.branch_id.casefold() == requested_branch_key:
+                return branch
+        return requested_branch
+
+    def select_configured_branch(self, *, config: SteamUpdateConfig, branch_id: str) -> SteamUpdateConfig:
+        return config.with_selected_branch(
+            self.branch_for(configured_branches=config.branches, branch_id=branch_id),
+            add_if_missing=True,
+        )
+
     def build_config(self, *, selected_branch: str | None = None) -> SteamUpdateConfig:
         resolved_selected_branch = (
             self.default_selected_branch
             if selected_branch is None or not selected_branch.strip()
             else selected_branch.strip()
         )
-        return SteamUpdateConfig(
+        default_config = SteamUpdateConfig(
             app_id=self.app_id,
             branches=tuple(branch.model_copy(deep=True) for branch in self.branches),
-            selected_branch=resolved_selected_branch,
+            selected_branch=self.default_selected_branch,
         )
+        return self.select_configured_branch(config=default_config, branch_id=resolved_selected_branch)
+
+
+_SEVEN_DAYS_STEAM_UPDATE_BRANCHES: tuple[SteamUpdateBranch, ...] = (
+    SteamUpdateBranch(branch_id="public", label="Stable"),
+    SteamUpdateBranch(branch_id="latest_experimental", label="Experimental"),
+    SteamUpdateBranch(branch_id="v3.1.0", label="Version 3.1.0 Stable"),
+    SteamUpdateBranch(branch_id="v3.0.1", label="Version 3.0.1 Stable"),
+    SteamUpdateBranch(branch_id="v3.0.0", label="Version 3.0.0 Stable"),
+    SteamUpdateBranch(branch_id="v2.6", label="Version 2.6 Stable"),
+    SteamUpdateBranch(branch_id="v1.4", label="Version 1.4 Stable"),
+    SteamUpdateBranch(branch_id="alpha21.2", label="Alpha 21.2 Stable"),
+    SteamUpdateBranch(branch_id="alpha20.7", label="Alpha 20.7 Stable"),
+    SteamUpdateBranch(branch_id="alpha19.6", label="Alpha 19.6 Stable"),
+    SteamUpdateBranch(branch_id="alpha18.4", label="Alpha 18.4 Stable"),
+    SteamUpdateBranch(branch_id="alpha17.4", label="Alpha 17.4 Stable"),
+    SteamUpdateBranch(branch_id="alpha16.4", label="Alpha 16.4 Stable"),
+    SteamUpdateBranch(branch_id="alpha15.2", label="Alpha 15.2 Stable"),
+    SteamUpdateBranch(branch_id="alpha14.7", label="Alpha 14.7 Stable"),
+    SteamUpdateBranch(branch_id="alpha13.8", label="Alpha 13.8 Stable"),
+    SteamUpdateBranch(branch_id="alpha12.5", label="Alpha 12.5 Stable"),
+    SteamUpdateBranch(branch_id="alpha11.6", label="Alpha 11.6 Stable"),
+    SteamUpdateBranch(branch_id="alpha10.4", label="Alpha 10.4 Stable"),
+    SteamUpdateBranch(branch_id="alpha9.3", label="Alpha 9.3 Stable"),
+    SteamUpdateBranch(branch_id="alpha8.8", label="Alpha 8.8 Stable"),
+)
 
 
 _STEAM_UPDATE_PRESETS: dict[str, SteamUpdatePreset] = {
@@ -598,10 +687,7 @@ _STEAM_UPDATE_PRESETS: dict[str, SteamUpdatePreset] = {
     ),
     "sevendays": SteamUpdatePreset(
         app_id=294420,
-        branches=(
-            SteamUpdateBranch(branch_id="public", label="Stable"),
-            SteamUpdateBranch(branch_id="latest_experimental", label="Experimental"),
-        ),
+        branches=_SEVEN_DAYS_STEAM_UPDATE_BRANCHES,
         default_selected_branch="latest_experimental",
     ),
 }
