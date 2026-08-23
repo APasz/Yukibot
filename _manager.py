@@ -23,6 +23,7 @@ from apps._config import (
     App_Config,
     AppVersion,
     RelayChannelSource,
+    SteamUpdateBranch,
     SteamUpdateConfig,
     normalise_activity_provider_ids,
     normalise_app_title_font,
@@ -30,6 +31,10 @@ from apps._config import (
     normalise_optional_channel_ids,
     normalise_optional_friendly_name,
     normalise_optional_text,
+)
+from apps._steam import (
+    cached_steam_update_branches,
+    merge_steam_update_branches,
     steam_update_preset_for_scope,
 )
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatHub
@@ -165,6 +170,20 @@ class AppInstanceTemplate:
     api_host: str | None = None
     api_port: int | None = None
     steam_update: SteamUpdateConfig | None = None
+    steam_update_factory: Callable[[], SteamUpdateConfig] | None = None
+
+    def __post_init__(self) -> None:
+        if self.steam_update is not None and self.steam_update_factory is not None:
+            raise ValueError("App instance templates may define either a Steam config or a Steam config factory.")
+
+    def resolved_steam_update(self) -> SteamUpdateConfig | None:
+        """Resolve this template's Steam configuration on demand."""
+
+        if self.steam_update is not None:
+            return self.steam_update
+        if self.steam_update_factory is None:
+            return None
+        return self.steam_update_factory()
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {}
@@ -182,8 +201,9 @@ class AppInstanceTemplate:
             payload["api_host"] = self.api_host
         if self.api_port is not None:
             payload["api_port"] = self.api_port
-        if self.steam_update is not None:
-            payload["steam_update"] = self.steam_update.model_dump(mode="json", exclude_none=True)
+        steam_update = self.resolved_steam_update()
+        if steam_update is not None:
+            payload["steam_update"] = steam_update.model_dump(mode="json", exclude_none=True)
         return payload
 
 
@@ -233,7 +253,7 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
         install_inputs=(AppInstallInput.ADMIN_PASSWORD,),
         join_port=7777,
         api_host="127.0.0.1",
-        steam_update=_required_scope_steam_update_template("satisfactory"),
+        steam_update_factory=lambda: _required_scope_steam_update_template("satisfactory"),
     ),
     "sevendays": AppInstanceTemplate(
         label="7 Days to Die",
@@ -242,7 +262,7 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
         client_overrides_dir="{WD}/client-overrides",
         server_log_file="{WD}/server_stdout.log",
         join_port=26900,
-        steam_update=_required_scope_steam_update_template("sevendays"),
+        steam_update_factory=lambda: _required_scope_steam_update_template("sevendays"),
     ),
 }
 
@@ -990,10 +1010,7 @@ class App_Manager(metaclass=config.Singleton):
         if current_steam_update is not None:
             if selected_branch is None:
                 return current_steam_update
-            preset = steam_update_preset_for_scope(app.scope)
-            if preset is None:
-                return current_steam_update.with_selected_branch(selected_branch, add_if_missing=True)
-            return preset.select_configured_branch(config=current_steam_update, branch_id=selected_branch)
+            return current_steam_update.with_selected_branch(selected_branch, add_if_missing=True)
         preset = steam_update_preset_for_scope(app.scope)
         if preset is None:
             raise ValueError(f"{app.friendly} does not support Steam update configuration.")
@@ -1254,8 +1271,10 @@ class App_Manager(metaclass=config.Singleton):
         creatable_scopes = frozenset(self.list_create_scopes())
         recipes: list[AppSteamInstallRecipe] = []
         for scope, template in _SCOPE_INSTANCE_TEMPLATES.items():
-            steam_update = template.steam_update
-            if scope not in creatable_scopes or steam_update is None:
+            if scope not in creatable_scopes:
+                continue
+            steam_update = template.resolved_steam_update()
+            if steam_update is None:
                 continue
             scope_path = Path("apps") / scope
             instances_path = scope_path / "instances.json"
@@ -1355,8 +1374,10 @@ class App_Manager(metaclass=config.Singleton):
             steam_recipe = self._steam_install_recipe_for_scope(plan.scope)
             if steam_recipe is None:
                 raise ValueError(f"SteamCMD installation is not supported for scope `{plan.scope}`.")
-            branch = steam_recipe.steam_update.branch(plan.steam_branch)
-            selected_steam_update = steam_recipe.steam_update.with_selected_branch(branch)
+            selected_steam_update = steam_recipe.steam_update.with_selected_branch(
+                plan.steam_branch,
+                add_if_missing=True,
+            )
             next_payload["steam_update"] = selected_steam_update.model_dump(mode="json", exclude_none=True)
 
         raw[plan.instance_key] = next_payload
@@ -2058,19 +2079,17 @@ class App_Manager(metaclass=config.Singleton):
     ) -> SteamUpdateConfig:
         configured_payload = template_payload.get("steam_update")
         if configured_payload is None:
-            return default_config.model_copy(deep=True)
-        if not isinstance(configured_payload, Mapping):
-            raise ValueError(f"Steam update configuration for scope `{scope}` must be an object.")
-        configured_config = SteamUpdateConfig.model_validate(configured_payload)
-        if configured_config.app_id != default_config.app_id:
-            raise ValueError(f"Steam app ID for scope `{scope}` does not match its installation recipe.")
-        preset = steam_update_preset_for_scope(scope)
-        branches = (
-            tuple(branch.model_copy(deep=True) for branch in default_config.branches)
-            if preset is None
-            else preset.merged_branches(configured_config.branches)
+            configured_config = default_config.model_copy(deep=True)
+        else:
+            if not isinstance(configured_payload, Mapping):
+                raise ValueError(f"Steam update configuration for scope `{scope}` must be an object.")
+            configured_config = SteamUpdateConfig.model_validate(configured_payload)
+            if configured_config.app_id != default_config.app_id:
+                raise ValueError(f"Steam app ID for scope `{scope}` does not match its installation recipe.")
+        discovered_branches = cached_steam_update_branches(default_config.app_id, allow_stale=True) or ()
+        return configured_config.model_copy(
+            update={"branches": merge_steam_update_branches(discovered_branches, configured_config.branches)}
         )
-        return configured_config.model_copy(update={"branches": branches})
 
     def _validate_steam_install_branch(self, *, scope: str, branch_id: str | None) -> str | None:
         if branch_id is None:
@@ -2078,7 +2097,11 @@ class App_Manager(metaclass=config.Singleton):
         recipe = self._steam_install_recipe_for_scope(scope)
         if recipe is None:
             raise ValueError(f"SteamCMD installation is not supported for scope `{scope}`.")
-        return recipe.steam_update.branch(branch_id).branch_id
+        requested_branch = SteamUpdateBranch(branch_id=branch_id)
+        try:
+            return recipe.steam_update.branch(requested_branch.branch_id).branch_id
+        except ValueError:
+            return requested_branch.branch_id
 
     @staticmethod
     def _validate_scope_name(raw: str) -> str:

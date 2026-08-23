@@ -21,7 +21,14 @@ from _manager import AppInstallInput, AppInstanceCreateRequest, AppInstanceCreat
 from _async_utils import run_blocking
 from _security import Access_Control, Power_Level
 from apps._config import AppVersion, SteamUpdateBranch, SteamUpdateConfig
-from apps._updater import build_steamcmd_command, redact_steamcmd_output, run_steamcmd_command, steamcmd_progress
+from apps._steam import cached_steam_update_branches, load_steam_update_branches, merge_steam_update_branches, steam_update_preset_for_scope
+from apps._updater import (
+    build_steamcmd_command,
+    redact_steamcmd_output,
+    resolve_steamcmd_command_prefix,
+    run_steamcmd_command,
+    steamcmd_progress,
+)
 
 log = logging.getLogger(__name__)
 
@@ -413,10 +420,10 @@ class NodeAppInstallerService:
         self._active_targets: set[Path] = set()
         self._active_instance_keys: set[tuple[str, str]] = set()
 
-    def build_catalog(self, *, manager: NodeAppInstallerManager) -> NodeAppInstallCatalog:
+    async def build_catalog(self, *, manager: NodeAppInstallerManager) -> NodeAppInstallCatalog:
         return NodeAppInstallCatalog(
             node=self._node_name(),
-            recipes=tuple(self._catalog_recipe(recipe) for recipe in self._available_recipes(manager=manager)),
+            recipes=tuple(self._catalog_recipe(recipe) for recipe in await self._available_recipes(manager=manager)),
         )
 
     async def start_install(
@@ -428,7 +435,7 @@ class NodeAppInstallerService:
         request: NodeAppInstallRequest,
     ) -> NodeAppInstallStatus:
         await acl.perm_check(actor_user_id, Power_Level.sudo)
-        recipe = self._recipe_for_scope(manager=manager, scope=request.scope)
+        recipe = await self._recipe_for_scope(manager=manager, scope=request.scope)
         branch = self._recipe_branch(recipe=recipe, branch_id=request.steam_branch_id)
         normalised_request = request.model_copy(
             update={"scope": recipe.scope, "steam_branch_id": branch.branch_id}
@@ -664,17 +671,40 @@ class NodeAppInstallerService:
             ),
         )
 
-    def _available_recipes(self, *, manager: NodeAppInstallerManager) -> tuple[AppSteamInstallRecipe, ...]:
+    async def _available_recipes(self, *, manager: NodeAppInstallerManager) -> tuple[AppSteamInstallRecipe, ...]:
         recipes = manager.list_steam_install_recipes()
         policy = self._scope_policy()
-        return tuple(recipe for recipe in recipes if policy.allows(recipe.scope))
+        allowed_recipes = tuple(recipe for recipe in recipes if policy.allows(recipe.scope))
+        return tuple(await asyncio.gather(*(self._with_discovered_branches(recipe) for recipe in allowed_recipes)))
 
-    def _recipe_for_scope(self, *, manager: NodeAppInstallerManager, scope: str) -> AppSteamInstallRecipe:
+    async def _recipe_for_scope(self, *, manager: NodeAppInstallerManager, scope: str) -> AppSteamInstallRecipe:
         scope_key = scope.strip().casefold()
-        for recipe in self._available_recipes(manager=manager):
+        for recipe in await self._available_recipes(manager=manager):
             if recipe.scope.casefold() == scope_key:
                 return recipe
         raise ValueError("That app is not available for installation.")
+
+    @staticmethod
+    async def _with_discovered_branches(recipe: AppSteamInstallRecipe) -> AppSteamInstallRecipe:
+        if steam_update_preset_for_scope(recipe.scope) is None:
+            return recipe
+        working_directory = config.DIR_LOG / "steamcmd-app-info"
+        try:
+            discovered_branches = await load_steam_update_branches(
+                recipe.steam_update,
+                command_prefix=resolve_steamcmd_command_prefix(recipe.steam_update),
+                working_directory=working_directory,
+            )
+        except Exception as xcp:
+            discovered_branches = cached_steam_update_branches(recipe.steam_update.app_id, allow_stale=True) or ()
+            log.warning(
+                "Unable to discover Steam install branches: scope=%s app_id=%s error=%s",
+                recipe.scope,
+                recipe.steam_update.app_id,
+                xcp,
+            )
+        branches = merge_steam_update_branches(discovered_branches, recipe.steam_update.branches)
+        return replace(recipe, steam_update=recipe.steam_update.model_copy(update={"branches": branches}))
 
     @staticmethod
     def _recipe_branch(*, recipe: AppSteamInstallRecipe, branch_id: str) -> SteamUpdateBranch:

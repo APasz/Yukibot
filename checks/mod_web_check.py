@@ -59,6 +59,7 @@ from apps._config import (
     ModPlatformMetadata,
     ModrinthModMetadata,
     ModType,
+    SteamUpdateBranch,
     is_client_pack_candidate,
 )
 from apps._console import ConsoleResponseSource
@@ -4073,6 +4074,26 @@ class ModWebTests(unittest.TestCase):
             app_name="satisfactory_alpha",
             update_info=None,
         )
+
+        self.assertEqual(
+            options,
+            {
+                "public": "public",
+            },
+        )
+
+    def test_details_steam_update_branch_options_include_cached_metadata(self) -> None:
+        with patch(
+            "web_dash.app_page_updates.cached_steam_update_branches",
+            return_value=(
+                SteamUpdateBranch(branch_id="public", label="Stable"),
+                SteamUpdateBranch(branch_id="experimental", label="Experimental"),
+            ),
+        ):
+            options = ModWebService._details_steam_update_branch_options(
+                app_name="satisfactory_alpha",
+                update_info=None,
+            )
 
         self.assertEqual(
             options,

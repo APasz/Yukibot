@@ -643,7 +643,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
         user: ModWebUser,
     ) -> NodeAppInstallCatalog:
         if node.is_current:
-            return self._node_api.build_app_install_catalog()
+            return await self._node_api.build_app_install_catalog()
         payload = await self._remote_json_async(
             node=node,
             app_name=None,

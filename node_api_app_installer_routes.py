@@ -20,7 +20,7 @@ class NodeAppInstallerRouteService(NodeAuthenticatedRouteService, Protocol):
     @property
     def node_name(self) -> str: ...
 
-    def build_app_install_catalog(self) -> NodeAppInstallCatalog: ...
+    async def build_app_install_catalog(self) -> NodeAppInstallCatalog: ...
 
     async def start_app_install(
         self,
@@ -46,7 +46,7 @@ def register_app_installer_routes(
     async def _catalog(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API app installer catalog request: node=%s", service.node_name)
         service._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APP_MANAGE,))
-        return service.build_app_install_catalog().to_mapping()
+        return (await service.build_app_install_catalog()).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/app-installer/jobs")
     async def _start_job(

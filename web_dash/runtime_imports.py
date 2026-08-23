@@ -101,9 +101,13 @@ from apps._config import (
     ModType,
     SteamUpdateBranch,
     SteamUpdatePreset,
-    steam_update_preset_for_scope,
 )
 from apps._node_api import NodeModUploadSource
+from apps._steam import (
+    cached_steam_update_branches,
+    merge_steam_update_branches,
+    steam_update_preset_for_scope,
+)
 from apps._updater import (
     AppUpdateInfo,
     AppUpdateOperationKind,
@@ -464,6 +468,7 @@ __all__: tuple[str, ...] = (
     "assert_never",
     "asyncio",
     "base64",
+    "cached_steam_update_branches",
     "cached_member_role_color",
     "cast",
     "color_int_to_hex",
@@ -479,6 +484,7 @@ __all__: tuple[str, ...] = (
     "json",
     "logging",
     "lru_cache",
+    "merge_steam_update_branches",
     "mimetypes",
     "mod_web_badge_class",
     "parse_qsl",

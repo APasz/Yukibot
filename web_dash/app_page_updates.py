@@ -17,8 +17,10 @@ from .runtime_imports import (
     NodeAppRuntimeSummary,
     SteamUpdatePreset,
     app_scope_from_name,
+    cached_steam_update_branches,
     config,
     escape,
+    merge_steam_update_branches,
     replace,
     required_app_mutation_level,
     steam_update_preset_for_scope,
@@ -108,12 +110,17 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         preset = cls._details_steam_update_preset(app_name)
         if preset is None:
             return {}
+        fallback_config = preset.build_config()
+        branches = merge_steam_update_branches(
+            cached_steam_update_branches(preset.app_id, allow_stale=True) or (),
+            fallback_config.branches,
+        )
         return {
             branch.branch_id: cls._update_branch_option_label(
                 branch_id=branch.branch_id,
                 label=branch.display_label,
             )
-            for branch in preset.branches
+            for branch in branches
         }
 
     @classmethod

@@ -2823,9 +2823,9 @@ class NodeApiService:
             )
         return result
 
-    def build_app_install_catalog(self) -> NodeAppInstallCatalog:
+    async def build_app_install_catalog(self) -> NodeAppInstallCatalog:
         self._require_app_installer_available()
-        return self._app_installer.build_catalog(manager=self._require_manager())
+        return await self._app_installer.build_catalog(manager=self._require_manager())
 
     async def start_app_install(
         self,

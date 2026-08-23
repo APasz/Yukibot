@@ -13,14 +13,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from re import Pattern
+from typing import Any, Final, cast
 from urllib.parse import quote, unquote, urlsplit
 
 import hikari
 
 import config
 from _async_utils import run_blocking
-from archive_safety import validated_zip_entries
 from _discord import (
     App_Bound,
     DC_Bound,
@@ -40,6 +40,7 @@ from apps._config import (
     ModPageLink,
     ModPlacement,
     ModType,
+    SteamUpdatePreset,
     known_mod_page_provider_for_url,
 )
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
@@ -66,6 +67,7 @@ from apps._settings import (
 from apps._tailer import Tailer
 from apps._telnet import TelnetClient
 from apps._updater import SteamCmd_Update_Manager
+from archive_safety import validated_zip_entries
 from config import Activity_Manager
 from relay_notices import (
     GameDeathKind,
@@ -179,30 +181,35 @@ _SEVENDAYS_VERSION_BUILD_RE = re.compile(
     r"(?P<main>\d+(?:\.\d+)*)(?:\s*\((?P<parenthesized>[^)]+)\)|\s*(?P<suffix>[bB]\d+))",
     re.IGNORECASE,
 )
-_SEVENDAYS_READY_RE = re.compile(r"\bStartAsServer\b")
-_SEVENDAYS_TELNET_STARTUP_ERROR_RE = re.compile(r"\bError in Telnet\.ctor\b", re.IGNORECASE)
-_SEVENDAYS_TRANSIENT_RE = re.compile(r"GMSG: Player '(.+?)' (joined|left) the game", re.IGNORECASE)
-_SEVENDAYS_DEATH_RE = re.compile(r"GMSG: Player '(?P<player>.+?)' died\b", re.IGNORECASE)
-_SEVENDAYS_CHAT_RE = re.compile(r"Chat.*?:\s*'(.*?)':\s*(.+)", re.IGNORECASE)
-_SEVENDAYS_SANDBOX_CODE_RE = re.compile(r"\bSandbox Code:\s*(?P<code>\S+)\s*$", re.IGNORECASE)
-_SEVENDAYS_SANDBOX_OPTIONS_RE = re.compile(r"\bSandbox Options:\s*$", re.IGNORECASE)
-_SEVENDAYS_SANDBOX_SECTION_RE = re.compile(r"\*\*\*\s*(?P<section>[^*]+?)\s*\*\*\*")
-_SEVENDAYS_SANDBOX_OPTION_RE = re.compile(
+_SEVENDAYS_READY_RE: Pattern[str] = re.compile(r"\bStartAsServer\b")
+_SEVENDAYS_TELNET_STARTUP_ERROR_RE: Pattern[str] = re.compile(r"\bError in Telnet\.ctor\b", re.IGNORECASE)
+_SEVENDAYS_TRANSIENT_RE: Pattern[str] = re.compile(r"GMSG: Player '(.+?)' (joined|left) the game", re.IGNORECASE)
+_SEVENDAYS_DEATH_RE: Pattern[str] = re.compile(r"GMSG: Player '(?P<player>.+?)' died\b", re.IGNORECASE)
+_SEVENDAYS_CHAT_RE: Pattern[str] = re.compile(r"Chat.*?:\s*'(.*?)':\s*(.+)", re.IGNORECASE)
+_SEVENDAYS_SANDBOX_CODE_RE: Pattern[str] = re.compile(r"\bSandbox Code:\s*(?P<code>\S+)\s*$", re.IGNORECASE)
+_SEVENDAYS_SANDBOX_OPTIONS_RE: Pattern[str] = re.compile(r"\bSandbox Options:\s*$", re.IGNORECASE)
+_SEVENDAYS_SANDBOX_SECTION_RE: Pattern[str] = re.compile(r"\*\*\*\s*(?P<section>[^*]+?)\s*\*\*\*")
+_SEVENDAYS_SANDBOX_OPTION_RE: Pattern[str] = re.compile(
     r"\bOption\s+(?P<key>[^:]+):\s*"
     r"(?P<value_index>-?\d+)/(?P<value_label>.*?)\s+"
     r"\(default:\s*(?P<default_index>-?\d+)/(?P<default_label>.*?)\)\s*$",
     re.IGNORECASE,
 )
-_SEVENDAYS_RUNTIME_LOG_DISCOVERY_TIMEOUT_SECONDS = 10.0
-_SEVENDAYS_RUNTIME_LOG_DISCOVERY_POLL_SECONDS = 0.25
-_SEVENDAYS_MANAGED_USERDATA_FOLDER = "userdata"
-_SEVENDAYS_YUKIBOT_DATA_RELATIVE_PATH = Path(".yukibot")
-_SEVENDAYS_SANDBOX_OPTIONS_FILE_NAME = "sandbox_options.json"
-_SEVENDAYS_SANDBOX_OPTIONS_SCHEMA_VERSION = 1
-_SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION = AppVersion(main="3.0", build=259)
-_SEVENDAYS_STARTUP_SANDBOX_OPTIONS_DELAY_SECONDS = 5.0
+_SEVENDAYS_RUNTIME_LOG_DISCOVERY_TIMEOUT_SECONDS: float = 10.0
+_SEVENDAYS_RUNTIME_LOG_DISCOVERY_POLL_SECONDS: float = 0.25
+_SEVENDAYS_MANAGED_USERDATA_FOLDER: str = "userdata"
+_SEVENDAYS_YUKIBOT_DATA_RELATIVE_PATH: Path = Path(".yukibot")
+_SEVENDAYS_SANDBOX_OPTIONS_FILE_NAME: str = "sandbox_options.json"
+_SEVENDAYS_SANDBOX_OPTIONS_SCHEMA_VERSION: int = 1
+_SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION: AppVersion = AppVersion(main="3.0", build=259)
+_SEVENDAYS_STARTUP_SANDBOX_OPTIONS_DELAY_SECONDS: float = 5.0
 _SEVENDAYS_STARTUP_SANDBOX_OPTIONS_MAX_ATTEMPTS = 6
-_SEVENDAYS_DEFAULT_TELNET_PORT = 8081
+_SEVENDAYS_DEFAULT_TELNET_PORT: int = 8081
+STEAM_APP_ID: Final[int] = 294420
+STEAM_UPDATE_PRESET: Final[SteamUpdatePreset] = SteamUpdatePreset(
+    app_id=STEAM_APP_ID,
+    default_selected_branch="latest_experimental",
+)
 
 
 def _required_mapping_text(payload: dict[str, object], key: str) -> str:

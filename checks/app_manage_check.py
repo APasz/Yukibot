@@ -3885,7 +3885,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.cfg.steam_update.app_id, 294420)
             self.assertEqual(app.cfg.steam_update.selected_branch, "alpha_22")
             branch_ids = [branch.branch_id for branch in app.cfg.steam_update.branches]
-            self.assertEqual(branch_ids[:3], ["public", "latest_experimental", "v3.1.0"])
+            self.assertIn("latest_experimental", branch_ids)
             self.assertEqual(branch_ids[-2:], ["alpha_21", "alpha_22"])
             self.assertIsNotNone(app.updater)
             self.assertEqual(payload["alpha"]["steam_update"]["app_id"], 294420)

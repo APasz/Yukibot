@@ -111,7 +111,7 @@ On Yuki, the public authority endpoint also falls back to `PUBLIC_BASE_URL`, but
 
 ### SteamCMD update targets
 
-SteamCMD-backed apps can update to their default release or a listed publisher-provided version or beta branch. SteamCMD installs the current build on that branch—it cannot pin an arbitrary historical build ID unless the publisher exposes that build as a beta branch. Password-protected or custom branches can be declared in the instance's `steam_update.branches` configuration with `beta_password`.
+SteamCMD-backed apps fetch their publisher-provided version and beta branches from Steam app metadata, with each app's result cached for 12 hours. SteamCMD installs the current build on that branch—it cannot pin an arbitrary historical build ID unless the publisher exposes that build as a beta branch. Password-protected or custom branches can be declared in the instance's `steam_update.branches` configuration with `beta_password`.
 
 ### Satisfactory first claim
 

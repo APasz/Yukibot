@@ -15,7 +15,15 @@ from typing import Protocol
 import _errors
 import config
 from _async_utils import run_blocking
-from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig, steam_update_preset_for_scope
+from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
+from apps._steam import (
+    build_steamcmd_login_arguments,
+    cached_steam_update_branches,
+    load_steam_update_branches,
+    merge_steam_update_branches,
+    parse_steam_keyvalues_mapping,
+    steam_update_branch_cache_is_fresh,
+)
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +48,7 @@ class AppUpdateState(enum.StrEnum):
 type SteamCmdOutputHandler = Callable[[str, str], None]
 
 _STEAMCMD_ERROR_OUTPUT_LINE_LIMIT = 4
+_STEAM_BRANCH_REFRESH_RETRY_SECONDS = 5 * 60.0
 
 
 def redact_steamcmd_output(
@@ -80,18 +89,12 @@ def build_steamcmd_command(
 ) -> list[str]:
     """Build a SteamCMD app-update command without exposing credentials in logs."""
 
-    login = steam_update.login
     command: list[str] = [
         *(resolve_steamcmd_command_prefix(steam_update) if command_prefix is None else command_prefix),
         "+force_install_dir",
         str(install_dir),
-        "+login",
-        login.username,
+        *build_steamcmd_login_arguments(steam_update),
     ]
-    if login.username.casefold() != "anonymous":
-        if login.password is None:
-            raise ValueError("Steam login password is required for non-anonymous logins.")
-        command.append(login.password)
     command.extend(["+app_update", str(steam_update.app_id), "-beta", branch.branch_id])
     if branch.beta_password is not None:
         command.extend(["-betapassword", branch.beta_password])
@@ -486,9 +489,12 @@ class SteamCmd_Update_Manager(Update_Manager):
         self._last_logged_manifest_signature: tuple[int, str | None, int | None] | None = None
         self._operation_running: bool = False
         self._active_task: asyncio.Task[AppUpdateOperationResult] | None = None
+        self._branch_refresh_task: asyncio.Task[None] | None = None
+        self._next_branch_refresh_at_seconds: float = 0.0
 
     def info(self) -> AppUpdateInfo:
         steam_update = self._steam_update_config()
+        self._schedule_branch_refresh(steam_update)
         branches = self._available_branches(steam_update)
         selected_branch = self._available_branch(branches, steam_update.selected_branch)
         installed_manifest = self._safe_read_installed_manifest()
@@ -515,12 +521,11 @@ class SteamCmd_Update_Manager(Update_Manager):
         if self.status().running:
             raise RuntimeError(f"Cannot change the Steam branch while {self.app.friendly} is updating.")
         steam_update = self._steam_update_config()
-        preset = steam_update_preset_for_scope(self.app.scope)
-        next_update = (
-            steam_update.with_selected_branch(branch_id, add_if_missing=True)
-            if preset is None
-            else preset.select_configured_branch(config=steam_update, branch_id=branch_id)
-        )
+        try:
+            selected_branch = self._available_branch(self._available_branches(steam_update), branch_id)
+        except ValueError:
+            selected_branch = SteamUpdateBranch(branch_id=branch_id)
+        next_update = steam_update.with_selected_branch(selected_branch, add_if_missing=True)
         branch = self._available_branch(self._available_branches(next_update), next_update.selected_branch)
         if next_update == steam_update:
             return self.info()
@@ -732,7 +737,10 @@ class SteamCmd_Update_Manager(Update_Manager):
         manifest_path = self._installed_manifest_path()
         if manifest_path is None:
             return None
-        raw_root = _parse_acf_mapping(manifest_path.read_text(encoding=config.STR_ENCODE))
+        raw_root = parse_steam_keyvalues_mapping(
+            manifest_path.read_text(encoding=config.STR_ENCODE),
+            source_label=f"Steam app manifest {manifest_path}",
+        )
         raw_state = raw_root.get("AppState")
         if not isinstance(raw_state, Mapping):
             raise ValueError(f"Steam app manifest is invalid: {manifest_path}")
@@ -787,10 +795,40 @@ class SteamCmd_Update_Manager(Update_Manager):
         return steam_update
 
     def _available_branches(self, steam_update: SteamUpdateConfig) -> tuple[SteamUpdateBranch, ...]:
-        preset = steam_update_preset_for_scope(self.app.scope)
-        if preset is None:
-            return steam_update.branches
-        return preset.merged_branches(steam_update.branches)
+        discovered_branches = cached_steam_update_branches(steam_update.app_id, allow_stale=True) or ()
+        return merge_steam_update_branches(discovered_branches, steam_update.branches)
+
+    def _schedule_branch_refresh(self, steam_update: SteamUpdateConfig) -> None:
+        if steam_update_branch_cache_is_fresh(steam_update.app_id):
+            return
+        with self._state_lock:
+            if time.monotonic() < self._next_branch_refresh_at_seconds:
+                return
+            if self._branch_refresh_task is not None and not self._branch_refresh_task.done():
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            self._branch_refresh_task = loop.create_task(
+                self._refresh_available_branches(steam_update),
+                name=f"steam-branch-refresh-{self.app.friendly}",
+            )
+
+    async def _refresh_available_branches(self, steam_update: SteamUpdateConfig) -> None:
+        try:
+            await load_steam_update_branches(
+                steam_update,
+                command_prefix=self._steamcmd_command_prefix,
+                working_directory=self.app.dir_log,
+            )
+        except Exception as xcp:
+            with self._state_lock:
+                self._next_branch_refresh_at_seconds = time.monotonic() + _STEAM_BRANCH_REFRESH_RETRY_SECONDS
+            log.warning("Unable to refresh Steam branches: app=%s error=%s", self.app.friendly, xcp)
+        else:
+            with self._state_lock:
+                self._next_branch_refresh_at_seconds = 0.0
 
     @staticmethod
     def _available_branch(
@@ -987,83 +1025,6 @@ def _steam_manifest_candidates(directory: Path, *, manifest_name: str) -> tuple[
             candidates.append(candidate)
             seen.add(candidate)
     return tuple(candidates)
-
-
-def _parse_acf_mapping(text: str) -> dict[str, object]:
-    tokens = _acf_tokens(text)
-    payload, index = _parse_acf_block(tokens=tokens, index=0, stop_on_brace=False)
-    if index != len(tokens):
-        raise ValueError("Steam app manifest has trailing tokens.")
-    return payload
-
-
-def _acf_tokens(text: str) -> tuple[str, ...]:
-    tokens: list[str] = []
-    position = 0
-    length = len(text)
-    while position < length:
-        char = text[position]
-        if char.isspace():
-            position += 1
-            continue
-        if char in "{}":
-            tokens.append(char)
-            position += 1
-            continue
-        if char != '"':
-            raise ValueError(f"Steam app manifest contains unexpected token near position {position}.")
-        position += 1
-        value_chars: list[str] = []
-        while position < length:
-            next_char = text[position]
-            if next_char == "\\":
-                if position + 1 >= length:
-                    raise ValueError("Steam app manifest contains an incomplete escape sequence.")
-                value_chars.append(text[position + 1])
-                position += 2
-                continue
-            if next_char == '"':
-                position += 1
-                break
-            value_chars.append(next_char)
-            position += 1
-        else:
-            raise ValueError("Steam app manifest contains an unterminated string.")
-        tokens.append("".join(value_chars))
-    return tuple(tokens)
-
-
-def _parse_acf_block(
-    *,
-    tokens: tuple[str, ...],
-    index: int,
-    stop_on_brace: bool,
-) -> tuple[dict[str, object], int]:
-    payload: dict[str, object] = {}
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "}":
-            if not stop_on_brace:
-                raise ValueError("Steam app manifest contains an unexpected closing brace.")
-            return payload, index + 1
-        if token == "{":
-            raise ValueError("Steam app manifest contains an unexpected opening brace.")
-        key = token
-        index += 1
-        if index >= len(tokens):
-            raise ValueError(f"Steam app manifest is missing a value for {key!r}.")
-        next_token = tokens[index]
-        if next_token == "{":
-            value, index = _parse_acf_block(tokens=tokens, index=index + 1, stop_on_brace=True)
-            payload[key] = value
-            continue
-        if next_token == "}":
-            raise ValueError(f"Steam app manifest is missing a value for {key!r}.")
-        payload[key] = next_token
-        index += 1
-    if stop_on_brace:
-        raise ValueError("Steam app manifest is missing a closing brace.")
-    return payload, index
 
 
 _STEAMCMD_PROGRESS_RE = re.compile(

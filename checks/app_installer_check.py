@@ -126,7 +126,7 @@ class _RouteService:
         assert verified_grant is None
         return 42
 
-    def build_app_install_catalog(self) -> NodeAppInstallCatalog:
+    async def build_app_install_catalog(self) -> NodeAppInstallCatalog:
         return NodeAppInstallCatalog(node=self.node_name, recipes=())
 
     async def start_app_install(self, *, request: NodeAppInstallRequest, actor_user_id: int) -> NodeAppInstallStatus:
@@ -221,13 +221,57 @@ class AppInstallerCheck(unittest.TestCase):
             )
             service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
 
-            catalog = service.build_catalog(manager=manager)
+            catalog = asyncio.run(service.build_catalog(manager=manager))
 
         self.assertEqual(catalog.node, "node-a")
         self.assertEqual(catalog.recipes[0].scope, "demo")
         self.assertEqual(catalog.recipes[0].fields[0].key, AppInstallInput.ADMIN_PASSWORD.value)
         self.assertIn("claiming it in the game client", catalog.recipes[0].fields[0].help_text or "")
         self.assertNotIn("not-disclosed", str(catalog.to_mapping()))
+
+    def test_catalog_fetches_live_branches_and_keeps_configured_overrides(self) -> None:
+        async def _build_catalog() -> tuple[NodeAppInstallCatalog, AsyncMock]:
+            with TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                manager = _InstallerManager(root=root)
+                manager.recipe = replace(
+                    manager.recipe,
+                    scope="sevendays",
+                    steam_update=SteamUpdateConfig(
+                        app_id=294420,
+                        branches=(
+                            SteamUpdateBranch(branch_id="public", label="Preferred"),
+                            SteamUpdateBranch(branch_id="private", beta_password="secret"),
+                        ),
+                        selected_branch="public",
+                    ),
+                )
+                service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
+                branch_loader = AsyncMock(
+                    return_value=(
+                        SteamUpdateBranch(branch_id="public", label="Stable"),
+                        SteamUpdateBranch(branch_id="experimental", label="Experimental"),
+                    )
+                )
+                with (
+                    patch.object(config, "DIR_LOG", root / "logs"),
+                    patch("node_api_app_installer.load_steam_update_branches", new=branch_loader),
+                    patch("node_api_app_installer.resolve_steamcmd_command_prefix", return_value=("steamcmd",)),
+                ):
+                    catalog = await service.build_catalog(manager=manager)
+            return catalog, branch_loader
+
+        catalog, branch_loader = asyncio.run(_build_catalog())
+
+        self.assertEqual(
+            [(branch.branch_id, branch.label) for branch in catalog.recipes[0].branches],
+            [
+                ("public", "Preferred"),
+                ("experimental", "Experimental"),
+                ("private", "private"),
+            ],
+        )
+        branch_loader.assert_awaited_once()
 
     def test_node_allowlist_filters_catalog_and_rejects_direct_installs(self) -> None:
         async def _run() -> None:
@@ -249,7 +293,7 @@ class AppInstallerCheck(unittest.TestCase):
                     inputs={AppInstallInput.ADMIN_PASSWORD: "secret"},
                 )
 
-                self.assertEqual(service.build_catalog(manager=manager).recipes, ())
+                self.assertEqual((await service.build_catalog(manager=manager)).recipes, ())
                 with self.assertRaisesRegex(ValueError, "not available for installation"):
                     await service.start_install(
                         manager=manager,

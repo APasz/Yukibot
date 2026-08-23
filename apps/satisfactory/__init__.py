@@ -19,7 +19,7 @@ from pathlib import Path
 from re import Pattern
 from ssl import SSLContext
 from threading import Lock as ThreadLock
-from typing import Any, Protocol, Self, TypeVar, cast
+from typing import Any, Final, Protocol, Self, TypeVar, cast
 from urllib.parse import SplitResult, urlsplit
 
 import aiohttp
@@ -53,7 +53,7 @@ from apps._blueprint_files import (
     validate_blueprint_session_name,
     validate_blueprint_upload_pair,
 )
-from apps._config import App_Config, AppVersion, resolve_config_path
+from apps._config import App_Config, AppVersion, SteamUpdatePreset, resolve_config_path
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._save_files import AppSaveEntry, AppSaveEntryKind, AppSaveRoot, AppSaveRootMode
 from apps._settings import (
@@ -168,6 +168,8 @@ _SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME = "Shared"
 _SATISFACTORY_BLUEPRINT_STORAGE_SUFFIX = "-shared"
 _SATISFACTORY_SAVE_ROOT_ID = "saves"
 _SATISFACTORY_SAVE_ROOT_LABEL = "Server Saves"
+STEAM_APP_ID: Final[int] = 1690800
+STEAM_UPDATE_PRESET: Final[SteamUpdatePreset] = SteamUpdatePreset(app_id=STEAM_APP_ID)
 
 
 def _satisfactory_start_command(join_port: int | None) -> list[str]:

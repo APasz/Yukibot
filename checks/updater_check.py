@@ -6,8 +6,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
+import apps._steam as steam_metadata
 import config
-from apps._config import App_Config, AppVersion, SteamUpdateConfig, steam_update_preset_for_scope
+from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
+from apps._steam import (
+    STEAM_BRANCH_CACHE_TTL_SECONDS,
+    load_steam_update_branches,
+    parse_steam_app_info_branches,
+    steam_update_preset_for_scope,
+)
 from apps._updater import (
     AppUpdateBranchState,
     AppUpdateInfo,
@@ -162,19 +169,30 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual([branch.branch_id for branch in next_config.branches], ["public", "alpha_21"])
         self.assertEqual(next_config.selected_branch_config.display_label, "alpha_21")
 
-    def test_steam_update_preset_includes_reported_version_branches(self) -> None:
+    def test_steam_update_preset_defines_only_app_metadata(self) -> None:
+        from apps.sevendays import STEAM_APP_ID, STEAM_UPDATE_PRESET
+
         preset = steam_update_preset_for_scope("sevendays")
         self.assertIsNotNone(preset)
         assert preset is not None
+        self.assertIs(preset, STEAM_UPDATE_PRESET)
+        self.assertEqual(preset.app_id, STEAM_APP_ID)
 
         update_config = preset.build_config(selected_branch="v3.1.0")
 
         self.assertEqual(update_config.selected_branch, "v3.1.0")
-        self.assertEqual(
-            [branch.branch_id for branch in update_config.branches[:4]],
-            ["public", "latest_experimental", "v3.1.0", "v3.0.1"],
-        )
-        self.assertEqual(update_config.selected_branch_config.display_label, "Version 3.1.0 Stable")
+        self.assertEqual([branch.branch_id for branch in update_config.branches], ["latest_experimental", "v3.1.0"])
+        self.assertEqual(update_config.selected_branch_config.display_label, "v3.1.0")
+
+    def test_steam_update_preset_resolves_satisfactory_app_metadata(self) -> None:
+        from apps.satisfactory import STEAM_APP_ID, STEAM_UPDATE_PRESET
+
+        preset = steam_update_preset_for_scope("satisfactory")
+
+        self.assertIsNotNone(preset)
+        assert preset is not None
+        self.assertIs(preset, STEAM_UPDATE_PRESET)
+        self.assertEqual(preset.app_id, STEAM_APP_ID)
 
     def test_steamcmd_update_manager_select_branch_persists_choice(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -193,19 +211,36 @@ class UpdaterTests(unittest.TestCase):
             app = _FakeApp(Path(temp_dir))
             updater = SteamCmd_Update_Manager(app)
 
-            update_info = updater.info()
+            with patch(
+                "apps._updater.cached_steam_update_branches",
+                return_value=(
+                    SteamUpdateBranch(branch_id="public", label="Stable"),
+                    SteamUpdateBranch(branch_id="v3.1.0", label="Version 3.1.0 Stable"),
+                    SteamUpdateBranch(branch_id="alpha21.2", label="Alpha 21.2 Stable"),
+                ),
+            ):
+                update_info = updater.info()
 
         branches = {branch.branch_id: branch for branch in update_info.branches}
         self.assertEqual(branches["v3.1.0"].label, "Version 3.1.0 Stable")
         self.assertEqual(branches["alpha21.2"].label, "Alpha 21.2 Stable")
-        self.assertEqual(len(branches), 21)
+        self.assertIn("latest_experimental", branches)
+        self.assertEqual(len(branches), 4)
 
     def test_steamcmd_update_manager_selects_and_persists_version_branch(self) -> None:
         with TemporaryDirectory() as temp_dir:
             app = _FakeApp(Path(temp_dir))
             updater = SteamCmd_Update_Manager(app)
 
-            update_info = updater.select_branch("v3.1.0")
+            with patch(
+                "apps._updater.cached_steam_update_branches",
+                return_value=(
+                    SteamUpdateBranch(branch_id="public", label="Stable"),
+                    SteamUpdateBranch(branch_id="latest_experimental", label="Experimental"),
+                    SteamUpdateBranch(branch_id="v3.1.0", label="Version 3.1.0 Stable"),
+                ),
+            ):
+                update_info = updater.select_branch("v3.1.0")
 
         assert app.cfg.steam_update is not None
         self.assertEqual(app.cfg.steam_update.selected_branch, "v3.1.0")
@@ -217,6 +252,169 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(update_info.selected_branch_label, "Version 3.1.0 Stable")
         command = updater._steamcmd_command(branch=app.cfg.steam_update.selected_branch_config, validate=False)
         self.assertEqual(command[command.index("-beta") + 1], "v3.1.0")
+
+    def test_steam_app_info_branches_are_parsed_and_cached_for_twelve_hours(self) -> None:
+        app_info = '''
+Steam> app_info_print 123456
+"123456"
+{
+    "depots"
+    {
+        "branches"
+        {
+            "public"
+            {
+                "buildid" "100"
+            }
+            "experimental"
+            {
+                "description" "Experimental Builds"
+                "buildid" "101"
+            }
+        }
+    }
+}
+Steam> quit
+'''
+
+        parsed = parse_steam_app_info_branches(app_info, app_id=123456)
+
+        self.assertEqual(
+            [(branch.branch_id, branch.label) for branch in parsed],
+            [("public", None), ("experimental", "Experimental Builds")],
+        )
+        self.assertEqual(STEAM_BRANCH_CACHE_TTL_SECONDS, 12 * 60 * 60)
+
+        class _FakeProcess:
+            returncode = 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return (app_info.encode(), b"")
+
+        async def _exercise_cache() -> tuple[tuple[SteamUpdateBranch, ...], tuple[SteamUpdateBranch, ...], tuple[SteamUpdateBranch, ...], AsyncMock]:
+            update_config = SteamUpdateConfig(app_id=123456)
+            now = [0.0]
+            command_runner = AsyncMock(return_value=_FakeProcess())
+            with (
+                patch.dict("apps._steam._STEAM_BRANCH_CACHE", {}, clear=True),
+                patch.dict("apps._steam._STEAM_BRANCH_FETCHES", {}, clear=True),
+                patch("apps._steam.STEAM_BRANCH_CACHE_TTL_SECONDS", 1.0),
+                patch("apps._steam.time.monotonic", side_effect=lambda: now[0]),
+                patch("apps._steam.asyncio.create_subprocess_exec", command_runner),
+            ):
+                first = await load_steam_update_branches(
+                    update_config,
+                    command_prefix=("steamcmd",),
+                    working_directory=Path("."),
+                )
+                now[0] = 0.5
+                second = await load_steam_update_branches(
+                    update_config,
+                    command_prefix=("steamcmd",),
+                    working_directory=Path("."),
+                )
+                now[0] = 1.0
+                third = await load_steam_update_branches(
+                    update_config,
+                    command_prefix=("steamcmd",),
+                    working_directory=Path("."),
+                )
+            return first, second, third, command_runner
+
+        first, second, third, command_runner = asyncio.run(_exercise_cache())
+
+        self.assertEqual(first, parsed)
+        self.assertEqual(second, parsed)
+        self.assertEqual(third, parsed)
+        self.assertEqual(command_runner.await_count, 2)
+        self.assertIn("+app_info_update", command_runner.await_args_list[0].args)
+
+    def test_steam_branch_fetch_is_removed_after_all_waiters_cancel(self) -> None:
+        async def _exercise() -> None:
+            update_config = SteamUpdateConfig(app_id=123456)
+            fetch_started = asyncio.Event()
+            finish_fetch = asyncio.Event()
+
+            async def _fetch(
+                *,
+                steam_update: SteamUpdateConfig,
+                command_prefix: tuple[str, ...],
+                working_directory: Path,
+            ) -> tuple[SteamUpdateBranch, ...]:
+                del steam_update, command_prefix, working_directory
+                fetch_started.set()
+                await finish_fetch.wait()
+                return (SteamUpdateBranch(branch_id="public"),)
+
+            with (
+                patch.dict("apps._steam._STEAM_BRANCH_CACHE", {}, clear=True),
+                patch.dict("apps._steam._STEAM_BRANCH_FETCHES", {}, clear=True),
+                patch("apps._steam._fetch_steam_update_branches", new=_fetch),
+            ):
+                waiter = asyncio.create_task(
+                    load_steam_update_branches(
+                        update_config,
+                        command_prefix=("steamcmd",),
+                        working_directory=Path("."),
+                    )
+                )
+                await fetch_started.wait()
+                waiter.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await waiter
+
+                finish_fetch.set()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertNotIn(update_config.app_id, steam_metadata._STEAM_BRANCH_FETCHES)
+
+        asyncio.run(_exercise())
+
+    def test_steam_branch_discovery_terminates_on_cancellation(self) -> None:
+        class _BlockingProcess:
+            def __init__(self) -> None:
+                self.returncode: int | None = None
+                self.communicate_started = asyncio.Event()
+                self.terminated = False
+                self.wait_calls = 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                self.communicate_started.set()
+                await asyncio.Event().wait()
+                return (b"", b"")
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            async def wait(self) -> int:
+                self.wait_calls += 1
+                self.returncode = 1
+                return self.returncode
+
+        async def _exercise(working_directory: Path) -> _BlockingProcess:
+            process = _BlockingProcess()
+            with patch(
+                "apps._steam.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ):
+                discovery = asyncio.create_task(
+                    steam_metadata._fetch_steam_update_branches(
+                        steam_update=SteamUpdateConfig(app_id=123456),
+                        command_prefix=("steamcmd",),
+                        working_directory=working_directory,
+                    )
+                )
+                await process.communicate_started.wait()
+                discovery.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await discovery
+            return process
+
+        with TemporaryDirectory() as temp_dir:
+            process = asyncio.run(_exercise(Path(temp_dir) / "steam-info"))
+
+        self.assertTrue(process.terminated)
+        self.assertEqual(process.wait_calls, 1)
 
     def test_steamcmd_command_error_redacts_credentials_in_command_and_output(self) -> None:
         error = _command_error_text(

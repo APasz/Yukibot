@@ -8292,7 +8292,7 @@ class NodeApiTests(unittest.TestCase):
 
         with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
             with self.assertRaises(HTTPException) as raised:
-                service.build_app_install_catalog()
+                asyncio.run(service.build_app_install_catalog())
 
         self.assertEqual(raised.exception.status_code, 400)
 
