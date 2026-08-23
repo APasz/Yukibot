@@ -90,6 +90,7 @@ class NodeAppMutationAction(StrEnum):
     START = "start"
     STOP = "stop"
     KILL = "kill"
+    DELETE = "delete"
     ENABLE = "enable"
     DISABLE = "disable"
     RENAME = "rename"
@@ -102,6 +103,8 @@ class NodeAppMutationAction(StrEnum):
 def required_app_mutation_level(action: NodeAppMutationAction) -> Power_Level:
     if action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP}:
         return Power_Level.user
+    if action is NodeAppMutationAction.DELETE:
+        return Power_Level.root
     if action in {
         NodeAppMutationAction.KILL,
         NodeAppMutationAction.ENABLE,
@@ -121,6 +124,7 @@ def required_app_mutation_scope(action: NodeAppMutationAction) -> NodeApiScope:
         return NodeApiScope.APP_CONTROL
     if action in {
         NodeAppMutationAction.KILL,
+        NodeAppMutationAction.DELETE,
         NodeAppMutationAction.ENABLE,
         NodeAppMutationAction.DISABLE,
         NodeAppMutationAction.RENAME,
@@ -855,6 +859,7 @@ class NodeAppMutationService:
         self._transition_ttl_seconds = transition_ttl_seconds
         self._transitions: dict[str, NodeAppTransitionSnapshot] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._deleting_app_keys: set[str] = set()
         self._log = logging.getLogger(__name__)
 
     def cancel_pending(self) -> None:
@@ -921,6 +926,9 @@ class NodeAppMutationService:
         update_branch_id: str | None = None,
     ) -> NodeAppMutationResult:
         await acl.perm_check(actor_user_id, required_app_mutation_level(action))
+        app_key = app.name.casefold()
+        if action is not NodeAppMutationAction.DELETE and app_key in self._deleting_app_keys:
+            raise http_exception(409, f"Cannot change {app.friendly}; deletion is in progress.")
         if action is NodeAppMutationAction.START:
             blocker = manager.start_blocker(app)
             if blocker is not None:
@@ -948,6 +956,18 @@ class NodeAppMutationService:
                 task=asyncio.create_task(self._run_task(manager=manager, app=app, action=action)),
             )
             message = f"Kill requested for {app.friendly}."
+        elif action is NodeAppMutationAction.DELETE:
+            pending_task = self._tasks.get(app_key)
+            if pending_task is not None and not pending_task.done():
+                raise http_exception(409, f"Cannot delete {app.friendly}; another state change is in progress.")
+            if app_key in self._deleting_app_keys:
+                raise http_exception(409, f"Cannot delete {app.friendly}; deletion is already in progress.")
+            self._deleting_app_keys.add(app_key)
+            try:
+                await manager.delete_instance(app)
+            finally:
+                self._deleting_app_keys.discard(app_key)
+            message = f"Deleted {app.friendly}."
         elif action is NodeAppMutationAction.ENABLE:
             manager.toggle(app.name, True)
             message = f"Enabled {app.friendly}."
@@ -1042,16 +1062,16 @@ class NodeAppMutationService:
             raise ValueError(f"Unsupported app mutation action: {action}")
 
         self._invalidate_state_caches(app.name)
-        app_stats = (
-            await self._build_live_runtime_summary(app)
-            if action
-            in {
-                NodeAppMutationAction.START,
-                NodeAppMutationAction.STOP,
-                NodeAppMutationAction.KILL,
-            }
-            else await self._build_runtime_summary(app)
-        )
+        if action is NodeAppMutationAction.DELETE:
+            app_stats = None
+        elif action in {
+            NodeAppMutationAction.START,
+            NodeAppMutationAction.STOP,
+            NodeAppMutationAction.KILL,
+        }:
+            app_stats = await self._build_live_runtime_summary(app)
+        else:
+            app_stats = await self._build_runtime_summary(app)
         self._log.info(
             "Node API app mutated: node=%s app=%s action=%s actor=%s",
             self._node_name(),

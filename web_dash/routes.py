@@ -1123,6 +1123,14 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             if user is not None:
                 await self._render_alias_page(ui=ui, user=user, request=request)
 
+        @ui.page("/app-installer")
+        @ui.page("/mod-web/app-installer")
+        async def _app_installer_page(request: Request) -> None:
+            traffic_log.info("Rendering app installer")
+            user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.sudo)
+            if user is not None:
+                await self._render_app_installer_page(ui=ui, user=user)
+
         @ui.page("/apps/{app_name}")
         async def _app_alias_page(app_name: str, request: Request) -> None:
             traffic_log.info("Rendering app alias page: app=%s", app_name)

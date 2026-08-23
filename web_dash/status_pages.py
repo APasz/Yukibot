@@ -126,7 +126,7 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
                 with ui.column().classes("min-w-0 gap-1"):
                     ui.label("Node unavailable").classes("text-base font-bold mod-title-small")
                     ui.label(message).classes("text-sm mod-subtitle break-words")
-                    ui.label("Yuki will keep trying in the background.").classes(
+                    ui.label("Will keep trying in the background.").classes(
                         "text-xs uppercase tracking-[0.18em] mod-subtitle"
                     )
 

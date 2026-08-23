@@ -373,6 +373,7 @@ class NodeSystemCapabilities:
     supports_node_font_sources: bool = False
     supports_node_disk_settings: bool = True
     supports_discord_settings: bool = False
+    supports_app_installer_settings: bool = False
 
     def __post_init__(self) -> None:
         if not self.actions:
@@ -391,6 +392,7 @@ class NodeSystemCapabilities:
         raw_node_font_sources = payload.get("supports_node_font_sources", False)
         raw_node_disk_settings = payload.get("supports_node_disk_settings", True)
         raw_discord_settings = payload.get("supports_discord_settings", False)
+        raw_app_installer_settings = payload.get("supports_app_installer_settings", False)
         if not all(
             isinstance(value, bool)
             for value in (
@@ -400,6 +402,7 @@ class NodeSystemCapabilities:
                 raw_node_font_sources,
                 raw_node_disk_settings,
                 raw_discord_settings,
+                raw_app_installer_settings,
             )
         ):
             raise ValueError("Node system capability is invalid.")
@@ -419,6 +422,7 @@ class NodeSystemCapabilities:
             supports_node_font_sources=cast(bool, raw_node_font_sources),
             supports_node_disk_settings=cast(bool, raw_node_disk_settings),
             supports_discord_settings=cast(bool, raw_discord_settings),
+            supports_app_installer_settings=cast(bool, raw_app_installer_settings),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -430,6 +434,7 @@ class NodeSystemCapabilities:
             "supports_node_font_sources": self.supports_node_font_sources,
             "supports_node_disk_settings": self.supports_node_disk_settings,
             "supports_discord_settings": self.supports_discord_settings,
+            "supports_app_installer_settings": self.supports_app_installer_settings,
         }
 
 

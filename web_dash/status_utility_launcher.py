@@ -9,6 +9,7 @@ from typing import Protocol, cast
 from nicegui.element import Element
 
 import config
+from _security import Power_Level
 from mod_web_auth import ModWebUser
 
 from .nicegui_protocols import ModWebUi
@@ -125,6 +126,14 @@ class ModWebStatusUtilityLauncherMixin(ModWebStatusFeatureSupport):
         if include_mirrors:
             action_specs.append(
                 _plate_action(ModWebUserPlateAction.MIRRORS, lambda: ui.navigate.to("/mod-web/mirrors"))
+            )
+        if self._user_has_level(user, Power_Level.sudo):
+            action_specs.append(
+                _UtilityActionSpec(
+                    label="Install App",
+                    icon="download",
+                    action=lambda: ui.navigate.to("/mod-web/app-installer"),
+                )
             )
         action_specs.append(_plate_action(ModWebUserPlateAction.SETTINGS, open_user_settings))
         action_specs.append(_plate_action(ModWebUserPlateAction.STANDARD_DRINKS, open_standard_drinks))

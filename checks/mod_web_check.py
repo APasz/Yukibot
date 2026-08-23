@@ -147,6 +147,7 @@ from node_api import (
     NodeSystemSummary,
 )
 from node_api_app_state import ClientPackFilePreview, NodeAppMutationAction
+from node_api_app_installer import NodeAppInstallScopeOption, NodeAppInstallerSettingsState
 from node_api_console import NodeConsoleActionEntry, NodeConsoleActionParameter
 from node_api_files import NodeConfigEntry, NodeConfigList
 from node_api_mod import (
@@ -183,6 +184,7 @@ from web_dash.app_page import (
     _MinecraftRecipeEditorSelection,
     _MinecraftRecipeEditorState,
 )
+from web_dash.app_installer import _AppInstallerPageLock
 from web_dash.app_page_factorio import (
     _ENEMY_EXPANSION_SETTINGS,
     ModWebAppPageFactorioMixin,
@@ -199,6 +201,7 @@ from web_dash.constants import (
     _REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
 )
 from web_dash.home import (
+    _APP_INSTALLER_POLICY_SELECT_PROPS,
     _format_restart_hours_input,
     _format_restart_state_line,
     _format_restart_timestamp,
@@ -3404,6 +3407,7 @@ class ModWebTests(unittest.TestCase):
                 supports_node_capacity=True,
                 supports_node_font_sources=True,
                 supports_discord_settings=True,
+                supports_app_installer_settings=True,
             )
             capacity = config.NodeCapacityProfile(
                 cpu_points_total=12,
@@ -3412,6 +3416,11 @@ class ModWebTests(unittest.TestCase):
                 ram_points_reserved=4,
             )
             font_sources = config.NodeFontSourceSettings(google_font_urls=("https://fonts.google.com/specimen/Inter",))
+            app_installer_settings = NodeAppInstallerSettingsState(
+                node="erin",
+                settings=config.AppInstallerSettings(allowed_scopes=("satisfactory",)),
+                available_apps=(NodeAppInstallScopeOption(scope="satisfactory", label="Satisfactory"),),
+            )
             disk_settings = NodeDiskManagementState(
                 node="erin",
                 disks=(
@@ -3437,6 +3446,7 @@ class ModWebTests(unittest.TestCase):
             remote_system_capabilities = AsyncMock(return_value=system_capabilities)
             remote_system_logs = AsyncMock()
             remote_capacity = AsyncMock(return_value=capacity)
+            remote_app_installer_settings = AsyncMock(return_value=app_installer_settings)
             remote_font_sources = AsyncMock(return_value=font_sources)
             remote_disk_settings = AsyncMock(return_value=disk_settings)
             remote_discord_settings = AsyncMock(return_value=discord_settings)
@@ -3490,6 +3500,7 @@ class ModWebTests(unittest.TestCase):
                     new=remote_system_logs,
                 ),
                 patch.object(service, "_node_capacity", new=remote_capacity),
+                patch.object(service, "_app_installer_settings", new=remote_app_installer_settings),
                 patch.object(
                     service,
                     "_node_font_sources",
@@ -3509,6 +3520,7 @@ class ModWebTests(unittest.TestCase):
                 remote_system_capabilities.assert_not_awaited()
                 remote_system_logs.assert_not_awaited()
                 remote_capacity.assert_not_awaited()
+                remote_app_installer_settings.assert_not_awaited()
                 remote_font_sources.assert_not_awaited()
                 remote_disk_settings.assert_not_awaited()
                 remote_discord_settings.assert_not_awaited()
@@ -3543,16 +3555,19 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(system_tab.restart_state, restart_state)
             self.assertEqual(system_tab.system_capabilities, system_capabilities)
             self.assertEqual(properties_tab.node_capacity, capacity)
+            self.assertEqual(properties_tab.app_installer_settings, app_installer_settings)
             self.assertEqual(properties_tab.node_font_sources, font_sources)
             self.assertEqual(properties_tab.node_disk_settings, disk_settings)
             self.assertEqual(properties_tab.system_capabilities, system_capabilities)
             self.assertEqual(portal_properties_tab.system_capabilities, portal_properties_capabilities)
             self.assertIsNone(portal_properties_tab.node_capacity)
+            self.assertIsNone(portal_properties_tab.app_installer_settings)
             self.assertIsNone(portal_properties_tab.node_font_sources)
             self.assertEqual(portal_properties_tab.node_disk_settings, disk_settings)
             self.assertEqual(discord_tab.discord_settings, discord_settings)
             self.assertEqual(discord_tab.system_capabilities, system_capabilities)
             self.assertEqual(remote_capacity.await_count, 1)
+            self.assertEqual(remote_app_installer_settings.await_count, 1)
             self.assertEqual(remote_font_sources.await_count, 1)
             self.assertEqual(remote_disk_settings.await_count, 2)
             remote_discord_settings.assert_awaited_once_with(node_name="erin", user=user)
@@ -3603,6 +3618,69 @@ class ModWebTests(unittest.TestCase):
             preferences.labels,
             {"/mnt/offline": "Offline", "/mnt/backups": "Archive"},
         )
+
+    def test_build_app_installer_settings_uses_global_enable_toggle(self) -> None:
+        all_apps = NodeAppInstallerSettingsState(
+            node="erin",
+            settings=config.AppInstallerSettings(),
+            available_apps=(
+                NodeAppInstallScopeOption(scope="satisfactory", label="Satisfactory"),
+                NodeAppInstallScopeOption(scope="sevendays", label="7 Days to Die"),
+            ),
+        )
+        selected_apps = NodeAppInstallerSettingsState(
+            node="erin",
+            settings=config.AppInstallerSettings(allowed_scopes=("satisfactory",)),
+            available_apps=all_apps.available_apps,
+        )
+
+        self.assertEqual(
+            ModWebService._build_app_installer_settings(
+                initial_settings=all_apps,
+                app_installs_enabled=True,
+                selected_scopes=("satisfactory", "sevendays"),
+            ),
+            config.AppInstallerSettings(),
+        )
+        self.assertEqual(
+            ModWebService._build_app_installer_settings(
+                initial_settings=selected_apps,
+                app_installs_enabled=False,
+                selected_scopes=("satisfactory",),
+            ),
+            config.AppInstallerSettings(allowed_scopes=()),
+        )
+        self.assertEqual(
+            ModWebService._build_app_installer_settings(
+                initial_settings=selected_apps,
+                app_installs_enabled=True,
+                selected_scopes=("sevendays",),
+            ),
+            config.AppInstallerSettings(allowed_scopes=("sevendays",)),
+        )
+        with self.assertRaisesRegex(ValueError, "at least one allowed app"):
+            ModWebService._build_app_installer_settings(
+                initial_settings=selected_apps,
+                app_installs_enabled=True,
+                selected_scopes=(),
+            )
+
+    def test_app_installer_policy_select_keeps_selected_options_neutral(self) -> None:
+        self.assertIn(
+            "options-selected-class=mod-app-installer-policy-option",
+            _APP_INSTALLER_POLICY_SELECT_PROPS,
+        )
+
+    def test_app_installer_page_lock_remains_held_until_its_job_finishes(self) -> None:
+        lock = _AppInstallerPageLock()
+
+        self.assertTrue(lock.acquire(owner_token="first", node_name="erin"))
+        self.assertFalse(lock.acquire(owner_token="second", node_name="yuki"))
+        lock.record_job(owner_token="first", node_name="erin", job_id="job-1")
+        self.assertFalse(lock.release(owner_token="second"))
+        self.assertFalse(lock.release_completed_job(job_id="job-2"))
+        self.assertTrue(lock.release_completed_job(job_id="job-1"))
+        self.assertTrue(lock.acquire(owner_token="second", node_name="yuki"))
 
     def test_render_node_system_page_reconnects_after_transient_node_restart(
         self,
@@ -19040,6 +19118,16 @@ class ModWebTests(unittest.TestCase):
                 del exc_type, exc, traceback
                 return False
 
+        class FakeDialog(FakeContainer):
+            def __init__(self) -> None:
+                self.opened = False
+
+            def open(self) -> None:
+                self.opened = True
+
+            def close(self) -> None:
+                self.opened = False
+
         class FakeButton:
             def __init__(self, text: str, on_click: Callable[[], object] | None = None) -> None:
                 self.text = text
@@ -19099,7 +19187,9 @@ class ModWebTests(unittest.TestCase):
                 self.inputs: list[FakeInput] = []
                 self.selects: list[FakeSelect] = []
                 self.checkboxes: list[FakeCheckbox] = []
-                self.navigate = SimpleNamespace(reload=lambda: None)
+                self.labels: list[str] = []
+                self.dialogs: list[FakeDialog] = []
+                self.navigate = SimpleNamespace(reload=lambda: None, to=lambda _target: None)
 
             def column(self) -> FakeContainer:
                 return FakeContainer()
@@ -19134,8 +19224,13 @@ class ModWebTests(unittest.TestCase):
                 return control
 
             def label(self, text: str) -> FakeContainer:
-                del text
+                self.labels.append(text)
                 return FakeContainer()
+
+            def dialog(self) -> FakeDialog:
+                dialog = FakeDialog()
+                self.dialogs.append(dialog)
+                return dialog
 
             def notify(self, message: str, *, type: str | None = None) -> None:
                 del message, type
@@ -19188,7 +19283,11 @@ class ModWebTests(unittest.TestCase):
         )
         user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
 
-        with patch.object(service, "_user_has_level", return_value=True):
+        with patch.object(
+            service,
+            "_user_has_level",
+            side_effect=lambda _user, required_level: required_level <= Power_Level.sudo,
+        ):
             service._render_app_properties_section(
                 ui=cast(ModWebUi, cast(object, ui)),
                 model=model,
@@ -19197,6 +19296,7 @@ class ModWebTests(unittest.TestCase):
             )
 
         self.assertIn("Disable", [button.text for button in ui.buttons])
+        self.assertNotIn("Delete Instance", [button.text for button in ui.buttons])
         self.assertEqual(
             [control.value for control in ui.inputs],
             ["Minecraft Alpha", "Main shard", "0", "0", "", ""],
@@ -19249,6 +19349,23 @@ class ModWebTests(unittest.TestCase):
                 "mod-app-details-toggle",
             ],
         )
+
+        root_ui = FakeUi()
+        with patch.object(service, "_user_has_level", return_value=True):
+            service._render_app_properties_section(
+                ui=cast(ModWebUi, cast(object, root_ui)),
+                model=model,
+                user=user,
+                tab=service._app_properties_tab_definition(),
+            )
+
+        delete_instance_button = next(button for button in root_ui.buttons if button.text == "Delete Instance")
+        self.assertIsNotNone(delete_instance_button.on_click)
+        assert delete_instance_button.on_click is not None
+        delete_instance_button.on_click()
+        self.assertEqual(len(root_ui.dialogs), 1)
+        self.assertTrue(root_ui.dialogs[0].opened)
+        self.assertTrue(any("Back up saves and mods first." in label for label in root_ui.labels))
 
     def test_render_user_header_omits_discord_settings_for_sudo_users(
         self,
@@ -19815,6 +19932,7 @@ class ModWebTests(unittest.TestCase):
                 "Sim Upload",
                 "Sim Download",
                 "Clear Transfers",
+                "Install App",
                 "Settings",
                 "Standard drinks",
                 "Currency",
@@ -19837,6 +19955,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             ui.icons,
             [
+                "download",
                 "settings",
                 "local_bar",
                 "currency_exchange",
@@ -19847,6 +19966,11 @@ class ModWebTests(unittest.TestCase):
                 "logout",
             ],
         )
+        install_item = next(item for item in ui.menu_items if item.text == "Install App")
+        if install_item.on_click is None:
+            raise AssertionError("Install App menu item is missing a click handler.")
+        install_item.on_click(None)
+        self.assertEqual(ui.navigated_to, ["/mod-web/app-installer"])
         settings_item = next(item for item in ui.menu_items if item.text == "Settings")
         if settings_item.on_click is None:
             raise AssertionError("Settings menu item is missing a click handler.")
@@ -20033,7 +20157,7 @@ class ModWebTests(unittest.TestCase):
         if about_item.on_click is None:
             raise AssertionError("About menu item is missing a click handler.")
         about_item.on_click(None)
-        self.assertEqual(ui.navigated_to, ["/aliases", "/auth/about"])
+        self.assertEqual(ui.navigated_to, ["/mod-web/app-installer", "/aliases", "/auth/about"])
 
     def test_user_settings_panel_saves_and_resets_appearance_colours(self) -> None:
         class FakeContainer:

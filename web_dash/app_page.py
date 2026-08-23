@@ -51,6 +51,7 @@ from .constants import (
     _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
     log,
 )
+from .links import mod_web_node_path
 from .nicegui_protocols import (
     AsyncRefresh,
     ModWebEventArgumentsContainer,
@@ -6631,6 +6632,12 @@ class ModWebAppPageMixin(
                     self._replace_browser_mod_sort_order(ui=ui, order=current_sort_order)
                     _mod_download_rows.refresh(current_search_query)
 
+                def open_modlist() -> None:
+                    modlist_dialog.open()
+
+                def open_delete_dialog() -> None:
+                    delete_dialog.open()
+
                 toolbar_bindings: _ModWebModToolbarBindings = self._render_mod_toolbar(
                     ui=ui,
                     model=model,
@@ -6642,7 +6649,7 @@ class ModWebAppPageMixin(
                     cancel_selection=exit_mod_selection,
                     download_selected=download_selected if capabilities.supports_raw_download else None,
                     open_client_pack=open_client_pack_dialog if supports_client_pack else None,
-                    open_modlist=modlist_dialog.open,
+                    open_modlist=open_modlist,
                     open_client_pack_config=(
                         open_client_pack_configuration
                         if supports_client_pack and self._user_has_level(user, Power_Level.admin)
@@ -6665,7 +6672,7 @@ class ModWebAppPageMixin(
                         else None
                     ),
                     cancel_metadata=cancel_metadata_operation,
-                    delete_selected=delete_dialog.open,
+                    delete_selected=open_delete_dialog,
                     upload_mod=upload_picker_action,
                     add_mod_link=open_mod_link_dialog if can_install_factorio_mod_link else None,
                     show_search=show_search,
@@ -6780,6 +6787,9 @@ class ModWebAppPageMixin(
         can_edit_app_details: bool = self._user_has_level(
             user, required_app_mutation_level(NodeAppMutationAction.UPDATE_DETAILS)
         )
+        can_delete_instance: bool = self._user_has_level(
+            user, required_app_mutation_level(NodeAppMutationAction.DELETE)
+        )
         if not can_manage_app_state and not can_edit_app_details:
             self._render_flat_tab_empty_state(
                 ui=ui,
@@ -6808,6 +6818,8 @@ class ModWebAppPageMixin(
         rcon_requires_online_players_checkbox: Checkbox | None = None
         save_properties_button: Button | None = None
         instance_state_button: Button | None = None
+        delete_instance_dialog: Dialog | None = None
+        delete_instance_submit_button: Button | None = None
         activity_provider_checkboxes: list[tuple[str, Checkbox]] = []
         current_runtime_model: ModWebBasePageModel = model
         steam_update_preset = self._details_steam_update_preset(model.app_name)
@@ -7014,6 +7026,56 @@ class ModWebAppPageMixin(
 
             await self._run_with_loading_button(button=instance_state_button, action=_mutate_state)
 
+        async def _delete_instance() -> None:
+            try:
+                result = await self._mutate_app(
+                    model=current_runtime_model,
+                    action=NodeAppMutationAction.DELETE,
+                    user=user,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "App instance deletion failed: node=%s app=%s error=%s",
+                    current_runtime_model.node_name,
+                    current_runtime_model.app_name,
+                    xcp,
+                )
+                ui.notify(f"App instance deletion failed: {xcp}", type="negative")
+                return
+            if delete_instance_dialog is not None:
+                delete_instance_dialog.close()
+            ui.notify(result.message, type="positive")
+            ui.navigate.to(mod_web_node_path(current_runtime_model.node_name))
+
+        async def _handle_instance_delete(_: object | None = None) -> None:
+            if delete_instance_submit_button is None:
+                raise RuntimeError("App instance Delete button was not rendered.")
+            await self._run_with_loading_button(button=delete_instance_submit_button, action=_delete_instance)
+
+        def _open_instance_delete_dialog() -> None:
+            nonlocal delete_instance_dialog, delete_instance_submit_button
+            if delete_instance_dialog is None:
+                with ui.dialog() as created_dialog:
+                    delete_instance_dialog = created_dialog
+                    with ui.card().classes("mod-card mod-dialog-card"):
+                        with ui.column().classes("w-full gap-4 p-5"):
+                            with ui.column().classes("gap-1"):
+                                ui.label(f"Delete {current_runtime_model.app_friendly}?").classes(
+                                    "text-xl font-black mod-title-small"
+                                )
+                                ui.label(
+                                    "Back up saves and mods first. This permanently removes the managed install "
+                                    "directory and instance configuration; save data outside the install directory "
+                                    "may need separate cleanup."
+                                ).classes("mod-subtitle text-sm")
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                ui.button("Cancel", on_click=created_dialog.close).classes("mod-list-button secondary")
+                                delete_instance_submit_button = ui.button(
+                                    "Delete Instance",
+                                    on_click=_handle_instance_delete,
+                                ).classes("mod-list-button danger")
+            delete_instance_dialog.open()
+
         with ui.card().classes(f"{self._flat_tab_card_classes()} mod-app-properties-card"):
             with ui.column().classes("w-full gap-4 mod-app-details-layout"):
                 with ui.column().classes("gap-1"):
@@ -7183,6 +7245,10 @@ class ModWebAppPageMixin(
                             self._app_enable_disable_label(model),
                             on_click=_change_instance_state,
                         ).classes(f"{self._app_enable_disable_button_classes(model)} mod-app-details-state-button")
+                        if can_delete_instance:
+                            ui.button("Delete Instance", on_click=_open_instance_delete_dialog).classes(
+                                "mod-list-button danger mod-app-details-state-button"
+                            )
                 if can_edit_app_details:
                     with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
                         save_properties_button = ui.button("Save", on_click=_handle_property_save).classes(

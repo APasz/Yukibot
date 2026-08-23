@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from fastapi import Request
 
 import config
+from node_api_app_installer import NodeAppInstallerSettingsMutationResult, NodeAppInstallerSettingsState
 from node_api_route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
@@ -16,6 +17,8 @@ class NodeManagementRouteService(NodeAuthenticatedRouteService, Protocol):
     """Node-management operations exposed through the HTTP API."""
 
     def read_node_capacity(self) -> config.NodeCapacityProfile: ...
+
+    def read_app_installer_settings(self) -> NodeAppInstallerSettingsState: ...
 
     def read_node_font_sources(self) -> config.NodeFontSourceSettings: ...
 
@@ -29,6 +32,13 @@ class NodeManagementRouteService(NodeAuthenticatedRouteService, Protocol):
         capacity: config.NodeCapacityProfile,
         actor_user_id: int,
     ) -> MappingResponse: ...
+
+    async def mutate_app_installer_settings(
+        self,
+        *,
+        settings: config.AppInstallerSettings,
+        actor_user_id: int,
+    ) -> NodeAppInstallerSettingsMutationResult: ...
 
     async def mutate_node_disk_settings(
         self,
@@ -78,6 +88,23 @@ def register_node_management_routes(
         actor_user_id = _actor_user_id(service, request=request, access_token=access_token, scope=NodeApiScope.NODE_MANAGE)
         capacity = config.NodeCapacityProfile.model_validate(payload)
         return (await service.mutate_node_capacity(capacity=capacity, actor_user_id=actor_user_id)).to_mapping()
+
+    @nicegui_app.get(f"{api_prefix}/app-installer-settings")
+    async def _app_installer_settings(request: Request, access_token: str | None = None) -> dict[str, object]:
+        traffic_log.info("Node API app installer settings request: node=%s", service.node_name)
+        service._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+        return service.read_app_installer_settings().to_mapping()
+
+    @nicegui_app.post(f"{api_prefix}/app-installer-settings")
+    async def _update_app_installer_settings(
+        payload: dict[str, object],
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        traffic_log.info("Node API app installer settings update request: node=%s", service.node_name)
+        actor_user_id = _actor_user_id(service, request=request, access_token=access_token, scope=NodeApiScope.NODE_MANAGE)
+        settings = config.AppInstallerSettings.model_validate(payload)
+        return (await service.mutate_app_installer_settings(settings=settings, actor_user_id=actor_user_id)).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/node-disk-settings")
     async def _node_disk_settings(request: Request, access_token: str | None = None) -> dict[str, object]:

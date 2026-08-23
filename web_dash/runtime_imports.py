@@ -179,6 +179,10 @@ from node_api import (
     NodeDiscordSettingsMutationResult,
     NodeFontSourceSettingsMutationResult,
 )
+from node_api_app_installer import (
+    NodeAppInstallerSettingsMutationResult,
+    NodeAppInstallerSettingsState,
+)
 from node_api_app_state import (
     ClientPackFilePreview,
     NodeAppActivityProviderEntry,
@@ -344,6 +348,8 @@ __all__: tuple[str, ...] = (
     "NodeApiService",
     "NodeAppActivityProviderEntry",
     "NodeAppEntry",
+    "NodeAppInstallerSettingsMutationResult",
+    "NodeAppInstallerSettingsState",
     "NodeAppResourcePointSummary",
     "NodeAppMutationAction",
     "NodeAppMutationResult",

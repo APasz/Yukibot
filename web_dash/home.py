@@ -16,7 +16,7 @@ from .constants import (
     log,
 )
 from .links import mod_web_node_system_path
-from .nicegui_protocols import ModWebUi, _value_as_bool, _value_as_text
+from .nicegui_protocols import ModWebUi, _value_as_bool, _value_as_object, _value_as_text
 from .remote_node_monitor import RemoteNodeAvailability, RemoteNodeMonitorSnapshot
 from .runtime_imports import (
     MAX_RESTART_INTERVAL_MINUTES,
@@ -37,6 +37,7 @@ from .runtime_imports import (
     MaintenanceService,
     ModWebUser,
     NodeAppEntry,
+    NodeAppInstallerSettingsState,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
     NodeDiskManagementState,
@@ -56,8 +57,8 @@ from .runtime_imports import (
     Request,
     RestartTarget,
     Select,
-    Tooltip,
     Timer,
+    Tooltip,
     Utilities,
     app_scope_from_name,
     asyncio,
@@ -91,6 +92,11 @@ _RESTART_DISPLAY_TIMEZONES: tuple[tuple[str, str], ...] = tuple(
 _RESTART_STATE_TIMEZONE = _RESTART_TIMEZONES[2][0]
 _RESTART_STATE_TIMEZONE_LABEL = dict(_RESTART_TIMEZONES)[_RESTART_STATE_TIMEZONE]
 _RESTART_SCHEDULE_FIELD_PROPS = "filled square dense hide-bottom-space color=accent"
+_APP_INSTALLER_POLICY_SELECT_PROPS = (
+    "filled square dense stack-label hide-bottom-space color=accent options-dark "
+    "popup-content-class=mod-setting-menu "
+    "options-selected-class=mod-app-installer-policy-option"
+)
 _SYSTEM_TREND_WINDOW_SECONDS = 10 * 60
 _SYSTEM_WARNING_PERCENT = 75
 _SYSTEM_CRITICAL_PERCENT = 90
@@ -1792,6 +1798,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 user=user,
                                 can_manage_node_configuration=self._user_has_level(user, Power_Level.root),
                                 initial_capacity=loaded.node_capacity,
+                                initial_app_installer_settings=loaded.app_installer_settings,
                                 initial_font_sources=loaded.node_font_sources,
                                 initial_disk_settings=loaded.node_disk_settings,
                                 initial_system_capabilities=loaded.system_capabilities,
@@ -2341,6 +2348,31 @@ class ModWebHomeMixin(ModWebServiceSupport):
             secondary_mount=secondary_mount,
         )
 
+    @staticmethod
+    def _build_app_installer_settings(
+        *,
+        initial_settings: NodeAppInstallerSettingsState,
+        app_installs_enabled: bool,
+        selected_scopes: tuple[str, ...],
+    ) -> config.AppInstallerSettings:
+        if not app_installs_enabled:
+            return config.AppInstallerSettings(allowed_scopes=())
+
+        selected_settings = config.AppInstallerSettings(allowed_scopes=selected_scopes)
+        supported_scope_keys = {app.scope.casefold() for app in initial_settings.available_apps}
+        selected_scope_keys = set(selected_settings.allowed_scopes or ())
+        if not selected_scope_keys:
+            if initial_settings.settings.allowed_scopes is None and not supported_scope_keys:
+                return config.AppInstallerSettings()
+            raise ValueError("Choose at least one allowed app.")
+        if (
+            initial_settings.settings.allowed_scopes is None
+            and selected_scope_keys == supported_scope_keys
+            and len(selected_settings.allowed_scopes or ()) == len(supported_scope_keys)
+        ):
+            return config.AppInstallerSettings()
+        return selected_settings
+
     def _render_node_system_properties(
         self,
         *,
@@ -2349,6 +2381,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         user: ModWebUser,
         can_manage_node_configuration: bool,
         initial_capacity: config.NodeCapacityProfile | None,
+        initial_app_installer_settings: NodeAppInstallerSettingsState | None,
         initial_font_sources: config.NodeFontSourceSettings | None,
         initial_disk_settings: NodeDiskManagementState | None,
         initial_system_capabilities: NodeSystemCapabilities | None,
@@ -2356,6 +2389,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
         field_inputs: dict[_ModWebNodeSettingsFieldKey, Input] = {}
         disk_activity_checkboxes: dict[str, Checkbox] = {}
         disk_label_inputs: dict[str, Input] = {}
+        app_installer_enabled_checkbox: Checkbox | None = None
+        app_installer_allowed_apps_select: Select | None = None
         primary_disk_select: Select | None = None
         secondary_disk_select: Select | None = None
         save_button: Button | None = None
@@ -2364,7 +2399,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
             with ui.column().classes("w-full gap-4 p-4"):
                 with ui.column().classes("gap-0"):
                     ui.label("Properties").classes("text-lg font-black mod-title-small")
-                    ui.label(f"Node-specific settings for {node.label}.").classes("mod-subtitle text-xs")
 
                 if initial_system_capabilities is None:
                     ui.label("Properties are unavailable. Reload the page to try again.").classes(
@@ -2378,17 +2412,19 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     can_edit_capacity = (
                         can_manage_node_configuration and initial_system_capabilities.supports_node_capacity
                     )
+                    can_edit_app_installer = (
+                        can_manage_node_configuration
+                        and initial_system_capabilities.supports_app_installer_settings
+                        and initial_app_installer_settings is not None
+                    )
                     can_edit_disks = (
                         can_manage_node_configuration and initial_system_capabilities.supports_node_disk_settings
                     )
                     can_save_properties = (
                         can_edit_title_fonts
                         or (can_edit_capacity and initial_capacity is not None)
-                        or (
-                            can_edit_disks
-                            and initial_disk_settings is not None
-                            and bool(initial_disk_settings.disks)
-                        )
+                        or can_edit_app_installer
+                        or (can_edit_disks and initial_disk_settings is not None and bool(initial_disk_settings.disks))
                     )
                     font_sources = initial_font_sources or config.NodeFontSourceSettings()
                     capacity_values: dict[_ModWebNodeSettingsFieldKey, int] | None = (
@@ -2424,6 +2460,43 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                                 .classes("mod-app-details-field mod-app-details-point-field")
                                             )
 
+                        if can_edit_app_installer and initial_app_installer_settings is not None:
+                            with ui.column().classes("mod-app-details-subsection"):
+                                ui.label("App Installs").classes("mod-stat-label")
+                                app_options = {
+                                    app.scope: app.label for app in initial_app_installer_settings.available_apps
+                                }
+                                configured_scopes = initial_app_installer_settings.settings.allowed_scopes
+                                selected_app_scopes = (
+                                    list(app_options) if configured_scopes is None else list(configured_scopes)
+                                )
+                                for scope in selected_app_scopes:
+                                    app_options.setdefault(scope, f"Unavailable · {scope}")
+                                app_installs_enabled = configured_scopes != ()
+                                enabled_checkbox = (
+                                    ui.checkbox("Enable app installs", value=app_installs_enabled)
+                                    .props("dense color=accent")
+                                    .classes("mod-app-details-toggle")
+                                )
+                                app_installer_enabled_checkbox = enabled_checkbox
+                                allowed_apps_select = (
+                                    ui.select(
+                                        options=app_options,
+                                        value=selected_app_scopes,
+                                        label="Allowed Apps",
+                                        multiple=True,
+                                    )
+                                    .props(_APP_INSTALLER_POLICY_SELECT_PROPS)
+                                    .classes("mod-app-details-field mod-config-select w-full")
+                                )
+                                app_installer_allowed_apps_select = allowed_apps_select
+                                allowed_apps_select.set_enabled(app_installs_enabled)
+
+                                def _toggle_allowed_apps(event: object) -> None:
+                                    allowed_apps_select.set_enabled(_value_as_bool(event))
+
+                                enabled_checkbox.on("update:model-value", _toggle_allowed_apps)
+
                         font_section = ui.column().classes("mod-app-details-subsection")
                         font_section.set_visibility(can_edit_title_fonts)
                         with font_section:
@@ -2455,9 +2528,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         disk_section.set_visibility(can_edit_disks)
                         with disk_section:
                             ui.label("Disks").classes("mod-stat-label")
-                            ui.label(
-                                "Choose activity, primary, and secondary disks, and optionally override labels."
-                            ).classes("mod-subtitle text-xs")
                             if initial_disk_settings is None:
                                 ui.label("Disk settings are unavailable. Reload the page to try again.").classes(
                                     "mod-subtitle text-sm"
@@ -2607,6 +2677,30 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                         for mountpoint, label_input in disk_label_inputs.items()
                                     },
                                 )
+                            app_installer_settings: config.AppInstallerSettings | None = None
+                            if can_edit_app_installer:
+                                if (
+                                    app_installer_enabled_checkbox is None
+                                    or app_installer_allowed_apps_select is None
+                                ):
+                                    raise RuntimeError("App installer controls are unavailable.")
+                                if initial_app_installer_settings is None:
+                                    raise RuntimeError("App installer settings are unavailable.")
+                                selected_scopes: list[str] = []
+                                app_installs_enabled = _value_as_bool(app_installer_enabled_checkbox)
+                                if app_installs_enabled:
+                                    raw_allowed_scopes = _value_as_object(app_installer_allowed_apps_select)
+                                    if not isinstance(raw_allowed_scopes, list):
+                                        raise ValueError("Choose allowed apps from the list.")
+                                    for raw_scope in cast(list[object], raw_allowed_scopes):
+                                        if not isinstance(raw_scope, str):
+                                            raise ValueError("Choose allowed apps from the list.")
+                                        selected_scopes.append(raw_scope)
+                                app_installer_settings = self._build_app_installer_settings(
+                                    initial_settings=initial_app_installer_settings,
+                                    app_installs_enabled=app_installs_enabled,
+                                    selected_scopes=tuple(selected_scopes),
+                                )
                         except (TypeError, ValueError) as xcp:
                             ui.notify(str(xcp), type="negative")
                             return
@@ -2629,6 +2723,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                     capacity=capacity,
                                 )
                                 result_messages.append(capacity_result.message)
+                            if app_installer_settings is not None:
+                                app_installer_result = await self._update_app_installer_settings(
+                                    node_name=node.node_name,
+                                    user=user,
+                                    settings=app_installer_settings,
+                                )
+                                result_messages.append(app_installer_result.message)
                             if disk_preferences is not None:
                                 disk_result = await self._update_node_disk_settings(
                                     node_name=node.node_name,

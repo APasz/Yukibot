@@ -546,29 +546,46 @@ def _read_serverconfig_value(pointer: Path, property_name: str) -> str | None:
     return None
 
 
-def _ensure_serverconfig_userdata_redirect(pointer: Path) -> None:
+def _ensure_serverconfig_property(
+    pointer: Path,
+    *,
+    property_name: str,
+    value: str,
+    insert_after: str | None = None,
+) -> None:
     tree = ET.parse(pointer)
     root = tree.getroot()
-    last_known_index: int | None = None
-    for index, node in enumerate(root.findall("property")):
-        property_name = node.attrib.get("name")
-        if property_name == "UserDataFolder":
-            node.attrib["value"] = _SEVENDAYS_MANAGED_USERDATA_FOLDER
-            tree.write(pointer, encoding=config.STR_ENCODE)
+    for node in root.findall("property"):
+        if node.attrib.get("name") == property_name:
+            if node.attrib.get("value") != value:
+                node.attrib["value"] = value
+                tree.write(pointer, encoding=config.STR_ENCODE)
             return
-        if property_name == "AdminFileName":
-            last_known_index = index
 
-    redirect_node = ET.Element(
-        "property",
-        {
-            "name": "UserDataFolder",
-            "value": _SEVENDAYS_MANAGED_USERDATA_FOLDER,
-        },
-    )
-    insert_index = (last_known_index + 1) if last_known_index is not None else len(root)
-    root.insert(insert_index, redirect_node)
+    insert_index = len(root)
+    if insert_after is not None:
+        for index, node in enumerate(root.findall("property")):
+            if node.attrib.get("name") == insert_after:
+                insert_index = index + 1
+
+    root.insert(insert_index, ET.Element("property", {"name": property_name, "value": value}))
     tree.write(pointer, encoding=config.STR_ENCODE)
+
+
+def _ensure_serverconfig_userdata_redirect(pointer: Path) -> None:
+    userdata_path = (pointer.parent / _SEVENDAYS_MANAGED_USERDATA_FOLDER).resolve()
+    _ensure_serverconfig_property(
+        pointer,
+        property_name="UserDataFolder",
+        value=str(userdata_path),
+        insert_after="AdminFileName",
+    )
+
+
+def _ensure_serverconfig_join_port(pointer: Path, port: int | None) -> None:
+    if port is None:
+        return
+    _ensure_serverconfig_property(pointer, property_name="ServerPort", value=str(port))
 
 
 def parse_gamestat_value(raw_value: str) -> GameStatValue:
@@ -2746,6 +2763,7 @@ class SevenDays(App[App_Config]):
         serverconfig_path = self.directory / "serverconfig.xml"
         if serverconfig_path.is_file():
             _ensure_serverconfig_userdata_redirect(serverconfig_path)
+            _ensure_serverconfig_join_port(serverconfig_path, self.cfg.join_port)
         self._server_ready.clear()
         self._telnet_startup_error = None
         await self._configure_telnet_client()

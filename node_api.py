@@ -38,6 +38,7 @@ import apps.satisfactory.node_api as satisfactory_node_api
 import apps.sevendays.node_api as sevendays_node_api
 import config
 import node_api_app_operations
+import node_api_app_installer
 import node_api_app_state
 import node_api_client_pack
 import node_api_mod
@@ -110,6 +111,15 @@ from map_annotations import (
 from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
 from mod_web_auth import ModWebAuthService, ModWebUser
 from node_api_app_routes import register_app_routes
+from node_api_app_installer_routes import register_app_installer_routes
+from node_api_app_installer import (
+    NodeAppInstallCatalog,
+    NodeAppInstallRequest,
+    NodeAppInstallScopeOption,
+    NodeAppInstallStatus,
+    NodeAppInstallerSettingsMutationResult,
+    NodeAppInstallerSettingsState,
+)
 from node_api_app_state import (
     _ALL_NODE_STATE_TOPICS,
     NodeAppActivityProviderEntry,
@@ -550,6 +560,11 @@ class NodeApiService:
             runtime_http_exception=self._runtime_http_exception,
             traffic_log=traffic_log,
         )
+        self._app_installer = node_api_app_installer.NodeAppInstallerService(
+            node_name=lambda: self.node_name,
+            invalidate_state_caches=self._invalidate_state_caches,
+            scope_policy=lambda: self._require_manager().app_installer_settings(),
+        )
         self._factorio = factorio_node_api.FactorioNodeApiService(
             node_name=lambda: self.node_name,
             invalidate_app_state=lambda app_name: self._invalidate_state_caches(app_name=app_name),
@@ -666,6 +681,7 @@ class NodeApiService:
         history_task = self._system_history_task
         self._system_history_task = None
         self._app_mutations.cancel_pending()
+        self._app_installer.cancel_pending()
         self._app_state_subscriptions.close()
         if history_task is not None:
             history_task.cancel()
@@ -747,6 +763,14 @@ class NodeApiService:
             traffic_log=traffic_log,
         )
 
+        register_app_installer_routes(
+            nicegui_app,
+            service=self,
+            api_prefix=_NODE_API_PREFIX,
+            http_exception=_http_exception,
+            traffic_log=traffic_log,
+        )
+
         register_map_routes(
             nicegui_app,
             service=self,
@@ -812,7 +836,18 @@ class NodeApiService:
                 return ()
             raise _http_exception(503, "App manager is not available yet.")
         apps = tuple(sorted(manager.apps.values(), key=lambda item: item.friendly.casefold()))
-        return tuple(await asyncio.gather(*(self._build_live_app_entry(app) for app in apps)))
+        pending_entries = await asyncio.gather(
+            *(self._build_live_app_entry(app) for app in apps),
+            return_exceptions=True,
+        )
+        entries: list[NodeAppEntry] = []
+        for app, entry_or_error in zip(apps, pending_entries, strict=True):
+            if manager.apps.get(app.name) is not app:
+                continue
+            if isinstance(entry_or_error, BaseException):
+                raise entry_or_error
+            entries.append(entry_or_error)
+        return tuple(entries)
 
     async def build_live_app_entry(self, app: App) -> NodeAppEntry:
         return await self._app_state_cache.app_entry(app, build_entry=lambda app: self._build_live_app_entry(app))
@@ -2749,7 +2784,7 @@ class NodeApiService:
         steam_update_selected_branch: str | None = None,
         update_branch_id: str | None = None,
     ) -> node_api_app_state.NodeAppMutationResult:
-        return await self._app_mutations.mutate(
+        result = await self._app_mutations.mutate(
             manager=self._require_manager(),
             acl=self._require_acl(),
             app=app,
@@ -2777,6 +2812,55 @@ class NodeApiService:
             steam_update_selected_branch=steam_update_selected_branch,
             update_branch_id=update_branch_id,
         )
+        if action is node_api_app_state.NodeAppMutationAction.DELETE:
+            self._invalidate_mod_inventory(app.name)
+            audit_log(
+                "node.app.deleted",
+                actor_user_id=actor_user_id,
+                node=self.node_name,
+                app_name=app.name,
+                scope=app.scope,
+            )
+        return result
+
+    def build_app_install_catalog(self) -> NodeAppInstallCatalog:
+        self._require_app_installer_available()
+        return self._app_installer.build_catalog(manager=self._require_manager())
+
+    async def start_app_install(
+        self,
+        *,
+        request: NodeAppInstallRequest,
+        actor_user_id: int,
+    ) -> NodeAppInstallStatus:
+        self._require_app_installer_available()
+        return await self._app_installer.start_install(
+            manager=self._require_manager(),
+            acl=self._require_acl(),
+            actor_user_id=actor_user_id,
+            request=request,
+        )
+
+    def app_install_status(self, *, job_id: str) -> NodeAppInstallStatus:
+        self._require_app_installer_available()
+        return self._app_installer.install_status(job_id=job_id)
+
+    def read_app_installer_settings(self) -> NodeAppInstallerSettingsState:
+        if not self.system_capabilities().supports_app_installer_settings:
+            raise _http_exception(400, "App installer settings are unavailable on this node.")
+        manager = self._require_manager()
+        return NodeAppInstallerSettingsState(
+            node=self.node_name,
+            settings=manager.app_installer_settings(),
+            available_apps=tuple(
+                NodeAppInstallScopeOption(scope=recipe.scope, label=recipe.label)
+                for recipe in manager.list_steam_install_recipes()
+            ),
+        )
+
+    def _require_app_installer_available(self) -> None:
+        if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL:
+            raise _http_exception(400, "App installation is unavailable on portal nodes.")
 
     def read_node_capacity(self) -> config.NodeCapacityProfile:
         manager = self._require_manager()
@@ -2872,6 +2956,7 @@ class NodeApiService:
         supports_node_capacity = manager is not None
         supports_node_font_sources = manager is not None
         supports_discord_settings = manager is not None and manager.bot is not None
+        supports_app_installer_settings = not is_portal and manager is not None
         if is_portal:
             return NodeSystemCapabilities(
                 actions=(NodeSystemAction.RESTART_PROCESS,),
@@ -2880,6 +2965,7 @@ class NodeApiService:
                 supports_node_capacity=supports_node_capacity,
                 supports_node_font_sources=supports_node_font_sources,
                 supports_discord_settings=supports_discord_settings,
+                supports_app_installer_settings=supports_app_installer_settings,
             )
         return NodeSystemCapabilities(
             actions=(NodeSystemAction.RESTART_PROCESS, NodeSystemAction.REBOOT_HOST),
@@ -2888,6 +2974,7 @@ class NodeApiService:
             supports_node_capacity=supports_node_capacity,
             supports_node_font_sources=supports_node_font_sources,
             supports_discord_settings=supports_discord_settings,
+            supports_app_installer_settings=supports_app_installer_settings,
         )
 
     def read_restart_state(self) -> NodeRestartState:
@@ -3007,6 +3094,28 @@ class NodeApiService:
             node=self.node_name,
             message=f"Updated node capacity for {self.node_name}.",
             capacity=updated_capacity,
+        )
+
+    async def mutate_app_installer_settings(
+        self,
+        *,
+        settings: config.AppInstallerSettings,
+        actor_user_id: int,
+    ) -> NodeAppInstallerSettingsMutationResult:
+        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        if not self.system_capabilities().supports_app_installer_settings:
+            raise _http_exception(400, "App installer settings are unavailable on this node.")
+        updated_settings = self._require_manager().set_app_installer_settings(settings)
+        audit_log(
+            "node.app_installer_settings.updated",
+            actor_user_id=actor_user_id,
+            node=self.node_name,
+            allowed_scopes=updated_settings.allowed_scopes,
+        )
+        return NodeAppInstallerSettingsMutationResult(
+            node=self.node_name,
+            message=f"Updated app install settings for {self.node_name}.",
+            settings=updated_settings,
         )
 
     async def mutate_node_disk_settings(

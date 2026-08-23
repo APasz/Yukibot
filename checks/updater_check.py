@@ -16,6 +16,7 @@ from apps._updater import (
     AppUpdateState,
     SteamCmd_Update_Manager,
     _command_error_text,
+    run_steamcmd_command,
 )
 
 
@@ -61,6 +62,67 @@ class _FakeApp:
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_steamcmd_runner_keeps_early_success_when_output_tail_rolls_over(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdout = asyncio.StreamReader()
+                self.stderr = asyncio.StreamReader()
+                self.returncode = 0
+                self.stdout.feed_data(b"Success! App 123 fully installed.\n")
+                self.stdout.feed_data(b"\n".join(f"later output {index}".encode() for index in range(8)))
+                self.stdout.feed_eof()
+                self.stderr.feed_eof()
+
+            async def wait(self) -> int:
+                return self.returncode
+
+        async def run() -> None:
+            with patch(
+                "apps._updater.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=FakeProcess()),
+            ):
+                completed = await run_steamcmd_command(command=["steamcmd"], cwd=Path("."))
+            self.assertTrue(completed)
+
+        asyncio.run(run())
+
+    def test_steamcmd_runner_terminates_when_its_output_sink_fails(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdout = asyncio.StreamReader()
+                self.stderr = asyncio.StreamReader()
+                self.returncode: int | None = None
+                self.terminated = False
+                self.wait_calls = 0
+                self.stdout.feed_data(b"progress\n")
+                self.stdout.feed_eof()
+                self.stderr.feed_eof()
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            async def wait(self) -> int:
+                self.wait_calls += 1
+                return 1
+
+        async def run() -> None:
+            process = FakeProcess()
+
+            def reject_output(_: str, __: str) -> None:
+                raise RuntimeError("status sink failed")
+
+            with patch(
+                "apps._updater.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "status sink failed"):
+                    await run_steamcmd_command(command=["steamcmd"], cwd=Path("."), on_output=reject_output)
+
+            self.assertTrue(process.terminated)
+            self.assertEqual(process.wait_calls, 1)
+
+        asyncio.run(run())
+
     def test_app_update_info_round_trips_version_branch(self) -> None:
         update_info = AppUpdateInfo(
             provider_kind=AppUpdateProviderKind.STEAMCMD,
@@ -156,7 +218,7 @@ class UpdaterTests(unittest.TestCase):
         command = updater._steamcmd_command(branch=app.cfg.steam_update.selected_branch_config, validate=False)
         self.assertEqual(command[command.index("-beta") + 1], "v3.1.0")
 
-    def test_steamcmd_command_error_redacts_beta_password(self) -> None:
+    def test_steamcmd_command_error_redacts_credentials_in_command_and_output(self) -> None:
         error = _command_error_text(
             command=[
                 "steamcmd",
@@ -172,7 +234,7 @@ class UpdaterTests(unittest.TestCase):
                 "+quit",
             ],
             stdout_text="",
-            stderr_text="ERROR! Failed to install app",
+            stderr_text="ERROR! Failed to install app for login-secret with beta-secret",
         )
 
         self.assertNotIn("login-secret", error)

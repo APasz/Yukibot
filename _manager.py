@@ -3,6 +3,7 @@ import enum
 import importlib
 import json
 import logging
+import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,11 +15,13 @@ import hikari
 import lightbulb
 
 import config
+from _async_utils import run_blocking
 from _discord import App_Bound, DC_Bound, DC_Relay, RelayEmbedPayload
 from _utils import format_player_capacity
 from apps._app import App, AppRuntimeFaultKind
 from apps._config import (
     App_Config,
+    AppVersion,
     RelayChannelSource,
     SteamUpdateConfig,
     normalise_activity_provider_ids,
@@ -74,6 +77,57 @@ class AppInstanceCreateRequest:
     port: int | None = None
     server_log_file: str | None = None
     admin_password: str | None = None
+    steam_branch: str | None = None
+    initial_version: AppVersion | None = None
+
+
+class AppInstallInput(enum.StrEnum):
+    """A typed app-specific value requested by an installation recipe."""
+
+    ADMIN_PASSWORD = "admin_password"
+
+    @property
+    def label(self) -> str:
+        if self is AppInstallInput.ADMIN_PASSWORD:
+            return "Admin password"
+        raise ValueError(f"Unsupported app installation input: {self}")
+
+    @property
+    def help_text(self) -> str:
+        if self is AppInstallInput.ADMIN_PASSWORD:
+            return "For a new Satisfactory server, use this password when claiming it in the game client."
+        raise ValueError(f"Unsupported app installation input: {self}")
+
+    @property
+    def is_secret(self) -> bool:
+        return self is AppInstallInput.ADMIN_PASSWORD
+
+
+@dataclass(frozen=True, slots=True)
+class AppSteamInstallRecipe:
+    """A supported SteamCMD-backed app installation target."""
+
+    scope: str
+    label: str
+    default_port: int | None
+    steam_update: SteamUpdateConfig
+    inputs: tuple[AppInstallInput, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AppInstanceCreationPlan:
+    """Validated immutable inputs for a new managed app instance."""
+
+    scope: str
+    instance_key: str
+    friendly_name: str
+    subfolder: Path
+    directory: Path
+    server_log_file: str | None
+    admin_password: str | None
+    steam_branch: str | None
+    scope_path: Path
+    instances_path: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +155,8 @@ class AppDetailsUpdate:
 
 @dataclass(frozen=True, slots=True)
 class AppInstanceTemplate:
+    label: str | None = None
+    install_inputs: tuple[AppInstallInput, ...] = ()
     mods_dir: str | None = None
     client_mods_dir: str | None = None
     client_overrides_dir: str | None = None
@@ -173,11 +229,14 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
         join_port=25565,
     ),
     "satisfactory": AppInstanceTemplate(
+        label="Satisfactory",
+        install_inputs=(AppInstallInput.ADMIN_PASSWORD,),
         join_port=7777,
         api_host="127.0.0.1",
         steam_update=_required_scope_steam_update_template("satisfactory"),
     ),
     "sevendays": AppInstanceTemplate(
+        label="7 Days to Die",
         mods_dir="{WD}/Mods",
         client_mods_dir="{WD}/Mods",
         client_overrides_dir="{WD}/client-overrides",
@@ -330,6 +389,9 @@ class App_Manager(metaclass=config.Singleton):
 
     def active_resource_point_usage(self) -> config.ResourcePointSet:
         return self._active_resource_point_usage()
+
+    def app_installer_settings(self) -> config.AppInstallerSettings:
+        return self._load_bot_configuration().app_installer
 
     def node_capacity(self) -> config.NodeCapacityProfile:
         return self._load_bot_configuration().node_capacity
@@ -1072,6 +1134,14 @@ class App_Manager(metaclass=config.Singleton):
         config.save_bot_configuration(self._bot_configuration_path, bot_config)
         return capacity
 
+    def set_app_installer_settings(self, settings: config.AppInstallerSettings) -> config.AppInstallerSettings:
+        bot_config = self._load_bot_configuration()
+        if bot_config.app_installer == settings:
+            return settings
+        bot_config = bot_config.model_copy(update={"app_installer": settings})
+        config.save_bot_configuration(self._bot_configuration_path, bot_config)
+        return settings
+
     def node_font_sources(self) -> config.NodeFontSourceSettings:
         return self._load_bot_configuration().node_font_sources
 
@@ -1178,11 +1248,46 @@ class App_Manager(metaclass=config.Singleton):
         scopes.update(scope.strip().lower() for scope in self.list_create_scopes() if scope.strip())
         return tuple(sorted(scopes, key=str.casefold))
 
-    def create_instance(self, request: AppInstanceCreateRequest) -> str:
+    def list_steam_install_recipes(self) -> tuple[AppSteamInstallRecipe, ...]:
+        """Return the node's supported SteamCMD installation recipes."""
+
+        creatable_scopes = frozenset(self.list_create_scopes())
+        recipes: list[AppSteamInstallRecipe] = []
+        for scope, template in _SCOPE_INSTANCE_TEMPLATES.items():
+            steam_update = template.steam_update
+            if scope not in creatable_scopes or steam_update is None:
+                continue
+            scope_path = Path("apps") / scope
+            instances_path = scope_path / "instances.json"
+            instance_payload = self._read_json_object(instances_path)
+            _, template_payload = self._resolve_instance_template(
+                scope=scope,
+                scope_path=scope_path,
+                payload=instance_payload,
+            )
+            recipes.append(
+                AppSteamInstallRecipe(
+                    scope=scope,
+                    label=template.label or scope.replace("_", " ").title(),
+                    default_port=template.join_port,
+                    steam_update=self._steam_install_config_from_template(
+                        scope=scope,
+                        default_config=steam_update,
+                        template_payload=template_payload,
+                    ),
+                    inputs=template.install_inputs,
+                )
+            )
+        return tuple(sorted(recipes, key=lambda recipe: recipe.label.casefold()))
+
+    def prepare_instance_creation(self, request: AppInstanceCreateRequest) -> AppInstanceCreationPlan:
+        """Validate a new instance before files are provisioned for it."""
+
         scope = self._validate_scope_name(request.scope)
         instance_key = self._validate_instance_key(request.instance_key)
         friendly_name = _validate_required_friendly_name(request.friendly_name)
         subfolder = self._validate_subfolder(request.subfolder)
+        self._validate_optional_port(request.port)
         server_log_file = self._validate_optional_config_path(
             request.server_log_file,
             label="Server log file",
@@ -1202,28 +1307,193 @@ class App_Manager(metaclass=config.Singleton):
         raw = self._read_json_object(instances_path)
         if instance_key in raw:
             raise ValueError(f"Instance key `{instance_key}` already exists for scope `{scope}`.")
+        self._resolve_instance_template(scope=scope, scope_path=scope_path, payload=raw)
+
+        steam_branch = self._validate_steam_install_branch(scope=scope, branch_id=request.steam_branch)
+        return AppInstanceCreationPlan(
+            scope=scope,
+            instance_key=instance_key,
+            friendly_name=friendly_name,
+            subfolder=subfolder,
+            directory=(config.APP_PATH / subfolder).resolve(),
+            server_log_file=server_log_file,
+            admin_password=admin_password,
+            steam_branch=steam_branch,
+            scope_path=scope_path,
+            instances_path=instances_path,
+        )
+
+    def create_instance(self, request: AppInstanceCreateRequest) -> str:
+        plan = self.prepare_instance_creation(request)
+        raw = self._read_json_object(plan.instances_path)
+        if plan.instance_key in raw:
+            raise ValueError(f"Instance key `{plan.instance_key}` already exists for scope `{plan.scope}`.")
 
         template_key, template_payload = self._resolve_instance_template(
-            scope=scope,
-            scope_path=scope_path,
+            scope=plan.scope,
+            scope_path=plan.scope_path,
             payload=raw,
         )
         next_payload = dict(template_payload)
-        next_payload["friendly_name"] = friendly_name
-        next_payload["directory"] = f"{{APPS}}/{subfolder.as_posix()}"
-        if request.port is not None:
+        next_payload["friendly_name"] = plan.friendly_name
+        next_payload["directory"] = f"{{APPS}}/{plan.subfolder.as_posix()}"
+        join_port = request.port
+        if join_port is None:
+            builtin_template = _SCOPE_INSTANCE_TEMPLATES.get(plan.scope)
+            if builtin_template is not None:
+                join_port = builtin_template.join_port
+        if join_port is not None:
             next_payload.pop("port", None)
-            next_payload["join_port"] = request.port
-        if server_log_file is not None:
-            next_payload["server_log_file"] = server_log_file
-        if admin_password is not None:
-            next_payload["admin_password"] = admin_password
+            next_payload["join_port"] = self._validate_optional_port(join_port)
+        if plan.server_log_file is not None:
+            next_payload["server_log_file"] = plan.server_log_file
+        if plan.admin_password is not None:
+            next_payload["admin_password"] = plan.admin_password
+        if request.initial_version is not None:
+            next_payload["version"] = request.initial_version.model_dump(mode="json", exclude_none=True)
+        if plan.steam_branch is not None:
+            steam_recipe = self._steam_install_recipe_for_scope(plan.scope)
+            if steam_recipe is None:
+                raise ValueError(f"SteamCMD installation is not supported for scope `{plan.scope}`.")
+            branch = steam_recipe.steam_update.branch(plan.steam_branch)
+            selected_steam_update = steam_recipe.steam_update.with_selected_branch(branch)
+            next_payload["steam_update"] = selected_steam_update.model_dump(mode="json", exclude_none=True)
 
-        raw[instance_key] = next_payload
-        self._write_json_object(instances_path, raw)
-        instance_name = f"{scope}_{instance_key}"
-        log.info(f"Created app instance `{instance_name}` from template `{scope}:{template_key}`")
+        raw[plan.instance_key] = next_payload
+        self._write_json_object(plan.instances_path, raw)
+        instance_name = f"{plan.scope}_{plan.instance_key}"
+        log.info(f"Created app instance `{instance_name}` from template `{plan.scope}:{template_key}`")
         return instance_name
+
+    async def load_instance(self, *, scope: str, instance_key: str) -> ManagedApp:
+        """Load one newly provisioned instance without rebuilding every running app."""
+
+        bot = self.bot
+        if bot is None:
+            raise RuntimeError("App manager bot is not available.")
+        resolved_scope = self._validate_scope_name(scope)
+        resolved_instance_key = self._validate_instance_key(instance_key)
+        scope_path = Path("apps") / resolved_scope
+        if not scope_path.is_dir():
+            raise ValueError(f"Unknown app scope: {resolved_scope}")
+        instances_path = scope_path / "instances.json"
+        raw = self._read_json_object(instances_path)
+        instance_payload = self._require_instance_payload(
+            raw.get(resolved_instance_key),
+            instances_path=instances_path,
+            instance_key=resolved_instance_key,
+        )
+        app_name = f"{resolved_scope}_{resolved_instance_key}"
+        if app_name in self.apps:
+            raise ValueError(f"App instance `{app_name}` is already loaded.")
+        app_cls, cfg_cls = self._load_scope_types(resolved_scope)
+        cfg = self._build_app_config(
+            scope=resolved_scope,
+            scope_path=scope_path,
+            cfg_cls=cfg_cls,
+            instance_key=resolved_instance_key,
+            raw_cfg=instance_payload,
+        )
+        if not cfg.directory.exists():
+            raise FileNotFoundError(f"App directory is missing: {cfg.directory}")
+
+        app = self._instantiate_app(bot=bot, app_cls=app_cls, cfg=cfg)
+        try:
+            self._sync_app_instance_config(app)
+            await app.post_init()
+        except (asyncio.CancelledError, Exception):
+            DC_Relay.unregister_app(app)
+            raise
+        DC_Relay.bind_app_channel(app)
+        self.apps[app.name] = app
+        self._register_lookup_aliases(app.name, app)
+        self.dump_enabled()
+        log.info("Loaded provisioned app instance: %s", app.name)
+        return app
+
+    def discard_unloaded_instance(self, *, scope: str, instance_key: str) -> None:
+        """Remove a just-created instance configuration before it has been loaded."""
+
+        resolved_scope = self._validate_scope_name(scope)
+        resolved_instance_key = self._validate_instance_key(instance_key)
+        app_name = f"{resolved_scope}_{resolved_instance_key}"
+        if app_name in self.apps:
+            raise ValueError(f"Loaded app instance `{app_name}` cannot be discarded.")
+        instances_path = Path("apps") / resolved_scope / "instances.json"
+        raw = self._read_json_object(instances_path)
+        if resolved_instance_key not in raw:
+            return
+        del raw[resolved_instance_key]
+        self._write_json_object(instances_path, raw)
+        log.info("Discarded unregistered app instance: %s", app_name)
+
+    async def delete_instance(self, name: str | ManagedApp) -> None:
+        """Permanently remove a managed app's installation and instance configuration."""
+
+        app = name if isinstance(name, App) else self.get(name)
+        apps = self._apps_mapping()
+        if apps.get(app.name) is not app:
+            raise ValueError(f"App instance `{app.name}` is no longer managed.")
+        if app.name.casefold() in self._pending_start_name_keys():
+            raise RuntimeError(f"Cannot delete {app.friendly} while it is starting.")
+
+        directory = self._instance_deletion_directory(app)
+        if directory.exists() and not directory.is_dir():
+            raise ValueError(f"Cannot delete {app.friendly}; its installation path is not a directory.")
+
+        if app.check_running():
+            await self.end(app.name)
+            if app.check_running():
+                raise RuntimeError(f"Cannot delete {app.friendly}; it did not stop cleanly.")
+
+        instances_path = app.file_instances
+        raw = self._read_json_object(instances_path)
+        instance_payload = self._require_instance_payload(
+            raw.get(app.cfg.instance_key),
+            instances_path=instances_path,
+            instance_key=app.cfg.instance_key,
+        )
+        del raw[app.cfg.instance_key]
+        self._write_json_object(instances_path, raw)
+        apps.pop(app.name)
+        deletion_cancelled = False
+        try:
+            if directory.exists():
+                deletion_cancelled = await self._remove_directory_with_deferred_cancellation(directory)
+        except Exception:
+            apps[app.name] = app
+            raw[app.cfg.instance_key] = instance_payload
+            try:
+                self._write_json_object(instances_path, raw)
+            except Exception:
+                log.exception("Failed to restore instance configuration after deletion failure: %s", app.name)
+            raise
+
+        app.deregister_activity_providers()
+        DC_Relay.unregister_app(app)
+        app.set_instance_config_change_handler(None)
+        self._unregister_lookup_aliases(app)
+        self._managed_shutdown_name_keys().discard(app.name.casefold())
+        self._pending_start_name_keys().discard(app.name.casefold())
+        self._remove_restart_auto_start_app(app.name)
+        self.dump_enabled()
+        log.info("Deleted app instance: %s", app.name)
+        if deletion_cancelled:
+            raise asyncio.CancelledError
+
+    @staticmethod
+    async def _remove_directory_with_deferred_cancellation(directory: Path) -> bool:
+        """Finish a destructive removal before honouring task cancellation."""
+
+        removal_task = asyncio.create_task(run_blocking(shutil.rmtree, directory))
+        cancellation_requested = False
+        while not removal_task.done():
+            try:
+                await asyncio.shield(removal_task)
+            except asyncio.CancelledError:
+                cancellation_requested = True
+        removal_task.result()
+        return cancellation_requested
 
     def set_restart_auto_start_apps(self, apps: Sequence[str | ManagedApp] | None) -> tuple[str, ...]:
         resolved_names: list[str] = []
@@ -1246,6 +1516,21 @@ class App_Manager(metaclass=config.Singleton):
         bot_config.restart_state = bot_config.restart_state.model_copy(update={"auto_start_apps": resolved_name_tuple})
         config.save_bot_configuration(self._bot_configuration_path, bot_config)
         return resolved_name_tuple
+
+    def _remove_restart_auto_start_app(self, app_name: str) -> None:
+        bot_config = self._load_bot_configuration()
+        app_name_key = app_name.casefold()
+        next_auto_start_apps = tuple(
+            configured_name
+            for configured_name in bot_config.restart_state.auto_start_apps
+            if configured_name.casefold() != app_name_key
+        )
+        if next_auto_start_apps == bot_config.restart_state.auto_start_apps:
+            return
+        bot_config.restart_state = bot_config.restart_state.model_copy(
+            update={"auto_start_apps": next_auto_start_apps}
+        )
+        config.save_bot_configuration(self._bot_configuration_path, bot_config)
 
     def set_running_restart_auto_start_apps(self) -> tuple[str, ...]:
         return self.set_restart_auto_start_apps(self.running_apps())
@@ -1609,6 +1894,34 @@ class App_Manager(metaclass=config.Singleton):
         if friendly_name:
             self._register_lookup_alias_text(friendly_name, name)
 
+    def _unregister_lookup_aliases(self, app: ManagedApp) -> None:
+        self._remove_lookup_alias_text(app.name, app.name)
+        self._remove_lookup_alias_text(getattr(app, "proc_name", ""), app.name)
+        self._remove_lookup_alias_text(app.directory.name, app.name)
+        self._remove_lookup_alias_text(getattr(app, "friendly", ""), app.name)
+
+    def _instance_deletion_directory(self, app: ManagedApp) -> Path:
+        configured_directory = app.directory
+        if configured_directory.is_symlink():
+            raise ValueError(f"Cannot delete {app.friendly}; its installation path is a symbolic link.")
+
+        app_root = config.APP_PATH.resolve()
+        directory = configured_directory.resolve()
+        if directory == app_root:
+            raise ValueError(f"Cannot delete {app.friendly}; its installation path is DIR_APP itself.")
+        if not directory.is_relative_to(app_root):
+            raise ValueError(f"Cannot delete {app.friendly}; its installation path is outside DIR_APP.")
+
+        for other_app in self._apps_mapping().values():
+            if other_app is app:
+                continue
+            other_directory = other_app.directory.resolve()
+            if directory.is_relative_to(other_directory) or other_directory.is_relative_to(directory):
+                raise ValueError(
+                    f"Cannot delete {app.friendly}; its installation path overlaps {other_app.friendly}."
+                )
+        return directory
+
     @staticmethod
     def _lookup_alias_variants(text: str) -> tuple[str, ...]:
         stripped_text = text.strip()
@@ -1729,6 +2042,44 @@ class App_Manager(metaclass=config.Singleton):
         raw = self._read_json_object(instances_path)
         return self._find_instance_template(raw) is not None or self._builtin_instance_template(scope_path.name) is not None
 
+    def _steam_install_recipe_for_scope(self, scope: str) -> AppSteamInstallRecipe | None:
+        scope_key = scope.strip().casefold()
+        for recipe in self.list_steam_install_recipes():
+            if recipe.scope.casefold() == scope_key:
+                return recipe
+        return None
+
+    @staticmethod
+    def _steam_install_config_from_template(
+        *,
+        scope: str,
+        default_config: SteamUpdateConfig,
+        template_payload: Mapping[str, object],
+    ) -> SteamUpdateConfig:
+        configured_payload = template_payload.get("steam_update")
+        if configured_payload is None:
+            return default_config.model_copy(deep=True)
+        if not isinstance(configured_payload, Mapping):
+            raise ValueError(f"Steam update configuration for scope `{scope}` must be an object.")
+        configured_config = SteamUpdateConfig.model_validate(configured_payload)
+        if configured_config.app_id != default_config.app_id:
+            raise ValueError(f"Steam app ID for scope `{scope}` does not match its installation recipe.")
+        preset = steam_update_preset_for_scope(scope)
+        branches = (
+            tuple(branch.model_copy(deep=True) for branch in default_config.branches)
+            if preset is None
+            else preset.merged_branches(configured_config.branches)
+        )
+        return configured_config.model_copy(update={"branches": branches})
+
+    def _validate_steam_install_branch(self, *, scope: str, branch_id: str | None) -> str | None:
+        if branch_id is None:
+            return None
+        recipe = self._steam_install_recipe_for_scope(scope)
+        if recipe is None:
+            raise ValueError(f"SteamCMD installation is not supported for scope `{scope}`.")
+        return recipe.steam_update.branch(branch_id).branch_id
+
     @staticmethod
     def _validate_scope_name(raw: str) -> str:
         scope = raw.strip()
@@ -1769,6 +2120,16 @@ class App_Manager(metaclass=config.Singleton):
         except ValueError as xcp:
             raise ValueError("Subfolder must stay within DIR_APP.") from xcp
         return subfolder
+
+    @staticmethod
+    def _validate_optional_port(raw: object) -> int | None:
+        if raw is None:
+            return None
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise TypeError("Port must be an integer.")
+        if not 1 <= raw <= 65535:
+            raise ValueError("Port must be between 1 and 65535.")
+        return raw
 
     @staticmethod
     def _validate_optional_config_path(raw: str | None, *, label: str) -> str | None:

@@ -37,7 +37,9 @@ from apps.sevendays import (
     SevenDaysSandboxOptionsSnapshot,
     _candidate_sevendays_logs,
     _discover_sevendays_runtime_log,
+    _ensure_serverconfig_join_port,
     _preferred_sevendays_runtime_log,
+    _read_serverconfig_value,
     _sevendays_telnet_port,
     detect_sevendays_version,
     extract_sevendays_save_archive,
@@ -439,6 +441,18 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "must be enabled"):
                 _sevendays_telnet_port(serverconfig)
+
+    def test_server_port_is_kept_in_sync_with_the_join_port(self) -> None:
+        with TemporaryDirectory() as tmp:
+            serverconfig = Path(tmp) / "serverconfig.xml"
+            serverconfig.write_text(
+                '<ServerSettings><property name="ServerPort" value="27000" /></ServerSettings>',
+                encoding="utf-8",
+            )
+
+            _ensure_serverconfig_join_port(serverconfig, 26900)
+
+            self.assertEqual(_read_serverconfig_value(serverconfig, "ServerPort"), "26900")
 
     def test_detect_sevendays_version_from_timestamped_output_log(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -950,7 +964,7 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             self.assertEqual((generated_world_dir / "GenerationInfo.txt").read_text(encoding="utf-8"), "world-data")
             self.assertFalse((userdata_dir / "Saves" / "Wizefoco Mountains" / "FreshSave").exists())
             self.assertIn(
-                'name="UserDataFolder" value="userdata"',
+                f'name="UserDataFolder" value="{userdata_dir.as_posix()}"',
                 (app_dir / "serverconfig.xml").read_text(encoding="utf-8"),
             )
 
@@ -1389,6 +1403,7 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         app._players = SimpleNamespace(start=AsyncMock(side_effect=start_players))
         app._activities = SimpleNamespace(start=AsyncMock(side_effect=start_activities))
         app._running = False
+        app.cfg = SimpleNamespace(join_port=26900)
 
         tailer = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
         with (
@@ -1441,6 +1456,7 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
             app._players = SimpleNamespace(start=AsyncMock())
             app._activities = SimpleNamespace(start=AsyncMock())
             app._running = False
+            app.cfg = SimpleNamespace(join_port=26900)
 
             tailer = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
             with (
@@ -1454,7 +1470,8 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         tailer_cls.assert_called_once()
         self.assertEqual(tailer_cls.call_args.args[1:], (runtime_log, app.file_stdout))
         link_mock.assert_called_once_with(runtime_log, app.file_stdout.with_name(runtime_log.name))
-        self.assertIn('name="UserDataFolder" value="userdata"', redirected_config)
+        self.assertIn(f'name="UserDataFolder" value="{(root / "userdata").as_posix()}"', redirected_config)
+        self.assertIn('name="ServerPort" value="26900"', redirected_config)
 
     async def test_start_rejects_telnet_bind_failure_and_terminates_process(self) -> None:
         with TemporaryDirectory() as tmp:

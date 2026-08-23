@@ -1036,6 +1036,137 @@ class AppManageTests(unittest.TestCase):
             self.assertTrue(app.cfg.enabled)
             self.assertTrue(payload["alpha"]["enabled"])
 
+    def test_delete_instance_removes_managed_files_and_configuration(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            app_root = temp_path / "managed-apps"
+            instance_directory = app_root / "minecraft-alpha"
+            instance_directory.mkdir(parents=True)
+            (instance_directory / "server.jar").write_text("server", encoding="utf-8")
+            instances_path = temp_path / "minecraft" / "instances.json"
+            instances_path.parent.mkdir()
+            instances_path.write_text(
+                json.dumps(
+                    {
+                        "alpha": {
+                            "friendly_name": "Minecraft Alpha",
+                            "directory": "{APPS}/minecraft-alpha",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            configuration_path = temp_path / "configuration.json"
+            config.save_bot_configuration(
+                configuration_path,
+                config.BotConfiguration(
+                    restart_state=config.PersistedRestartState(
+                        auto_start_apps=("minecraft_alpha", "factorio_alpha")
+                    )
+                ),
+            )
+
+            app = _build_dummy_app()
+            app.name = "minecraft_alpha"
+            app.friendly = "Minecraft Alpha"
+            app.directory = instance_directory
+            app.cfg = App_Config(
+                name=app.name,
+                instance_key="alpha",
+                friendly_name=app.friendly,
+                directory=instance_directory,
+                apps_dir=instances_path.parent,
+                scope="minecraft",
+            )
+            app.file_instances = instances_path
+            app.deregister_activity_providers = Mock()  # type: ignore[method-assign]
+
+            manager = object.__new__(App_Manager)
+            manager.apps = {app.name: app}
+            manager._lookup = {}
+            manager._managed_shutdown_names = set()
+            manager._pending_start_names = set()
+            manager._bot_configuration_path = configuration_path
+            manager._register_lookup_aliases(app.name, app)
+
+            async def _remove_directory(remove: Any, directory: Path) -> Any:
+                self.assertNotIn(app.name, manager.apps)
+                return remove(directory)
+
+            with (
+                patch.object(config, "APP_PATH", app_root),
+                patch.object(config, "ENABLED_DUMP_FILE", temp_path / "enabled_apps.txt"),
+                patch("_manager.DC_Relay.unregister_app") as unregister_app,
+                patch("_manager.run_blocking", new=AsyncMock(side_effect=_remove_directory)),
+            ):
+                asyncio.run(manager.delete_instance(app))
+
+            self.assertFalse(instance_directory.exists())
+            self.assertEqual(json.loads(instances_path.read_text(encoding="utf-8")), {})
+            self.assertNotIn(app.name, manager.apps)
+            self.assertNotIn(app.name, manager._lookup.values())
+            app.deregister_activity_providers.assert_called_once()
+            unregister_app.assert_called_once_with(app)
+            self.assertEqual(
+                config.load_bot_configuration(configuration_path).restart_state.auto_start_apps,
+                ("factorio_alpha",),
+            )
+
+    def test_delete_directory_completes_before_honouring_cancellation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir) / "managed-app"
+            directory.mkdir()
+            cleanup_started = asyncio.Event()
+            allow_cleanup = asyncio.Event()
+
+            async def remove_directory(remove: Any, target: Path) -> Any:
+                cleanup_started.set()
+                await allow_cleanup.wait()
+                return remove(target)
+
+            async def exercise() -> None:
+                deletion = asyncio.create_task(App_Manager._remove_directory_with_deferred_cancellation(directory))
+                await cleanup_started.wait()
+                deletion.cancel()
+                allow_cleanup.set()
+                self.assertTrue(await deletion)
+
+            with patch("_manager.run_blocking", new=AsyncMock(side_effect=remove_directory)):
+                asyncio.run(exercise())
+
+            self.assertFalse(directory.exists())
+
+    def test_delete_instance_rejects_directory_outside_managed_app_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            app_root = temp_path / "managed-apps"
+            outside_directory = temp_path / "outside-apps" / "minecraft-alpha"
+            outside_directory.mkdir(parents=True)
+            sentinel_file = outside_directory / "server.jar"
+            sentinel_file.write_text("server", encoding="utf-8")
+
+            app = _build_dummy_app()
+            app.name = "minecraft_alpha"
+            app.friendly = "Minecraft Alpha"
+            app.directory = outside_directory
+            app.cfg = App_Config(
+                name=app.name,
+                instance_key="alpha",
+                friendly_name=app.friendly,
+                directory=outside_directory,
+                apps_dir=temp_path / "minecraft",
+                scope="minecraft",
+            )
+
+            manager = object.__new__(App_Manager)
+            manager.apps = {app.name: app}
+
+            with patch.object(config, "APP_PATH", app_root):
+                with self.assertRaisesRegex(ValueError, "outside DIR_APP"):
+                    asyncio.run(manager.delete_instance(app))
+
+            self.assertTrue(sentinel_file.is_file())
+
     def test_chat_relay_support_is_inbound_when_receiver_is_present(self) -> None:
         app = _build_dummy_app(has_receiver=True)
 
@@ -2795,6 +2926,22 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted, ())
         self.assertEqual(loaded.restart_state.auto_start_apps, ())
 
+    def test_set_app_installer_settings_persists_node_policy(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.json"
+            manager = object.__new__(App_Manager)
+            manager._bot_configuration_path = config_path
+
+            persisted = manager.set_app_installer_settings(
+                config.AppInstallerSettings(allowed_scopes=("satisfactory",))
+            )
+            current = manager.app_installer_settings()
+            loaded = config.load_bot_configuration(config_path)
+
+        self.assertEqual(persisted.allowed_scopes, ("satisfactory",))
+        self.assertEqual(current, persisted)
+        self.assertEqual(loaded.app_installer, persisted)
+
     async def test_launch_waits_for_start_completion_before_marking_lifecycle_started(self) -> None:
         manager = object.__new__(App_Manager)
         manager.apps = {}
@@ -2941,7 +3088,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         assert relayed_message.relay_embed is not None
         self.assertEqual(relayed_message.relay_embed.title, "Dummy Started")
 
-    def test_create_instance_writes_new_entry_from_template(self) -> None:
+    def test_create_instance_overrides_template_version_with_initial_version(self) -> None:
         manager = object.__new__(App_Manager)
         original_cwd = Path.cwd()
         with TemporaryDirectory() as temp_dir:
@@ -2957,6 +3104,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
                             "directory": "{APPS}/demo-alpha",
                             "server_log_file": "{WD}/Server.log",
                             "port": 12345,
+                            "version": {"main": "3.0.0", "build": 259},
                         }
                     }
                 ),
@@ -2973,6 +3121,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
                         subfolder="demo-beta",
                         port=23456,
                         server_log_file="{WD}/logs/server.log",
+                        initial_version=AppVersion(main="0.0"),
                     )
                 )
             finally:
@@ -2984,6 +3133,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["beta"]["directory"], "{APPS}/demo-beta")
             self.assertEqual(payload["beta"]["server_log_file"], "{WD}/logs/server.log")
             self.assertEqual(payload["beta"]["join_port"], 23456)
+            self.assertEqual(payload["beta"]["version"], {"main": "0.0"})
 
     def test_create_instance_writes_builtin_steam_update_template_for_sevendays(self) -> None:
         manager = object.__new__(App_Manager)
@@ -2992,6 +3142,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             temp_path = Path(temp_dir)
             scope_path = temp_path / "apps" / "sevendays"
             scope_path.mkdir(parents=True)
+            (scope_path / "__init__.py").write_text("", encoding="utf-8")
             instances_path = scope_path / "instances.json"
             instances_path.write_text("{}", encoding="utf-8")
 
@@ -3010,8 +3161,169 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
 
             payload = json.loads(instances_path.read_text(encoding="utf-8"))
             self.assertEqual(instance_name, "sevendays_alpha")
+            self.assertEqual(payload["alpha"]["join_port"], 26900)
             self.assertEqual(payload["alpha"]["steam_update"]["app_id"], 294420)
             self.assertEqual(payload["alpha"]["steam_update"]["selected_branch"], "latest_experimental")
+
+    def test_steam_install_recipe_uses_the_expected_default_port(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            scope_path = temp_path / "apps" / "sevendays"
+            scope_path.mkdir(parents=True)
+            (scope_path / "__init__.py").write_text("", encoding="utf-8")
+            (scope_path / "instances.json").write_text(
+                json.dumps(
+                    {
+                        "template": {
+                            "friendly_name": "Template",
+                            "directory": "{APPS}/template",
+                            "port": "27001",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            os.chdir(temp_path)
+            try:
+                recipes = manager.list_steam_install_recipes()
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(len(recipes), 1)
+        self.assertEqual(recipes[0].scope, "sevendays")
+        self.assertEqual(recipes[0].default_port, 26900)
+
+    async def test_load_instance_syncs_initial_instance_metadata(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.bot = Mock()
+        manager.apps = {}
+        manager._lookup = {}
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            scope_path = temp_path / "apps" / "demo"
+            scope_path.mkdir(parents=True)
+            (scope_path / "instances.json").write_text(
+                json.dumps({"alpha": {"friendly_name": "Demo", "directory": "{APPS}/demo"}}),
+                encoding="utf-8",
+            )
+            directory = temp_path / "demo"
+            directory.mkdir()
+            app_cfg = App_Config(
+                name="demo_alpha",
+                instance_key="alpha",
+                friendly_name="Demo",
+                directory=directory,
+                apps_dir=scope_path,
+                scope="demo",
+            )
+            app = Mock()
+            app.name = "demo_alpha"
+            app.post_init = AsyncMock()
+
+            os.chdir(temp_path)
+            try:
+                with (
+                    patch.object(manager, "_load_scope_types", return_value=(_DummyApp, App_Config)),
+                    patch.object(manager, "_build_app_config", return_value=app_cfg),
+                    patch.object(manager, "_instantiate_app", return_value=app),
+                    patch.object(manager, "_sync_app_instance_config") as sync_instance,
+                    patch.object(manager, "_register_lookup_aliases") as register_aliases,
+                    patch.object(manager, "dump_enabled"),
+                    patch("_manager.DC_Relay.bind_app_channel") as bind_channel,
+                ):
+                    loaded = await manager.load_instance(scope="demo", instance_key="alpha")
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertIs(loaded, app)
+        sync_instance.assert_called_once_with(app)
+        app.post_init.assert_awaited_once_with()
+        bind_channel.assert_called_once_with(app)
+        register_aliases.assert_called_once_with(app.name, app)
+
+    def test_create_instance_persists_selected_steam_branch(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            scope_path = temp_path / "apps" / "sevendays"
+            scope_path.mkdir(parents=True)
+            (scope_path / "__init__.py").write_text("", encoding="utf-8")
+            instances_path = scope_path / "instances.json"
+            instances_path.write_text("{}", encoding="utf-8")
+
+            os.chdir(temp_path)
+            try:
+                instance_name = manager.create_instance(
+                    AppInstanceCreateRequest(
+                        scope="sevendays",
+                        instance_key="stable",
+                        friendly_name="7D2D Stable",
+                        subfolder="sevendays-stable",
+                        steam_branch="public",
+                    )
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertEqual(instance_name, "sevendays_stable")
+            self.assertEqual(payload["stable"]["steam_update"]["selected_branch"], "public")
+
+    def test_create_instance_preserves_template_steam_credentials_and_executable(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            scope_path = temp_path / "apps" / "sevendays"
+            scope_path.mkdir(parents=True)
+            (scope_path / "__init__.py").write_text("", encoding="utf-8")
+            instances_path = scope_path / "instances.json"
+            instances_path.write_text(
+                json.dumps(
+                    {
+                        "template": {
+                            "friendly_name": "Template",
+                            "directory": "{APPS}/template",
+                            "steam_update": {
+                                "app_id": 294420,
+                                "steamcmd_executable": "custom-steamcmd",
+                                "login": {"username": "account", "password": "secret"},
+                                "branches": [{"branch_id": "public", "label": "Preferred"}],
+                                "selected_branch": "public",
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            os.chdir(temp_path)
+            try:
+                manager.create_instance(
+                    AppInstanceCreateRequest(
+                        scope="sevendays",
+                        instance_key="versioned",
+                        friendly_name="7D2D Versioned",
+                        subfolder="sevendays-versioned",
+                        steam_branch="v3.1.0",
+                    )
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            steam_update = payload["versioned"]["steam_update"]
+            self.assertEqual(steam_update["steamcmd_executable"], "custom-steamcmd")
+            self.assertEqual(steam_update["login"]["username"], "account")
+            self.assertEqual(steam_update["login"]["password"], "secret")
+            self.assertEqual(steam_update["selected_branch"], "v3.1.0")
+            self.assertEqual(steam_update["branches"][0]["label"], "Preferred")
+            self.assertIn("v3.1.0", [branch["branch_id"] for branch in steam_update["branches"]])
 
     def test_create_instance_rejects_subfolder_escape(self) -> None:
         manager = object.__new__(App_Manager)

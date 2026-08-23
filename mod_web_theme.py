@@ -2837,6 +2837,9 @@ class ModWebTheme:
                     background: rgba(82, 82, 91, 0.28) !important;
                     color: var(--mod-text) !important;
                 }}
+                .mod-setting-menu .q-item.mod-app-installer-policy-option {{
+                    color: var(--mod-text) !important;
+                }}
                 .mod-user-plate-option-content {{
                     display: flex;
                     align-items: center;

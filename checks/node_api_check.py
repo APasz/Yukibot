@@ -19,7 +19,7 @@ import hikari
 import requests
 from fastapi import FastAPI, HTTPException, Request, WebSocketDisconnect
 from fastapi.responses import FileResponse
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient, Response
 from modmux.models import Provider
 
 import config
@@ -197,6 +197,11 @@ from node_api import (
 from node_api_settings import NodeSettingEntry
 from node_api_storage_routes import FACTORIO_MOD_SETTINGS_ACCESS_LEVEL
 from node_api_files import NodeConfigList
+from node_api_app_installer import (
+    NodeAppInstallScopeOption,
+    NodeAppInstallerSettingsMutationResult,
+    NodeAppInstallerSettingsState,
+)
 from apps.satisfactory.node_api import NodeBlueprintList, NodeBlueprintMutationResult
 from node_api_app_state import (
     NodeAppMutationAction,
@@ -231,6 +236,18 @@ from node_api_route_contracts import DiscordHealthComponentState, DiscordHealthS
 from node_auth import NodeAccessGrant, NodeApiScope, verify_node_token
 from restart_state import RestartKind, RestartRecord
 from restart_targets import RestartTarget
+
+
+async def _asgi_request(
+    app: FastAPI,
+    *,
+    method: str,
+    path: str,
+    headers: dict[str, str],
+) -> Response:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        return await client.request(method, path, headers=headers)
 
 
 class _DummyApp(App[Any]):
@@ -623,6 +640,13 @@ class NodeApiTests(unittest.TestCase):
             NodeApiScope.APP_MANAGE,
         )
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.KILL), Power_Level.sudo)
+
+    def test_app_mutation_delete_requires_manage_scope_and_root_level(self) -> None:
+        self.assertEqual(
+            required_app_mutation_scope(NodeAppMutationAction.DELETE),
+            NodeApiScope.APP_MANAGE,
+        )
+        self.assertEqual(required_app_mutation_level(NodeAppMutationAction.DELETE), Power_Level.root)
 
     def test_app_mutation_rename_requires_manage_scope_and_sudo_level(self) -> None:
         self.assertEqual(
@@ -1511,6 +1535,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertIn("/api/node/presence/stream", handlers)
         self.assertIn("/api/node/system/restart-schedules", handlers)
         self.assertIn("/api/node/node-capacity", handlers)
+        self.assertIn("/api/node/app-installer-settings", handlers)
         self.assertIn("/api/node/node-disk-settings", handlers)
         self.assertIn("/api/node/node-font-sources", handlers)
         self.assertIn("/api/node/discord-settings", handlers)
@@ -1544,13 +1569,17 @@ class NodeApiTests(unittest.TestCase):
         app = FastAPI()
         NodeApiService().register_routes(app)
 
-        response = TestClient(app).options(
-            "/api/node/apps/minecraft_alpha/mods/upload",
-            headers={
-                "Origin": "https://portal.example",
-                "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "Authorization",
-            },
+        response = asyncio.run(
+            _asgi_request(
+                app,
+                method="OPTIONS",
+                path="/api/node/apps/minecraft_alpha/mods/upload",
+                headers={
+                    "Origin": "https://portal.example",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "Authorization",
+                },
+            )
         )
 
         self.assertEqual(response.status_code, 200)
@@ -1561,9 +1590,13 @@ class NodeApiTests(unittest.TestCase):
         app = FastAPI()
         NodeApiService().register_routes(app)
 
-        response = TestClient(app).get(
-            "/api/node/ping",
-            headers={"Origin": "https://portal.example"},
+        response = asyncio.run(
+            _asgi_request(
+                app,
+                method="GET",
+                path="/api/node/ping",
+                headers={"Origin": "https://portal.example"},
+            )
         )
 
         self.assertEqual(response.status_code, 204)
@@ -4578,6 +4611,21 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].transition_state, NodeAppTransitionState.STARTING)
 
+    def test_build_app_entries_ignores_deleted_app_snapshot_failure(self) -> None:
+        app = _build_app(Mock())
+        manager = SimpleNamespace(apps={app.name: app})
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+
+        async def _build_removed_app_entry(_: App) -> NodeAppEntry:
+            manager.apps.pop(app.name)
+            raise FileNotFoundError("serverconfig.xml was deleted")
+
+        with patch.object(service, "_build_live_app_entry", new=AsyncMock(side_effect=_build_removed_app_entry)):
+            entries = asyncio.run(service._build_app_entries())
+
+        self.assertEqual(entries, ())
+
     def test_build_chat_room_snapshot_returns_limited_history(self) -> None:
         app = _build_app(Mock())
         app.am_receiver = _DummyReceiver()
@@ -6896,6 +6944,60 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
+    def test_app_installer_settings_require_root_and_expose_supported_apps(self) -> None:
+        manager = Mock()
+        settings = config.AppInstallerSettings(allowed_scopes=("satisfactory",))
+        manager.app_installer_settings = Mock(return_value=settings)
+        manager.list_steam_install_recipes = Mock(
+            return_value=(SimpleNamespace(scope="satisfactory", label="Satisfactory"),)
+        )
+        manager.set_app_installer_settings = Mock(return_value=config.AppInstallerSettings(allowed_scopes=()))
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+        erin_profile = config.BOT_PROFILES[config.BotProfileName.ERIN]
+
+        with (
+            patch.object(config, "ACTIVE_BOT_PROFILE", erin_profile),
+            patch("node_api.audit_log") as audit,
+        ):
+            state = service.read_app_installer_settings()
+            result = asyncio.run(
+                service.mutate_app_installer_settings(
+                    settings=config.AppInstallerSettings(allowed_scopes=()),
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertEqual(
+            state,
+            NodeAppInstallerSettingsState(
+                node=config.MOD_WEB_SERVER.node_name,
+                settings=settings,
+                available_apps=(NodeAppInstallScopeOption(scope="satisfactory", label="Satisfactory"),),
+            ),
+        )
+        self.assertEqual(NodeAppInstallerSettingsState.from_mapping(state.to_mapping()), state)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+        manager.set_app_installer_settings.assert_called_once_with(config.AppInstallerSettings(allowed_scopes=()))
+        self.assertEqual(
+            result,
+            NodeAppInstallerSettingsMutationResult(
+                node=config.MOD_WEB_SERVER.node_name,
+                message=f"Updated app install settings for {config.MOD_WEB_SERVER.node_name}.",
+                settings=config.AppInstallerSettings(allowed_scopes=()),
+            ),
+        )
+        self.assertEqual(NodeAppInstallerSettingsMutationResult.from_mapping(result.to_mapping()), result)
+        audit.assert_called_once_with(
+            "node.app_installer_settings.updated",
+            actor_user_id=42,
+            node=config.MOD_WEB_SERVER.node_name,
+            allowed_scopes=(),
+        )
+
     def test_mutate_node_font_sources_requires_sudo_and_refreshes_assets(self) -> None:
         manager = Mock()
         manager.set_node_font_sources = Mock(
@@ -7248,6 +7350,114 @@ class NodeApiTests(unittest.TestCase):
         manager.kill.assert_awaited_once_with(app.name)
         self.assertEqual(result.action, NodeAppMutationAction.KILL)
         self.assertEqual(result.message, "Kill requested for Minecraft Alpha.")
+
+    def test_mutate_app_delete_requires_root_and_removes_instance(self) -> None:
+        app = _build_app(Mock())
+        manager = Mock()
+        manager.delete_instance = AsyncMock()
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with patch("node_api.audit_log") as audit:
+            result = asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.DELETE,
+                    actor_user_id=42,
+                )
+            )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+        manager.delete_instance.assert_awaited_once_with(app)
+        self.assertEqual(result.action, NodeAppMutationAction.DELETE)
+        self.assertEqual(result.message, "Deleted Minecraft Alpha.")
+        self.assertIsNone(result.app_stats)
+        audit.assert_called_once_with(
+            "node.app.deleted",
+            actor_user_id=42,
+            node=config.MOD_WEB_SERVER.node_name,
+            app_name=app.name,
+            scope=app.scope,
+        )
+
+    def test_mutate_app_delete_rejects_pending_runtime_mutation(self) -> None:
+        app = _build_app(Mock())
+        manager = Mock()
+        manager.delete_instance = AsyncMock()
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        async def _run_test() -> HTTPException:
+            pending_task = asyncio.create_task(asyncio.sleep(60))
+            service._app_mutations._tasks[app.name.casefold()] = pending_task
+            try:
+                with self.assertRaises(HTTPException) as raised:
+                    await service.mutate_app(
+                        app=app,
+                        action=NodeAppMutationAction.DELETE,
+                        actor_user_id=42,
+                    )
+                return raised.exception
+            finally:
+                pending_task.cancel()
+                try:
+                    await pending_task
+                except asyncio.CancelledError:
+                    pass
+
+        error = asyncio.run(_run_test())
+
+        self.assertEqual(error.status_code, 409)
+        manager.delete_instance.assert_not_awaited()
+
+    def test_mutate_app_delete_rejects_a_concurrent_delete(self) -> None:
+        app = _build_app(Mock())
+        manager = Mock()
+        deletion_started = asyncio.Event()
+        allow_deletion_finish = asyncio.Event()
+
+        async def _delete_instance(_: object) -> None:
+            deletion_started.set()
+            await allow_deletion_finish.wait()
+
+        manager.delete_instance = AsyncMock(side_effect=_delete_instance)
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        async def _run_test() -> HTTPException:
+            first_delete = asyncio.create_task(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.DELETE,
+                    actor_user_id=42,
+                )
+            )
+            await deletion_started.wait()
+            try:
+                with self.assertRaises(HTTPException) as raised:
+                    await service.mutate_app(
+                        app=app,
+                        action=NodeAppMutationAction.DELETE,
+                        actor_user_id=42,
+                    )
+                return raised.exception
+            finally:
+                allow_deletion_finish.set()
+                await first_delete
+
+        error = asyncio.run(_run_test())
+
+        self.assertEqual(error.status_code, 409)
+        manager.delete_instance.assert_awaited_once_with(app)
 
     def test_build_mod_list_uses_local_mod_manager(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -8050,6 +8260,7 @@ class NodeApiTests(unittest.TestCase):
                 self.assertFalse(capabilities.supports_node_font_sources)
                 self.assertTrue(capabilities.supports_node_disk_settings)
                 self.assertFalse(capabilities.supports_discord_settings)
+                self.assertFalse(capabilities.supports_app_installer_settings)
                 with self.assertRaises(HTTPException) as raised:
                     await service.schedule_system_action(
                         action=NodeSystemAction.REBOOT_HOST,
@@ -8062,6 +8273,28 @@ class NodeApiTests(unittest.TestCase):
             handler.assert_not_called()
 
         asyncio.run(exercise())
+
+    def test_portal_rejects_app_installer_settings(self) -> None:
+        service = NodeApiService()
+        service.set_manager(cast(Any, SimpleNamespace(bot=None)))
+        portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+
+        with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
+            self.assertFalse(service.system_capabilities().supports_app_installer_settings)
+            with self.assertRaises(HTTPException) as raised:
+                service.read_app_installer_settings()
+
+        self.assertEqual(raised.exception.status_code, 400)
+
+    def test_portal_rejects_app_installation_operations(self) -> None:
+        service = NodeApiService()
+        portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+
+        with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
+            with self.assertRaises(HTTPException) as raised:
+                service.build_app_install_catalog()
+
+        self.assertEqual(raised.exception.status_code, 400)
 
     def test_discord_settings_capability_requires_an_attached_discord_bot(self) -> None:
         service = NodeApiService()

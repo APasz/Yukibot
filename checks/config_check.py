@@ -869,6 +869,30 @@ class BotConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not contain duplicate"):
             config.parse_discord_activity_fields("ram, cpu, ram", source="Discord activity field order")
 
+    def test_app_installer_settings_normalise_per_node_allowlist(self) -> None:
+        settings = config.AppInstallerSettings(allowed_scopes=(" Satisfactory ", "SevenDays"))
+
+        self.assertEqual(settings.allowed_scopes, ("satisfactory", "sevendays"))
+        self.assertTrue(settings.allows("satisfactory"))
+        self.assertFalse(settings.allows("minecraft"))
+
+    def test_empty_app_installer_allowlist_disables_node_installs(self) -> None:
+        settings = config.AppInstallerSettings(allowed_scopes=())
+
+        self.assertFalse(settings.allows("satisfactory"))
+
+    def test_load_bot_configuration_reads_app_installer_allowlist(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+            path.write_text(
+                '{"app_installer":{"allowed_scopes":["satisfactory"]}}',
+                encoding="utf-8",
+            )
+
+            loaded = config.load_bot_configuration(path)
+
+        self.assertEqual(loaded.app_installer.allowed_scopes, ("satisfactory",))
+
     def test_save_bot_configuration_persists_discord_settings(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "configuration.json"
@@ -1074,6 +1098,8 @@ class BotConfigurationTests(unittest.TestCase):
         self.assertEqual(loaded.node_capacity.ram_points_total, 8)
         self.assertEqual(loaded.node_capacity.cpu_points_reserved, 3)
         self.assertEqual(loaded.node_capacity.ram_points_reserved, 4)
+        self.assertIsNone(loaded.app_installer.allowed_scopes)
+        self.assertIn('"app_installer"', saved_payload)
         self.assertIn('"node_capacity"', saved_payload)
         self.assertIn('"node_font_sources"', saved_payload)
 

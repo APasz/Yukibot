@@ -76,6 +76,7 @@ log: Logger = logging.getLogger(__name__)
 _DEFAULT_API_PORT: int = 7777
 _API_READY_RETRIES: int = 15
 _API_READY_SLEEP_SECONDS: float = 2.0
+_API_RETRY_AFTER_UNAVAILABLE_SECONDS: float = 10.0
 _PLAYER_POLL_SECONDS: float = 15.0
 _STOP_WAIT_SECONDS: float = 15.0
 _NETWORK_QUALITY_CHOICES: tuple[ChoiceOption, ...] = (
@@ -160,10 +161,18 @@ _SML_UPLUGIN_FILES: tuple[Path, Path] = (
     Path("Mods") / "SML" / "SML.uplugin",
 )
 _BLUEPRINT_ROOT: Path = Path("~/.config/Epic/FactoryGame/Saved/SaveGames/blueprints").expanduser()
+_SATISFACTORY_SERVER_SAVE_ROOT: Path = Path(
+    "~/.config/Epic/FactoryGame/Saved/SaveGames/server"
+).expanduser()
 _SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME = "Shared"
 _SATISFACTORY_BLUEPRINT_STORAGE_SUFFIX = "-shared"
 _SATISFACTORY_SAVE_ROOT_ID = "saves"
 _SATISFACTORY_SAVE_ROOT_LABEL = "Server Saves"
+
+
+def _satisfactory_start_command(join_port: int | None) -> list[str]:
+    port = _DEFAULT_API_PORT if join_port is None else join_port
+    return ["bash", "FactoryServer.sh", f"-Port={port}"]
 
 
 class SatisfactoryNetworkQuality(enum.IntEnum):
@@ -1811,7 +1820,7 @@ class Satisfactory(App[Satisfactory_Config]):
         self.manage_embed_color = 0xF59E0B
         self.proc_name = "FactoryServer-Linux-Shipping"
         self.proc_cmd = [self.proc_name]
-        self.cmd_start = ["bash", "FactoryServer.sh"]
+        self.cmd_start = _satisfactory_start_command(cfg.join_port)
         self.process = None
 
         host: str | None = cfg.effective_api_host
@@ -1858,6 +1867,8 @@ class Satisfactory(App[Satisfactory_Config]):
         self._player_session_matcher: SatisfactoryPlayerSessionMatcher = SatisfactoryPlayerSessionMatcher(self)
         self._tail_matchers.add(self._player_session_matcher.match)
         self._players: SatisfactoryPlayers = SatisfactoryPlayers(self)
+        self._runtime_api_task: asyncio.Task[None] | None = None
+        self._api_claim_pending = False
         self._save_index: dict[str, SatisfactorySaveHeader] = {}
         self.set_activity_providers(_build_satisfactory_activity_providers(self))
 
@@ -1874,7 +1885,7 @@ class Satisfactory(App[Satisfactory_Config]):
             AppSaveRoot(
                 id=_SATISFACTORY_SAVE_ROOT_ID,
                 label=_SATISFACTORY_SAVE_ROOT_LABEL,
-                path=self.cfg.directory / "FactoryGame" / "Saved" / "SaveGames",
+                path=_SATISFACTORY_SERVER_SAVE_ROOT,
                 mode=AppSaveRootMode.CHILDREN,
                 recursive=True,
                 suffixes=frozenset({".sav"}),
@@ -2325,6 +2336,45 @@ class Satisfactory(App[Satisfactory_Config]):
                 self._players.set_state(state)
                 return
 
+    async def _activate_runtime_api(self) -> None:
+        try:
+            await self._settings.apply_current_values()
+        except Exception as xcp:
+            log.warning(f"{self.friendly} pending settings were not applied: {xcp}")
+        try:
+            await self._settings.refresh_from_server()
+        except Exception as xcp:
+            log.warning(f"{self.friendly} settings refresh failed after startup: {xcp}")
+        await self._players.start()
+        self.register_enabled_activity_providers()
+
+    async def _wait_for_runtime_api(self) -> None:
+        while self._running and self.check_running():
+            try:
+                await self._warm_bridge()
+                await self._activate_runtime_api()
+            except asyncio.CancelledError:
+                raise
+            except Exception as xcp:
+                if self._api_claim_pending:
+                    log.debug("%s API is still unavailable: %s", self.friendly, xcp)
+                else:
+                    log.info(
+                        "%s API is unavailable. For a new server, claim it in the game client using the configured "
+                        "admin password; Yukibot will begin managing it automatically afterwards.",
+                        self.friendly,
+                    )
+                    self._api_claim_pending = True
+                await asyncio.sleep(_API_RETRY_AFTER_UNAVAILABLE_SECONDS)
+            else:
+                self._api_claim_pending = False
+                return
+
+    async def _cancel_runtime_api_task(self) -> None:
+        task = getattr(self, "_runtime_api_task", None)
+        self._runtime_api_task = None
+        await self._cancel_background_task(cast(asyncio.Task[object] | None, task), label="API readiness task")
+
     def _sync_provider_text(self, state: SatisfactoryServerState) -> None:
         alt_text: str | None = state.active_session_name or state.auto_load_session_name
         if alt_text:
@@ -2343,6 +2393,7 @@ class Satisfactory(App[Satisfactory_Config]):
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")
+        await self._cancel_runtime_api_task()
         self._player_session_matcher.reset()
         await self._std_launch()
         while not self.check_running():
@@ -2360,18 +2411,11 @@ class Satisfactory(App[Satisfactory_Config]):
         await self._tail.start(self._tail_matchers)
 
         self._running = True
-        await self._warm_bridge()
-        try:
-            await self._settings.apply_current_values()
-        except Exception as xcp:
-            log.warning(f"{self.friendly} pending settings were not applied: {xcp}")
-        try:
-            await self._settings.refresh_from_server()
-        except Exception as xcp:
-            log.warning(f"{self.friendly} settings refresh failed after startup: {xcp}")
-
-        await self._players.start()
-        self.register_enabled_activity_providers()
+        self._api_claim_pending = False
+        self._runtime_api_task = asyncio.create_task(
+            self._wait_for_runtime_api(),
+            name=f"{self.name}-api-ready",
+        )
         return True
 
     async def _wait_for_exit(self, timeout_seconds: float) -> bool:
@@ -2411,6 +2455,7 @@ class Satisfactory(App[Satisfactory_Config]):
     async def stop(self) -> bool:
         log.info(f"{__name__}.stop")
         self._running = False
+        await self._cancel_runtime_api_task()
         await self._players.stop()
         self.deregister_activity_providers()
 
@@ -2431,6 +2476,7 @@ class Satisfactory(App[Satisfactory_Config]):
     async def kill(self) -> bool:
         log.info(f"{__name__}.kill")
         self._running = False
+        await self._cancel_runtime_api_task()
         await self._players.stop()
         self.deregister_activity_providers()
         if self._tail:

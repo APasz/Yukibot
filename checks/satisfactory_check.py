@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import ValidationError
@@ -34,9 +34,11 @@ from apps.satisfactory import (
     SatisfactorySessionSaveSnapshot,
     SatisfactorySettings,
     SatisfactorySettingsSnapshot,
+    _SATISFACTORY_SERVER_SAVE_ROOT,
     _build_satisfactory_activity_providers,
     _normalise_active_schematic_label,
     _parse_api_endpoint,
+    _satisfactory_start_command,
     detect_satisfactory_version,
 )
 from relay_notices import PlayerSessionAction
@@ -370,6 +372,10 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
     def test_parse_api_endpoint_handles_default_port_and_ipv6(self) -> None:
         self.assertEqual(_parse_api_endpoint("127.0.0.1"), ("127.0.0.1", 7777))
         self.assertEqual(_parse_api_endpoint("[::1]:7778"), ("::1", 7778))
+
+    def test_start_command_uses_the_configured_join_port(self) -> None:
+        self.assertEqual(_satisfactory_start_command(None), ["bash", "FactoryServer.sh", "-Port=7777"])
+        self.assertEqual(_satisfactory_start_command(7778), ["bash", "FactoryServer.sh", "-Port=7778"])
 
     def test_server_state_parses_progress_fields_from_api_payload(self) -> None:
         state = SatisfactoryServerState.from_api_payload(
@@ -835,6 +841,62 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
 
         app._players.set_state.assert_not_called()
 
+    async def test_runtime_api_waits_for_in_game_claim_then_activates_management(self) -> None:
+        app = cast(Any, object.__new__(Satisfactory))
+        app.friendly = "Satisfactory"
+        app._running = True
+        app._api_claim_pending = False
+        app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        app._warm_bridge = AsyncMock(side_effect=(TimeoutError("unclaimed"), None))  # type: ignore[method-assign]
+        app._settings = SimpleNamespace(
+            apply_current_values=AsyncMock(),
+            refresh_from_server=AsyncMock(),
+        )
+        app._players = SimpleNamespace(start=AsyncMock())
+        app.register_enabled_activity_providers = Mock()  # type: ignore[method-assign]
+
+        with patch("apps.satisfactory._API_RETRY_AFTER_UNAVAILABLE_SECONDS", 0.0):
+            await app._wait_for_runtime_api()
+
+        self.assertEqual(app._warm_bridge.await_count, 2)
+        app._settings.apply_current_values.assert_awaited_once_with()
+        app._settings.refresh_from_server.assert_awaited_once_with()
+        app._players.start.assert_awaited_once_with()
+        app.register_enabled_activity_providers.assert_called_once_with()
+        self.assertFalse(app._api_claim_pending)
+
+    async def test_start_returns_while_the_runtime_api_waits_for_a_claim(self) -> None:
+        app = cast(Any, object.__new__(Satisfactory))
+        app.name = "satisfactory_alpha"
+        app.friendly = "Satisfactory"
+        app._runtime_api_task = None
+        app._player_session_matcher = SimpleNamespace(reset=Mock())
+        app._std_launch = AsyncMock()
+        app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        app.server_log = None
+        app.process = SimpleNamespace(stdout=object())
+        app.file_stdout = self.temp_path / "stdout.log"
+        app._tail_matchers = set()
+        app._running = False
+        app._api_claim_pending = False
+        api_wait_started = asyncio.Event()
+
+        async def wait_for_runtime_api() -> None:
+            api_wait_started.set()
+            await asyncio.Event().wait()
+
+        app._wait_for_runtime_api = wait_for_runtime_api  # type: ignore[method-assign]
+        tailer = SimpleNamespace(start=AsyncMock())
+        with patch("apps.satisfactory.Tailer", return_value=tailer):
+            result = await Satisfactory.start(app)
+            await api_wait_started.wait()
+
+        self.assertTrue(result)
+        self.assertTrue(app._running)
+        app._std_launch.assert_awaited_once_with()
+        tailer.start.assert_awaited_once_with(app._tail_matchers)
+        await app._cancel_runtime_api_task()
+
     async def test_players_stop_cancels_cross_loop_poll_task(self) -> None:
         app = object.__new__(Satisfactory)
         app.name = "satisfactory_alpha"
@@ -947,6 +1009,7 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saves[0].relative_path, "SERVER-SESSION/SERVER-SESSION_autosave_0.sav")
         self.assertEqual(app.save_file_roots[0].id, "saves")
         self.assertEqual(app.save_file_roots[0].label, "Server Saves")
+        self.assertEqual(app.save_file_roots[0].path, _SATISFACTORY_SERVER_SAVE_ROOT)
 
     async def test_save_files_are_empty_when_server_is_not_running(self) -> None:
         app = self._console_app()

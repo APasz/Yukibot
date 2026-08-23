@@ -24,6 +24,7 @@ from .runtime_imports import (
     Label,
     Literal,
     NodeAppActivityProviderEntry,
+    NodeAppInstallerSettingsState,
     NodeAppMutationAction,
     NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
@@ -366,7 +367,7 @@ class _ModWebRuntimeToolbarBindings:
 
 
 class _ModWebEnableableControl(Protocol):
-    def set_enabled(self, value: bool) -> None: ...
+    def set_enabled(self, value: bool) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -848,6 +849,7 @@ class ModWebNodeSystemTabLoadResult:
     system_capabilities: NodeSystemCapabilities | None = None
     system_logs: NodeSystemLogCatalog | None = None
     node_capacity: config.NodeCapacityProfile | None = None
+    app_installer_settings: NodeAppInstallerSettingsState | None = None
     node_font_sources: config.NodeFontSourceSettings | None = None
     node_disk_settings: NodeDiskManagementState | None = None
     discord_settings: config.DiscordSettings | None = None

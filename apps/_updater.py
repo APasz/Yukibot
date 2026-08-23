@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -35,6 +35,141 @@ class AppUpdateState(enum.StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+type SteamCmdOutputHandler = Callable[[str, str], None]
+
+_STEAMCMD_ERROR_OUTPUT_LINE_LIMIT = 4
+
+
+def redact_steamcmd_output(
+    *,
+    text: str,
+    steam_update: SteamUpdateConfig,
+    additional_secrets: Sequence[str | None] = (),
+) -> str:
+    """Redact SteamCMD credentials and any related secret values from text."""
+
+    return _redact_steamcmd_text(
+        text=text,
+        secrets=(
+            steam_update.login.password,
+            steam_update.selected_branch_config.beta_password,
+            *additional_secrets,
+        ),
+    )
+
+
+def resolve_steamcmd_command_prefix(steam_update: SteamUpdateConfig) -> tuple[str, ...]:
+    """Resolve the executable used for one SteamCMD operation."""
+
+    bot_config = config.load_bot_configuration(Path("configuration.json"))
+    configured_command = bot_config.steamcmd_path
+    if steam_update.steamcmd_executable != "steamcmd":
+        configured_command = steam_update.steamcmd_executable
+    return config.steamcmd_command_prefix(configured_command)
+
+
+def build_steamcmd_command(
+    *,
+    steam_update: SteamUpdateConfig,
+    install_dir: Path,
+    branch: SteamUpdateBranch,
+    validate: bool,
+    command_prefix: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Build a SteamCMD app-update command without exposing credentials in logs."""
+
+    login = steam_update.login
+    command: list[str] = [
+        *(resolve_steamcmd_command_prefix(steam_update) if command_prefix is None else command_prefix),
+        "+force_install_dir",
+        str(install_dir),
+        "+login",
+        login.username,
+    ]
+    if login.username.casefold() != "anonymous":
+        if login.password is None:
+            raise ValueError("Steam login password is required for non-anonymous logins.")
+        command.append(login.password)
+    command.extend(["+app_update", str(steam_update.app_id), "-beta", branch.branch_id])
+    if branch.beta_password is not None:
+        command.extend(["-betapassword", branch.beta_password])
+    if validate:
+        command.append("validate")
+    command.append("+quit")
+    return command
+
+
+async def run_steamcmd_command(
+    *,
+    command: list[str],
+    cwd: Path,
+    on_output: SteamCmdOutputHandler | None = None,
+) -> bool:
+    """Run SteamCMD and stream its output to an optional status sink."""
+
+    success_markers = (
+        "Success! App",
+        "fully installed",
+        "fully installed.",
+        "Success! Verified",
+    )
+    success_marker_seen = False
+
+    def handle_output(source: str, line: str) -> None:
+        nonlocal success_marker_seen
+        if source == "stdout" and any(marker in line for marker in success_markers):
+            success_marker_seen = True
+        if on_output is not None:
+            on_output(source, line)
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_lines: deque[str] = deque(maxlen=_STEAMCMD_ERROR_OUTPUT_LINE_LIMIT)
+    stderr_lines: deque[str] = deque(maxlen=_STEAMCMD_ERROR_OUTPUT_LINE_LIMIT)
+    try:
+        await asyncio.gather(
+            _consume_steamcmd_stream(process.stdout, source="stdout", sink=stdout_lines, on_output=handle_output),
+            _consume_steamcmd_stream(process.stderr, source="stderr", sink=stderr_lines, on_output=handle_output),
+        )
+        return_code = await process.wait()
+    except BaseException:
+        if process.returncode is None:
+            try:
+                process.terminate()
+                await process.wait()
+            except ProcessLookupError:
+                pass
+        raise
+    stdout_text = "\n".join(stdout_lines)
+    stderr_text = "\n".join(stderr_lines)
+    if return_code != 0:
+        raise RuntimeError(_command_error_text(command=command, stdout_text=stdout_text, stderr_text=stderr_text))
+    return success_marker_seen
+
+
+async def _consume_steamcmd_stream(
+    stream: asyncio.StreamReader | None,
+    *,
+    source: str,
+    sink: deque[str],
+    on_output: SteamCmdOutputHandler | None,
+) -> None:
+    if stream is None:
+        return
+    while True:
+        chunk = await stream.readline()
+        if not chunk:
+            return
+        line = chunk.decode(config.STR_ENCODE, errors="replace").rstrip("\r\n")
+        sink.append(line)
+        if on_output is not None:
+            on_output(source, line)
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,7 +475,7 @@ class SteamCmd_Update_Manager(Update_Manager):
     def __init__(self, app: UpdateManagerApp) -> None:
         super().__init__(app, base=True, mods=False)
         steam_update = self._steam_update_config()
-        self._steamcmd_command_prefix: tuple[str, ...] = self._resolve_steamcmd_command_prefix(steam_update)
+        self._steamcmd_command_prefix: tuple[str, ...] = resolve_steamcmd_command_prefix(steam_update)
         self._app_id: int = steam_update.app_id
         self._state_lock = threading.Lock()
         self._status: AppUpdateStatus = AppUpdateStatus(
@@ -539,6 +674,7 @@ class SteamCmd_Update_Manager(Update_Manager):
 
     async def _run_steamcmd(self, *, branch: SteamUpdateBranch, validate: bool) -> bool:
         install_dir = str(self.app.directory)
+        steam_update = self._steam_update_config()
         command = self._steamcmd_command(branch=branch, validate=validate)
         log.info(
             "Running SteamCMD: app=%s cwd=%s command=%s",
@@ -546,78 +682,31 @@ class SteamCmd_Update_Manager(Update_Manager):
             install_dir,
             _display_command(command),
         )
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=install_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        completed = await run_steamcmd_command(
+            command=command,
+            cwd=Path(install_dir),
+            on_output=lambda source, line: self._record_output_line(
+                source=source,
+                line=line,
+                steam_update=steam_update,
+            ),
         )
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-        await asyncio.gather(
-            self._consume_process_stream(process.stdout, source="stdout", sink=stdout_lines),
-            self._consume_process_stream(process.stderr, source="stderr", sink=stderr_lines),
-        )
-        return_code = await process.wait()
-        stdout_text = "\n".join(stdout_lines)
-        stderr_text = "\n".join(stderr_lines)
-        if return_code != 0:
-            raise RuntimeError(_command_error_text(command=command, stdout_text=stdout_text, stderr_text=stderr_text))
-        success_markers = (
-            "Success! App",
-            "fully installed",
-            "fully installed.",
-            "Success! Verified",
-        )
-        completed = any(marker in stdout_text for marker in success_markers)
         log.info(
-            "SteamCMD finished: app=%s returncode=%s success=%s stdout_lines=%s stderr_lines=%s",
+            "SteamCMD finished: app=%s success=%s",
             self.app.friendly,
-            return_code,
             completed,
-            len(stdout_lines),
-            len(stderr_lines),
         )
         return completed
 
     def _steamcmd_command(self, *, branch: SteamUpdateBranch, validate: bool) -> list[str]:
         steam_update = self._steam_update_config()
-        login = steam_update.login
-        command: list[str] = [
-            *self._steamcmd_command_prefix,
-            "+force_install_dir",
-            str(self.app.directory),
-            "+login",
-            login.username,
-        ]
-        if login.username.casefold() != "anonymous":
-            if login.password is None:
-                raise ValueError("Steam login password is required for non-anonymous logins.")
-            command.append(login.password)
-        command.extend(["+app_update", str(self._app_id), "-beta", branch.branch_id])
-        if branch.beta_password is not None:
-            command.extend(["-betapassword", branch.beta_password])
-        if validate:
-            command.append("validate")
-        command.append("+quit")
-        return command
-
-    async def _consume_process_stream(
-        self,
-        stream: asyncio.StreamReader | None,
-        *,
-        source: str,
-        sink: list[str],
-    ) -> None:
-        if stream is None:
-            return
-        while True:
-            chunk = await stream.readline()
-            if not chunk:
-                return
-            line = chunk.decode(config.STR_ENCODE, errors="replace").rstrip("\r\n")
-            sink.append(line)
-            self._record_output_line(source=source, line=line)
+        return build_steamcmd_command(
+            steam_update=steam_update,
+            install_dir=self.app.directory,
+            branch=branch,
+            validate=validate,
+            command_prefix=self._steamcmd_command_prefix,
+        )
 
     def _detect_installed_version(self) -> AppVersion | None:
         return self.app.detect_installed_version()
@@ -717,19 +806,27 @@ class SteamCmd_Update_Manager(Update_Manager):
     def _app_config(self) -> App_Config:
         return self.app.cfg
 
-    def _record_output_line(self, *, source: str, line: str) -> None:
-        clean_line = line.strip()
-        self._append_command_log(source=source, line=line)
+    def _record_output_line(
+        self,
+        *,
+        source: str,
+        line: str,
+        steam_update: SteamUpdateConfig,
+    ) -> None:
+        redacted_line = redact_steamcmd_output(text=line, steam_update=steam_update)
+        clean_line = redacted_line.strip()
+        self._append_command_log(source=source, line=redacted_line)
         if not clean_line:
             return
-        progress_match = _STEAMCMD_PROGRESS_RE.search(clean_line)
-        if progress_match is not None:
+        progress = steamcmd_progress(clean_line)
+        if progress is not None:
+            phase, progress_percent = progress
             log.info(
                 "SteamCMD progress: app=%s source=%s phase=%s progress=%s",
                 self.app.friendly,
                 source,
-                progress_match.group("phase").strip(),
-                progress_match.group("progress"),
+                phase,
+                progress_percent,
             )
         elif source == "stderr":
             log.warning("SteamCMD stderr: app=%s line=%s", self.app.friendly, clean_line)
@@ -745,9 +842,8 @@ class SteamCmd_Update_Manager(Update_Manager):
                 detail=clean_line,
                 log_lines=tuple(self._log_tail),
             )
-            if progress_match is not None:
-                phase_text = progress_match.group("phase").strip()
-                progress_percent = float(progress_match.group("progress"))
+            if progress is not None:
+                phase_text, progress_percent = progress
                 next_status = replace(
                     next_status,
                     summary=phase_text[:1].upper() + phase_text[1:] if phase_text else clean_line,
@@ -804,15 +900,6 @@ class SteamCmd_Update_Manager(Update_Manager):
         if error is not None:
             log.warning("SteamCMD update task failed: app=%s error=%s", self.app.friendly, error)
 
-    @staticmethod
-    def _resolve_steamcmd_command_prefix(steam_update: SteamUpdateConfig) -> tuple[str, ...]:
-        bot_config = config.load_bot_configuration(Path("configuration.json"))
-        configured_command = bot_config.steamcmd_path
-        if steam_update.steamcmd_executable != "steamcmd":
-            configured_command = steam_update.steamcmd_executable
-        return config.steamcmd_command_prefix(configured_command)
-
-
 def _mapping(raw: object, *, label: str) -> dict[str, object]:
     if not isinstance(raw, Mapping):
         raise ValueError(f"{label} is invalid.")
@@ -827,10 +914,30 @@ def _mapping(raw: object, *, label: str) -> dict[str, object]:
 def _command_error_text(*, command: list[str], stdout_text: str, stderr_text: str) -> str:
     output_lines = [line.strip() for line in (stdout_text + "\n" + stderr_text).splitlines() if line.strip()]
     tail_lines = output_lines[-4:]
-    tail_text = " | ".join(tail_lines)
+    tail_text = _redact_steamcmd_text(
+        text=" | ".join(tail_lines),
+        secrets=_steamcmd_command_secrets(command),
+    )
     if tail_text:
         return f"Command failed: {_display_command(command)} [{tail_text}]"
     return f"Command failed: {_display_command(command)}"
+
+
+def _redact_steamcmd_text(*, text: str, secrets: Sequence[str | None]) -> str:
+    redacted_text = text
+    for secret in sorted({secret for secret in secrets if secret}, key=len, reverse=True):
+        redacted_text = redacted_text.replace(secret, "******")
+    return redacted_text
+
+
+def _steamcmd_command_secrets(command: Sequence[str]) -> tuple[str, ...]:
+    secrets: list[str] = []
+    for index, part in enumerate(command):
+        if part == "+login" and index + 2 < len(command) and command[index + 1].casefold() != "anonymous":
+            secrets.append(command[index + 2])
+        elif part == "-betapassword" and index + 1 < len(command):
+            secrets.append(command[index + 1])
+    return tuple(secrets)
 
 
 def _display_command(command: list[str]) -> str:
@@ -963,6 +1070,15 @@ _STEAMCMD_PROGRESS_RE = re.compile(
     r"Update state \([^)]*\)\s*(?P<phase>[^,]+),\s*progress:\s*(?P<progress>\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
+
+
+def steamcmd_progress(line: str) -> tuple[str, float] | None:
+    """Extract the latest SteamCMD progress observation from one output line."""
+
+    match = _STEAMCMD_PROGRESS_RE.search(line)
+    if match is None:
+        return None
+    return (match.group("phase").strip(), float(match.group("progress")))
 
 
 def _unix_ms_now() -> int:

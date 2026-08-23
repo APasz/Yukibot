@@ -57,6 +57,8 @@ from .runtime_imports import (
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
+    NodeAppInstallerSettingsMutationResult,
+    NodeAppInstallerSettingsState,
     NodeBulkLauncherMetadataApplyResult,
     NodeCapacityMutationResult,
     NodeDiskManagementState,
@@ -522,6 +524,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return config.NodeCapacityProfile.model_validate(payload)
 
+    async def _remote_app_installer_settings_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+    ) -> NodeAppInstallerSettingsState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/app-installer-settings",
+            scopes=(NodeApiScope.NODE_MANAGE,),
+            user=user,
+        )
+        return NodeAppInstallerSettingsState.from_mapping(payload)
+
     async def _remote_node_disk_settings_async(
         self,
         node: ModWebNodeLink,
@@ -670,6 +686,23 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload=capacity.model_dump(mode="json"),
         )
         return NodeCapacityMutationResult.from_mapping(payload)
+
+    async def _remote_update_app_installer_settings_async(
+        self,
+        node: ModWebNodeLink,
+        settings: config.AppInstallerSettings,
+        user: ModWebUser,
+    ) -> NodeAppInstallerSettingsMutationResult:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/app-installer-settings",
+            scopes=(NodeApiScope.NODE_MANAGE,),
+            user=user,
+            method="POST",
+            json_payload=settings.model_dump(mode="json"),
+        )
+        return NodeAppInstallerSettingsMutationResult.from_mapping(payload)
 
     async def _remote_update_node_disk_settings_async(
         self,
@@ -1303,6 +1336,16 @@ class ModWebActionsMixin(ModWebServiceSupport):
         node = self._remote_node_link(node_name)
         return await self._remote_node_capacity_async(node, user)
 
+    async def _app_installer_settings(
+        self,
+        *,
+        node_name: str,
+        user: ModWebUser,
+    ) -> NodeAppInstallerSettingsState:
+        self._require_user_level(user=user, required_level=Power_Level.root)
+        node = self._remote_node_link(node_name)
+        return await self._remote_app_installer_settings_async(node, user)
+
     async def _node_font_sources(self, *, node_name: str, user: ModWebUser) -> config.NodeFontSourceSettings:
         self._require_user_level(user=user, required_level=Power_Level.sudo)
         node = self._remote_node_link(node_name)
@@ -1328,6 +1371,17 @@ class ModWebActionsMixin(ModWebServiceSupport):
         self._require_user_level(user=user, required_level=Power_Level.root)
         node = self._remote_node_link(node_name)
         return await self._remote_update_node_capacity_async(node, capacity, user)
+
+    async def _update_app_installer_settings(
+        self,
+        *,
+        node_name: str,
+        user: ModWebUser,
+        settings: config.AppInstallerSettings,
+    ) -> NodeAppInstallerSettingsMutationResult:
+        self._require_user_level(user=user, required_level=Power_Level.root)
+        node = self._remote_node_link(node_name)
+        return await self._remote_update_app_installer_settings_async(node, settings, user)
 
     async def _update_node_font_sources(
         self,
@@ -3203,7 +3257,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         ui: ModWebUi,
         entry: NodeModEntry,
         download_url: str | None,
-        on_change: Callable[["ValueChangeEventArguments"], None],
+        on_change: Callable[["ValueChangeEventArguments[bool]"], None],
         can_select: bool,
         show_selection: bool,
         app_friendly: str,

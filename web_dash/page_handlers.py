@@ -572,18 +572,33 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         if can_manage_node_configuration and system_capabilities.supports_node_capacity
                         else asyncio.sleep(0, result=None)
                     )
+                    app_installer_settings_job = (
+                        self._app_installer_settings(node_name=node.node_name, user=user)
+                        if (
+                            can_manage_node_configuration
+                            and system_capabilities.supports_app_installer_settings
+                        )
+                        else asyncio.sleep(0, result=None)
+                    )
                     node_disk_settings_job = (
                         self._node_disk_settings(node_name=node.node_name, user=user)
                         if can_manage_node_configuration and system_capabilities.supports_node_disk_settings
                         else asyncio.sleep(0, result=None)
                     )
-                    node_font_sources, node_capacity, node_disk_settings = await asyncio.gather(
+                    (
+                        node_font_sources,
+                        node_capacity,
+                        app_installer_settings,
+                        node_disk_settings,
+                    ) = await asyncio.gather(
                         node_font_sources_job,
                         node_capacity_job,
+                        app_installer_settings_job,
                         node_disk_settings_job,
                     )
                     return ModWebNodeSystemTabLoadResult(
                         node_capacity=node_capacity,
+                        app_installer_settings=app_installer_settings,
                         node_font_sources=node_font_sources,
                         node_disk_settings=node_disk_settings,
                         system_capabilities=system_capabilities,

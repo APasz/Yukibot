@@ -15,7 +15,7 @@ from logging import Logger
 from pathlib import Path
 from threading import Lock
 from time import monotonic
-from typing import Any, Callable, Literal, Protocol, overload
+from typing import Any, Callable, Literal, Protocol, cast, overload
 from urllib.parse import SplitResult, parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import hikari
@@ -1172,6 +1172,45 @@ class NodeFontSourceSettings(BaseModel):
         return normalise_google_font_source_urls(raw)
 
 
+_APP_INSTALLER_SCOPE_CHARACTERS: frozenset[str] = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
+
+
+class AppInstallerSettings(BaseModel):
+    """Node-local policy for SteamCMD app installation."""
+
+    allowed_scopes: tuple[str, ...] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("allowed_scopes", mode="before")
+    @classmethod
+    def _validate_allowed_scopes(cls, raw: object) -> tuple[str, ...] | None:
+        if raw is None:
+            return None
+        if isinstance(raw, str) or not isinstance(raw, tuple | list | set | frozenset):
+            raise TypeError("app installer allowed_scopes must be a sequence of app scopes")
+        scopes: list[str] = []
+        seen_scopes: set[str] = set()
+        for raw_scope in cast(Iterable[object], raw):
+            if not isinstance(raw_scope, str):
+                raise TypeError("app installer allowed_scopes must contain text values")
+            scope = raw_scope.strip().casefold()
+            if not scope:
+                raise ValueError("app installer allowed_scopes must not contain blank scopes")
+            if any(character not in _APP_INSTALLER_SCOPE_CHARACTERS for character in scope):
+                raise ValueError("app installer allowed_scopes contains an invalid app scope")
+            if scope in seen_scopes:
+                raise ValueError("app installer allowed_scopes must not contain duplicate app scopes")
+            seen_scopes.add(scope)
+            scopes.append(scope)
+        return tuple(scopes)
+
+    def allows(self, scope: str) -> bool:
+        if self.allowed_scopes is None:
+            return True
+        return scope.strip().casefold() in self.allowed_scopes
+
+
 class DiscordActivityField(enum.StrEnum):
     RAM = "ram"
     CPU = "cpu"
@@ -1396,6 +1435,7 @@ def supported_oauth_install_types(application: object) -> frozenset[OAuthInstall
 class BotConfiguration(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
+    app_installer: AppInstallerSettings = Field(default_factory=AppInstallerSettings)
     disk_preferences: PersistedDiskPreferences = Field(default_factory=PersistedDiskPreferences)
     discord_settings: DiscordSettings = Field(default_factory=DiscordSettings)
     maintenance: PersistedMaintenanceSettings = Field(default_factory=PersistedMaintenanceSettings)
@@ -1452,7 +1492,12 @@ def load_bot_configuration(path: Path) -> BotConfiguration:
     loaded = BotConfiguration.model_validate(migrated_raw)
     if migrated_legacy_portal_restart or (
         isinstance(raw, Mapping)
-        and ("node_capacity" not in raw or "discord_settings" not in raw or "node_font_sources" not in raw)
+        and (
+            "app_installer" not in raw
+            or "node_capacity" not in raw
+            or "discord_settings" not in raw
+            or "node_font_sources" not in raw
+        )
     ):
         save_bot_configuration(path, loaded)
     return loaded

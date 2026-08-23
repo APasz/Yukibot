@@ -24,6 +24,8 @@ from .runtime_imports import (
     ModWebUser,
     NodeApiService,
     NodeAppEntry,
+    NodeAppInstallerSettingsMutationResult,
+    NodeAppInstallerSettingsState,
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
@@ -70,6 +72,7 @@ from .runtime_imports import (
     NodeSystemSummary,
     Path,
     Power_Level,
+    RedirectResponse,
     RestartTarget,
     StarletteResponse,
     Tooltip,
@@ -518,6 +521,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_node_capacity"]) -> Callable[..., Awaitable[config.NodeCapacityProfile]]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_app_installer_settings"]) -> Callable[..., Awaitable[NodeAppInstallerSettingsState]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_node_disk_settings"]) -> Callable[..., Awaitable[NodeDiskManagementState]]: ...
 
     @overload
@@ -569,6 +575,11 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_update_node_capacity"]
     ) -> Callable[..., Awaitable[NodeCapacityMutationResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_update_app_installer_settings"]
+    ) -> Callable[..., Awaitable[NodeAppInstallerSettingsMutationResult]]: ...
 
     @overload
     def __getattr__(
@@ -975,6 +986,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_render_alias_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_app_installer_page"]) -> Callable[..., Awaitable[None]]: ...
 
     @overload
     def __getattr__(
