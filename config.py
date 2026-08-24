@@ -1551,11 +1551,7 @@ def load_known_bot_snapshots() -> tuple[BotMetadataSnapshot, ...]:
 
 
 def save_bot_configuration(path: Path, bot_config: BotConfiguration) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(bot_config.model_dump(mode="json", by_alias=True), sort_keys=True, indent=4),
-        STR_ENCODE,
-    )
+    write_json_object(path, bot_config.model_dump(mode="json", by_alias=True))
 
 
 def save_discord_settings(path: Path, settings: DiscordSettings) -> DiscordSettings:

@@ -935,6 +935,38 @@ class BotConfigurationTests(unittest.TestCase):
             ),
         )
 
+    def test_save_bot_configuration_replaces_complete_file_atomically(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+            previous = config.BotConfiguration(steamcmd_path="steamcmd-old")
+            updated = config.BotConfiguration(steamcmd_path="steamcmd-new")
+            config.save_bot_configuration(path, previous)
+
+            original_replace = type(path).replace
+
+            def assert_complete_files_before_replace(temp_path: Path, destination: Path) -> Path:
+                self.assertEqual(destination, path)
+                self.assertEqual(
+                    json.loads(destination.read_text(encoding="utf-8")),
+                    previous.model_dump(mode="json", by_alias=True),
+                )
+                self.assertEqual(
+                    json.loads(temp_path.read_text(encoding="utf-8")),
+                    updated.model_dump(mode="json", by_alias=True),
+                )
+                return original_replace(temp_path, destination)
+
+            with patch.object(
+                type(path),
+                "replace",
+                autospec=True,
+                side_effect=assert_complete_files_before_replace,
+            ) as replace:
+                config.save_bot_configuration(path, updated)
+
+            replace.assert_called_once()
+            self.assertEqual(config.load_bot_configuration(path), updated)
+
     def test_persisted_oauth_links_omit_unsupported_install_type_when_serialized(self) -> None:
         links = config.PersistedOAuthLinks(guild=None)
 
