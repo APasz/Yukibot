@@ -40,8 +40,6 @@ class NodeSystemMonitoringService:
         self,
         *,
         node_name: Callable[[], str],
-        manager: Callable[[], App_Manager | None],
-        stats_factory: Callable[[], Stats_System],
         http_exception: Callable[[int, str], Exception],
         logger: logging.Logger,
         summary_cache_ttl_seconds: float,
@@ -58,8 +56,7 @@ class NodeSystemMonitoringService:
         if max_log_lines <= 0:
             raise ValueError("System log line limit must be positive.")
         self._node_name = node_name
-        self._manager = manager
-        self._stats_factory = stats_factory
+        self._manager: App_Manager | None = None
         self._http_exception = http_exception
         self._log = logger
         self._summary_cache_ttl_seconds = summary_cache_ttl_seconds
@@ -72,6 +69,9 @@ class NodeSystemMonitoringService:
             maxlen=max(1, int(history_retention_seconds // history_interval_seconds))
         )
         self._history_lock = threading.RLock()
+
+    def set_manager(self, manager: App_Manager) -> None:
+        self._manager = manager
 
     def invalidate_summary_cache(self) -> None:
         with self._summary_cache_lock:
@@ -273,7 +273,7 @@ class NodeSystemMonitoringService:
         )
 
         try:
-            system_stats = self._stats_factory()
+            system_stats = Stats_System()
             snapshot: StatsSystemSnapshot = system_stats.system_snapshot(refresh=True)
         except Exception as xcp:
             self._log.warning(
@@ -317,7 +317,7 @@ class NodeSystemMonitoringService:
                 "Node API uptime probe failed: node=%s error=%s", self._node_name(), xcp
             )
 
-        manager = self._manager()
+        manager = self._manager
         if manager is not None:
             try:
                 capacity = manager.node_capacity()

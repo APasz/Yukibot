@@ -634,7 +634,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
         context: str = f"Local mod web app page: app={app_entry.name}"
         if supports_configs and self._user_has_level(user, config_read_level):
             try:
-                configs = self._node_api.build_config_list(app, actor_user_id=user.discord_id)
+                configs = self._node_api.storage.build_config_list(
+                    app=app,
+                    actor_user_id=user.discord_id,
+                )
             except Exception as xcp:
                 self._warn_page_section_load_failure(
                     context=context,
@@ -647,7 +650,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             configs = empty_configs
         if app_entry.supports_saves and can_manage_app:
             try:
-                saves = await self._node_api.build_save_list(app)
+                saves = await self._node_api.storage.build_save_list(app)
             except Exception as xcp:
                 self._warn_page_section_load_failure(
                     context=context,
@@ -655,7 +658,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     error=xcp,
                     load_warnings=load_warnings,
                 )
-                saves = self._node_api.build_empty_save_list(app)
+                saves = self._node_api.storage.build_empty_save_list(app)
         else:
             saves = None
         if app_entry.supports_blueprints and can_manage_app:

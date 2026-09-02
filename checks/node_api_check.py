@@ -111,6 +111,7 @@ from apps.factorio import (
     FactorioModPortalResolution,
 )
 from apps.factorio.node_api import (
+    NodeFactorioModSettings,
     NodeModPortalInstallRequest,
     NodeModPortalResolveResult,
     NodeModPortalVersionEntry,
@@ -120,6 +121,11 @@ from apps.factorio.node_api import (
     NodeModUpdateDependencyAction,
     NodeModUpdateRequest,
     NodeModUpdateStatus,
+)
+from apps.minecraft.node_api import (
+    NodeMinecraftRecipeMutationAction,
+    NodeMinecraftRecipeMutationRequest,
+    NodeMinecraftRecipeMutationResult,
 )
 from apps.minecraft import (
     Minecraft,
@@ -141,6 +147,7 @@ from apps.sevendays import (
     SevenDaysSandboxOption,
     SevenDaysSandboxOptionsSnapshot,
 )
+from apps.sevendays.node_api import NodeSevenDaysSandboxOptionsState
 from chat_hub import (
     ChatAuthor,
     ChatAuthorKind,
@@ -152,51 +159,56 @@ from chat_hub import (
 from deployment_metadata import DeploymentMetadata
 from maintenance import MaintenanceService
 from map_annotations import MapAnnotationDraft
-from node_api import (
-    NodeApiService,
+from node_api import NodeApiService
+from node_api_app_state import (
     NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
-    NodeCapacityMutationResult,
+    NodeStateStreamEvent,
+    NodeStateTopic,
+)
+from node_api_chat import (
+    NodeChatInjectionRequest,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
+    NodeWebChatRequest,
+)
+from node_api_console import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
     NodeConsoleStdoutStreamEvent,
     NodeConsoleStdoutStreamEventKind,
+)
+from node_api_files import (
+    NodeConfigList,
+    NodeSaveList,
+    NodeSaveMutationResult,
+)
+from node_api_node import (
+    NodeCapacityMutationResult,
     NodeDiscordSettingsMutationResult,
     NodeDiskEntry,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
-    NodeFactorioModSettings,
     NodeFontSourceSettingsMutationResult,
-    NodeMinecraftRecipeMutationAction,
-    NodeMinecraftRecipeMutationRequest,
-    NodeMinecraftRecipeMutationResult,
+)
+from node_api_settings import NodeSettingEntry, NodeSettingList
+from node_api_system import (
     NodeRestartRecord,
     NodeRestartScheduleState,
     NodeRestartState,
-    NodeSaveList,
-    NodeSaveMutationResult,
-    NodeSettingList,
-    NodeSevenDaysSandboxOptionsState,
-    NodeStateStreamEvent,
-    NodeStateTopic,
     NodeSystemAction,
     NodeSystemCapabilities,
     NodeSystemDiskSummary,
     NodeSystemHistory,
     NodeSystemSample,
     NodeSystemSummary,
-    NodeWebChatRequest,
 )
-from node_api_settings import NodeSettingEntry
 from node_api_storage_routes import FACTORIO_MOD_SETTINGS_ACCESS_LEVEL
-from node_api_files import NodeConfigList
 from node_api_app_installer import (
     NodeAppInstallScopeOption,
     NodeAppInstallerSettingsMutationResult,
@@ -209,7 +221,6 @@ from node_api_app_state import (
     required_app_mutation_level,
     required_app_mutation_scope,
 )
-from node_api_chat import NodeChatInjectionRequest
 from node_api_client_pack import NodeClientPackService
 from node_api_mod import (
     NodeBulkLauncherMetadataApplyRequest,
@@ -2251,7 +2262,7 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
         )
-        result = asyncio.run(NodeApiService().build_save_list(app))
+        result = asyncio.run(NodeApiService().storage.build_save_list(app))
 
         self.assertIsInstance(result, NodeSaveList)
         self.assertEqual(result.roots[0].id, "world")
@@ -2267,7 +2278,12 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock())
             app.resolve_save_file = Mock(return_value=save_path)  # type: ignore[method-assign]
 
-            response = asyncio.run(NodeApiService().build_save_download_response(app=app, save_id="saves/world.zip"))
+            response = asyncio.run(
+                NodeApiService().storage.build_save_download_response(
+                    app=app,
+                    save_id="saves/world.zip",
+                )
+            )
 
         self.assertEqual(Path(response.path), save_path)
         self.assertEqual(response.filename, "world.zip")
@@ -2281,7 +2297,12 @@ class NodeApiTests(unittest.TestCase):
         )
 
         with self.assertRaises(HTTPException) as raised:
-            asyncio.run(NodeApiService().build_save_download_response(app=cast(Any, app), save_id="saves/world.sav"))
+            asyncio.run(
+                NodeApiService().storage.build_save_download_response(
+                    app=cast(Any, app),
+                    save_id="saves/world.sav",
+                )
+            )
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(str(raised.exception.detail), "Satisfactory is not running.")
@@ -2309,7 +2330,7 @@ class NodeApiTests(unittest.TestCase):
             )
 
             result = asyncio.run(
-                NodeApiService().upload_save_path(
+                NodeApiService().storage.upload_save_path(
                     app=cast(Any, app),
                     root_id="saves",
                     source_path=source,
@@ -2336,7 +2357,7 @@ class NodeApiTests(unittest.TestCase):
 
             with self.assertRaises(HTTPException) as raised:
                 asyncio.run(
-                    NodeApiService().upload_save_path(
+                    NodeApiService().storage.upload_save_path(
                         app=cast(Any, app),
                         root_id="saves",
                         source_path=source,
@@ -3706,7 +3727,7 @@ class NodeApiTests(unittest.TestCase):
         )
 
         result = asyncio.run(
-            NodeApiService().rename_save_file(
+            NodeApiService().storage.rename_save_file(
                 app=cast(Any, app),
                 save_id="saves/old.zip",
                 new_name="new.zip",
@@ -3741,7 +3762,7 @@ class NodeApiTests(unittest.TestCase):
         )
 
         result = asyncio.run(
-            NodeApiService().delete_save_file(
+            NodeApiService().storage.delete_save_file(
                 app=cast(Any, app),
                 save_id="world/world",
                 actor_user_id=42,
@@ -4364,8 +4385,8 @@ class NodeApiTests(unittest.TestCase):
         )
         response.headers = {"Content-Type": "application/json"}
 
-        with patch("node_api.requests.get", return_value=response) as get_mock:
-            manifest = NodeApiService().build_map_manifest(app)
+        with patch("node_api_map_service.requests.get", return_value=response) as get_mock:
+            manifest = NodeApiService().maps.build_manifest(app)
 
         self.assertEqual(manifest.initial_world_name, "minecraft_nether")
         self.assertEqual(
@@ -4444,8 +4465,8 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock())
             app.__class__ = _MappedApp
             app.directory = root_path
-            with patch("node_api.requests.get") as get_mock:
-                manifest = NodeApiService().build_map_manifest(app)
+            with patch("node_api_map_service.requests.get") as get_mock:
+                manifest = NodeApiService().maps.build_manifest(app)
 
         self.assertEqual(manifest.initial_world_name, "minecraft_nether")
         self.assertEqual(
@@ -4469,10 +4490,10 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock())
             app.__class__ = _MappedApp
             app.directory = root_path
-            with patch("node_api.requests.get") as get_mock:
-                response = NodeApiService()._squaremap_proxy_response(
-                    app,
-                    "images/icon/registered/squaremap-spawn_icon.png",
+            with patch("node_api_map_service.requests.get") as get_mock:
+                response = NodeApiService().maps.proxy_response(
+                    app=app,
+                    relative_path="images/icon/registered/squaremap-spawn_icon.png",
                 )
 
         self.assertEqual(response.content, expected_content)
@@ -4499,10 +4520,10 @@ class NodeApiTests(unittest.TestCase):
             app.__class__ = _MappedApp
             app.directory = Path(temp_dir)
             service = NodeApiService()
-            with patch("node_api.requests.get", return_value=live_response):
-                service.build_map_manifest(app)
-            with patch("node_api.requests.get", side_effect=requests.ConnectionError("offline")):
-                cached_manifest = service.build_map_manifest(app)
+            with patch("node_api_map_service.requests.get", return_value=live_response):
+                service.maps.build_manifest(app)
+            with patch("node_api_map_service.requests.get", side_effect=requests.ConnectionError("offline")):
+                cached_manifest = service.maps.build_manifest(app)
 
         self.assertEqual(cached_manifest.initial_world_name, "minecraft_nether")
         self.assertEqual(
@@ -4529,16 +4550,16 @@ class NodeApiTests(unittest.TestCase):
             app.__class__ = _MappedApp
             app.directory = Path(temp_dir)
             service = NodeApiService()
-            with patch("node_api.requests.get", return_value=live_response):
-                service._squaremap_proxy_response(
-                    app,
-                    "tiles/minecraft_overworld/settings.json",
+            with patch("node_api_map_service.requests.get", return_value=live_response):
+                service.maps.proxy_response(
+                    app=app,
+                    relative_path="tiles/minecraft_overworld/settings.json",
                     allow_stale_on_error=True,
                 )
-            with patch("node_api.requests.get", side_effect=requests.Timeout("slow")):
-                cached_response = service._squaremap_proxy_response(
-                    app,
-                    "tiles/minecraft_overworld/settings.json",
+            with patch("node_api_map_service.requests.get", side_effect=requests.Timeout("slow")):
+                cached_response = service.maps.proxy_response(
+                    app=app,
+                    relative_path="tiles/minecraft_overworld/settings.json",
                     allow_stale_on_error=True,
                 )
 
@@ -4574,12 +4595,20 @@ class NodeApiTests(unittest.TestCase):
                 }
             )
 
-            created = service.create_map_annotation(app, draft, 42, "Taylor")
-            listed = service.build_map_annotation_list(app)
+            created = service.maps.create_annotation(
+                app=app,
+                draft=draft,
+                created_by_user_id=42,
+                created_by_name="Taylor",
+            )
+            listed = service.maps.build_annotation_list(app)
             self.assertIsNotNone(created.annotation)
             assert created.annotation is not None
-            deleted = service.delete_map_annotation(app, created.annotation.annotation_id)
-            after_delete = service.build_map_annotation_list(app)
+            deleted = service.maps.delete_annotation(
+                app=app,
+                annotation_id=created.annotation.annotation_id,
+            )
+            after_delete = service.maps.build_annotation_list(app)
 
         self.assertEqual(created.annotation.label, "Home Base")
         self.assertEqual(created.annotation.created_by_name, "Taylor")
@@ -4650,7 +4679,7 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
 
         try:
-            snapshot = service.build_chat_room_snapshot(app, limit=1)
+            snapshot = service.chat.build_room_snapshot(app, limit=1)
         finally:
             hub.clear_room(app.name)
 
@@ -4718,9 +4747,9 @@ class NodeApiTests(unittest.TestCase):
         )
         relay = SimpleNamespace(publish_chat_event=AsyncMock(return_value=event))
         service = NodeApiService()
-        service.set_chat_relay_service(cast(Any, relay))
+        service.chat.set_relay(cast(Any, relay))
 
-        result = asyncio.run(service.publish_app_fake_chat(app=app, event=event))
+        result = asyncio.run(service.chat.publish_fake_chat(app=app, event=event))
 
         self.assertEqual(result, event)
         relay.publish_chat_event.assert_awaited_once_with(event=event)
@@ -4738,7 +4767,7 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
 
         with self.assertRaises(HTTPException) as raised:
-            asyncio.run(service.publish_app_fake_chat(app=app, event=event))
+            asyncio.run(service.chat.publish_fake_chat(app=app, event=event))
 
         self.assertEqual(raised.exception.status_code, 400)
 
@@ -4757,14 +4786,14 @@ class NodeApiTests(unittest.TestCase):
                 raise WebSocketDisconnect(code=1006)
 
         service = NodeApiService()
-        service.build_chat_room_snapshot = Mock(
+        service.chat.build_room_snapshot = Mock(
             return_value=NodeChatRoomSnapshot(room_id="minecraft_alpha", endpoint_count=0, events=())
         )  # type: ignore[method-assign]
-        service.build_live_app_runtime_summary = AsyncMock(return_value=None)  # type: ignore[method-assign]
-        service.subscribe_local_app_runtime = Mock(return_value=Mock())  # type: ignore[method-assign]
+        service.chat._build_live_runtime_summary = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        service._app_state_subscriptions.subscribe_app_runtime = Mock(return_value=Mock())  # type: ignore[method-assign]
         app = _build_app(Mock())
 
-        asyncio.run(service._serve_chat_stream(websocket=cast(Any, _DisconnectingWebSocket()), app=app))
+        asyncio.run(service.chat.serve_stream(websocket=cast(Any, _DisconnectingWebSocket()), app=app))
 
     def test_serve_presence_stream_returns_pong_with_sample_id(self) -> None:
         sent_payloads: list[object] = []
@@ -5008,7 +5037,7 @@ class NodeApiTests(unittest.TestCase):
         )
 
         try:
-            snapshot = service.build_chat_room_snapshot(app, limit=1)
+            snapshot = service.chat.build_room_snapshot(app, limit=1)
         finally:
             hub.clear_room(app.name)
 
@@ -5048,7 +5077,7 @@ class NodeApiTests(unittest.TestCase):
         )
 
         try:
-            snapshot = service.build_chat_room_snapshot(app, limit=1)
+            snapshot = service.chat.build_room_snapshot(app, limit=1)
         finally:
             hub.clear_room(app.name)
 
@@ -6917,7 +6946,7 @@ class NodeApiTests(unittest.TestCase):
         service.set_acl(cast(Any, acl))
 
         result = asyncio.run(
-            service.mutate_node_capacity(
+            service.node_management.mutate_capacity(
                 capacity=config.NodeCapacityProfile(
                     cpu_points_total=8,
                     ram_points_total=12,
@@ -6961,11 +6990,11 @@ class NodeApiTests(unittest.TestCase):
 
         with (
             patch.object(config, "ACTIVE_BOT_PROFILE", erin_profile),
-            patch("node_api.audit_log") as audit,
+            patch("node_api_node_service.audit_log") as audit,
         ):
-            state = service.read_app_installer_settings()
+            state = service.node_management.read_app_installer_settings()
             result = asyncio.run(
-                service.mutate_app_installer_settings(
+                service.node_management.mutate_app_installer_settings(
                     settings=config.AppInstallerSettings(allowed_scopes=()),
                     actor_user_id=42,
                 )
@@ -7011,9 +7040,9 @@ class NodeApiTests(unittest.TestCase):
         acl.perm_check = AsyncMock()
         service.set_acl(cast(Any, acl))
 
-        with patch("node_api.font_assets.schedule_startup_refresh") as schedule_refresh:
+        with patch("node_api_node_service.font_assets.schedule_startup_refresh") as schedule_refresh:
             result = asyncio.run(
-                service.mutate_node_font_sources(
+                service.node_management.mutate_font_sources(
                     settings=config.NodeFontSourceSettings(
                         google_font_urls=("https://fonts.google.com/specimen/Black+Ops+One",)
                     ),
@@ -7076,11 +7105,11 @@ class NodeApiTests(unittest.TestCase):
         service.set_acl(cast(Any, acl))
 
         with (
-            patch("node_api.Stats_System", return_value=stats),
-            patch.object(service, "read_node_disk_settings", return_value=settings),
+            patch("node_api_node_service.Stats_System", return_value=stats),
+            patch.object(service.node_management, "read_disk_settings", return_value=settings),
         ):
             result = asyncio.run(
-                service.mutate_node_disk_settings(
+                service.node_management.mutate_disk_settings(
                     preferences=preferences,
                     actor_user_id=42,
                 )
@@ -7133,7 +7162,7 @@ class NodeApiTests(unittest.TestCase):
         )
 
         result = asyncio.run(
-            service.mutate_discord_settings(
+            service.node_management.mutate_discord_settings(
                 settings=settings,
                 actor_user_id=42,
             )
@@ -7177,7 +7206,7 @@ class NodeApiTests(unittest.TestCase):
         service.set_acl(cast(Any, acl))
 
         asyncio.run(
-            service.mutate_discord_settings(
+            service.node_management.mutate_discord_settings(
                 settings=config.DiscordSettings(
                     activity=config.DiscordActivitySettings(
                         refresh_interval_seconds=5,
@@ -7913,9 +7942,19 @@ class NodeApiTests(unittest.TestCase):
                     second_notification.set()
 
             service.list_apps = list_apps  # type: ignore[method-assign]
-            service.build_system_summary = build_system_summary  # type: ignore[method-assign]
 
-            with patch.object(service._app_state_subscriptions, "_node_state_interval_seconds", 0.01):
+            with (
+                patch.object(
+                    service._app_state_subscriptions,
+                    "_node_state_interval_seconds",
+                    0.01,
+                ),
+                patch.object(
+                    service.system_monitoring,
+                    "build_summary",
+                    side_effect=build_system_summary,
+                ),
+            ):
                 unsubscribe = service.subscribe_local_node_state(on_update)
                 try:
                     await asyncio.wait_for(second_notification.wait(), timeout=0.2)
@@ -7963,7 +8002,7 @@ class NodeApiTests(unittest.TestCase):
                     "list_apps",
                     new=AsyncMock(side_effect=AssertionError("App entries should not be built")),
                 ) as list_apps,
-                patch.object(service, "build_system_summary", return_value=summary),
+                patch.object(service.system_monitoring, "build_summary", return_value=summary),
             ):
                 unsubscribe = service.subscribe_local_node_state(
                     on_update,
@@ -8079,16 +8118,16 @@ class NodeApiTests(unittest.TestCase):
         )
 
         with (
-            patch("node_api.Stats_System", return_value=fake_stats),
-            patch("node_api.time.time", return_value=10_000),
-            patch("node_api.psutil.Process") as process_cls,
-            patch("node_api.psutil.boot_time", return_value=6_400),
+            patch("node_api_system_service.Stats_System", return_value=fake_stats),
+            patch("node_api_system_service.time.time", return_value=10_000),
+            patch("node_api_system_service.psutil.Process") as process_cls,
+            patch("node_api_system_service.psutil.boot_time", return_value=6_400),
             patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", None),
             patch.object(config, "MOD_WEB_BUILD_SHA", None),
             patch.object(config, "INDEV", False),
         ):
             process_cls.return_value.create_time.return_value = 9_100
-            summary = NodeApiService().build_system_summary()
+            summary = NodeApiService().system_monitoring.build_summary()
 
         self.assertEqual(
             summary,
@@ -8125,11 +8164,11 @@ class NodeApiTests(unittest.TestCase):
             version="v2026.08.01.1",
         )
         with (
-            patch("node_api.Stats_System", side_effect=RuntimeError("stats unavailable")),
+            patch("node_api_system_service.Stats_System", side_effect=RuntimeError("stats unavailable")),
             patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", deployment),
             patch.object(config, "MOD_WEB_BUILD_SHA", deployment.revision),
         ):
-            summary = NodeApiService().build_system_summary()
+            summary = NodeApiService().system_monitoring.build_summary()
 
         self.assertEqual(summary.deployment_version, "v2026.08.01.1")
         self.assertEqual(summary.deployment_revision, "abcdef1234567890")
@@ -8138,12 +8177,12 @@ class NodeApiTests(unittest.TestCase):
 
     def test_system_summary_identifies_indev_nodes_without_deployment_metadata(self) -> None:
         with (
-            patch("node_api.Stats_System", side_effect=RuntimeError("stats unavailable")),
+            patch("node_api_system_service.Stats_System", side_effect=RuntimeError("stats unavailable")),
             patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", None),
             patch.object(config, "MOD_WEB_BUILD_SHA", None),
             patch.object(config, "INDEV", True),
         ):
-            summary = NodeApiService().build_system_summary()
+            summary = NodeApiService().system_monitoring.build_summary()
 
         self.assertEqual(summary.deployment_version, "indev")
         self.assertIsNone(summary.deployment_revision)
@@ -8165,8 +8204,8 @@ class NodeApiTests(unittest.TestCase):
 
             with patch.object(config, "DIR_LOG", log_directory):
                 service = NodeApiService()
-                catalog = service.build_system_log_catalog()
-                tail = service.build_system_log_tail(log_path="System.log", max_lines=2)
+                catalog = service.system_monitoring.build_log_catalog()
+                tail = service.system_monitoring.build_log_tail(log_path="System.log", max_lines=2)
 
         self.assertEqual(catalog.node, service.node_name)
         self.assertEqual(
@@ -8210,10 +8249,10 @@ class NodeApiTests(unittest.TestCase):
             acl = AsyncMock()
             handler = Mock()
             service.set_acl(cast(Access_Control, acl))
-            service.set_system_action_handler(handler)
+            service.node_management.set_system_action_handler(handler)
             loop = asyncio.get_running_loop()
             with patch.object(loop, "call_later") as call_later:
-                result = await service.schedule_system_action(
+                result = await service.node_management.schedule_system_action(
                     action=NodeSystemAction.RESTART_PROCESS,
                     auto_restart_running_apps=False,
                     silent=True,
@@ -8227,7 +8266,7 @@ class NodeApiTests(unittest.TestCase):
             handler.assert_called_once_with(NodeSystemAction.RESTART_PROCESS, False, True)
 
             with self.assertRaises(HTTPException) as raised:
-                await service.schedule_system_action(
+                await service.node_management.schedule_system_action(
                     action=NodeSystemAction.REBOOT_HOST,
                     auto_restart_running_apps=True,
                     silent=False,
@@ -8243,10 +8282,10 @@ class NodeApiTests(unittest.TestCase):
             acl = AsyncMock()
             handler = Mock()
             service.set_acl(cast(Access_Control, acl))
-            service.set_system_action_handler(handler)
+            service.node_management.set_system_action_handler(handler)
             portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
             with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
-                capabilities = service.system_capabilities()
+                capabilities = service.node_management.system_capabilities()
                 self.assertEqual(
                     capabilities,
                     NodeSystemCapabilities(
@@ -8262,7 +8301,7 @@ class NodeApiTests(unittest.TestCase):
                 self.assertFalse(capabilities.supports_discord_settings)
                 self.assertFalse(capabilities.supports_app_installer_settings)
                 with self.assertRaises(HTTPException) as raised:
-                    await service.schedule_system_action(
+                    await service.node_management.schedule_system_action(
                         action=NodeSystemAction.REBOOT_HOST,
                         auto_restart_running_apps=True,
                         silent=False,
@@ -8280,9 +8319,9 @@ class NodeApiTests(unittest.TestCase):
         portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
 
         with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
-            self.assertFalse(service.system_capabilities().supports_app_installer_settings)
+            self.assertFalse(service.node_management.system_capabilities().supports_app_installer_settings)
             with self.assertRaises(HTTPException) as raised:
-                service.read_app_installer_settings()
+                service.node_management.read_app_installer_settings()
 
         self.assertEqual(raised.exception.status_code, 400)
 
@@ -8301,9 +8340,9 @@ class NodeApiTests(unittest.TestCase):
         manager = SimpleNamespace(bot=None)
         service.set_manager(cast(Any, manager))
 
-        without_bot = service.system_capabilities()
+        without_bot = service.node_management.system_capabilities()
         manager.bot = object()
-        with_bot = service.system_capabilities()
+        with_bot = service.node_management.system_capabilities()
 
         self.assertFalse(without_bot.supports_discord_settings)
         self.assertTrue(with_bot.supports_discord_settings)
@@ -8324,12 +8363,12 @@ class NodeApiTests(unittest.TestCase):
                     service = NodeApiService()
                     acl = AsyncMock()
                     service.set_acl(cast(Access_Control, acl))
-                    service.set_maintenance_service(
+                    service.node_management.set_maintenance_service(
                         maintenance,
                         (RestartTarget.BOT, RestartTarget.SYSTEM),
                     )
 
-                    state = service.read_restart_schedules()
+                    state = service.node_management.read_restart_schedules()
                     self.assertEqual(NodeRestartScheduleState.from_mapping(state.to_mapping()), state)
                     self.assertEqual(
                         [entry.target for entry in state.schedules],
@@ -8342,7 +8381,7 @@ class NodeApiTests(unittest.TestCase):
                         int(triggered_at.timestamp()),
                     )
 
-                    updated = await service.update_restart_schedule(
+                    updated = await service.node_management.update_restart_schedule(
                         target=RestartTarget.SYSTEM,
                         interval_minutes=7 * 24 * 60,
                         anchor_timestamp=int(datetime.fromisoformat("2026-07-02T10:00:00+10:00").timestamp()),
@@ -8360,10 +8399,13 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
         maintenance = Mock(spec=MaintenanceService)
         maintenance.reload.return_value = False
-        service.set_maintenance_service(cast(MaintenanceService, maintenance), (RestartTarget.BOT,))
+        service.node_management.set_maintenance_service(
+            cast(MaintenanceService, maintenance),
+            (RestartTarget.BOT,),
+        )
 
         with self.assertRaises(HTTPException) as raised:
-            service.read_restart_schedules()
+            service.node_management.read_restart_schedules()
 
         self.assertEqual(raised.exception.status_code, 503)
         maintenance.reload.assert_called_once_with()
@@ -8373,18 +8415,18 @@ class NodeApiTests(unittest.TestCase):
     ) -> None:
         service = NodeApiService()
         with (
-            patch("node_api.psutil.Process") as process_cls,
+            patch("node_api_node_service.psutil.Process") as process_cls,
             patch(
-                "node_api.read_process_restart_record",
+                "node_api_node_service.read_process_restart_record",
                 return_value=RestartRecord(timestamp=1_782_909_000, kind=RestartKind.MANUAL_SYS),
             ) as read_process,
             patch(
-                "node_api.read_voice_restart_record",
+                "node_api_node_service.read_voice_restart_record",
                 return_value=RestartRecord(timestamp=1_782_912_600, kind=RestartKind.MANUAL_VOICE),
             ),
         ):
             process_cls.return_value.create_time.return_value = 1_782_800_000
-            state = service.read_restart_state()
+            state = service.node_management.read_restart_state()
 
         read_process.assert_called_once_with(default_timestamp=1_782_800_000)
         self.assertEqual(
@@ -8414,9 +8456,9 @@ class NodeApiTests(unittest.TestCase):
                     service = NodeApiService()
                     acl = AsyncMock()
                     service.set_acl(cast(Access_Control, acl))
-                    service.set_maintenance_service(maintenance, (RestartTarget.BOT,))
+                    service.node_management.set_maintenance_service(maintenance, (RestartTarget.BOT,))
 
-                    updated = await service.skip_restart_schedule(
+                    updated = await service.node_management.skip_restart_schedule(
                         target=RestartTarget.BOT,
                         actor_user_id=42,
                     )
@@ -8478,13 +8520,13 @@ class NodeApiTests(unittest.TestCase):
         )
 
         with (
-            patch("node_api.Stats_System", return_value=fake_stats),
-            patch("node_api.time.time", return_value=12_000),
-            patch("node_api.psutil.Process") as process_cls,
-            patch("node_api.psutil.boot_time", return_value=10_200),
+            patch("node_api_system_service.Stats_System", return_value=fake_stats),
+            patch("node_api_system_service.time.time", return_value=12_000),
+            patch("node_api_system_service.psutil.Process") as process_cls,
+            patch("node_api_system_service.psutil.boot_time", return_value=10_200),
         ):
             process_cls.return_value.create_time.return_value = 11_700
-            summary = service.build_system_summary()
+            summary = service.system_monitoring.build_summary()
 
         self.assertEqual(summary.running_names, ("Factorio Lab", "Minecraft Alpha"))
         self.assertEqual(summary.running_app_ids, ("factorio_lab", "minecraft_alpha"))
@@ -8513,7 +8555,7 @@ class NodeApiTests(unittest.TestCase):
         server = replace(config.MOD_WEB_SERVER, node_name="erin")
         with patch.object(config, "MOD_WEB_SERVER", server):
             service = NodeApiService()
-            model = service.build_config_list(app)
+            model = service.storage.build_config_list(app=app)
 
         self.assertIsInstance(model, NodeConfigList)
         self.assertEqual(model.node, "erin")
@@ -8557,7 +8599,7 @@ class NodeApiTests(unittest.TestCase):
         acl._roles = {42: Power_Level.visitor}  # type: ignore[attr-defined]
         service.set_acl(acl)
 
-        model = service.build_config_list(app, actor_user_id=42)
+        model = service.storage.build_config_list(app=app, actor_user_id=42)
 
         self.assertEqual([entry.id for entry in model.configs], ["public/visitor.toml"])
 
@@ -8578,7 +8620,10 @@ class NodeApiTests(unittest.TestCase):
         app.read_config_file = Mock(return_value=AppConfigFileContent(file=config_file, content="motd=hello\n"))  # type: ignore[method-assign]
 
         service = NodeApiService()
-        content = service.read_config_file(app=app, config_id="server/server.properties")
+        content = service.storage.read_config_file(
+            app=app,
+            config_id="server/server.properties",
+        )
 
         self.assertEqual(content.app_name, "minecraft_alpha")
         self.assertEqual(content.content, "motd=hello\n")
@@ -8613,10 +8658,14 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock())
             app.__class__ = _ConfigDownloadApp
 
-            with patch("node_api.File_Utils.compress", new=AsyncMock(return_value=archive_path)) as compress:
+            with patch("node_api_storage_service.File_Utils.compress", new=AsyncMock(return_value=archive_path)) as compress:
                 service = NodeApiService()
                 response = asyncio.run(
-                    service.build_config_root_download_response(app=app, root_id="mod-configs", actor_user_id=None)
+                    service.storage.build_config_root_download_response(
+                        app=app,
+                        root_id="mod-configs",
+                        actor_user_id=None,
+                    )
                 )
 
         self.assertEqual(Path(response.path), archive_path)
@@ -9430,10 +9479,10 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
         relay_tts = Mock()
         relay_tts.queue_relay_message = AsyncMock(side_effect=RuntimeError("Relay author is not listening to TTS."))
-        service.set_relay_tts_service(cast(Any, relay_tts))
+        service.relay_tts.set_queue(cast(Any, relay_tts))
 
         result = asyncio.run(
-            service.queue_relay_tts(
+            service.relay_tts.queue_request(
                 NodeRelayTTSRequest(
                     guild_id=123,
                     channel_id=456,

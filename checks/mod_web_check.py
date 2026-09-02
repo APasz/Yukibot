@@ -88,6 +88,9 @@ from apps.minecraft import (
 from apps.minecraft.node_api import (
     NodeMinecraftItemRegistryState,
     NodeMinecraftRecipeBookState,
+    NodeMinecraftRecipeMutationAction,
+    NodeMinecraftRecipeMutationResult,
+    NodeMinecraftRecipeWorkspaceState,
 )
 from apps.minecraft.pack_export import PackFormat, PackPurpose
 from apps.satisfactory.node_api import NodeBlueprintEntry, NodeBlueprintList
@@ -112,32 +115,41 @@ from currency_conversion import CurrencyConversionBatch, CurrencyRateProvider
 from deployment_metadata import DeploymentMetadata
 from font_assets import FontAssetEntry, font_assets
 from mod_web_auth import ModWebUser
-from node_api import (
+from node_api_app_state import (
     NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
+    NodeStateStreamEvent,
+)
+from node_api_chat import (
     NodeChatEndpointSummary,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
+)
+from node_api_console import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
-    NodeDiskEntry,
-    NodeDiskManagementState,
-    NodeMinecraftRecipeMutationAction,
-    NodeMinecraftRecipeMutationResult,
-    NodeMinecraftRecipeWorkspaceState,
-    NodeRestartRecord,
-    NodeRestartScheduleState,
-    NodeRestartState,
+)
+from node_api_files import (
+    NodeConfigEntry,
+    NodeConfigList,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveRootEntry,
-    NodeSettingList,
-    NodeStateStreamEvent,
+)
+from node_api_node import (
+    NodeDiskEntry,
+    NodeDiskManagementState,
+)
+from node_api_settings import NodeSettingChoice, NodeSettingEntry, NodeSettingList
+from node_api_system import (
+    NodeRestartRecord,
+    NodeRestartScheduleState,
+    NodeRestartState,
     NodeSystemAction,
     NodeSystemCapabilities,
     NodeSystemDiskSummary,
@@ -150,7 +162,6 @@ from node_api import (
 from node_api_app_state import ClientPackFilePreview, NodeAppMutationAction
 from node_api_app_installer import NodeAppInstallScopeOption, NodeAppInstallerSettingsState
 from node_api_console import NodeConsoleActionEntry, NodeConsoleActionParameter
-from node_api_files import NodeConfigEntry, NodeConfigList
 from node_api_mod import (
     NodeBulkLauncherMetadataApplyResult,
     NodeModEntry,
@@ -161,7 +172,6 @@ from node_api_mod import (
     NodeModUploadBatchResult,
 )
 from node_api_route_contracts import DiscordServiceState
-from node_api_settings import NodeSettingChoice, NodeSettingEntry
 from node_auth import NodeApiScope, verify_node_token
 from relay_notices import (
     AppLifecycleNotice,
@@ -5528,7 +5538,7 @@ class ModWebTests(unittest.TestCase):
             patch.object(service, "_user_has_level", return_value=True),
             patch.object(service._node_api, "build_app_entry", return_value=app_entry),
             patch.object(
-                service._node_api,
+                service._node_api.storage,
                 "build_save_list",
                 new=AsyncMock(return_value=save_list),
             ) as build_save_list,
@@ -5587,11 +5597,15 @@ class ModWebTests(unittest.TestCase):
             patch.object(service, "_user_has_level", return_value=True),
             patch.object(service._node_api, "build_app_entry", return_value=app_entry),
             patch.object(
-                service._node_api,
+                service._node_api.storage,
                 "build_save_list",
                 new=AsyncMock(side_effect=RuntimeError("Satisfactory API is unavailable.")),
             ) as build_save_list,
-            patch.object(service._node_api, "build_empty_save_list", return_value=empty_save_list),
+            patch.object(
+                service._node_api.storage,
+                "build_empty_save_list",
+                return_value=empty_save_list,
+            ),
             patch.object(
                 service._node_api,
                 "build_blueprint_list",
@@ -19501,21 +19515,6 @@ class ModWebTests(unittest.TestCase):
         service.set_manager(cast(Any, Mock()))
         ui = FakeUi()
         user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
-        service._node_api.read_discord_settings = Mock(
-            return_value=config.DiscordSettings(
-                activity=config.DiscordActivitySettings(
-                    fallback_text="Watching over Erin",
-                    refresh_interval_seconds=3,
-                    units_per_app=2,
-                    alt_text_percentage=50,
-                    fields=(
-                        config.DiscordActivityField.APP,
-                        config.DiscordActivityField.PLAYERS,
-                    ),
-                )
-            )
-        )
-
         with (
             patch.object(service, "_action_link", side_effect=lambda **kwargs: None),
             patch.object(service, "_badge", side_effect=lambda **kwargs: FakeContainer()),

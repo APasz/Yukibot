@@ -744,7 +744,8 @@ class AppInstallerCheck(unittest.TestCase):
         service = _NodeSettingsRouteService()
         register_node_management_routes(
             app,
-            service=cast(Any, service),
+            auth=cast(Any, service),
+            management=cast(Any, service),
             api_prefix="/api",
             http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
             traffic_log=logging.getLogger(__name__),

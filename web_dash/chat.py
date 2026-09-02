@@ -117,7 +117,10 @@ if TYPE_CHECKING:
 
 class ModWebChatMixin(ModWebServiceSupport):
     def _local_chat_snapshot(self, room_id: str) -> NodeChatRoomSnapshot:
-        return self._node_api.build_chat_room_snapshot(self._resolve_app(room_id), limit=_CHAT_HISTORY_LIMIT)
+        return self._node_api.chat.build_room_snapshot(
+            self._resolve_app(room_id),
+            limit=_CHAT_HISTORY_LIMIT,
+        )
 
     def _local_chat_panel_config(
         self,

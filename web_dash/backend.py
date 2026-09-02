@@ -129,21 +129,24 @@ class ModWebDashboardBackend:
             self._node_api.set_acl(acl)
 
     def set_relay_tts_service(self, relay_tts_service: RelayTTSQueue | None) -> None:
-        self._node_api.set_relay_tts_service(relay_tts_service)
+        self._node_api.relay_tts.set_queue(relay_tts_service)
 
     def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self._chat_relay = chat_relay
-        self._node_api.set_chat_relay_service(chat_relay)
+        self._node_api.chat.set_relay(chat_relay)
 
     def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
-        self._node_api.set_system_action_handler(handler)
+        self._node_api.node_management.set_system_action_handler(handler)
 
     def set_maintenance_service(
         self,
         maintenance_service: MaintenanceService,
         available_targets: tuple[RestartTarget, ...],
     ) -> None:
-        self._node_api.set_maintenance_service(maintenance_service, available_targets)
+        self._node_api.node_management.set_maintenance_service(
+            maintenance_service,
+            available_targets,
+        )
 
     def replace_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self.set_chat_relay_service(chat_relay)

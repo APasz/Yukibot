@@ -10,7 +10,7 @@ from fastapi import Request, WebSocket, status
 from fastapi.responses import Response
 
 from apps._app import App
-from node_api_relay import NodeRelayTTSRequest, NodeRelayTTSResult
+from node_api_relay import NodeRelayTTSRequest, NodeRelayTTSService
 from node_api_route_contracts import MappingResponse, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
@@ -39,13 +39,11 @@ class NodeCoreRouteService(NodeAuthenticatedRouteService, Protocol):
 
     async def _serve_node_state_stream(self, *, websocket: WebSocket) -> None: ...
 
-    async def queue_relay_tts(self, relay_request: NodeRelayTTSRequest) -> NodeRelayTTSResult: ...
-
-
 def register_core_routes(
     nicegui_app: Any,
     *,
     service: NodeCoreRouteService,
+    relay_tts: NodeRelayTTSService,
     api_prefix: str,
     traffic_log: logging.Logger,
 ) -> None:
@@ -98,4 +96,4 @@ def register_core_routes(
     ) -> dict[str, object]:
         service._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.RELAY_TTS,))
         relay_request = NodeRelayTTSRequest.model_validate(payload)
-        return (await service.queue_relay_tts(relay_request)).to_mapping()
+        return (await relay_tts.queue_request(relay_request)).to_mapping()

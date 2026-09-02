@@ -7,7 +7,7 @@ import logging
 import mimetypes
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import cast
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import requests
@@ -24,18 +24,6 @@ from map_annotations import (
 from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
 
 _SQUAREMAP_REQUEST_TIMEOUT_SECONDS = 10.0
-
-
-class SquaremapRequest(Protocol):
-    """The synchronous request operation required by the Squaremap proxy."""
-
-    def __call__(
-        self,
-        url: str,
-        *,
-        params: Mapping[str, Sequence[str]] | None,
-        timeout: float,
-    ) -> requests.Response: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,12 +43,10 @@ class NodeMapService:
         *,
         node_name: Callable[[], str],
         http_exception: Callable[[int, str], Exception],
-        request_get: SquaremapRequest,
         logger: logging.Logger,
     ) -> None:
         self._node_name = node_name
         self._http_exception = http_exception
-        self._request_get = request_get
         self._log = logger
 
     def build_manifest(self, app: App) -> MapManifest:
@@ -170,7 +156,7 @@ class NodeMapService:
         params = parse_qs(raw_query, keep_blank_values=True) if raw_query else None
         should_log_failure = not normalized_path.casefold().endswith(".png")
         try:
-            response = self._request_get(
+            response = requests.get(
                 url, params=params, timeout=_SQUAREMAP_REQUEST_TIMEOUT_SECONDS
             )
         except requests.Timeout as xcp:

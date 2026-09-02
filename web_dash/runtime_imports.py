@@ -174,8 +174,8 @@ from mod_web_theme import (
     apply_mod_web_theme,
     mod_web_badge_class,
 )
-from node_api import (
-    NodeApiService,
+from node_api import NodeApiService
+from node_api_node import (
     NodeCapacityMutationResult,
     NodeDiskEntry,
     NodeDiskManagementState,

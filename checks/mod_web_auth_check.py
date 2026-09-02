@@ -20,7 +20,8 @@ from mod_web_auth import (
     ModWebSessionPersistence,
     ModWebUser,
 )
-from node_api import NodeApiScope, NodeApiService
+from node_api import NodeApiService
+from node_auth import NodeApiScope
 
 
 class FakeRequest:

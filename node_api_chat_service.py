@@ -19,7 +19,10 @@ from chat_hub import (
     ChatHub,
     ChatRoomUpdate,
 )
-from node_api_app_state import NodeAppRuntimeSummary, NodeAppStateStreamEvent
+from node_api_app_state import (
+    NodeAppRuntimeSummary,
+    NodeAppStateSubscriptionService,
+)
 from node_api_chat import (
     NodeChatEndpointSummary,
     NodeChatRoomSnapshot,
@@ -47,43 +50,10 @@ class WebChatRelayPublisher(Protocol):
     async def publish_chat_event(self, *, event: ChatEvent) -> ChatEvent: ...
 
 
-class ChatRoomSnapshotBuilder(Protocol):
-    """Builds a chat snapshot through the public node API façade."""
-
-    def __call__(self, app: App, *, limit: int) -> NodeChatRoomSnapshot: ...
-
-
 class LiveAppRuntimeSummaryBuilder(Protocol):
     """Builds the lightweight runtime summary used by chat stream events."""
 
     def __call__(self, app: App) -> Awaitable[NodeAppRuntimeSummary]: ...
-
-
-class LocalAppRuntimeSubscriber(Protocol):
-    """Subscribes a callback to local runtime state changes for one app."""
-
-    def __call__(
-        self,
-        app_name: str,
-        callback: Callable[[NodeAppStateStreamEvent], None],
-    ) -> Callable[[], None]: ...
-
-
-class WebsocketCloser(Protocol):
-    """Closes a websocket without allowing expected disconnects to escape."""
-
-    def __call__(self, websocket: WebSocket) -> Awaitable[None]: ...
-
-
-def require_chat_relay_app(
-    app: App,
-    *,
-    http_exception: Callable[[int, str], Exception],
-) -> None:
-    """Reject chat operations for apps without an outbound relay."""
-
-    if not app.supports_chat_relay:
-        raise http_exception(404, f"{app.friendly} does not expose a chat relay.")
 
 
 class NodeChatService:
@@ -92,27 +62,32 @@ class NodeChatService:
     def __init__(
         self,
         *,
-        manager: Callable[[], App_Manager | None],
         http_exception: Callable[[int, str], Exception],
         history_limit: int,
-        build_room_snapshot: ChatRoomSnapshotBuilder,
         build_live_runtime_summary: LiveAppRuntimeSummaryBuilder,
-        subscribe_local_app_runtime: LocalAppRuntimeSubscriber,
-        close_websocket: WebsocketCloser,
+        app_runtime_subscriptions: NodeAppStateSubscriptionService,
     ) -> None:
         if history_limit < 1:
             raise ValueError("Chat history limit must be positive.")
-        self._manager = manager
+        self._manager: App_Manager | None = None
         self._http_exception = http_exception
         self._history_limit = history_limit
-        self._build_room_snapshot = build_room_snapshot
         self._build_live_runtime_summary = build_live_runtime_summary
-        self._subscribe_local_app_runtime = subscribe_local_app_runtime
-        self._close_websocket = close_websocket
+        self._app_runtime_subscriptions = app_runtime_subscriptions
         self._relay: WebChatRelayPublisher | None = None
+
+    def set_manager(self, manager: App_Manager) -> None:
+        self._manager = manager
 
     def set_relay(self, relay: WebChatRelayPublisher | None) -> None:
         self._relay = relay
+
+    def require_relay_app(self, app: App) -> None:
+        if not app.supports_chat_relay:
+            raise self._http_exception(
+                404,
+                f"{app.friendly} does not expose a chat relay.",
+            )
 
     def build_room_snapshot(
         self,
@@ -120,7 +95,7 @@ class NodeChatService:
         *,
         limit: int,
     ) -> NodeChatRoomSnapshot:
-        require_chat_relay_app(app, http_exception=self._http_exception)
+        self.require_relay_app(app)
         bounded_limit = max(0, min(limit, self._history_limit))
         hub = ChatHub()
         endpoint_summaries = self._endpoint_summaries(
@@ -142,7 +117,7 @@ class NodeChatService:
         actor_user_id: int,
         chat_request: NodeWebChatRequest,
     ) -> ChatEvent:
-        require_chat_relay_app(app, http_exception=self._http_exception)
+        self.require_relay_app(app)
         relay = self._relay
         if relay is None:
             raise self._http_exception(
@@ -159,7 +134,7 @@ class NodeChatService:
         )
 
     async def publish_fake_chat(self, *, app: App, event: ChatEvent) -> ChatEvent:
-        require_chat_relay_app(app, http_exception=self._http_exception)
+        self.require_relay_app(app)
         if event.room_id.casefold() != app.name.casefold():
             raise self._http_exception(
                 400,
@@ -196,7 +171,7 @@ class NodeChatService:
                     kind=NodeChatStreamEventKind.CHAT_CHANGED,
                     room_id=app.name,
                     snapshot=(
-                        self._build_room_snapshot(app, limit=self._history_limit)
+                        self.build_room_snapshot(app, limit=self._history_limit)
                         if update.event is None
                         else None
                     ),
@@ -206,7 +181,7 @@ class NodeChatService:
             )
 
         room_subscription_id = ChatHub().subscribe(app.name, _enqueue_chat_update)
-        unsubscribe_runtime = self._subscribe_local_app_runtime(
+        unsubscribe_runtime = self._app_runtime_subscriptions.subscribe_app_runtime(
             app.name,
             lambda update: _enqueue_update(
                 NodeChatStreamEvent(
@@ -276,7 +251,7 @@ class NodeChatService:
 
         disconnect_task = asyncio.create_task(_wait_for_disconnect())
         try:
-            initial_snapshot = self._build_room_snapshot(
+            initial_snapshot = self.build_room_snapshot(
                 app,
                 limit=self._history_limit,
             )
@@ -318,7 +293,12 @@ class NodeChatService:
                 await disconnect_task
             ChatHub().unsubscribe(app.name, room_subscription_id)
             unsubscribe_runtime()
-            await self._close_websocket(websocket)
+            await self._close_websocket_quietly(websocket)
+
+    @staticmethod
+    async def _close_websocket_quietly(websocket: WebSocket) -> None:
+        with suppress(RuntimeError, WebSocketDisconnect):
+            await websocket.close()
 
     def _endpoint_summaries(
         self,
@@ -394,7 +374,7 @@ class NodeChatService:
     def _discord_channel_cache_entry(self, channel_id: int | None) -> object | None:
         if channel_id is None:
             return None
-        manager = self._manager()
+        manager = self._manager
         bot = getattr(manager, "bot", None) if manager is not None else None
         cache = getattr(bot, "cache", None) if bot is not None else None
         get_guild_channel = (
@@ -405,7 +385,7 @@ class NodeChatService:
         return None
 
     def _discord_guild_name(self, guild_id: int) -> str | None:
-        manager = self._manager()
+        manager = self._manager
         bot = getattr(manager, "bot", None) if manager is not None else None
         cache = getattr(bot, "cache", None) if bot is not None else None
         get_guild = getattr(cache, "get_guild", None) if cache is not None else None

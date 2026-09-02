@@ -6,12 +6,15 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable
-from typing import Protocol
+
+import psutil
 
 import config
+from _audit import audit_log
 from _manager import App_Manager
 from _security import Access_Control, Power_Level
 from _sys import Stats_System
+from font_assets import font_assets
 from maintenance import MaintenanceService
 from node_api_app_installer import (
     NodeAppInstallScopeOption,
@@ -37,26 +40,8 @@ from node_api_system import (
     NodeSystemActionResult,
     NodeSystemCapabilities,
 )
-from restart_state import RestartRecord
+from restart_state import read_process_restart_record, read_voice_restart_record
 from restart_targets import RestartTarget
-
-
-class NodeAuditLogger(Protocol):
-    """Writes an audit event for a node-management change."""
-
-    def __call__(self, event: str, /, **fields: object) -> None: ...
-
-
-class ProcessRestartRecordReader(Protocol):
-    """Reads a process restart record with a fallback start timestamp."""
-
-    def __call__(self, *, default_timestamp: int) -> RestartRecord: ...
-
-
-class FontAssetRefresher(Protocol):
-    """Schedules a refresh after Google font source settings change."""
-
-    def __call__(self, *, google_font_urls: tuple[str, ...]) -> None: ...
 
 
 class NodeManagementService:
@@ -66,34 +51,18 @@ class NodeManagementService:
         self,
         *,
         node_name: Callable[[], str],
-        manager: Callable[[], App_Manager | None],
-        require_manager: Callable[[], App_Manager],
-        require_acl: Callable[[], Access_Control],
         http_exception: Callable[[int, str], Exception],
-        stats_factory: Callable[[], Stats_System],
         invalidate_state_caches: Callable[[], None],
-        refresh_font_assets: FontAssetRefresher,
-        audit_log: NodeAuditLogger,
-        process_started_at: Callable[[], int],
-        read_process_restart_record: ProcessRestartRecordReader,
-        read_voice_restart_record: Callable[[], RestartRecord | None],
         logger: logging.Logger,
         restart_delay_seconds: float,
     ) -> None:
         if restart_delay_seconds < 0:
             raise ValueError("Node system action delay must not be negative.")
         self._node_name = node_name
-        self._manager = manager
-        self._require_manager = require_manager
-        self._require_acl = require_acl
+        self._manager: App_Manager | None = None
+        self._acl: Access_Control | None = None
         self._http_exception = http_exception
-        self._stats_factory = stats_factory
         self._invalidate_state_caches = invalidate_state_caches
-        self._refresh_font_assets = refresh_font_assets
-        self._audit_log = audit_log
-        self._process_started_at = process_started_at
-        self._read_process_restart_record = read_process_restart_record
-        self._read_voice_restart_record = read_voice_restart_record
         self._log = logger
         self._restart_delay_seconds = restart_delay_seconds
         self._system_action_handler: NodeSystemActionHandler | None = None
@@ -101,6 +70,12 @@ class NodeManagementService:
         self._maintenance_restart_targets: tuple[RestartTarget, ...] = ()
         self._pending_system_action: NodeSystemAction | None = None
         self._system_action_lock = threading.RLock()
+
+    def set_manager(self, manager: App_Manager) -> None:
+        self._manager = manager
+
+    def set_acl(self, acl: Access_Control) -> None:
+        self._acl = acl
 
     def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
         self._system_action_handler = handler
@@ -143,7 +118,7 @@ class NodeManagementService:
         return self._require_manager().node_font_sources()
 
     def read_disk_settings(self) -> NodeDiskManagementState:
-        stats = self._stats_factory()
+        stats = Stats_System()
         stats.refresh_disk_inventory()
         activity_mountpoints = {disk.mountpoint_text for disk in stats.activity_disks}
         primary_disk = stats.primary_disk
@@ -205,7 +180,7 @@ class NodeManagementService:
                 )
             self._pending_system_action = action
 
-        self._audit_log(
+        audit_log(
             "node.system_action.scheduled",
             actor_user_id=actor_user_id,
             node=self._node_name(),
@@ -233,7 +208,7 @@ class NodeManagementService:
         )
 
     def system_capabilities(self) -> NodeSystemCapabilities:
-        manager = self._manager()
+        manager = self._manager
         is_portal = config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL
         supports_app_auto_restart = not is_portal and manager is not None
         supports_silent_restart = (
@@ -264,10 +239,10 @@ class NodeManagementService:
         )
 
     def read_restart_state(self) -> NodeRestartState:
-        process_record = self._read_process_restart_record(
-            default_timestamp=self._process_started_at()
+        process_record = read_process_restart_record(
+            default_timestamp=int(psutil.Process().create_time())
         )
-        voice_record = self._read_voice_restart_record()
+        voice_record = read_voice_restart_record()
         return NodeRestartState(
             node=self._node_name(),
             process=NodeRestartRecord(
@@ -322,7 +297,7 @@ class NodeManagementService:
         except ValueError as xcp:
             raise self._http_exception(400, str(xcp)) from xcp
         updated_schedule = updated_schedules[target]
-        self._audit_log(
+        audit_log(
             "node.restart_schedule.updated",
             actor_user_id=actor_user_id,
             node=self._node_name(),
@@ -346,7 +321,7 @@ class NodeManagementService:
             schedule = maintenance.skip_next_restart(target)
         except ValueError as xcp:
             raise self._http_exception(400, str(xcp)) from xcp
-        self._audit_log(
+        audit_log(
             "node.restart_schedule.skipped",
             actor_user_id=actor_user_id,
             node=self._node_name(),
@@ -383,7 +358,7 @@ class NodeManagementService:
                 "App installer settings are unavailable on this node.",
             )
         updated_settings = self._require_manager().set_app_installer_settings(settings)
-        self._audit_log(
+        audit_log(
             "node.app_installer_settings.updated",
             actor_user_id=actor_user_id,
             node=self._node_name(),
@@ -400,12 +375,11 @@ class NodeManagementService:
         *,
         preferences: config.PersistedDiskPreferences,
         actor_user_id: int,
-        read_disk_settings: Callable[[], NodeDiskManagementState],
     ) -> NodeDiskSettingsMutationResult:
         await self._require_acl().perm_check(actor_user_id, Power_Level.root)
-        updated_preferences = self._stats_factory().set_disk_preferences(preferences)
+        updated_preferences = Stats_System().set_disk_preferences(preferences)
         self._invalidate_state_caches()
-        self._audit_log(
+        audit_log(
             "node.disk_settings.updated",
             actor_user_id=actor_user_id,
             node=self._node_name(),
@@ -417,7 +391,7 @@ class NodeManagementService:
         return NodeDiskSettingsMutationResult(
             node=self._node_name(),
             message=f"Updated node disk settings for {self._node_name()}.",
-            settings=read_disk_settings(),
+            settings=self.read_disk_settings(),
         )
 
     async def mutate_font_sources(
@@ -428,7 +402,7 @@ class NodeManagementService:
     ) -> NodeFontSourceSettingsMutationResult:
         await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
         updated_settings = self._require_manager().set_node_font_sources(settings)
-        self._refresh_font_assets(
+        font_assets.schedule_startup_refresh(
             google_font_urls=updated_settings.google_font_urls,
         )
         return NodeFontSourceSettingsMutationResult(
@@ -442,10 +416,9 @@ class NodeManagementService:
         *,
         settings: config.DiscordSettings,
         actor_user_id: int,
-        read_discord_settings: Callable[[], config.DiscordSettings],
     ) -> NodeDiscordSettingsMutationResult:
         manager = self._require_manager()
-        current_settings = read_discord_settings()
+        current_settings = self.read_discord_settings()
         required_level = (
             Power_Level.root
             if current_settings.activity.refresh_interval_seconds
@@ -461,6 +434,18 @@ class NodeManagementService:
             message=f"Updated Discord settings for {self._node_name()}.",
             settings=updated_settings,
         )
+
+    def _require_manager(self) -> App_Manager:
+        manager = self._manager
+        if manager is None:
+            raise self._http_exception(503, "App manager is not available yet.")
+        return manager
+
+    def _require_acl(self) -> Access_Control:
+        acl = self._acl
+        if acl is None:
+            raise self._http_exception(503, "Access control is not available yet.")
+        return acl
 
     def _require_maintenance_service(self) -> MaintenanceService:
         maintenance = self._maintenance_service

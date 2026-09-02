@@ -1,4 +1,4 @@
-"""Node API composition root and backwards-compatible public façade."""
+"""Node API composition root."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
-import psutil
 import requests
 from fastapi import (
     HTTPException,
@@ -41,14 +40,11 @@ import config
 import node_api_app_operations
 import node_api_app_installer
 import node_api_app_state
-import node_api_chat
 import node_api_chat_service
 import node_api_client_pack
-import node_api_files
 import node_api_map_service
 import node_api_mod
 import node_api_mod_service
-import node_api_node
 import node_api_relay
 import node_api_storage_service
 import node_api_system
@@ -95,15 +91,6 @@ from apps.sevendays import SevenDays
 from apps.sevendays.node_api import (
     NodeSevenDaysSandboxOptionsState,
 )
-from chat_hub import ChatEvent
-from font_assets import font_assets
-from maintenance import MaintenanceService
-from map_annotations import (
-    MapAnnotationDraft,
-    MapAnnotationList,
-    MapAnnotationMutationResult,
-    MapManifest,
-)
 from mod_web_auth import ModWebAuthService, ModWebUser
 from node_api_app_routes import register_app_routes
 from node_api_app_installer_routes import register_app_installer_routes
@@ -111,8 +98,6 @@ from node_api_app_installer import (
     NodeAppInstallCatalog,
     NodeAppInstallRequest,
     NodeAppInstallStatus,
-    NodeAppInstallerSettingsMutationResult,
-    NodeAppInstallerSettingsState,
 )
 from node_api_app_state import (
     _ALL_NODE_STATE_TOPICS,
@@ -127,7 +112,6 @@ from node_api_app_state import (
     NodeStateTopic,
     _NodeAppPlayerSnapshot,
 )
-from node_api_chat import NodeChatRoomSnapshot, NodeWebChatRequest
 from node_api_chat_routes import register_chat_routes
 from node_api_console import (
     NodeConsoleActionExecutionResult,
@@ -138,27 +122,9 @@ from node_api_console import (
 )
 from node_api_console_routes import register_console_routes
 from node_api_core_routes import register_core_routes
-from node_api_files import (
-    NodeConfigContent,
-    NodeConfigList,
-    NodeConfigMutationResult,
-    NodeSaveList,
-    NodeSaveMutationResult,
-    NodeSaveUploadTransport,
-)
 from node_api_map_routes import register_map_routes
 from node_api_mod_routes import register_mod_routes
-from node_api_node import (
-    NodeCapacityMutationResult,
-    NodeDiscordSettingsMutationResult,
-    NodeDiskManagementState,
-    NodeDiskSettingsMutationResult,
-    NodeFontSourceSettingsMutationResult,
-)
 from node_api_node_routes import register_node_management_routes
-from node_api_relay import (
-    RelayTTSQueue,
-)
 from node_api_route_contracts import (
     NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
     NODE_DISCORD_SERVICE_STATE_HEADER,
@@ -172,18 +138,7 @@ from node_api_settings import (
 )
 from node_api_settings_routes import register_settings_routes
 from node_api_storage_routes import register_storage_routes
-from node_api_system import (
-    NodeRestartScheduleState,
-    NodeRestartState,
-    NodeSystemAction,
-    NodeSystemActionHandler,
-    NodeSystemActionResult,
-    NodeSystemCapabilities,
-    NodeSystemHistory,
-    NodeSystemLogCatalog,
-    NodeSystemLogTail,
-    NodeSystemSummary,
-)
+from node_api_system import NodeSystemSummary
 from node_api_system_routes import register_system_routes
 from node_api_upload import NodeApiRequestBodyLimitMiddleware
 from node_auth import (
@@ -193,11 +148,6 @@ from node_auth import (
     issue_node_token,
     verify_node_token,
 )
-from restart_state import (
-    read_process_restart_record,
-    read_voice_restart_record,
-)
-from restart_targets import RestartTarget
 
 if TYPE_CHECKING:
     from _manager import App_Manager
@@ -207,21 +157,6 @@ if TYPE_CHECKING:
         NodeModUpdateCheckResult,
     )
 
-
-# Backwards-compatible façade exports for response and transport contracts.
-NodeAppInstallScopeOption = node_api_app_installer.NodeAppInstallScopeOption
-NodeChatEndpointSummary = node_api_chat.NodeChatEndpointSummary
-NodeChatStreamEvent = node_api_chat.NodeChatStreamEvent
-NodeChatStreamEventKind = node_api_chat.NodeChatStreamEventKind
-NodeDiskEntry = node_api_node.NodeDiskEntry
-NodeRestartRecord = node_api_system.NodeRestartRecord
-NodeRestartScheduleEntry = node_api_system.NodeRestartScheduleEntry
-NodeSystemDiskSummary = node_api_system.NodeSystemDiskSummary
-NodeSystemLogEntry = node_api_system.NodeSystemLogEntry
-NodeSystemSample = node_api_system.NodeSystemSample
-NodeSaveEntry = node_api_files.NodeSaveEntry
-NodeSaveRootEntry = node_api_files.NodeSaveRootEntry
-WebChatRelayPublisher = node_api_chat_service.WebChatRelayPublisher
 
 _NODE_API_PREFIX = "/api/node"
 _NODE_TOKEN_TTL_SECONDS = 15 * 60
@@ -323,10 +258,8 @@ class NodeApiService:
             live_runtime_ttl_seconds=_LIVE_APP_RUNTIME_CACHE_TTL_SECONDS,
             full_runtime_ttl_seconds=_FULL_APP_RUNTIME_CACHE_TTL_SECONDS,
         )
-        self._system_monitoring = node_api_system_service.NodeSystemMonitoringService(
+        self.system_monitoring = node_api_system_service.NodeSystemMonitoringService(
             node_name=lambda: self.node_name,
-            manager=lambda: self._manager,
-            stats_factory=lambda: Stats_System(),
             http_exception=_http_exception,
             logger=log,
             summary_cache_ttl_seconds=_NODE_SYSTEM_SUMMARY_CACHE_TTL_SECONDS,
@@ -334,27 +267,10 @@ class NodeApiService:
             history_interval_seconds=node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS,
             max_log_lines=_NODE_SYSTEM_LOG_MAX_LINES,
         )
-        self._nodes = node_api_node_service.NodeManagementService(
+        self.node_management = node_api_node_service.NodeManagementService(
             node_name=lambda: self.node_name,
-            manager=lambda: self._manager,
-            require_manager=lambda: self._require_manager(),
-            require_acl=lambda: self._require_acl(),
             http_exception=_http_exception,
-            stats_factory=lambda: Stats_System(),
             invalidate_state_caches=lambda: self._invalidate_state_caches(),
-            refresh_font_assets=lambda *, google_font_urls: (
-                font_assets.schedule_startup_refresh(
-                    google_font_urls=google_font_urls,
-                )
-            ),
-            audit_log=lambda event, **fields: audit_log(event, **fields),
-            process_started_at=lambda: int(psutil.Process().create_time()),
-            read_process_restart_record=lambda *, default_timestamp: (
-                read_process_restart_record(
-                    default_timestamp=default_timestamp,
-                )
-            ),
-            read_voice_restart_record=lambda: read_voice_restart_record(),
             logger=log,
             restart_delay_seconds=_NODE_RESTART_DELAY_SECONDS,
         )
@@ -380,32 +296,21 @@ class NodeApiService:
                 app
             ),
             list_apps=lambda: self.list_apps(),
-            build_system_summary=lambda: self.build_system_summary(),
+            build_system_summary=lambda: self.system_monitoring.build_summary(),
             stream_system_summary=self._stream_system_summary,
             discord_health=lambda: self._discord_service_health()[1],
             app_runtime_interval_seconds=_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS,
             node_state_interval_seconds=_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS,
         )
-        self._chats = node_api_chat_service.NodeChatService(
-            manager=lambda: self._manager,
+        self.chat = node_api_chat_service.NodeChatService(
             http_exception=_http_exception,
             history_limit=_NODE_CHAT_HISTORY_LIMIT,
-            build_room_snapshot=lambda app, *, limit: self.build_chat_room_snapshot(
-                app,
-                limit=limit,
-            ),
             build_live_runtime_summary=lambda app: self.build_live_app_runtime_summary(
                 app
             ),
-            subscribe_local_app_runtime=lambda app_name, callback: (
-                self.subscribe_local_app_runtime(
-                    app_name,
-                    callback,
-                )
-            ),
-            close_websocket=lambda websocket: self._close_websocket_quietly(websocket),
+            app_runtime_subscriptions=self._app_state_subscriptions,
         )
-        self._relay_tts = node_api_relay.NodeRelayTTSService(
+        self.relay_tts = node_api_relay.NodeRelayTTSService(
             node_name=lambda: self.node_name,
             http_exception=_http_exception,
             traffic_logger=traffic_log,
@@ -457,7 +362,7 @@ class NodeApiService:
                 traffic_log=traffic_log,
             )
         )
-        self._storage = node_api_storage_service.NodeStorageService(
+        self.storage = node_api_storage_service.NodeStorageService(
             node_name=lambda: self.node_name,
             current_acl=lambda: self._acl,
             invalidate_client_pack_content=self._invalidate_client_pack_content,
@@ -465,12 +370,9 @@ class NodeApiService:
             runtime_http_exception=self._runtime_http_exception,
             traffic_log=traffic_log,
         )
-        self._maps = node_api_map_service.NodeMapService(
+        self.maps = node_api_map_service.NodeMapService(
             node_name=lambda: self.node_name,
             http_exception=_http_exception,
-            request_get=lambda url, *, params, timeout: requests.get(
-                url, params=params, timeout=timeout
-            ),
             logger=log,
         )
         self._mod_service = node_api_mod_service.NodeModService(
@@ -496,6 +398,9 @@ class NodeApiService:
 
     def set_manager(self, manager: App_Manager) -> None:
         self._manager = manager
+        self.system_monitoring.set_manager(manager)
+        self.node_management.set_manager(manager)
+        self.chat.set_manager(manager)
         self._invalidate_state_caches()
 
     def set_discord_service_state(self, state: DiscordServiceState | None) -> None:
@@ -520,7 +425,7 @@ class NodeApiService:
 
     def _invalidate_state_caches(self, *, app_name: str | None = None) -> None:
         self._app_state_cache.invalidate(app_name)
-        self._system_monitoring.invalidate_summary_cache()
+        self.system_monitoring.invalidate_summary_cache()
 
     def _invalidate_mod_inventory(self, app_name: str) -> None:
         self._mod_service.invalidate_inventory(app_name)
@@ -542,25 +447,10 @@ class NodeApiService:
 
     def set_acl(self, acl: Access_Control) -> None:
         self._acl = acl
+        self.node_management.set_acl(acl)
 
     def set_web_auth(self, web_auth: ModWebAuthService) -> None:
         self._web_auth = web_auth
-
-    def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
-        self._nodes.set_system_action_handler(handler)
-
-    def set_maintenance_service(
-        self,
-        maintenance_service: MaintenanceService,
-        available_targets: tuple[RestartTarget, ...],
-    ) -> None:
-        self._nodes.set_maintenance_service(maintenance_service, available_targets)
-
-    def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
-        self._chats.set_relay(chat_relay)
-
-    def set_relay_tts_service(self, relay_tts_service: RelayTTSQueue | None) -> None:
-        self._relay_tts.set_queue(relay_tts_service)
 
     def begin_shutdown(self) -> None:
         self._shutting_down = True
@@ -584,7 +474,7 @@ class NodeApiService:
         try:
             while not self._shutting_down:
                 try:
-                    self.build_system_summary(force_refresh=True)
+                    self.system_monitoring.build_summary(force_refresh=True)
                 except Exception:
                     log.exception(
                         "Node API system history sample failed: node=%s", self.node_name
@@ -616,13 +506,16 @@ class NodeApiService:
         register_core_routes(
             nicegui_app,
             service=self,
+            relay_tts=self.relay_tts,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
         )
 
         register_system_routes(
             nicegui_app,
-            service=self,
+            auth=self,
+            monitoring=self.system_monitoring,
+            management=self.node_management,
             api_prefix=_NODE_API_PREFIX,
             max_log_lines=_NODE_SYSTEM_LOG_MAX_LINES,
             http_exception=_http_exception,
@@ -631,7 +524,8 @@ class NodeApiService:
 
         register_node_management_routes(
             nicegui_app,
-            service=self,
+            auth=self,
+            management=self.node_management,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -639,7 +533,8 @@ class NodeApiService:
 
         register_chat_routes(
             nicegui_app,
-            service=self,
+            auth=self,
+            chat=self.chat,
             api_prefix=_NODE_API_PREFIX,
             history_limit=_NODE_CHAT_HISTORY_LIMIT,
             traffic_log=traffic_log,
@@ -663,7 +558,8 @@ class NodeApiService:
 
         register_map_routes(
             nicegui_app,
-            service=self,
+            auth=self,
+            maps=self.maps,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
         )
@@ -677,7 +573,8 @@ class NodeApiService:
 
         register_storage_routes(
             nicegui_app,
-            service=self,
+            auth=self,
+            storage=self.storage,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -1007,22 +904,6 @@ class NodeApiService:
             startup_defined=getattr(resource_points, "startup", None) is not None,
         )
 
-    def build_system_summary(self, *, force_refresh: bool = False) -> NodeSystemSummary:
-        return self._system_monitoring.build_summary(force_refresh=force_refresh)
-
-    def build_system_history(self) -> NodeSystemHistory:
-        return self._system_monitoring.build_history()
-
-    def build_system_log_catalog(self) -> NodeSystemLogCatalog:
-        return self._system_monitoring.build_log_catalog()
-
-    def build_system_log_tail(
-        self, *, log_path: str, max_lines: int = 200
-    ) -> NodeSystemLogTail:
-        return self._system_monitoring.build_log_tail(
-            log_path=log_path, max_lines=max_lines
-        )
-
     @staticmethod
     def _app_footprint_paths(app: App) -> tuple[Path, ...]:
         candidates: list[Path] = [app.directory]
@@ -1073,39 +954,6 @@ class NodeApiService:
             size_bytes=size_bytes,
         )
         return size_bytes
-
-    @staticmethod
-    def _require_chat_relay_app(app: App) -> None:
-        node_api_chat_service.require_chat_relay_app(
-            app,
-            http_exception=_http_exception,
-        )
-
-    def build_chat_room_snapshot(
-        self, app: App, *, limit: int = _NODE_CHAT_HISTORY_LIMIT
-    ) -> NodeChatRoomSnapshot:
-        return self._chats.build_room_snapshot(app, limit=limit)
-
-    async def publish_app_web_chat(
-        self,
-        *,
-        app: App,
-        actor_user_id: int,
-        chat_request: NodeWebChatRequest,
-    ) -> ChatEvent:
-        return await self._chats.publish_web_chat(
-            app=app,
-            actor_user_id=actor_user_id,
-            chat_request=chat_request,
-        )
-
-    async def publish_app_fake_chat(self, *, app: App, event: ChatEvent) -> ChatEvent:
-        return await self._chats.publish_fake_chat(app=app, event=event)
-
-    async def queue_relay_tts(
-        self, relay_request: node_api_relay.NodeRelayTTSRequest
-    ) -> node_api_relay.NodeRelayTTSResult:
-        return await self._relay_tts.queue_request(relay_request)
 
     async def build_app_runtime_summary(
         self,
@@ -1228,52 +1076,6 @@ class NodeApiService:
             build_summary=self._build_runtime_summary_for_state_cache,
         )
 
-    def build_map_manifest(self, app: App) -> MapManifest:
-        return self._maps.build_manifest(app)
-
-    def _build_map_manifest_result(
-        self,
-        app: App,
-    ) -> tuple[MapManifest, node_api_map_service.NodeMapProxyResponse]:
-        return self._maps.build_manifest_result(app)
-
-    def build_map_annotation_list(self, app: App) -> MapAnnotationList:
-        return self._maps.build_annotation_list(app)
-
-    def create_map_annotation(
-        self,
-        app: App,
-        draft: MapAnnotationDraft,
-        created_by_user_id: int | None,
-        created_by_name: str | None,
-    ) -> MapAnnotationMutationResult:
-        return self._maps.create_annotation(
-            app=app,
-            draft=draft,
-            created_by_user_id=created_by_user_id,
-            created_by_name=created_by_name,
-        )
-
-    def delete_map_annotation(
-        self, app: App, annotation_id: str
-    ) -> MapAnnotationMutationResult:
-        return self._maps.delete_annotation(app=app, annotation_id=annotation_id)
-
-    def _squaremap_proxy_response(
-        self,
-        app: App,
-        relative_path: str,
-        raw_query: str = "",
-        *,
-        allow_stale_on_error: bool = False,
-    ) -> node_api_map_service.NodeMapProxyResponse:
-        return self._maps.proxy_response(
-            app=app,
-            relative_path=relative_path,
-            raw_query=raw_query,
-            allow_stale_on_error=allow_stale_on_error,
-        )
-
     @staticmethod
     def _map_annotation_creator_name(
         app: App, *, actor_user_id: int, user: ModWebUser | None
@@ -1369,19 +1171,6 @@ class NodeApiService:
         else:
             code = status.WS_1011_INTERNAL_ERROR
         return WebSocketException(code=code, reason=str(error.detail))
-
-    async def _serve_chat_stream(
-        self,
-        *,
-        websocket: WebSocket,
-        app: App,
-        after_revision: int | None = None,
-    ) -> None:
-        await self._chats.serve_stream(
-            websocket=websocket,
-            app=app,
-            after_revision=after_revision,
-        )
 
     async def _serve_presence_stream(self, *, websocket: WebSocket) -> None:
         if not self._try_reserve_presence_stream_connection():
@@ -1604,7 +1393,7 @@ class NodeApiService:
                     node_name=self.node_name,
                     app_entries=await self.list_apps(),
                     system_summary=self._stream_system_summary(
-                        self.build_system_summary()
+                        self.system_monitoring.build_summary()
                     ),
                     discord_health=self._discord_service_health()[1],
                 )
@@ -1704,7 +1493,7 @@ class NodeApiService:
                     app_name=app.name,
                     app_stats=await self.build_live_app_runtime_summary(app),
                     system_summary=self._stream_system_summary(
-                        self.build_system_summary()
+                        self.system_monitoring.build_summary()
                     ),
                     update_info=app.update_info,
                     update_status=app.update_status,
@@ -2010,7 +1799,7 @@ class NodeApiService:
         return result
 
     async def build_app_install_catalog(self) -> NodeAppInstallCatalog:
-        self._require_app_installer_available()
+        self.node_management.require_app_installer_available()
         return await self._app_installer.build_catalog(manager=self._require_manager())
 
     async def start_app_install(
@@ -2019,7 +1808,7 @@ class NodeApiService:
         request: NodeAppInstallRequest,
         actor_user_id: int,
     ) -> NodeAppInstallStatus:
-        self._require_app_installer_available()
+        self.node_management.require_app_installer_available()
         return await self._app_installer.start_install(
             manager=self._require_manager(),
             acl=self._require_acl(),
@@ -2028,133 +1817,8 @@ class NodeApiService:
         )
 
     def app_install_status(self, *, job_id: str) -> NodeAppInstallStatus:
-        self._require_app_installer_available()
+        self.node_management.require_app_installer_available()
         return self._app_installer.install_status(job_id=job_id)
-
-    def read_app_installer_settings(self) -> NodeAppInstallerSettingsState:
-        return self._nodes.read_app_installer_settings()
-
-    def _require_app_installer_available(self) -> None:
-        self._nodes.require_app_installer_available()
-
-    def read_node_capacity(self) -> config.NodeCapacityProfile:
-        return self._nodes.read_capacity()
-
-    def read_node_font_sources(self) -> config.NodeFontSourceSettings:
-        return self._nodes.read_font_sources()
-
-    def read_node_disk_settings(self) -> NodeDiskManagementState:
-        return self._nodes.read_disk_settings()
-
-    def read_discord_settings(self) -> config.DiscordSettings:
-        return self._nodes.read_discord_settings()
-
-    async def schedule_system_action(
-        self,
-        *,
-        action: NodeSystemAction,
-        auto_restart_running_apps: bool,
-        silent: bool,
-        actor_user_id: int,
-    ) -> NodeSystemActionResult:
-        return await self._nodes.schedule_system_action(
-            action=action,
-            auto_restart_running_apps=auto_restart_running_apps,
-            silent=silent,
-            actor_user_id=actor_user_id,
-        )
-
-    def system_capabilities(self) -> NodeSystemCapabilities:
-        return self._nodes.system_capabilities()
-
-    def read_restart_state(self) -> NodeRestartState:
-        return self._nodes.read_restart_state()
-
-    def read_restart_schedules(self) -> NodeRestartScheduleState:
-        return self._nodes.read_restart_schedules()
-
-    async def update_restart_schedule(
-        self,
-        *,
-        target: RestartTarget,
-        interval_minutes: int | None,
-        anchor_timestamp: int | None,
-        actor_user_id: int,
-    ) -> NodeRestartScheduleState:
-        return await self._nodes.update_restart_schedule(
-            target=target,
-            interval_minutes=interval_minutes,
-            anchor_timestamp=anchor_timestamp,
-            actor_user_id=actor_user_id,
-        )
-
-    async def skip_restart_schedule(
-        self,
-        *,
-        target: RestartTarget,
-        actor_user_id: int,
-    ) -> NodeRestartScheduleState:
-        return await self._nodes.skip_restart_schedule(
-            target=target,
-            actor_user_id=actor_user_id,
-        )
-
-    async def mutate_node_capacity(
-        self,
-        *,
-        capacity: config.NodeCapacityProfile,
-        actor_user_id: int,
-    ) -> NodeCapacityMutationResult:
-        return await self._nodes.mutate_capacity(
-            capacity=capacity,
-            actor_user_id=actor_user_id,
-        )
-
-    async def mutate_app_installer_settings(
-        self,
-        *,
-        settings: config.AppInstallerSettings,
-        actor_user_id: int,
-    ) -> NodeAppInstallerSettingsMutationResult:
-        return await self._nodes.mutate_app_installer_settings(
-            settings=settings,
-            actor_user_id=actor_user_id,
-        )
-
-    async def mutate_node_disk_settings(
-        self,
-        *,
-        preferences: config.PersistedDiskPreferences,
-        actor_user_id: int,
-    ) -> NodeDiskSettingsMutationResult:
-        return await self._nodes.mutate_disk_settings(
-            preferences=preferences,
-            actor_user_id=actor_user_id,
-            read_disk_settings=lambda: self.read_node_disk_settings(),
-        )
-
-    async def mutate_node_font_sources(
-        self,
-        *,
-        settings: config.NodeFontSourceSettings,
-        actor_user_id: int,
-    ) -> NodeFontSourceSettingsMutationResult:
-        return await self._nodes.mutate_font_sources(
-            settings=settings,
-            actor_user_id=actor_user_id,
-        )
-
-    async def mutate_discord_settings(
-        self,
-        *,
-        settings: config.DiscordSettings,
-        actor_user_id: int,
-    ) -> NodeDiscordSettingsMutationResult:
-        return await self._nodes.mutate_discord_settings(
-            settings=settings,
-            actor_user_id=actor_user_id,
-            read_discord_settings=lambda: self.read_discord_settings(),
-        )
 
     async def build_mod_download_response(
         self,
@@ -2440,41 +2104,6 @@ class NodeApiService:
             placement=placement,
         )
 
-    def build_config_list(
-        self, app: App, *, actor_user_id: int | None = None
-    ) -> NodeConfigList:
-        return self._storage.build_config_list(app=app, actor_user_id=actor_user_id)
-
-    def read_config_file(self, *, app: App, config_id: str) -> NodeConfigContent:
-        return self._storage.read_config_file(app=app, config_id=config_id)
-
-    def write_config_file(
-        self, *, app: App, config_id: str, content: str
-    ) -> NodeConfigContent:
-        return self._storage.write_config_file(
-            app=app, config_id=config_id, content=content
-        )
-
-    def create_config_file(
-        self,
-        *,
-        app: App,
-        root_id: str,
-        relative_path: str,
-        content: str,
-    ) -> NodeConfigContent:
-        return self._storage.create_config_file(
-            app=app,
-            root_id=root_id,
-            relative_path=relative_path,
-            content=content,
-        )
-
-    def delete_config_file(
-        self, *, app: App, config_id: str
-    ) -> NodeConfigMutationResult:
-        return self._storage.delete_config_file(app=app, config_id=config_id)
-
     def factorio_generation_state(self, *, app: App) -> NodeFactorioGenerationState:
         return self._factorio.generation_state(app=app)
 
@@ -2535,96 +2164,6 @@ class NodeApiService:
     def _invalidate_client_pack_content(self, app: App) -> None:
         app.invalidate_client_pack_content()
         self._invalidate_state_caches(app_name=app.name)
-
-    async def build_config_root_download_response(
-        self,
-        *,
-        app: App,
-        root_id: str,
-        actor_user_id: int | None = None,
-    ) -> FileResponse:
-        return await self._storage.build_config_root_download_response(
-            app=app,
-            root_id=root_id,
-            actor_user_id=actor_user_id,
-        )
-
-    async def build_save_list(self, app: App) -> NodeSaveList:
-        return await self._storage.build_save_list(app)
-
-    def build_empty_save_list(self, app: App) -> NodeSaveList:
-        return self._storage.build_empty_save_list(app)
-
-    async def build_save_download_response(self, *, app: App, save_id: str) -> Response:
-        return await self._storage.build_save_download_response(
-            app=app, save_id=save_id
-        )
-
-    async def upload_save_file(
-        self,
-        *,
-        app: App,
-        root_id: str,
-        upload: UploadFile,
-        upload_name: str | None,
-        actor_user_id: int,
-        upload_transport: NodeSaveUploadTransport = NodeSaveUploadTransport.DIRECT,
-    ) -> NodeSaveMutationResult:
-        return await self._storage.upload_save_file(
-            app=app,
-            root_id=root_id,
-            upload=upload,
-            upload_name=upload_name,
-            actor_user_id=actor_user_id,
-            upload_transport=upload_transport,
-        )
-
-    async def upload_save_path(
-        self,
-        *,
-        app: App,
-        root_id: str,
-        source_path: Path,
-        upload_name: str,
-        actor_user_id: int,
-        upload_transport: NodeSaveUploadTransport = NodeSaveUploadTransport.DIRECT,
-    ) -> NodeSaveMutationResult:
-        return await self._storage.upload_save_path(
-            app=app,
-            root_id=root_id,
-            source_path=source_path,
-            upload_name=upload_name,
-            actor_user_id=actor_user_id,
-            upload_transport=upload_transport,
-        )
-
-    async def rename_save_file(
-        self,
-        *,
-        app: App,
-        save_id: str,
-        new_name: str,
-        actor_user_id: int,
-    ) -> NodeSaveMutationResult:
-        return await self._storage.rename_save_file(
-            app=app,
-            save_id=save_id,
-            new_name=new_name,
-            actor_user_id=actor_user_id,
-        )
-
-    async def delete_save_file(
-        self,
-        *,
-        app: App,
-        save_id: str,
-        actor_user_id: int,
-    ) -> NodeSaveMutationResult:
-        return await self._storage.delete_save_file(
-            app=app,
-            save_id=save_id,
-            actor_user_id=actor_user_id,
-        )
 
     @staticmethod
     def _runtime_http_exception(
