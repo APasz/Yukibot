@@ -42,6 +42,8 @@ dependencies = [
 dev = [
     "basedpyright",
     "playwright",
+    "pytest",
+    "ruff",
 ]
 
 [tool.uv]
@@ -66,6 +68,7 @@ select = ["E731", "F401", "F402", "F811"]
 include = [
     "*.py",
     "apps",
+    "node_api",
     "web_dash",
 ]
 exclude = [

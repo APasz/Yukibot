@@ -23,7 +23,7 @@ from apps._node_api import (
     required_string as _required_string,
 )
 from apps.satisfactory import Satisfactory
-from node_api_upload import persist_upload_to_temp, validated_upload_filename
+from node_api.upload import persist_upload_to_temp, validated_upload_filename
 
 @dataclass(frozen=True, slots=True)
 class NodeBlueprintFileEntry:

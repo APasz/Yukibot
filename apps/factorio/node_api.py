@@ -43,7 +43,7 @@ from apps.factorio import (
     parse_factorio_mod_portal_url,
     resolve_factorio_mod_portal_candidates,
 )
-from node_api_upload import persist_upload_to_temp, validated_upload_filename
+from node_api.upload import persist_upload_to_temp, validated_upload_filename
 
 log: Logger = logging.getLogger(__name__)
 _FACTORIO_SCOPE: Final[str] = "factorio"

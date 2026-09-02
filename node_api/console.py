@@ -14,7 +14,7 @@ from apps._node_api import (
     required_int as _required_int,
     required_string as _required_string,
 )
-from node_api_settings import NodeSettingChoice
+from .settings import NodeSettingChoice
 
 @dataclass(frozen=True, slots=True)
 class NodeConsoleActionParameter:

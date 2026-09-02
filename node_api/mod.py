@@ -39,7 +39,7 @@ from apps._config import (
 )
 from apps._node_api import optional_string, required_bool, required_int, required_string
 from apps.minecraft.pack_export import PackFormat, PackPurpose
-from node_api_app_state import NodeAppRuntimeSummary
+from .app_state import NodeAppRuntimeSummary
 
 
 @dataclass(frozen=True, slots=True)

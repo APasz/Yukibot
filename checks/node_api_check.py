@@ -23,7 +23,7 @@ from httpx import ASGITransport, AsyncClient, Response
 from modmux.models import Provider
 
 import config
-import node_api
+import node_api.service as node_api
 from _manager import AppStartBlocker, AppStartBlockerKind
 from _mod_ops import ArchiveDataEntry, ClientPackSelection
 from _security import Access_Control, Power_Level
@@ -159,8 +159,8 @@ from chat_hub import (
 from deployment_metadata import DeploymentMetadata
 from maintenance import MaintenanceService
 from map_annotations import MapAnnotationDraft
-from node_api import NodeApiService
-from node_api_app_state import (
+from node_api.service import NodeApiService
+from node_api.app_state import (
     NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppRuntimeSummary,
@@ -169,26 +169,26 @@ from node_api_app_state import (
     NodeStateStreamEvent,
     NodeStateTopic,
 )
-from node_api_chat import (
+from node_api.chat import (
     NodeChatInjectionRequest,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
     NodeWebChatRequest,
 )
-from node_api_console import (
+from node_api.console import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
     NodeConsoleStdoutStreamEvent,
     NodeConsoleStdoutStreamEventKind,
 )
-from node_api_files import (
+from node_api.files import (
     NodeConfigList,
     NodeSaveList,
     NodeSaveMutationResult,
 )
-from node_api_node import (
+from node_api.node import (
     NodeCapacityMutationResult,
     NodeDiscordSettingsMutationResult,
     NodeDiskEntry,
@@ -196,8 +196,8 @@ from node_api_node import (
     NodeDiskSettingsMutationResult,
     NodeFontSourceSettingsMutationResult,
 )
-from node_api_settings import NodeSettingEntry, NodeSettingList
-from node_api_system import (
+from node_api.settings import NodeSettingEntry, NodeSettingList
+from node_api.system import (
     NodeRestartRecord,
     NodeRestartScheduleState,
     NodeRestartState,
@@ -208,21 +208,21 @@ from node_api_system import (
     NodeSystemSample,
     NodeSystemSummary,
 )
-from node_api_storage_routes import FACTORIO_MOD_SETTINGS_ACCESS_LEVEL
-from node_api_app_installer import (
+from node_api.storage_routes import FACTORIO_MOD_SETTINGS_ACCESS_LEVEL
+from node_api.app_installer import (
     NodeAppInstallScopeOption,
     NodeAppInstallerSettingsMutationResult,
     NodeAppInstallerSettingsState,
 )
 from apps.satisfactory.node_api import NodeBlueprintList, NodeBlueprintMutationResult
-from node_api_app_state import (
+from node_api.app_state import (
     NodeAppMutationAction,
     NodeAppMutationResult,
     required_app_mutation_level,
     required_app_mutation_scope,
 )
-from node_api_client_pack import NodeClientPackService
-from node_api_mod import (
+from node_api.client_pack import NodeClientPackService
+from node_api.mod import (
     NodeBulkLauncherMetadataApplyRequest,
     NodeBulkLauncherMetadataRequest,
     NodeClientPackConfigUpdateRequest,
@@ -241,9 +241,9 @@ from node_api_mod import (
     NodeModUploadResult,
     required_mod_mutation_level,
 )
-from node_api_mod_service import NodeModService
-from node_api_relay import NodeRelayTTSRequest, RemoteRelayTTSForwarder
-from node_api_route_contracts import DiscordHealthComponentState, DiscordHealthSnapshot, DiscordServiceState
+from node_api.mod_service import NodeModService
+from node_api.relay import NodeRelayTTSRequest, RemoteRelayTTSForwarder
+from node_api.route_contracts import DiscordHealthComponentState, DiscordHealthSnapshot, DiscordServiceState
 from node_auth import NodeAccessGrant, NodeApiScope, verify_node_token
 from restart_state import RestartKind, RestartRecord
 from restart_targets import RestartTarget
@@ -4385,7 +4385,7 @@ class NodeApiTests(unittest.TestCase):
         )
         response.headers = {"Content-Type": "application/json"}
 
-        with patch("node_api_map_service.requests.get", return_value=response) as get_mock:
+        with patch("node_api.map_service.requests.get", return_value=response) as get_mock:
             manifest = NodeApiService().maps.build_manifest(app)
 
         self.assertEqual(manifest.initial_world_name, "minecraft_nether")
@@ -4402,7 +4402,7 @@ class NodeApiTests(unittest.TestCase):
         relay_display_name = Mock(return_value="Yoko")
 
         with patch(
-            "node_api.config.Name_Cache",
+            "node_api.service.config.Name_Cache",
             return_value=SimpleNamespace(discord_fallback_name=relay_display_name),
         ):
             created_by_name = NodeApiService._map_annotation_creator_name(app, actor_user_id=42, user=cast(Any, user))
@@ -4420,7 +4420,7 @@ class NodeApiTests(unittest.TestCase):
         user = SimpleNamespace(username="discord_user")
 
         with patch(
-            "node_api.config.Name_Cache",
+            "node_api.service.config.Name_Cache",
             return_value=SimpleNamespace(discord_fallback_name=Mock(return_value="discord_user")),
         ):
             created_by_name = NodeApiService._map_annotation_creator_name(app, actor_user_id=42, user=cast(Any, user))
@@ -4465,7 +4465,7 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock())
             app.__class__ = _MappedApp
             app.directory = root_path
-            with patch("node_api_map_service.requests.get") as get_mock:
+            with patch("node_api.map_service.requests.get") as get_mock:
                 manifest = NodeApiService().maps.build_manifest(app)
 
         self.assertEqual(manifest.initial_world_name, "minecraft_nether")
@@ -4490,7 +4490,7 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock())
             app.__class__ = _MappedApp
             app.directory = root_path
-            with patch("node_api_map_service.requests.get") as get_mock:
+            with patch("node_api.map_service.requests.get") as get_mock:
                 response = NodeApiService().maps.proxy_response(
                     app=app,
                     relative_path="images/icon/registered/squaremap-spawn_icon.png",
@@ -4520,9 +4520,9 @@ class NodeApiTests(unittest.TestCase):
             app.__class__ = _MappedApp
             app.directory = Path(temp_dir)
             service = NodeApiService()
-            with patch("node_api_map_service.requests.get", return_value=live_response):
+            with patch("node_api.map_service.requests.get", return_value=live_response):
                 service.maps.build_manifest(app)
-            with patch("node_api_map_service.requests.get", side_effect=requests.ConnectionError("offline")):
+            with patch("node_api.map_service.requests.get", side_effect=requests.ConnectionError("offline")):
                 cached_manifest = service.maps.build_manifest(app)
 
         self.assertEqual(cached_manifest.initial_world_name, "minecraft_nether")
@@ -4550,13 +4550,13 @@ class NodeApiTests(unittest.TestCase):
             app.__class__ = _MappedApp
             app.directory = Path(temp_dir)
             service = NodeApiService()
-            with patch("node_api_map_service.requests.get", return_value=live_response):
+            with patch("node_api.map_service.requests.get", return_value=live_response):
                 service.maps.proxy_response(
                     app=app,
                     relative_path="tiles/minecraft_overworld/settings.json",
                     allow_stale_on_error=True,
                 )
-            with patch("node_api_map_service.requests.get", side_effect=requests.Timeout("slow")):
+            with patch("node_api.map_service.requests.get", side_effect=requests.Timeout("slow")):
                 cached_response = service.maps.proxy_response(
                     app=app,
                     relative_path="tiles/minecraft_overworld/settings.json",
@@ -4919,7 +4919,7 @@ class NodeApiTests(unittest.TestCase):
             def raise_for_status(self) -> None:
                 return None
 
-        with patch("node_api.requests.get", return_value=_PingResponse()):
+        with patch("node_api.service.requests.get", return_value=_PingResponse()):
             probe = NodeApiService._measure_node_latency_probe("https://erin.example/api/node/ping")
 
         self.assertGreaterEqual(probe.latency_ms or 0, 1)
@@ -4932,7 +4932,7 @@ class NodeApiTests(unittest.TestCase):
             def raise_for_status(self) -> None:
                 return None
 
-        with patch("node_api.requests.get", return_value=_PingResponse()):
+        with patch("node_api.service.requests.get", return_value=_PingResponse()):
             probe = NodeApiService._measure_node_latency_probe("https://erin.example/api/node/ping")
 
         self.assertEqual(probe.discord_service_state, node_api.DiscordServiceState.DEGRADED)
@@ -5529,7 +5529,7 @@ class NodeApiTests(unittest.TestCase):
             )
 
             with patch(
-                "node_api_mod_service.resolve_launcher_metadata_resolution",
+                "node_api.mod_service.resolve_launcher_metadata_resolution",
                 new=AsyncMock(return_value=expected),
             ) as resolve_metadata:
                 result = asyncio.run(
@@ -5607,7 +5607,7 @@ class NodeApiTests(unittest.TestCase):
             expected = LauncherMetadataDiscovery()
 
             with patch(
-                "node_api_mod_service.discover_launcher_metadata",
+                "node_api.mod_service.discover_launcher_metadata",
                 new=AsyncMock(return_value=expected),
             ) as discover_metadata:
                 result = asyncio.run(
@@ -5659,7 +5659,7 @@ class NodeApiTests(unittest.TestCase):
             expected = ModPageDiscovery()
 
             with patch(
-                "node_api_mod_service.discover_mod_pages",
+                "node_api.mod_service.discover_mod_pages",
                 new=AsyncMock(return_value=expected),
             ) as discover_pages:
                 result = asyncio.run(
@@ -5707,7 +5707,7 @@ class NodeApiTests(unittest.TestCase):
             expected = BulkLauncherMetadataDiscovery()
 
             with patch(
-                "node_api_mod_service.discover_bulk_launcher_metadata",
+                "node_api.mod_service.discover_bulk_launcher_metadata",
                 new=AsyncMock(return_value=expected),
             ) as discover_metadata:
                 result = asyncio.run(
@@ -5772,7 +5772,7 @@ class NodeApiTests(unittest.TestCase):
 
             with (
                 patch(
-                    "node_api_mod_service.discover_bulk_launcher_metadata",
+                    "node_api.mod_service.discover_bulk_launcher_metadata",
                     new=AsyncMock(return_value=discovery),
                 ) as discover_metadata,
                 patch.object(service, "_invalidate_client_pack_content"),
@@ -6249,7 +6249,7 @@ class NodeApiTests(unittest.TestCase):
             app.directory = Path(temp_dir)
             with (
                 patch(
-                    "node_api_client_pack.build_client_pack_entries",
+                    "node_api.client_pack.build_client_pack_entries",
                     return_value=(Mock(),),
                 ),
                 patch.object(
@@ -6329,7 +6329,7 @@ class NodeApiTests(unittest.TestCase):
                 return_value=(),
             ),
             patch(
-                "node_api_client_pack.export_minecraft_pack",
+                "node_api.client_pack.export_minecraft_pack",
                 new=AsyncMock(
                     side_effect=MinecraftPackExportError("Unsupported CurseForge loader: unsupported")
                 ),
@@ -6451,7 +6451,7 @@ class NodeApiTests(unittest.TestCase):
             app.directory = Path(temp_dir)
             app.cfg.client_overrides_dir = Path(temp_dir) / "client-overrides"
 
-            with self.assertLogs("node_api_client_pack", level="WARNING") as captured:
+            with self.assertLogs("node_api.client_pack", level="WARNING") as captured:
                 resolved = NodeClientPackService.overrides_dir(app)
 
             self.assertEqual(resolved, Path(temp_dir) / ".yukibot" / "client-overrides")
@@ -6990,7 +6990,7 @@ class NodeApiTests(unittest.TestCase):
 
         with (
             patch.object(config, "ACTIVE_BOT_PROFILE", erin_profile),
-            patch("node_api_node_service.audit_log") as audit,
+            patch("node_api.node_service.audit_log") as audit,
         ):
             state = service.node_management.read_app_installer_settings()
             result = asyncio.run(
@@ -7040,7 +7040,7 @@ class NodeApiTests(unittest.TestCase):
         acl.perm_check = AsyncMock()
         service.set_acl(cast(Any, acl))
 
-        with patch("node_api_node_service.font_assets.schedule_startup_refresh") as schedule_refresh:
+        with patch("node_api.node_service.font_assets.schedule_startup_refresh") as schedule_refresh:
             result = asyncio.run(
                 service.node_management.mutate_font_sources(
                     settings=config.NodeFontSourceSettings(
@@ -7105,7 +7105,7 @@ class NodeApiTests(unittest.TestCase):
         service.set_acl(cast(Any, acl))
 
         with (
-            patch("node_api_node_service.Stats_System", return_value=stats),
+            patch("node_api.node_service.Stats_System", return_value=stats),
             patch.object(service.node_management, "read_disk_settings", return_value=settings),
         ):
             result = asyncio.run(
@@ -7390,7 +7390,7 @@ class NodeApiTests(unittest.TestCase):
         acl.perm_check = AsyncMock()
         service.set_acl(cast(Any, acl))
 
-        with patch("node_api.audit_log") as audit:
+        with patch("node_api.service.audit_log") as audit:
             result = asyncio.run(
                 service.mutate_app(
                     app=app,
@@ -7517,7 +7517,7 @@ class NodeApiTests(unittest.TestCase):
             fake_stats.disk_snapshot_for_path.return_value = fake_disk
             with (
                 patch.object(config, "MOD_WEB_SERVER", server),
-                patch("node_api.Stats_System", return_value=fake_stats),
+                patch("node_api.service.Stats_System", return_value=fake_stats),
                 patch.object(NodeApiService, "_app_footprint_size_bytes", return_value=8),
             ):
                 service = NodeApiService()
@@ -7656,7 +7656,7 @@ class NodeApiTests(unittest.TestCase):
             )
             fake_stats = Mock()
             fake_stats.disk_snapshot_for_path.return_value = fake_disk
-            with patch("node_api.Stats_System", return_value=fake_stats):
+            with patch("node_api.service.Stats_System", return_value=fake_stats):
                 summary = asyncio.run(NodeApiService().build_app_runtime_summary(app))
 
         self.assertEqual(summary.footprint_bytes, 22)
@@ -7671,7 +7671,7 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
 
         with (
-            patch("node_api.Stats_System") as stats_system,
+            patch("node_api.service.Stats_System") as stats_system,
             patch.object(service, "_app_footprint_size_bytes") as footprint_size,
         ):
             summary = asyncio.run(service.build_live_app_runtime_summary(app))
@@ -8039,7 +8039,7 @@ class NodeApiTests(unittest.TestCase):
                     "_calculate_app_footprint_size_bytes",
                     side_effect=[123, 456],
                 ) as calculate_size,
-                patch("node_api.time.time", side_effect=[100.0, 120.0]),
+                patch("node_api.service.time.time", side_effect=[100.0, 120.0]),
             ):
                 first = service._app_footprint_size_bytes(app)
                 second = service._app_footprint_size_bytes(app)
@@ -8118,10 +8118,10 @@ class NodeApiTests(unittest.TestCase):
         )
 
         with (
-            patch("node_api_system_service.Stats_System", return_value=fake_stats),
-            patch("node_api_system_service.time.time", return_value=10_000),
-            patch("node_api_system_service.psutil.Process") as process_cls,
-            patch("node_api_system_service.psutil.boot_time", return_value=6_400),
+            patch("node_api.system_service.Stats_System", return_value=fake_stats),
+            patch("node_api.system_service.time.time", return_value=10_000),
+            patch("node_api.system_service.psutil.Process") as process_cls,
+            patch("node_api.system_service.psutil.boot_time", return_value=6_400),
             patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", None),
             patch.object(config, "MOD_WEB_BUILD_SHA", None),
             patch.object(config, "INDEV", False),
@@ -8164,7 +8164,7 @@ class NodeApiTests(unittest.TestCase):
             version="v2026.08.01.1",
         )
         with (
-            patch("node_api_system_service.Stats_System", side_effect=RuntimeError("stats unavailable")),
+            patch("node_api.system_service.Stats_System", side_effect=RuntimeError("stats unavailable")),
             patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", deployment),
             patch.object(config, "MOD_WEB_BUILD_SHA", deployment.revision),
         ):
@@ -8177,7 +8177,7 @@ class NodeApiTests(unittest.TestCase):
 
     def test_system_summary_identifies_indev_nodes_without_deployment_metadata(self) -> None:
         with (
-            patch("node_api_system_service.Stats_System", side_effect=RuntimeError("stats unavailable")),
+            patch("node_api.system_service.Stats_System", side_effect=RuntimeError("stats unavailable")),
             patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", None),
             patch.object(config, "MOD_WEB_BUILD_SHA", None),
             patch.object(config, "INDEV", True),
@@ -8415,13 +8415,13 @@ class NodeApiTests(unittest.TestCase):
     ) -> None:
         service = NodeApiService()
         with (
-            patch("node_api_node_service.psutil.Process") as process_cls,
+            patch("node_api.node_service.psutil.Process") as process_cls,
             patch(
-                "node_api_node_service.read_process_restart_record",
+                "node_api.node_service.read_process_restart_record",
                 return_value=RestartRecord(timestamp=1_782_909_000, kind=RestartKind.MANUAL_SYS),
             ) as read_process,
             patch(
-                "node_api_node_service.read_voice_restart_record",
+                "node_api.node_service.read_voice_restart_record",
                 return_value=RestartRecord(timestamp=1_782_912_600, kind=RestartKind.MANUAL_VOICE),
             ),
         ):
@@ -8520,10 +8520,10 @@ class NodeApiTests(unittest.TestCase):
         )
 
         with (
-            patch("node_api_system_service.Stats_System", return_value=fake_stats),
-            patch("node_api_system_service.time.time", return_value=12_000),
-            patch("node_api_system_service.psutil.Process") as process_cls,
-            patch("node_api_system_service.psutil.boot_time", return_value=10_200),
+            patch("node_api.system_service.Stats_System", return_value=fake_stats),
+            patch("node_api.system_service.time.time", return_value=12_000),
+            patch("node_api.system_service.psutil.Process") as process_cls,
+            patch("node_api.system_service.psutil.boot_time", return_value=10_200),
         ):
             process_cls.return_value.create_time.return_value = 11_700
             summary = service.system_monitoring.build_summary()
@@ -8658,7 +8658,7 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock())
             app.__class__ = _ConfigDownloadApp
 
-            with patch("node_api_storage_service.File_Utils.compress", new=AsyncMock(return_value=archive_path)) as compress:
+            with patch("node_api.storage_service.File_Utils.compress", new=AsyncMock(return_value=archive_path)) as compress:
                 service = NodeApiService()
                 response = asyncio.run(
                     service.storage.build_config_root_download_response(
@@ -8804,7 +8804,7 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock(get=Mock(return_value=mod), reload_mods=AsyncMock()))
 
             with patch(
-                "node_api_client_pack.compress_mod_archive_entries",
+                "node_api.client_pack.compress_mod_archive_entries",
                 new=AsyncMock(return_value=archive_path),
             ) as compress:
                 download = asyncio.run(
@@ -8872,7 +8872,7 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(mod_manager)
 
             with patch(
-                "node_api_client_pack.compress_mod_archive_entries",
+                "node_api.client_pack.compress_mod_archive_entries",
                 new=AsyncMock(return_value=archive_path),
             ) as compress:
                 service = NodeApiService()
@@ -8913,7 +8913,7 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(mod_manager)
 
             with patch(
-                "node_api_client_pack.compress_mod_archive_entries",
+                "node_api.client_pack.compress_mod_archive_entries",
                 new=AsyncMock(return_value=archive_path),
             ) as compress:
                 response = asyncio.run(
@@ -9532,7 +9532,7 @@ class NodeApiTests(unittest.TestCase):
 
             with (
                 patch.object(config, "MOD_WEB_SERVER", server),
-                patch("node_api.requests.post", return_value=requests_response) as post_mock,
+                patch("node_api.service.requests.post", return_value=requests_response) as post_mock,
             ):
                 spoken, queue_size = asyncio.run(
                     forwarder.queue_discord_relay_message(

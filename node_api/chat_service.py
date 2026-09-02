@@ -19,11 +19,11 @@ from chat_hub import (
     ChatHub,
     ChatRoomUpdate,
 )
-from node_api_app_state import (
+from .app_state import (
     NodeAppRuntimeSummary,
     NodeAppStateSubscriptionService,
 )
-from node_api_chat import (
+from .chat import (
     NodeChatEndpointSummary,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,

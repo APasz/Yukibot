@@ -16,15 +16,15 @@ from apps.factorio.node_api import (
     NodeFactorioMapExchangeImportRequest,
 )
 from apps.satisfactory.node_api import NodeBlueprintMutationResult
-from node_api_files import (
+from .files import (
     NodeConfigCreateRequest,
     NodeConfigWriteRequest,
     NodeSaveMutationResult,
     NodeSaveRenameRequest,
     NodeSaveUploadTransport,
 )
-from node_api_storage_service import NodeStorageService
-from node_api_route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
+from .storage_service import NodeStorageService
+from .route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
 from node_auth import NodeAccessGrant, NodeApiScope
 
 

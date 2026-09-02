@@ -37,19 +37,21 @@ import apps.minecraft.node_api as minecraft_node_api
 import apps.satisfactory.node_api as satisfactory_node_api
 import apps.sevendays.node_api as sevendays_node_api
 import config
-import node_api_app_operations
-import node_api_app_installer
-import node_api_app_state
-import node_api_chat_service
-import node_api_client_pack
-import node_api_map_service
-import node_api_mod
-import node_api_mod_service
-import node_api_relay
-import node_api_storage_service
-import node_api_system
-import node_api_system_service
-import node_api_node_service
+from . import (
+    app_installer,
+    app_operations,
+    app_state,
+    chat_service,
+    client_pack,
+    map_service,
+    mod as mod_contracts,
+    mod_service,
+    node_service,
+    relay,
+    storage_service,
+    system,
+    system_service,
+)
 from _async_utils import run_blocking
 from _audit import audit_log
 from _file import File_Utils
@@ -92,14 +94,14 @@ from apps.sevendays.node_api import (
     NodeSevenDaysSandboxOptionsState,
 )
 from mod_web_auth import ModWebAuthService, ModWebUser
-from node_api_app_routes import register_app_routes
-from node_api_app_installer_routes import register_app_installer_routes
-from node_api_app_installer import (
+from .app_routes import register_app_routes
+from .app_installer_routes import register_app_installer_routes
+from .app_installer import (
     NodeAppInstallCatalog,
     NodeAppInstallRequest,
     NodeAppInstallStatus,
 )
-from node_api_app_state import (
+from .app_state import (
     _ALL_NODE_STATE_TOPICS,
     NodeAppActivityProviderEntry,
     NodeAppEntry,
@@ -112,35 +114,35 @@ from node_api_app_state import (
     NodeStateTopic,
     _NodeAppPlayerSnapshot,
 )
-from node_api_chat_routes import register_chat_routes
-from node_api_console import (
+from .chat_routes import register_chat_routes
+from .console import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
     NodeConsoleStdoutStreamEvent,
     NodeConsoleStdoutStreamEventKind,
 )
-from node_api_console_routes import register_console_routes
-from node_api_core_routes import register_core_routes
-from node_api_map_routes import register_map_routes
-from node_api_mod_routes import register_mod_routes
-from node_api_node_routes import register_node_management_routes
-from node_api_route_contracts import (
+from .console_routes import register_console_routes
+from .core_routes import register_core_routes
+from .map_routes import register_map_routes
+from .mod_routes import register_mod_routes
+from .node_routes import register_node_management_routes
+from .route_contracts import (
     NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
     NODE_DISCORD_SERVICE_STATE_HEADER,
     DiscordHealthSnapshot,
     DiscordServiceState,
 )
-from node_api_settings import (
+from .settings import (
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
 )
-from node_api_settings_routes import register_settings_routes
-from node_api_storage_routes import register_storage_routes
-from node_api_system import NodeSystemSummary
-from node_api_system_routes import register_system_routes
-from node_api_upload import NodeApiRequestBodyLimitMiddleware
+from .settings_routes import register_settings_routes
+from .storage_routes import register_storage_routes
+from .system import NodeSystemSummary
+from .system_routes import register_system_routes
+from .upload import NodeApiRequestBodyLimitMiddleware
 from node_auth import (
     NodeAccessGrant,
     NodeApiScope,
@@ -253,21 +255,21 @@ class NodeApiService:
         self._acl: Access_Control | None = None
         self._web_auth: ModWebAuthService | None = None
         self._app_footprint_cache: dict[str, NodeAppFootprintSnapshot] = {}
-        self._app_state_cache = node_api_app_state.NodeAppStateCache(
+        self._app_state_cache = app_state.NodeAppStateCache(
             app_entry_ttl_seconds=_NODE_APP_ENTRY_CACHE_TTL_SECONDS,
             live_runtime_ttl_seconds=_LIVE_APP_RUNTIME_CACHE_TTL_SECONDS,
             full_runtime_ttl_seconds=_FULL_APP_RUNTIME_CACHE_TTL_SECONDS,
         )
-        self.system_monitoring = node_api_system_service.NodeSystemMonitoringService(
+        self.system_monitoring = system_service.NodeSystemMonitoringService(
             node_name=lambda: self.node_name,
             http_exception=_http_exception,
             logger=log,
             summary_cache_ttl_seconds=_NODE_SYSTEM_SUMMARY_CACHE_TTL_SECONDS,
-            history_retention_seconds=node_api_system.SYSTEM_HISTORY_RETENTION_SECONDS,
-            history_interval_seconds=node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS,
+            history_retention_seconds=system.SYSTEM_HISTORY_RETENTION_SECONDS,
+            history_interval_seconds=system.SYSTEM_HISTORY_INTERVAL_SECONDS,
             max_log_lines=_NODE_SYSTEM_LOG_MAX_LINES,
         )
-        self.node_management = node_api_node_service.NodeManagementService(
+        self.node_management = node_service.NodeManagementService(
             node_name=lambda: self.node_name,
             http_exception=_http_exception,
             invalidate_state_caches=lambda: self._invalidate_state_caches(),
@@ -277,7 +279,7 @@ class NodeApiService:
         self._presence_stream_connection_count = 0
         self._presence_stream_connection_lock = threading.Lock()
         self._system_history_task: asyncio.Task[None] | None = None
-        self._app_mutations = node_api_app_state.NodeAppMutationService(
+        self._app_mutations = app_state.NodeAppMutationService(
             node_name=lambda: self.node_name,
             invalidate_state_caches=lambda app_name: self._invalidate_state_caches(
                 app_name=app_name
@@ -288,7 +290,7 @@ class NodeApiService:
             ),
             transition_ttl_seconds=_APP_TRANSITION_TTL_SECONDS,
         )
-        self._app_state_subscriptions = node_api_app_state.NodeAppStateSubscriptionService(
+        self._app_state_subscriptions = app_state.NodeAppStateSubscriptionService(
             node_name=lambda: self.node_name,
             is_shutting_down=lambda: self._shutting_down,
             resolve_app=lambda app_name: self._resolve_app(app_name),
@@ -302,7 +304,7 @@ class NodeApiService:
             app_runtime_interval_seconds=_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS,
             node_state_interval_seconds=_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS,
         )
-        self.chat = node_api_chat_service.NodeChatService(
+        self.chat = chat_service.NodeChatService(
             http_exception=_http_exception,
             history_limit=_NODE_CHAT_HISTORY_LIMIT,
             build_live_runtime_summary=lambda app: self.build_live_app_runtime_summary(
@@ -310,26 +312,26 @@ class NodeApiService:
             ),
             app_runtime_subscriptions=self._app_state_subscriptions,
         )
-        self.relay_tts = node_api_relay.NodeRelayTTSService(
+        self.relay_tts = relay.NodeRelayTTSService(
             node_name=lambda: self.node_name,
             http_exception=_http_exception,
             traffic_logger=traffic_log,
         )
-        self._client_packs = node_api_client_pack.NodeClientPackService(
+        self._client_packs = client_pack.NodeClientPackService(
             node_name=lambda: self.node_name,
             invalidate_app_state=lambda app_name: self._invalidate_state_caches(
                 app_name=app_name
             ),
             invalidate_mod_inventory=self._invalidate_mod_inventory,
         )
-        self._app_operations = node_api_app_operations.NodeAppOperationsService(
+        self._app_operations = app_operations.NodeAppOperationsService(
             node_name=lambda: self.node_name,
             require_acl=self._require_acl,
             http_exception=_http_exception,
             runtime_http_exception=self._runtime_http_exception,
             traffic_log=traffic_log,
         )
-        self._app_installer = node_api_app_installer.NodeAppInstallerService(
+        self._app_installer = app_installer.NodeAppInstallerService(
             node_name=lambda: self.node_name,
             invalidate_state_caches=self._invalidate_state_caches,
             scope_policy=lambda: self._require_manager().app_installer_settings(),
@@ -362,7 +364,7 @@ class NodeApiService:
                 traffic_log=traffic_log,
             )
         )
-        self.storage = node_api_storage_service.NodeStorageService(
+        self.storage = storage_service.NodeStorageService(
             node_name=lambda: self.node_name,
             current_acl=lambda: self._acl,
             invalidate_client_pack_content=self._invalidate_client_pack_content,
@@ -370,12 +372,12 @@ class NodeApiService:
             runtime_http_exception=self._runtime_http_exception,
             traffic_log=traffic_log,
         )
-        self.maps = node_api_map_service.NodeMapService(
+        self.maps = map_service.NodeMapService(
             node_name=lambda: self.node_name,
             http_exception=_http_exception,
             logger=log,
         )
-        self._mod_service = node_api_mod_service.NodeModService(
+        self._mod_service = mod_service.NodeModService(
             node_name=lambda: self.node_name,
             require_acl=self._require_acl,
             build_runtime_summary=lambda app: self.build_cached_app_runtime_summary(
@@ -437,7 +439,7 @@ class NodeApiService:
         upload_sources: Sequence[app_node_api.NodeModUploadSource],
         actor_user_id: int,
         placement: ModPlacement,
-    ) -> node_api_mod.NodeModUploadBatchResult:
+    ) -> mod_contracts.NodeModUploadBatchResult:
         return await self.upload_mod_paths(
             app=app,
             upload_sources=upload_sources,
@@ -479,7 +481,7 @@ class NodeApiService:
                     log.exception(
                         "Node API system history sample failed: node=%s", self.node_name
                     )
-                await asyncio.sleep(node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS)
+                await asyncio.sleep(system.SYSTEM_HISTORY_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
 
@@ -1736,7 +1738,7 @@ class NodeApiService:
         self,
         *,
         app: App,
-        action: node_api_app_state.NodeAppMutationAction,
+        action: app_state.NodeAppMutationAction,
         actor_user_id: int,
         friendly_name: str | None = None,
         title_font_preset: str | None = None,
@@ -1758,7 +1760,7 @@ class NodeApiService:
         steam_update_enabled: bool | None = None,
         steam_update_selected_branch: str | None = None,
         update_branch_id: str | None = None,
-    ) -> node_api_app_state.NodeAppMutationResult:
+    ) -> app_state.NodeAppMutationResult:
         result = await self._app_mutations.mutate(
             manager=self._require_manager(),
             acl=self._require_acl(),
@@ -1787,7 +1789,7 @@ class NodeApiService:
             steam_update_selected_branch=steam_update_selected_branch,
             update_branch_id=update_branch_id,
         )
-        if action is node_api_app_state.NodeAppMutationAction.DELETE:
+        if action is app_state.NodeAppMutationAction.DELETE:
             self._invalidate_mod_inventory(app.name)
             audit_log(
                 "node.app.deleted",
@@ -1824,7 +1826,7 @@ class NodeApiService:
         self,
         *,
         app: App,
-        request: node_api_mod.NodeDownloadRequest,
+        request: mod_contracts.NodeDownloadRequest,
     ) -> FileResponse:
         return await self._client_packs.build_mod_download_response(
             app=app,
@@ -1853,7 +1855,7 @@ class NodeApiService:
             operation_id=operation_id,
         )
 
-    async def build_mod_list(self, app: App) -> node_api_mod.NodeModList:
+    async def build_mod_list(self, app: App) -> mod_contracts.NodeModList:
         return await self._mod_service.build_mod_list(app)
 
     async def upload_mod_file(
@@ -1864,7 +1866,7 @@ class NodeApiService:
         upload_name: str | None,
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> node_api_mod.NodeModUploadResult:
+    ) -> mod_contracts.NodeModUploadResult:
         return await self._mod_service.upload_mod_file(
             app=app,
             upload=upload,
@@ -1881,7 +1883,7 @@ class NodeApiService:
         upload_names: Sequence[str] | None,
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> node_api_mod.NodeModUploadBatchResult:
+    ) -> mod_contracts.NodeModUploadBatchResult:
         return await self._mod_service.upload_mod_files(
             app=app,
             uploads=uploads,
@@ -1898,7 +1900,7 @@ class NodeApiService:
         upload_name: str,
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> node_api_mod.NodeModUploadResult:
+    ) -> mod_contracts.NodeModUploadResult:
         return await self._mod_service.upload_mod_path(
             app=app,
             source_path=source_path,
@@ -1915,7 +1917,7 @@ class NodeApiService:
         actor_user_id: int,
         selected_mod_ids: Sequence[str] | None = None,
         version: str | None = None,
-    ) -> node_api_mod.NodeModUploadBatchResult:
+    ) -> mod_contracts.NodeModUploadBatchResult:
         return await self._mod_service.install_mod_from_link(
             app=app,
             url=url,
@@ -1965,7 +1967,7 @@ class NodeApiService:
         mod_name: str,
         actor_user_id: int,
         version: str | None = None,
-    ) -> node_api_mod.NodeModUploadBatchResult:
+    ) -> mod_contracts.NodeModUploadBatchResult:
         return await self._mod_service.update_mod(
             app=app,
             mod_name=mod_name,
@@ -1978,9 +1980,9 @@ class NodeApiService:
         *,
         app: App,
         mod_name: str,
-        action: node_api_mod.NodeModMutationAction,
+        action: mod_contracts.NodeModMutationAction,
         actor_user_id: int,
-    ) -> node_api_mod.NodeModMutationResult:
+    ) -> mod_contracts.NodeModMutationResult:
         return await self._mod_service.mutate_mod(
             app=app,
             mod_name=mod_name,
@@ -1993,7 +1995,7 @@ class NodeApiService:
         *,
         app: App,
         mod_name: str,
-        resolve_request: node_api_mod.NodeModPageResolveRequest,
+        resolve_request: mod_contracts.NodeModPageResolveRequest,
         actor_user_id: int,
     ) -> ModPageDiscovery:
         return await self._mod_service.find_mod_pages(
@@ -2007,7 +2009,7 @@ class NodeApiService:
         self,
         *,
         app: App,
-        discovery_request: node_api_mod.NodeBulkLauncherMetadataRequest,
+        discovery_request: mod_contracts.NodeBulkLauncherMetadataRequest,
         actor_user_id: int,
     ) -> BulkLauncherMetadataDiscovery:
         return await self._mod_service.discover_bulk_mod_metadata(
@@ -2020,9 +2022,9 @@ class NodeApiService:
         self,
         *,
         app: App,
-        apply_request: node_api_mod.NodeBulkLauncherMetadataApplyRequest,
+        apply_request: mod_contracts.NodeBulkLauncherMetadataApplyRequest,
         actor_user_id: int,
-    ) -> node_api_mod.NodeBulkLauncherMetadataApplyResult:
+    ) -> mod_contracts.NodeBulkLauncherMetadataApplyResult:
         return await self._mod_service.apply_bulk_mod_metadata(
             app=app,
             apply_request=apply_request,
@@ -2034,7 +2036,7 @@ class NodeApiService:
         *,
         app: App,
         mod_name: str,
-        resolve_request: node_api_mod.NodeModMetadataResolveRequest,
+        resolve_request: mod_contracts.NodeModMetadataResolveRequest,
         actor_user_id: int,
     ) -> LauncherMetadataDiscovery:
         return await self._mod_service.resolve_mod_launcher_metadata(
@@ -2049,7 +2051,7 @@ class NodeApiService:
         *,
         app: App,
         mod_name: str,
-        fetch_request: node_api_mod.NodeModMetadataFetchRequest,
+        fetch_request: mod_contracts.NodeModMetadataFetchRequest,
         actor_user_id: int,
     ) -> LauncherMetadataResolution:
         return await self._mod_service.fetch_mod_launcher_metadata(
@@ -2064,9 +2066,9 @@ class NodeApiService:
         *,
         app: App,
         mod_name: str,
-        update: node_api_mod.NodeModPropertiesUpdateRequest,
+        update: mod_contracts.NodeModPropertiesUpdateRequest,
         actor_user_id: int,
-    ) -> node_api_mod.NodeModMutationResult:
+    ) -> mod_contracts.NodeModMutationResult:
         return await self._mod_service.update_mod_properties(
             app=app,
             mod_name=mod_name,
@@ -2081,7 +2083,7 @@ class NodeApiService:
         mod_name: str,
         notes: str | None,
         actor_user_id: int,
-    ) -> node_api_mod.NodeModMutationResult:
+    ) -> mod_contracts.NodeModMutationResult:
         return await self._mod_service.update_mod_notes(
             app=app,
             mod_name=mod_name,
@@ -2096,7 +2098,7 @@ class NodeApiService:
         upload_sources: Sequence[app_node_api.NodeModUploadSource],
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> node_api_mod.NodeModUploadBatchResult:
+    ) -> mod_contracts.NodeModUploadBatchResult:
         return await self._mod_service.upload_mod_paths(
             app=app,
             upload_sources=upload_sources,
@@ -2320,7 +2322,7 @@ class NodeApiService:
         self,
         *,
         app: App,
-        update: node_api_mod.NodeClientPackConfigUpdateRequest,
+        update: mod_contracts.NodeClientPackConfigUpdateRequest,
         actor_user_id: int,
     ) -> dict[str, object]:
         return await self._client_packs.update_config(
@@ -2335,7 +2337,7 @@ class NodeApiService:
         self,
         *,
         app: App,
-        update: node_api_mod.NodeClientPackPublishRequest,
+        update: mod_contracts.NodeClientPackPublishRequest,
         actor_user_id: int,
     ) -> dict[str, object]:
         return await self._client_packs.publish_config(
@@ -2385,13 +2387,13 @@ class NodeApiService:
 
     def mod_download_form(
         self, app_name: str, *, subject: str = "web", base_url: str | None = None
-    ) -> node_api_mod.NodeModDownloadForm:
+    ) -> mod_contracts.NodeModDownloadForm:
         token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_DOWNLOAD,),
         )
-        return node_api_mod.NodeModDownloadForm(
+        return mod_contracts.NodeModDownloadForm(
             action_url=f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/mods/download",
             access_token=token,
         )

@@ -15,15 +15,15 @@ from apps._console import (
     execute_console_action,
 )
 from apps._settings import Setting, Settings_Manager
-from node_api_console import (
+from .console import (
     NodeConsoleActionEntry,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleActionParameter,
     NodeConsoleStdoutSnapshot,
 )
-from node_api_route_contracts import HttpExceptionFactory
-from node_api_settings import (
+from .route_contracts import HttpExceptionFactory
+from .settings import (
     NodeSettingChoice,
     NodeSettingEntry,
     NodeSettingList,

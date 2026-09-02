@@ -16,12 +16,12 @@ from _security import Access_Control, Power_Level
 from _sys import Stats_System
 from font_assets import font_assets
 from maintenance import MaintenanceService
-from node_api_app_installer import (
+from .app_installer import (
     NodeAppInstallScopeOption,
     NodeAppInstallerSettingsMutationResult,
     NodeAppInstallerSettingsState,
 )
-from node_api_node import (
+from .node import (
     NodeCapacityMutationResult,
     NodeDiscordSettingsMutationResult,
     NodeDiskEntry,
@@ -29,7 +29,7 @@ from node_api_node import (
     NodeDiskSettingsMutationResult,
     NodeFontSourceSettingsMutationResult,
 )
-from node_api_system import (
+from .system import (
     SYSTEM_ACTION_LABELS,
     NodeRestartRecord,
     NodeRestartScheduleEntry,

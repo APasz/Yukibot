@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from starlette.types import Message, Receive, Scope, Send
 
 from archive_safety import ZipArchiveLimits, validated_zip_entries
-from node_api_upload import NodeApiRequestBodyLimitMiddleware, persist_upload_to_temp
+from node_api.upload import NodeApiRequestBodyLimitMiddleware, persist_upload_to_temp
 from safe_http import PublicAddressResolver, UnsafeOutboundUrlError, validate_public_http_url
 
 

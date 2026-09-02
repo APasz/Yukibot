@@ -174,8 +174,8 @@ from mod_web_theme import (
     apply_mod_web_theme,
     mod_web_badge_class,
 )
-from node_api import NodeApiService
-from node_api_node import (
+from node_api.service import NodeApiService
+from node_api.node import (
     NodeCapacityMutationResult,
     NodeDiskEntry,
     NodeDiskManagementState,
@@ -183,11 +183,11 @@ from node_api_node import (
     NodeDiscordSettingsMutationResult,
     NodeFontSourceSettingsMutationResult,
 )
-from node_api_app_installer import (
+from node_api.app_installer import (
     NodeAppInstallerSettingsMutationResult,
     NodeAppInstallerSettingsState,
 )
-from node_api_app_state import (
+from node_api.app_state import (
     ClientPackFilePreview,
     NodeAppActivityProviderEntry,
     NodeAppEntry,
@@ -202,12 +202,12 @@ from node_api_app_state import (
     required_app_mutation_level,
     required_app_mutation_scope,
 )
-from node_api_chat import (
+from node_api.chat import (
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
 )
-from node_api_console import (
+from node_api.console import (
     NodeConsoleActionEntry,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
@@ -215,7 +215,7 @@ from node_api_console import (
     NodeConsoleStdoutSnapshot,
     NodeConsoleStdoutStreamEvent,
 )
-from node_api_files import (
+from node_api.files import (
     NodeConfigContent,
     NodeConfigEntry,
     NodeConfigList,
@@ -225,7 +225,7 @@ from node_api_files import (
     NodeSaveList,
     NodeSaveMutationResult,
 )
-from node_api_mod import (
+from node_api.mod import (
     NodeBulkLauncherMetadataApplyResult,
     NodeModEntry,
     NodeModList,
@@ -236,15 +236,15 @@ from node_api_mod import (
     NodeModUploadResult,
     required_mod_mutation_level,
 )
-from node_api_relay import RelayTTSQueue
-from node_api_settings import (
+from node_api.relay import RelayTTSQueue
+from node_api.settings import (
     NodeSettingChoice,
     NodeSettingEntry,
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
 )
-from node_api_system import (
+from node_api.system import (
     NodeRestartRecord,
     NodeRestartScheduleEntry,
     NodeRestartScheduleState,

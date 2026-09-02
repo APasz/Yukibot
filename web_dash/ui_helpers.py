@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, Literal
 
 from font_assets import font_assets
-from node_api_route_contracts import (
+from node_api.route_contracts import (
     NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
     NODE_DISCORD_SERVICE_STATE_HEADER,
 )

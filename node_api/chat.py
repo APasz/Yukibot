@@ -15,7 +15,7 @@ from apps._node_api import (
     required_string,
 )
 from chat_hub import ChatEvent
-from node_api_app_state import NodeAppRuntimeSummary
+from .app_state import NodeAppRuntimeSummary
 
 
 @dataclass(frozen=True, slots=True)

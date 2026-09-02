@@ -50,10 +50,10 @@ from font_assets import font_assets
 from maintenance import MaintenanceService
 from mirror_models import MirrorAutoSyncOutcome, MirrorAutoSyncResult
 from mirror_service import MirrorService
-from node_api_route_contracts import DiscordServiceState
-from node_api_system import NodeSystemAction
-from node_api_relay import RemoteRelayTTSForwarder
-from node_api_http import NodeApiHttpService
+from node_api.route_contracts import DiscordServiceState
+from node_api.system import NodeSystemAction
+from node_api.relay import RemoteRelayTTSForwarder
+from node_api.http import NodeApiHttpService
 from online import Online_Tracker
 from relay_notices import (
     BotLifecycleNotice,

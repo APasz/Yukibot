@@ -49,14 +49,14 @@ from apps.minecraft.pack_export import (
     discover_client_pack_kubejs_scripts,
     export_minecraft_pack,
 )
-from node_api_app_state import ClientPackFilePreview
-from node_api_mod import (
+from .app_state import ClientPackFilePreview
+from .mod import (
     NodeClientPackConfigUpdateRequest,
     NodeClientPackPublishRequest,
     NodeDownloadFile,
     NodeDownloadRequest,
 )
-from node_api_route_contracts import HttpExceptionFactory
+from .route_contracts import HttpExceptionFactory
 
 
 class NodeClientPackService:

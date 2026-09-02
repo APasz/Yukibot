@@ -997,7 +997,8 @@ class SettingTests(unittest.TestCase):
             SevenDays_Settings(pointer)
 
             saved = pointer.read_text(encoding="utf-8")
-            self.assertIn('name="UserDataFolder" value="userdata"', saved)
+            expected_userdata_path = (pointer.parent / "userdata").resolve()
+            self.assertIn(f'name="UserDataFolder" value="{expected_userdata_path}"', saved)
 
     def test_sevendays_settings_force_userdata_redirect_when_present_with_other_value(self) -> None:
         property_values = {
@@ -1014,7 +1015,8 @@ class SettingTests(unittest.TestCase):
             settings.save()
 
             saved = pointer.read_text(encoding="utf-8")
-            self.assertIn('name="UserDataFolder" value="userdata"', saved)
+            expected_userdata_path = (pointer.parent / "userdata").resolve()
+            self.assertIn(f'name="UserDataFolder" value="{expected_userdata_path}"', saved)
             self.assertNotIn('name="UserDataFolder" value="/var/lib/7d2d"', saved)
 
     def test_sevendays_world_save_selection_uses_discovered_pairs_and_fresh_generation(self) -> None:

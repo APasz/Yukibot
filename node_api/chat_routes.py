@@ -9,9 +9,9 @@ from fastapi import HTTPException, Request, WebSocket, WebSocketException
 
 from _security import Power_Level
 from apps._app import App
-from node_api_chat import NodeChatInjectionRequest, NodeWebChatRequest
-from node_api_chat_service import NodeChatService
-from node_api_route_contracts import NodeAuthenticatedRouteService
+from .chat import NodeChatInjectionRequest, NodeWebChatRequest
+from .chat_service import NodeChatService
+from .route_contracts import NodeAuthenticatedRouteService
 from node_auth import NodeAccessGrant, NodeApiScope
 
 

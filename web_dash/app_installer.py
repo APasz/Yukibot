@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 
 from _manager import AppInstallInput
-from node_api_app_installer import (
+from node_api.app_installer import (
     NodeAppInstallCatalog,
     NodeAppInstallInputKind,
     NodeAppInstallRecipe,

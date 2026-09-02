@@ -9,8 +9,8 @@ from fastapi import Request
 
 from _audit import audit_log
 from _security import Power_Level
-from node_api_app_installer import NodeAppInstallCatalog, NodeAppInstallRequest, NodeAppInstallStatus
-from node_api_route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
+from .app_installer import NodeAppInstallCatalog, NodeAppInstallRequest, NodeAppInstallStatus
+from .route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
 

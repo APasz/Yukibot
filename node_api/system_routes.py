@@ -7,10 +7,10 @@ from typing import Any, Protocol
 
 from fastapi import Request
 
-from node_api_node_service import NodeManagementService
-from node_api_system import NodeSystemAction
-from node_api_system_service import NodeSystemMonitoringService
-from node_api_route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
+from .node_service import NodeManagementService
+from .system import NodeSystemAction
+from .system_service import NodeSystemMonitoringService
+from .route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 from restart_targets import RestartTarget
 

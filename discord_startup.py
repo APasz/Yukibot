@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import hikari
 
-from node_api_route_contracts import (
+from node_api.route_contracts import (
     DiscordHealthComponentState,
     DiscordHealthSnapshot,
     DiscordServiceState,

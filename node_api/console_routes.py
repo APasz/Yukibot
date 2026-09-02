@@ -10,8 +10,8 @@ from fastapi import HTTPException, Request, WebSocket, WebSocketException, statu
 from _audit import audit_log
 from apps._app import App
 from apps._console import ConsoleAction
-from node_api_console import NodeConsoleActionExecuteRequest, NodeConsoleActionExecutionResult
-from node_api_route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
+from .console import NodeConsoleActionExecuteRequest, NodeConsoleActionExecutionResult
+from .route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
 from node_auth import NodeAccessGrant, NodeApiScope
 
 

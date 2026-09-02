@@ -41,8 +41,8 @@ from apps._node_api import (
     string_tuple,
 )
 from apps._updater import AppUpdateInfo, AppUpdateStatus
-from node_api_route_contracts import DiscordHealthSnapshot, HttpExceptionFactory
-from node_api_system import NodeSystemSummary
+from .route_contracts import DiscordHealthSnapshot, HttpExceptionFactory
+from .system import NodeSystemSummary
 from node_auth import NodeApiScope
 
 _DEFAULT_REMOTE_CONFIG_READ_LEVEL = Power_Level.sudo

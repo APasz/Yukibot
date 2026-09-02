@@ -4,7 +4,7 @@ from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from node_api_route_contracts import DiscordServiceState
+from node_api.route_contracts import DiscordServiceState
 
 from . import avatars as mod_web_avatars
 from .constants import (

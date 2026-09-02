@@ -115,7 +115,7 @@ from currency_conversion import CurrencyConversionBatch, CurrencyRateProvider
 from deployment_metadata import DeploymentMetadata
 from font_assets import FontAssetEntry, font_assets
 from mod_web_auth import ModWebUser
-from node_api_app_state import (
+from node_api.app_state import (
     NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppResourcePointSummary,
@@ -124,29 +124,29 @@ from node_api_app_state import (
     NodeAppTransitionState,
     NodeStateStreamEvent,
 )
-from node_api_chat import (
+from node_api.chat import (
     NodeChatEndpointSummary,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
 )
-from node_api_console import (
+from node_api.console import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
 )
-from node_api_files import (
+from node_api.files import (
     NodeConfigEntry,
     NodeConfigList,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveRootEntry,
 )
-from node_api_node import (
+from node_api.node import (
     NodeDiskEntry,
     NodeDiskManagementState,
 )
-from node_api_settings import NodeSettingChoice, NodeSettingEntry, NodeSettingList
-from node_api_system import (
+from node_api.settings import NodeSettingChoice, NodeSettingEntry, NodeSettingList
+from node_api.system import (
     NodeRestartRecord,
     NodeRestartScheduleState,
     NodeRestartState,
@@ -159,10 +159,10 @@ from node_api_system import (
     NodeSystemSample,
     NodeSystemSummary,
 )
-from node_api_app_state import ClientPackFilePreview, NodeAppMutationAction
-from node_api_app_installer import NodeAppInstallScopeOption, NodeAppInstallerSettingsState
-from node_api_console import NodeConsoleActionEntry, NodeConsoleActionParameter
-from node_api_mod import (
+from node_api.app_state import ClientPackFilePreview, NodeAppMutationAction
+from node_api.app_installer import NodeAppInstallScopeOption, NodeAppInstallerSettingsState
+from node_api.console import NodeConsoleActionEntry, NodeConsoleActionParameter
+from node_api.mod import (
     NodeBulkLauncherMetadataApplyResult,
     NodeModEntry,
     NodeModList,
@@ -171,7 +171,7 @@ from node_api_mod import (
     NodeModSummary,
     NodeModUploadBatchResult,
 )
-from node_api_route_contracts import DiscordServiceState
+from node_api.route_contracts import DiscordServiceState
 from node_auth import NodeApiScope, verify_node_token
 from relay_notices import (
     AppLifecycleNotice,
@@ -3078,11 +3078,11 @@ class ModWebTests(unittest.TestCase):
                     {
                         "timestamp": "2026-07-17T12:34:56.789Z",
                         "level": "ERROR",
-                        "logger": "node_api",
+                        "logger": "node_api.service",
                         "message": "Unable to load <config>",
                         "node_name": "erin",
                         "source": {
-                            "file": "/srv/node_api.py",
+                            "file": "/srv/node_api/service.py",
                             "line": 42,
                             "function": "load_config",
                         },
@@ -3102,7 +3102,7 @@ class ModWebTests(unittest.TestCase):
             markup,
         )
         self.assertIn("Unable to load &lt;config&gt;", markup)
-        self.assertIn("node_api.load_config:42", markup)
+        self.assertIn("node_api.service.load_config:42", markup)
         self.assertIn("Exception: RuntimeError: missing config", markup)
         self.assertIn('class="mod-system-log-event mod-system-log-event-warn"', markup)
         self.assertIn("partial machine event", markup)

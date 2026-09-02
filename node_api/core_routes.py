@@ -10,8 +10,8 @@ from fastapi import Request, WebSocket, status
 from fastapi.responses import Response
 
 from apps._app import App
-from node_api_relay import NodeRelayTTSRequest, NodeRelayTTSService
-from node_api_route_contracts import MappingResponse, NodeAuthenticatedRouteService
+from .relay import NodeRelayTTSRequest, NodeRelayTTSService
+from .route_contracts import MappingResponse, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from mod_web_theme import BadgeTone
-from node_api_route_contracts import DiscordServiceState
+from node_api.route_contracts import DiscordServiceState
 
 from .nicegui_protocols import ModWebNotificationType
 from .runtime_imports import (

@@ -17,7 +17,7 @@ from _utils import Utilities
 from apps._app import App
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
-from node_api_files import (
+from .files import (
     NodeConfigContent,
     NodeConfigEntry,
     NodeConfigList,
@@ -29,7 +29,7 @@ from node_api_files import (
     NodeSaveRootEntry,
     NodeSaveUploadTransport,
 )
-from node_api_upload import persist_upload_to_temp
+from .upload import persist_upload_to_temp
 
 
 class RuntimeHttpExceptionFactory(Protocol):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from node_api_route_contracts import NODE_DISCORD_SERVICE_STATE_HEADER, DiscordServiceState
+from node_api.route_contracts import NODE_DISCORD_SERVICE_STATE_HEADER, DiscordServiceState
 
 from .constants import (
     _REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,

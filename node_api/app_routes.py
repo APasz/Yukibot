@@ -11,12 +11,12 @@ from fastapi.responses import Response
 from _async_utils import run_blocking
 from apps._app import App
 from apps.minecraft.node_api import NodeMinecraftRecipeMutationRequest
-from node_api_app_state import (
+from .app_state import (
     NodeAppMutationAction,
     NodeAppMutationRequest,
     required_app_mutation_scope,
 )
-from node_api_route_contracts import (
+from .route_contracts import (
     HttpExceptionFactory,
     MappingResponse,
     NodeAuthenticatedRouteService,

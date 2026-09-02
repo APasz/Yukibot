@@ -107,7 +107,8 @@ def _tracked_text_paths() -> tuple[Path, ...]:
         sorted(
             path
             for path in paths
-            if path.name in _TEXT_FILE_NAMES or path.suffix in _TEXT_SUFFIXES
+            if (path.name in _TEXT_FILE_NAMES or path.suffix in _TEXT_SUFFIXES)
+            and (REPO_ROOT / path).is_file()
         )
     )
 

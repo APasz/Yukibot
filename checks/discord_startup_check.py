@@ -7,7 +7,7 @@ from collections.abc import Mapping
 import hikari
 
 from discord_startup import DiscordClientStartupSupervisor
-from node_api_route_contracts import DiscordHealthComponentState, DiscordHealthSnapshot, DiscordServiceState
+from node_api.route_contracts import DiscordHealthComponentState, DiscordHealthSnapshot, DiscordServiceState
 
 
 def _discord_unavailable_error(

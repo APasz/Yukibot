@@ -29,7 +29,7 @@ from apps.factorio.node_api import (
     NodeModUpdateRequest,
 )
 from apps.minecraft.pack_export import PackFormat, PackPurpose
-from node_api_mod import (
+from .mod import (
     NodeBulkLauncherMetadataApplyRequest,
     NodeBulkLauncherMetadataApplyResult,
     NodeBulkLauncherMetadataRequest,
@@ -46,7 +46,7 @@ from node_api_mod import (
     NodeModPropertiesUpdateRequest,
     NodeModUploadBatchResult,
 )
-from node_api_route_contracts import NodeAuthenticatedRouteService
+from .route_contracts import NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
 

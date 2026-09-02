@@ -17,7 +17,7 @@ import config
 from _manager import AppInstallInput, AppInstanceCreateRequest, AppInstanceCreationPlan, AppSteamInstallRecipe
 from _security import Power_Level
 from apps._config import AppVersion, SteamUpdateBranch, SteamUpdateConfig, SteamUpdateLogin
-from node_api_app_installer import (
+from node_api.app_installer import (
     NodeAppInstallCatalog,
     NodeAppInstallRequest,
     NodeAppInstallScopeOption,
@@ -28,8 +28,8 @@ from node_api_app_installer import (
     NodeAppInstallStatus,
     _NodeAppInstallJob,
 )
-from node_api_app_installer_routes import register_app_installer_routes
-from node_api_node_routes import register_node_management_routes
+from node_api.app_installer_routes import register_app_installer_routes
+from node_api.node_routes import register_node_management_routes
 from node_auth import NodeAccessGrant, NodeApiScope
 
 
@@ -198,7 +198,7 @@ class AppInstallerCheck(unittest.TestCase):
             for index in range(3)
         }
 
-        with patch("node_api_app_installer._INSTALL_COMPLETED_JOB_LIMIT", 2):
+        with patch("node_api.app_installer._INSTALL_COMPLETED_JOB_LIMIT", 2):
             with service._lock:
                 service._prune_completed_jobs_locked()
 
@@ -255,8 +255,8 @@ class AppInstallerCheck(unittest.TestCase):
                 )
                 with (
                     patch.object(config, "DIR_LOG", root / "logs"),
-                    patch("node_api_app_installer.load_steam_update_branches", new=branch_loader),
-                    patch("node_api_app_installer.resolve_steamcmd_command_prefix", return_value=("steamcmd",)),
+                    patch("node_api.app_installer.load_steam_update_branches", new=branch_loader),
+                    patch("node_api.app_installer.resolve_steamcmd_command_prefix", return_value=("steamcmd",)),
                 ):
                     catalog = await service.build_catalog(manager=manager)
             return catalog, branch_loader
@@ -329,7 +329,7 @@ class AppInstallerCheck(unittest.TestCase):
                     (cwd / "installed.txt").write_text("ok", encoding="utf-8")
                     return True
 
-                with patch("node_api_app_installer.run_steamcmd_command", new=_fake_steamcmd):
+                with patch("node_api.app_installer.run_steamcmd_command", new=_fake_steamcmd):
                     queued = await service.start_install(
                         manager=manager,
                         acl=acl,
@@ -419,7 +419,7 @@ class AppInstallerCheck(unittest.TestCase):
                     del command, cwd, on_output
                     raise RuntimeError("steam-secret beta-secret admin-secret")
 
-                with patch("node_api_app_installer.run_steamcmd_command", new=_failed_steamcmd):
+                with patch("node_api.app_installer.run_steamcmd_command", new=_failed_steamcmd):
                     queued = await service.start_install(
                         manager=manager,
                         acl=acl,
@@ -461,9 +461,9 @@ class AppInstallerCheck(unittest.TestCase):
                     return False
 
                 with (
-                    patch("node_api_app_installer.run_steamcmd_command", new=fake_steamcmd),
+                    patch("node_api.app_installer.run_steamcmd_command", new=fake_steamcmd),
                     patch(
-                        "node_api_app_installer.run_blocking",
+                        "node_api.app_installer.run_blocking",
                         new=AsyncMock(side_effect=RuntimeError("cleanup failed")),
                     ),
                 ):
@@ -525,7 +525,7 @@ class AppInstallerCheck(unittest.TestCase):
                     return True
 
                 manager.load_instance = _loading_instance  # type: ignore[method-assign]
-                with patch("node_api_app_installer.run_steamcmd_command", new=_fake_steamcmd):
+                with patch("node_api.app_installer.run_steamcmd_command", new=_fake_steamcmd):
                     queued = await service.start_install(
                         manager=manager,
                         acl=acl,
@@ -594,7 +594,7 @@ class AppInstallerCheck(unittest.TestCase):
                     (cwd / "installed.txt").write_text("ok", encoding="utf-8")
                     return True
 
-                with patch("node_api_app_installer.run_steamcmd_command", new=_blocked_steamcmd):
+                with patch("node_api.app_installer.run_steamcmd_command", new=_blocked_steamcmd):
                     queued = await service.start_install(
                         manager=first_manager,
                         acl=acl,
@@ -655,7 +655,7 @@ class AppInstallerCheck(unittest.TestCase):
                     await client.get("/api/app-installer/jobs/job-1"),
                 )
 
-        with patch("node_api_app_installer_routes.audit_log") as audit:
+        with patch("node_api.app_installer_routes.audit_log") as audit:
             catalog_response, start_response, status_response = asyncio.run(_request_routes())
 
         self.assertEqual(catalog_response.status_code, 200)

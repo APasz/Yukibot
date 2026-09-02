@@ -8,8 +8,8 @@ from typing import Any, Protocol
 from fastapi import Request
 
 from apps._app import App
-from node_api_route_contracts import MappingResponse, NodeAuthenticatedRouteService
-from node_api_settings import NodeSettingMutationResult, NodeSettingWriteRequest
+from .route_contracts import MappingResponse, NodeAuthenticatedRouteService
+from .settings import NodeSettingMutationResult, NodeSettingWriteRequest
 from node_auth import NodeAccessGrant, NodeApiScope
 
 

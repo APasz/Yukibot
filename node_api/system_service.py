@@ -16,7 +16,7 @@ import config
 from _manager import App_Manager, app_scope_from_name
 from _sys import Stats_System, StatsDiskSnapshot, StatsSystemSnapshot
 from deployment_metadata import DeploymentMetadata
-from node_api_system import (
+from .system import (
     NodeSystemDiskSummary,
     NodeSystemHistory,
     NodeSystemLogCatalog,

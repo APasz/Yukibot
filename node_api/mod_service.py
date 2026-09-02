@@ -16,7 +16,7 @@ from fastapi import HTTPException, UploadFile
 import apps._node_api as app_node_api
 import apps.factorio.node_api as factorio_node_api
 import config
-import node_api_mod
+from . import mod as mod_contracts
 from _async_utils import run_blocking
 from _file import File_Utils
 from _mod_ops import RunningAppModMutationError, require_app_stopped_for_mod_mutation
@@ -53,8 +53,8 @@ from apps.factorio.node_api import (
     NodeModUpdateCheckResult,
     NodeModUpdateDependency,
 )
-from node_api_app_state import NodeAppRuntimeSummary
-from node_api_upload import persist_upload_to_temp, validated_upload_filename
+from .app_state import NodeAppRuntimeSummary
+from .upload import persist_upload_to_temp, validated_upload_filename
 
 _MOD_INVENTORY_CACHE_TTL_SECONDS = 5.0
 _BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS = 60.0 * 60.0
@@ -74,7 +74,7 @@ class ModUploadPaths(Protocol):
         upload_sources: Sequence[app_node_api.NodeModUploadSource],
         actor_user_id: int,
         placement: ModPlacement,
-    ) -> node_api_mod.NodeModUploadBatchResult: ...
+    ) -> mod_contracts.NodeModUploadBatchResult: ...
 
 
 def _http_exception(status_code: int, detail: str) -> HTTPException:
@@ -107,10 +107,10 @@ class NodeModService:
         self._invalidate_client_pack_content = invalidate_client_pack_content
         self._invalidate_mod_inventory = invalidate_mod_inventory
         self._upload_mod_paths_callback = upload_mod_paths
-        self._inventory_cache: dict[str, node_api_mod.TimedModInventory] = {}
+        self._inventory_cache: dict[str, mod_contracts.TimedModInventory] = {}
         self._inventory_cache_locks: dict[str, asyncio.Lock] = {}
         self._bulk_metadata_tasks: dict[tuple[str, uuid.UUID], asyncio.Task[object]] = {}
-        self._bulk_metadata_discoveries: dict[tuple[str, uuid.UUID], node_api_mod.CachedBulkMetadataDiscovery] = {}
+        self._bulk_metadata_discoveries: dict[tuple[str, uuid.UUID], mod_contracts.CachedBulkMetadataDiscovery] = {}
 
     def invalidate_inventory(self, app_name: str) -> None:
         self._inventory_cache.pop(app_name.casefold(), None)
@@ -193,7 +193,7 @@ class NodeModService:
                 key=lambda key: self._bulk_metadata_discoveries[key].captured_at_seconds,
             )
             self._bulk_metadata_discoveries.pop(oldest_key, None)
-        self._bulk_metadata_discoveries[cache_key] = node_api_mod.CachedBulkMetadataDiscovery(
+        self._bulk_metadata_discoveries[cache_key] = mod_contracts.CachedBulkMetadataDiscovery(
             captured_at_seconds=now,
             discovery=discovery,
         )
@@ -213,7 +213,7 @@ class NodeModService:
             raise _http_exception(409, "Bulk metadata discovery expired; run discovery again.")
         return cached.discovery
 
-    async def build_mod_list(self, app: App) -> node_api_mod.NodeModList:
+    async def build_mod_list(self, app: App) -> mod_contracts.NodeModList:
         inventory, app_stats = await asyncio.gather(
             self._cached_mod_inventory(app),
             self._build_runtime_summary(app),
@@ -224,7 +224,7 @@ class NodeModService:
             app.name,
             len(inventory.mods),
         )
-        return node_api_mod.NodeModList(
+        return mod_contracts.NodeModList(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self._node_name(),
@@ -233,7 +233,7 @@ class NodeModService:
             app_stats=app_stats,
         )
 
-    async def _cached_mod_inventory(self, app: App) -> node_api_mod.TimedModInventory:
+    async def _cached_mod_inventory(self, app: App) -> mod_contracts.TimedModInventory:
         app_key = app.name.casefold()
         now = time.monotonic()
         cached = self._inventory_cache.get(app_key)
@@ -247,9 +247,9 @@ class NodeModService:
                 return cached
             await app.has_mod_manager.reload_mods()
             mods = tuple(app.has_mod_manager.list_mods())
-            inventory = node_api_mod.TimedModInventory(
+            inventory = mod_contracts.TimedModInventory(
                 captured_at_seconds=time.monotonic(),
-                summary=node_api_mod.NodeModSummary(
+                summary=mod_contracts.NodeModSummary(
                     total_count=len(mods),
                     enabled_count=sum(1 for mod in mods if mod.cfg.placement is ModPlacement.SERVER_ENABLED),
                     disabled_count=sum(1 for mod in mods if mod.cfg.placement is ModPlacement.SERVER_DISABLED),
@@ -272,7 +272,7 @@ class NodeModService:
         upload_name: str | None,
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> node_api_mod.NodeModUploadResult:
+    ) -> mod_contracts.NodeModUploadResult:
         result = await self.upload_mod_files(
             app=app,
             uploads=[upload],
@@ -290,7 +290,7 @@ class NodeModService:
         upload_names: Sequence[str] | None,
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> node_api_mod.NodeModUploadBatchResult:
+    ) -> mod_contracts.NodeModUploadBatchResult:
         upload_sources = self._resolve_mod_upload_requests(uploads=uploads, upload_names=upload_names)
         temp_paths: list[Path] = []
         try:
@@ -322,7 +322,7 @@ class NodeModService:
         upload_name: str,
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> node_api_mod.NodeModUploadResult:
+    ) -> mod_contracts.NodeModUploadResult:
         result = await self.upload_mod_paths(
             app=app,
             upload_sources=[app_node_api.NodeModUploadSource(source_path=source_path, upload_name=upload_name)],
@@ -339,7 +339,7 @@ class NodeModService:
         actor_user_id: int,
         selected_mod_ids: Sequence[str] | None = None,
         version: str | None = None,
-    ) -> node_api_mod.NodeModUploadBatchResult:
+    ) -> mod_contracts.NodeModUploadBatchResult:
         return await factorio_node_api.install_mod_from_link(
             app=app,
             url=url,
@@ -419,7 +419,7 @@ class NodeModService:
         mod_name: str,
         actor_user_id: int,
         version: str | None = None,
-    ) -> node_api_mod.NodeModUploadBatchResult:
+    ) -> mod_contracts.NodeModUploadBatchResult:
         update_result: FactorioModUpdateApplyResult = await factorio_node_api.update_mod(
             app=app,
             node_name=self._node_name(),
@@ -448,7 +448,7 @@ class NodeModService:
             if dependency_change_count == 0
             else f" Updated {dependency_change_count} required dependenc{'ies' if dependency_change_count != 1 else 'y'}."
         )
-        return node_api_mod.NodeModUploadBatchResult(
+        return mod_contracts.NodeModUploadBatchResult(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self._node_name(),
@@ -506,7 +506,7 @@ class NodeModService:
         upload_sources: Sequence[app_node_api.NodeModUploadSource],
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-    ) -> node_api_mod.NodeModUploadBatchResult:
+    ) -> mod_contracts.NodeModUploadBatchResult:
         if app.mods is None:
             raise _http_exception(409, f"{app.friendly} does not support mods.")
         resolved_upload_sources: tuple[app_node_api.NodeModUploadSource, ...] = self._validated_mod_upload_sources(
@@ -540,12 +540,12 @@ class NodeModService:
             ",".join(mod.name for mod in uploaded_mods),
             actor_user_id,
         )
-        mod_entries: tuple[node_api_mod.NodeModEntry, ...] = tuple(
+        mod_entries: tuple[mod_contracts.NodeModEntry, ...] = tuple(
             self._mod_entry(uploaded_mod) for uploaded_mod in uploaded_mods
         )
         self._invalidate_client_pack_content(app)
         self._invalidate_mod_inventory(app.name)
-        return node_api_mod.NodeModUploadBatchResult(
+        return mod_contracts.NodeModUploadBatchResult(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self._node_name(),
@@ -558,26 +558,26 @@ class NodeModService:
         *,
         app: App,
         mod_name: str,
-        action: node_api_mod.NodeModMutationAction,
+        action: mod_contracts.NodeModMutationAction,
         actor_user_id: int,
-    ) -> node_api_mod.NodeModMutationResult:
+    ) -> mod_contracts.NodeModMutationResult:
         try:
             manager: Mod_Manager = app.has_mod_manager
             await manager.reload_mods()
             mod: Mod = _get_mod_or_404(manager, mod_name)
             override_protected_mod: bool = mod.is_protected and action in {
-                node_api_mod.NodeModMutationAction.ENABLE,
-                node_api_mod.NodeModMutationAction.DISABLE,
-                node_api_mod.NodeModMutationAction.DELETE,
+                mod_contracts.NodeModMutationAction.ENABLE,
+                mod_contracts.NodeModMutationAction.DISABLE,
+                mod_contracts.NodeModMutationAction.DELETE,
             }
             await self._require_acl().perm_check(
                 actor_user_id,
-                node_api_mod.required_mod_mutation_level(action, is_protected=override_protected_mod),
+                mod_contracts.required_mod_mutation_level(action, is_protected=override_protected_mod),
             )
             result_message: str
-            result_mod_entry: node_api_mod.NodeModEntry | None
+            result_mod_entry: mod_contracts.NodeModEntry | None
 
-            if action is node_api_mod.NodeModMutationAction.ENABLE:
+            if action is mod_contracts.NodeModMutationAction.ENABLE:
                 if not mod.server_loadable:
                     raise _http_exception(
                         409,
@@ -591,7 +591,7 @@ class NodeModService:
                 )
                 result_message = f"Enabled {updated_mod.friendly}."
                 result_mod_entry = self._mod_entry(updated_mod)
-            elif action is node_api_mod.NodeModMutationAction.DISABLE:
+            elif action is mod_contracts.NodeModMutationAction.DISABLE:
                 if not mod.server_loadable:
                     raise _http_exception(
                         409,
@@ -605,14 +605,14 @@ class NodeModService:
                 )
                 result_message = f"Disabled {updated_mod.friendly}."
                 result_mod_entry = self._mod_entry(updated_mod)
-            elif action is node_api_mod.NodeModMutationAction.TOGGLE_COREMOD:
+            elif action is mod_contracts.NodeModMutationAction.TOGGLE_COREMOD:
                 if mod.is_builtin:
                     raise _http_exception(409, "Built-in mods cannot be converted to or from coremods.")
                 updated_mod = await manager.set_coremod(mod, not mod.is_coremod_type)
                 coremod_text: Literal["enabled", "disabled"] = "enabled" if updated_mod.is_coremod_type else "disabled"
                 result_message = f"Coremod {coremod_text} for {updated_mod.friendly}."
                 result_mod_entry = self._mod_entry(updated_mod)
-            elif action is node_api_mod.NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
+            elif action is mod_contracts.NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
                 reason: ModDownloadBlockReason | None = (
                     ModDownloadBlockReason.OTHER if mod.downloadable else mod.default_download_block_reason()
                 )
@@ -622,7 +622,7 @@ class NodeModService:
                 )
                 result_message = f"{updated_mod.friendly} is now {blocked_text}."
                 result_mod_entry = self._mod_entry(updated_mod)
-            elif action is node_api_mod.NodeModMutationAction.DELETE:
+            elif action is mod_contracts.NodeModMutationAction.DELETE:
                 require_app_stopped_for_mod_mutation(app)
                 await manager.remove(
                     mod,
@@ -645,7 +645,7 @@ class NodeModService:
         )
         self._invalidate_client_pack_content(app)
         self._invalidate_mod_inventory(app.name)
-        return node_api_mod.NodeModMutationResult(
+        return mod_contracts.NodeModMutationResult(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self._node_name(),
@@ -660,7 +660,7 @@ class NodeModService:
         *,
         app: App,
         mod_name: str,
-        resolve_request: node_api_mod.NodeModPageResolveRequest,
+        resolve_request: mod_contracts.NodeModPageResolveRequest,
         actor_user_id: int,
     ) -> ModPageDiscovery:
         manager: Mod_Manager = app.has_mod_manager
@@ -668,7 +668,7 @@ class NodeModService:
         mod: Mod = _get_mod_or_404(manager, mod_name)
         await self._require_acl().perm_check(
             actor_user_id,
-            node_api_mod.required_mod_mutation_level(node_api_mod.NodeModMutationAction.UPDATE_PROPERTIES),
+            mod_contracts.required_mod_mutation_level(mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES),
         )
         version = app.cfg.version
         try:
@@ -690,7 +690,7 @@ class NodeModService:
     def _bulk_launcher_metadata_targets(
         *,
         manager: Mod_Manager,
-        discovery_request: node_api_mod.NodeBulkLauncherMetadataRequest,
+        discovery_request: mod_contracts.NodeBulkLauncherMetadataRequest,
     ) -> tuple[BulkLauncherMetadataTarget, ...]:
         mods = (
             tuple(_get_mod_or_404(manager, mod_name) for mod_name in discovery_request.mod_names)
@@ -732,14 +732,14 @@ class NodeModService:
         self,
         *,
         app: App,
-        discovery_request: node_api_mod.NodeBulkLauncherMetadataRequest,
+        discovery_request: mod_contracts.NodeBulkLauncherMetadataRequest,
         actor_user_id: int,
     ) -> BulkLauncherMetadataDiscovery:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
         await self._require_acl().perm_check(
             actor_user_id,
-            node_api_mod.required_mod_mutation_level(node_api_mod.NodeModMutationAction.UPDATE_PROPERTIES),
+            mod_contracts.required_mod_mutation_level(mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES),
         )
         targets = self._bulk_launcher_metadata_targets(
             manager=manager,
@@ -780,14 +780,14 @@ class NodeModService:
         self,
         *,
         app: App,
-        apply_request: node_api_mod.NodeBulkLauncherMetadataApplyRequest,
+        apply_request: mod_contracts.NodeBulkLauncherMetadataApplyRequest,
         actor_user_id: int,
-    ) -> node_api_mod.NodeBulkLauncherMetadataApplyResult:
+    ) -> mod_contracts.NodeBulkLauncherMetadataApplyResult:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
         await self._require_acl().perm_check(
             actor_user_id,
-            node_api_mod.required_mod_mutation_level(node_api_mod.NodeModMutationAction.UPDATE_PROPERTIES),
+            mod_contracts.required_mod_mutation_level(mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES),
         )
         started_at = time.monotonic()
         type_selection_names = frozenset(apply_request.apply_suggested_type_mod_names)
@@ -876,7 +876,7 @@ class NodeModService:
             (app.name, apply_request.discovery_operation_id),
             None,
         )
-        return node_api_mod.NodeBulkLauncherMetadataApplyResult(
+        return mod_contracts.NodeBulkLauncherMetadataApplyResult(
             discovery=discovery,
             applied_mod_names=tuple(applied_mod_names),
             applied_type_mod_names=tuple(applied_type_mod_names),
@@ -887,7 +887,7 @@ class NodeModService:
         *,
         app: App,
         mod_name: str,
-        resolve_request: node_api_mod.NodeModMetadataResolveRequest,
+        resolve_request: mod_contracts.NodeModMetadataResolveRequest,
         actor_user_id: int,
     ) -> LauncherMetadataDiscovery:
         manager: Mod_Manager = app.has_mod_manager
@@ -895,7 +895,7 @@ class NodeModService:
         mod: Mod = _get_mod_or_404(manager, mod_name)
         await self._require_acl().perm_check(
             actor_user_id,
-            node_api_mod.required_mod_mutation_level(node_api_mod.NodeModMutationAction.UPDATE_PROPERTIES),
+            mod_contracts.required_mod_mutation_level(mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES),
         )
         version = app.cfg.version
         try:
@@ -917,7 +917,7 @@ class NodeModService:
         *,
         app: App,
         mod_name: str,
-        fetch_request: node_api_mod.NodeModMetadataFetchRequest,
+        fetch_request: mod_contracts.NodeModMetadataFetchRequest,
         actor_user_id: int,
     ) -> LauncherMetadataResolution:
         manager: Mod_Manager = app.has_mod_manager
@@ -925,7 +925,7 @@ class NodeModService:
         mod: Mod = _get_mod_or_404(manager, mod_name)
         await self._require_acl().perm_check(
             actor_user_id,
-            node_api_mod.required_mod_mutation_level(node_api_mod.NodeModMutationAction.UPDATE_PROPERTIES),
+            mod_contracts.required_mod_mutation_level(mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES),
         )
         try:
             return await resolve_launcher_metadata_resolution(
@@ -943,15 +943,15 @@ class NodeModService:
         *,
         app: App,
         mod_name: str,
-        update: node_api_mod.NodeModPropertiesUpdateRequest,
+        update: mod_contracts.NodeModPropertiesUpdateRequest,
         actor_user_id: int,
-    ) -> node_api_mod.NodeModMutationResult:
+    ) -> mod_contracts.NodeModMutationResult:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
         mod: Mod = _get_mod_or_404(manager, mod_name)
         await self._require_acl().perm_check(
             actor_user_id,
-            node_api_mod.required_mod_mutation_level(node_api_mod.NodeModMutationAction.UPDATE_PROPERTIES),
+            mod_contracts.required_mod_mutation_level(mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES),
         )
         if mod.is_builtin:
             raise _http_exception(409, "Built-in mod properties cannot be changed.")
@@ -983,12 +983,12 @@ class NodeModService:
         )
         self._invalidate_client_pack_content(app)
         self._invalidate_mod_inventory(app.name)
-        return node_api_mod.NodeModMutationResult(
+        return mod_contracts.NodeModMutationResult(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self._node_name(),
             mod_name=mod.name,
-            action=node_api_mod.NodeModMutationAction.UPDATE_PROPERTIES,
+            action=mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES,
             message=f"Updated properties for {updated_mod.friendly}.",
             mod=self._mod_entry(updated_mod),
         )
@@ -1000,7 +1000,7 @@ class NodeModService:
         mod_name: str,
         notes: str | None,
         actor_user_id: int,
-    ) -> node_api_mod.NodeModMutationResult:
+    ) -> mod_contracts.NodeModMutationResult:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
         mod: Mod = _get_mod_or_404(manager, mod_name)
@@ -1010,12 +1010,12 @@ class NodeModService:
         except ValueError as xcp:
             raise _http_exception(409, str(xcp)) from xcp
         self._invalidate_mod_inventory(app.name)
-        return node_api_mod.NodeModMutationResult(
+        return mod_contracts.NodeModMutationResult(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self._node_name(),
             mod_name=mod.name,
-            action=node_api_mod.NodeModMutationAction.UPDATE_NOTES,
+            action=mod_contracts.NodeModMutationAction.UPDATE_NOTES,
             message=f"Updated notes for {updated_mod.friendly}.",
             mod=self._mod_entry(updated_mod),
         )
@@ -1025,19 +1025,19 @@ class NodeModService:
         *,
         uploads: Sequence[UploadFile],
         upload_names: Sequence[str] | None,
-    ) -> tuple[node_api_mod.ResolvedModUploadFile, ...]:
+    ) -> tuple[mod_contracts.ResolvedModUploadFile, ...]:
         if not uploads:
             raise _http_exception(400, "At least one mod upload is required.")
         if upload_names is not None and len(upload_names) != len(uploads):
             raise _http_exception(400, "Mod upload filenames must match the number of uploads.")
-        resolved_uploads: list[node_api_mod.ResolvedModUploadFile] = []
+        resolved_uploads: list[mod_contracts.ResolvedModUploadFile] = []
         for index, upload in enumerate(uploads):
             resolved_upload_name = self._validated_upload_filename(
                 (upload.filename or "") if upload_names is None else upload_names[index],
                 kind="Mod",
             )
             resolved_uploads.append(
-                node_api_mod.ResolvedModUploadFile(
+                mod_contracts.ResolvedModUploadFile(
                     upload=upload,
                     upload_name=resolved_upload_name,
                 )
@@ -1068,18 +1068,18 @@ class NodeModService:
         return tuple(resolved_sources)
 
     @staticmethod
-    def _mod_upload_message(*, app: App, mods: Sequence[node_api_mod.NodeModEntry]) -> str:
+    def _mod_upload_message(*, app: App, mods: Sequence[mod_contracts.NodeModEntry]) -> str:
         if len(mods) == 1:
             return f"Uploaded mod `{mods[0].friendly}` for {app.friendly}."
         return f"Uploaded {len(mods)} mods for {app.friendly}."
 
     @staticmethod
     def _single_mod_upload_result(
-        result: node_api_mod.NodeModUploadBatchResult,
-    ) -> node_api_mod.NodeModUploadResult:
+        result: mod_contracts.NodeModUploadBatchResult,
+    ) -> mod_contracts.NodeModUploadResult:
         if len(result.mods) != 1:
             raise ValueError("Exactly one uploaded mod is required.")
-        return node_api_mod.NodeModUploadResult(
+        return mod_contracts.NodeModUploadResult(
             app_name=result.app_name,
             app_friendly=result.app_friendly,
             node=result.node,
@@ -1088,9 +1088,9 @@ class NodeModService:
         )
 
     @staticmethod
-    def _mod_entry(mod: Mod) -> node_api_mod.NodeModEntry:
+    def _mod_entry(mod: Mod) -> mod_contracts.NodeModEntry:
         size_bytes = File_Utils.pointer_size(mod.path)
-        return node_api_mod.NodeModEntry(
+        return mod_contracts.NodeModEntry(
             name=mod.name,
             friendly=mod.friendly,
             client_path=str(mod.client_path),

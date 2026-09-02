@@ -14,8 +14,8 @@ from _async_utils import run_blocking
 from apps._app import App
 from map_annotations import MapAnnotationDraft
 from mod_web_auth import ModWebAuthService, ModWebUser
-from node_api_map_service import NodeMapService, NodeMapProxyResponse
-from node_api_route_contracts import NodeAuthenticatedRouteService
+from .map_service import NodeMapService, NodeMapProxyResponse
+from .route_contracts import NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
 _MAP_SOURCE_HEADER_NAME = "X-Yukibot-Map-Source"
