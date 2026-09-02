@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -22,6 +22,7 @@ from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
 
 log = logging.getLogger(__name__)
 _RELAY_TTS_FORWARD_TTL_SECONDS = 60
+
 
 class RelayTTSQueue(Protocol):
     async def queue_relay_message(
@@ -82,6 +83,77 @@ class NodeRelayTTSResult:
         }
 
 
+class NodeRelayTTSService:
+    """Queues local relay TTS requests and records their node-level outcome."""
+
+    def __init__(
+        self,
+        *,
+        node_name: Callable[[], str],
+        http_exception: Callable[[int, str], Exception],
+        traffic_logger: logging.Logger,
+    ) -> None:
+        self._node_name = node_name
+        self._http_exception = http_exception
+        self._traffic_log = traffic_logger
+        self._queue: RelayTTSQueue | None = None
+
+    def set_queue(self, queue: RelayTTSQueue | None) -> None:
+        self._queue = queue
+
+    async def queue_request(
+        self,
+        relay_request: NodeRelayTTSRequest,
+    ) -> NodeRelayTTSResult:
+        queue = self._queue
+        if queue is None:
+            log.warning(
+                "Node API relay TTS unavailable: node=%s source_app=%s player=%s",
+                self._node_name(),
+                relay_request.source_app,
+                relay_request.player_name,
+            )
+            raise self._http_exception(503, "Relay TTS is not available on this node.")
+
+        try:
+            spoken, queue_size = await queue.queue_relay_message(
+                relay_request.guild_id,
+                relay_request.channel_id,
+                relay_request.message_id,
+                relay_request.text,
+                user_id=relay_request.user_id,
+            )
+        except (RuntimeError, ValueError) as xcp:
+            reason = str(xcp)
+            self._traffic_log.info(
+                "Node API relay TTS skipped: node=%s source_app=%s player=%s guild=%s channel=%s message_id=%s reason=%s",
+                self._node_name(),
+                relay_request.source_app,
+                relay_request.player_name,
+                relay_request.guild_id,
+                relay_request.channel_id,
+                relay_request.message_id,
+                reason,
+            )
+            return NodeRelayTTSResult(queued=False, reason=reason)
+
+        self._traffic_log.info(
+            "Node API relay TTS queued: node=%s source_app=%s player=%s guild=%s channel=%s message_id=%s queue_size=%s",
+            self._node_name(),
+            relay_request.source_app,
+            relay_request.player_name,
+            relay_request.guild_id,
+            relay_request.channel_id,
+            relay_request.message_id,
+            queue_size,
+        )
+        return NodeRelayTTSResult(
+            queued=True,
+            spoken=spoken,
+            queue_size=queue_size,
+        )
+
+
 class RemoteRelayTTSForwarder:
     _BOT_CONFIGURATION_PATH = Path("configuration.json")
     _TARGET_PROFILE = config.BotProfileName.YUKI
@@ -89,7 +161,9 @@ class RemoteRelayTTSForwarder:
     def __init__(self) -> None:
         self._bot_configuration_path = self._BOT_CONFIGURATION_PATH
 
-    def voice_target(self, guild_id: hikari.Snowflakeish) -> config.VoiceTargetConfig | None:
+    def voice_target(
+        self, guild_id: hikari.Snowflakeish
+    ) -> config.VoiceTargetConfig | None:
         del guild_id
         return None
 
@@ -172,7 +246,9 @@ class RemoteRelayTTSForwarder:
         for snapshot in registry.values():
             if snapshot.profile.bot_profile is self._TARGET_PROFILE:
                 return snapshot
-        raise RuntimeError(f"No known bot metadata entry exists for target profile {self._TARGET_PROFILE.value!r}.")
+        raise RuntimeError(
+            f"No known bot metadata entry exists for target profile {self._TARGET_PROFILE.value!r}."
+        )
 
     def _load_known_bot_registry(self) -> dict[str, config.BotMetadataSnapshot]:
         snapshots: dict[str, config.BotMetadataSnapshot] = {}
@@ -180,7 +256,11 @@ class RemoteRelayTTSForwarder:
             try:
                 bot_config = config.load_bot_configuration(self._bot_configuration_path)
             except (OSError, ValueError) as xcp:
-                log.warning("Relay TTS target lookup failed to read %s: %s", self._bot_configuration_path, xcp)
+                log.warning(
+                    "Relay TTS target lookup failed to read %s: %s",
+                    self._bot_configuration_path,
+                    xcp,
+                )
             else:
                 snapshots.update(bot_config.known_bots)
 
@@ -196,12 +276,18 @@ class RemoteRelayTTSForwarder:
                         }
                     )
                 except (OSError, ValueError, TypeError) as xcp:
-                    log.warning("Relay TTS target lookup failed to read bot registry cache %s: %s", cache_path, xcp)
+                    log.warning(
+                        "Relay TTS target lookup failed to read bot registry cache %s: %s",
+                        cache_path,
+                        xcp,
+                    )
 
         return snapshots
 
     @staticmethod
-    def _post_relay_tts(url: str, token: str, payload: Mapping[str, JsonValue]) -> dict[str, object]:
+    def _post_relay_tts(
+        url: str, token: str, payload: Mapping[str, JsonValue]
+    ) -> dict[str, object]:
         try:
             response = requests.post(
                 url,
@@ -210,7 +296,9 @@ class RemoteRelayTTSForwarder:
                 timeout=5,
             )
         except requests.RequestException as xcp:
-            raise RuntimeError(f"Relay TTS request failed: {type(xcp).__name__}: {xcp}") from xcp
+            raise RuntimeError(
+                f"Relay TTS request failed: {type(xcp).__name__}: {xcp}"
+            ) from xcp
         try:
             body = response.json()
         except ValueError:
@@ -219,5 +307,7 @@ class RemoteRelayTTSForwarder:
             detail = body.get("detail") if isinstance(body, dict) else response.text
             raise RuntimeError(f"Relay TTS request rejected by target node: {detail}")
         if not isinstance(body, dict):
-            raise RuntimeError("Relay TTS response from target node was not a JSON object.")
+            raise RuntimeError(
+                "Relay TTS response from target node was not a JSON object."
+            )
         return body

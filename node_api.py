@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import psutil
@@ -41,15 +41,19 @@ import config
 import node_api_app_operations
 import node_api_app_installer
 import node_api_app_state
+import node_api_chat
+import node_api_chat_service
 import node_api_client_pack
 import node_api_files
 import node_api_map_service
 import node_api_mod
 import node_api_mod_service
+import node_api_node
 import node_api_relay
 import node_api_storage_service
 import node_api_system
 import node_api_system_service
+import node_api_node_service
 from _async_utils import run_blocking
 from _audit import audit_log
 from _file import File_Utils
@@ -91,14 +95,7 @@ from apps.sevendays import SevenDays
 from apps.sevendays.node_api import (
     NodeSevenDaysSandboxOptionsState,
 )
-from chat_hub import (
-    ChatEndpoint,
-    ChatEndpointId,
-    ChatEndpointKind,
-    ChatEvent,
-    ChatHub,
-    ChatRoomUpdate,
-)
+from chat_hub import ChatEvent
 from font_assets import font_assets
 from maintenance import MaintenanceService
 from map_annotations import (
@@ -113,7 +110,6 @@ from node_api_app_installer_routes import register_app_installer_routes
 from node_api_app_installer import (
     NodeAppInstallCatalog,
     NodeAppInstallRequest,
-    NodeAppInstallScopeOption,
     NodeAppInstallStatus,
     NodeAppInstallerSettingsMutationResult,
     NodeAppInstallerSettingsState,
@@ -131,13 +127,7 @@ from node_api_app_state import (
     NodeStateTopic,
     _NodeAppPlayerSnapshot,
 )
-from node_api_chat import (
-    NodeChatEndpointSummary,
-    NodeChatRoomSnapshot,
-    NodeChatStreamEvent,
-    NodeChatStreamEventKind,
-    NodeWebChatRequest,
-)
+from node_api_chat import NodeChatRoomSnapshot, NodeWebChatRequest
 from node_api_chat_routes import register_chat_routes
 from node_api_console import (
     NodeConsoleActionExecutionResult,
@@ -161,7 +151,6 @@ from node_api_mod_routes import register_mod_routes
 from node_api_node import (
     NodeCapacityMutationResult,
     NodeDiscordSettingsMutationResult,
-    NodeDiskEntry,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
     NodeFontSourceSettingsMutationResult,
@@ -184,8 +173,6 @@ from node_api_settings import (
 from node_api_settings_routes import register_settings_routes
 from node_api_storage_routes import register_storage_routes
 from node_api_system import (
-    NodeRestartRecord,
-    NodeRestartScheduleEntry,
     NodeRestartScheduleState,
     NodeRestartState,
     NodeSystemAction,
@@ -221,12 +208,20 @@ if TYPE_CHECKING:
     )
 
 
-# Backwards-compatible façade exports for system response contracts.
+# Backwards-compatible façade exports for response and transport contracts.
+NodeAppInstallScopeOption = node_api_app_installer.NodeAppInstallScopeOption
+NodeChatEndpointSummary = node_api_chat.NodeChatEndpointSummary
+NodeChatStreamEvent = node_api_chat.NodeChatStreamEvent
+NodeChatStreamEventKind = node_api_chat.NodeChatStreamEventKind
+NodeDiskEntry = node_api_node.NodeDiskEntry
+NodeRestartRecord = node_api_system.NodeRestartRecord
+NodeRestartScheduleEntry = node_api_system.NodeRestartScheduleEntry
 NodeSystemDiskSummary = node_api_system.NodeSystemDiskSummary
 NodeSystemLogEntry = node_api_system.NodeSystemLogEntry
 NodeSystemSample = node_api_system.NodeSystemSample
 NodeSaveEntry = node_api_files.NodeSaveEntry
 NodeSaveRootEntry = node_api_files.NodeSaveRootEntry
+WebChatRelayPublisher = node_api_chat_service.WebChatRelayPublisher
 
 _NODE_API_PREFIX = "/api/node"
 _NODE_TOKEN_TTL_SECONDS = 15 * 60
@@ -311,22 +306,6 @@ def _normalised_auth_url(raw: str) -> str:
     )
 
 
-class WebChatRelayPublisher(Protocol):
-    async def publish_web_chat(
-        self,
-        *,
-        room_id: str,
-        session_id: str,
-        author_display_name: str,
-        author_id: str | None,
-        discord_user_id: int | None,
-        content: str,
-        reply_to_event_id: str | None = None,
-    ) -> ChatEvent: ...
-
-    async def publish_chat_event(self, *, event: ChatEvent) -> ChatEvent: ...
-
-
 _BulkMetadataOperationResult = TypeVar("_BulkMetadataOperationResult")
 
 
@@ -336,15 +315,8 @@ class NodeApiService:
         self._discord_health_lock = threading.RLock()
         self._discord_service_state: DiscordServiceState | None = None
         self._discord_health: DiscordHealthSnapshot | None = None
-        self._chat_relay: WebChatRelayPublisher | None = None
-        self._relay_tts_service: RelayTTSQueue | None = None
         self._acl: Access_Control | None = None
         self._web_auth: ModWebAuthService | None = None
-        self._system_action_handler: NodeSystemActionHandler | None = None
-        self._maintenance_service: MaintenanceService | None = None
-        self._maintenance_restart_targets: tuple[RestartTarget, ...] = ()
-        self._pending_system_action: NodeSystemAction | None = None
-        self._system_action_lock = threading.RLock()
         self._app_footprint_cache: dict[str, NodeAppFootprintSnapshot] = {}
         self._app_state_cache = node_api_app_state.NodeAppStateCache(
             app_entry_ttl_seconds=_NODE_APP_ENTRY_CACHE_TTL_SECONDS,
@@ -361,6 +333,30 @@ class NodeApiService:
             history_retention_seconds=node_api_system.SYSTEM_HISTORY_RETENTION_SECONDS,
             history_interval_seconds=node_api_system.SYSTEM_HISTORY_INTERVAL_SECONDS,
             max_log_lines=_NODE_SYSTEM_LOG_MAX_LINES,
+        )
+        self._nodes = node_api_node_service.NodeManagementService(
+            node_name=lambda: self.node_name,
+            manager=lambda: self._manager,
+            require_manager=lambda: self._require_manager(),
+            require_acl=lambda: self._require_acl(),
+            http_exception=_http_exception,
+            stats_factory=lambda: Stats_System(),
+            invalidate_state_caches=lambda: self._invalidate_state_caches(),
+            refresh_font_assets=lambda *, google_font_urls: (
+                font_assets.schedule_startup_refresh(
+                    google_font_urls=google_font_urls,
+                )
+            ),
+            audit_log=lambda event, **fields: audit_log(event, **fields),
+            process_started_at=lambda: int(psutil.Process().create_time()),
+            read_process_restart_record=lambda *, default_timestamp: (
+                read_process_restart_record(
+                    default_timestamp=default_timestamp,
+                )
+            ),
+            read_voice_restart_record=lambda: read_voice_restart_record(),
+            logger=log,
+            restart_delay_seconds=_NODE_RESTART_DELAY_SECONDS,
         )
         self._presence_stream_connection_count = 0
         self._presence_stream_connection_lock = threading.Lock()
@@ -389,6 +385,30 @@ class NodeApiService:
             discord_health=lambda: self._discord_service_health()[1],
             app_runtime_interval_seconds=_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS,
             node_state_interval_seconds=_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS,
+        )
+        self._chats = node_api_chat_service.NodeChatService(
+            manager=lambda: self._manager,
+            http_exception=_http_exception,
+            history_limit=_NODE_CHAT_HISTORY_LIMIT,
+            build_room_snapshot=lambda app, *, limit: self.build_chat_room_snapshot(
+                app,
+                limit=limit,
+            ),
+            build_live_runtime_summary=lambda app: self.build_live_app_runtime_summary(
+                app
+            ),
+            subscribe_local_app_runtime=lambda app_name, callback: (
+                self.subscribe_local_app_runtime(
+                    app_name,
+                    callback,
+                )
+            ),
+            close_websocket=lambda websocket: self._close_websocket_quietly(websocket),
+        )
+        self._relay_tts = node_api_relay.NodeRelayTTSService(
+            node_name=lambda: self.node_name,
+            http_exception=_http_exception,
+            traffic_logger=traffic_log,
         )
         self._client_packs = node_api_client_pack.NodeClientPackService(
             node_name=lambda: self.node_name,
@@ -527,21 +547,20 @@ class NodeApiService:
         self._web_auth = web_auth
 
     def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
-        self._system_action_handler = handler
+        self._nodes.set_system_action_handler(handler)
 
     def set_maintenance_service(
         self,
         maintenance_service: MaintenanceService,
         available_targets: tuple[RestartTarget, ...],
     ) -> None:
-        self._maintenance_service = maintenance_service
-        self._maintenance_restart_targets = available_targets
+        self._nodes.set_maintenance_service(maintenance_service, available_targets)
 
     def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
-        self._chat_relay = chat_relay
+        self._chats.set_relay(chat_relay)
 
     def set_relay_tts_service(self, relay_tts_service: RelayTTSQueue | None) -> None:
-        self._relay_tts_service = relay_tts_service
+        self._relay_tts.set_queue(relay_tts_service)
 
     def begin_shutdown(self) -> None:
         self._shutting_down = True
@@ -1057,122 +1076,15 @@ class NodeApiService:
 
     @staticmethod
     def _require_chat_relay_app(app: App) -> None:
-        if not app.supports_chat_relay:
-            raise _http_exception(404, f"{app.friendly} does not expose a chat relay.")
+        node_api_chat_service.require_chat_relay_app(
+            app,
+            http_exception=_http_exception,
+        )
 
     def build_chat_room_snapshot(
         self, app: App, *, limit: int = _NODE_CHAT_HISTORY_LIMIT
     ) -> NodeChatRoomSnapshot:
-        self._require_chat_relay_app(app)
-        bounded_limit = max(0, min(limit, _NODE_CHAT_HISTORY_LIMIT))
-        hub = ChatHub()
-        endpoint_summaries = self._chat_endpoint_summaries(
-            app, endpoints=hub.endpoints_for_room(app.name)
-        )
-        return NodeChatRoomSnapshot(
-            room_id=app.name,
-            endpoint_count=len(endpoint_summaries),
-            events=hub.history(app.name, limit=bounded_limit),
-            endpoint_summaries=endpoint_summaries,
-            revision=hub.room_revision(app.name),
-        )
-
-    def _chat_endpoint_summaries(
-        self,
-        app: App,
-        *,
-        endpoints: tuple[ChatEndpoint, ...],
-    ) -> tuple[NodeChatEndpointSummary, ...]:
-        app_running = app.check_running()
-        summaries: list[NodeChatEndpointSummary] = []
-        seen_keys: set[str] = set()
-        for endpoint in endpoints:
-            summary = self._chat_endpoint_summary(
-                app, endpoint, app_running=app_running
-            )
-            if summary is None:
-                continue
-            summary_key, summary_label = summary
-            if summary_key in seen_keys:
-                continue
-            seen_keys.add(summary_key)
-            summaries.append(NodeChatEndpointSummary(label=summary_label))
-        return tuple(summaries)
-
-    def _chat_endpoint_summary(
-        self,
-        app: App,
-        endpoint: ChatEndpoint,
-        *,
-        app_running: bool,
-    ) -> tuple[str, str] | None:
-        endpoint_id = endpoint.id
-        if endpoint_id.kind is ChatEndpointKind.APP:
-            if not app_running:
-                return None
-            label = endpoint.label or app.friendly
-            return endpoint_id.stable_key, f"Game: {label}"
-        if endpoint_id.kind is ChatEndpointKind.DISCORD_CHANNEL:
-            return self._discord_endpoint_summary(endpoint)
-        if endpoint_id.kind is ChatEndpointKind.DISCORD_TTS:
-            label = endpoint.label or endpoint_id.value
-            return endpoint_id.stable_key, f"Discord TTS: {label}"
-        if endpoint_id.kind is ChatEndpointKind.WEB_SESSION:
-            label = endpoint.label or "Dashboard"
-            return endpoint_id.stable_key, f"Web: {label}"
-        if endpoint_id.kind is ChatEndpointKind.SYSTEM:
-            label = endpoint.label or "System"
-            return endpoint_id.stable_key, f"System: {label}"
-        raise ValueError(f"Unsupported chat endpoint kind: {endpoint_id.kind}")
-
-    def _discord_endpoint_summary(self, endpoint: ChatEndpoint) -> tuple[str, str]:
-        endpoint_id = endpoint.id
-        channel_id = self._discord_endpoint_channel_id(endpoint_id)
-        channel = self._discord_channel_cache_entry(channel_id)
-        guild_id = getattr(channel, "guild_id", None)
-        if isinstance(guild_id, int | str):
-            guild_id_int = int(guild_id)
-            guild_name = self._discord_guild_name(guild_id_int)
-            guild_label = guild_name or str(guild_id_int)
-            return f"discord_guild:{guild_id_int}", f"Discord: {guild_label}"
-
-        channel_name = getattr(channel, "name", None)
-        if isinstance(channel_name, str) and channel_name.strip():
-            return endpoint_id.stable_key, f"Discord: {channel_name}"
-        if endpoint.label is not None and endpoint.label.strip():
-            return endpoint_id.stable_key, f"Discord: {endpoint.label}"
-        return endpoint_id.stable_key, f"Discord: {endpoint_id.value}"
-
-    @staticmethod
-    def _discord_endpoint_channel_id(endpoint_id: ChatEndpointId) -> int | None:
-        try:
-            return int(endpoint_id.value)
-        except TypeError, ValueError:
-            return None
-
-    def _discord_channel_cache_entry(self, channel_id: int | None) -> object | None:
-        if channel_id is None:
-            return None
-        manager = self._manager
-        bot = getattr(manager, "bot", None) if manager is not None else None
-        cache = getattr(bot, "cache", None) if bot is not None else None
-        get_guild_channel = (
-            getattr(cache, "get_guild_channel", None) if cache is not None else None
-        )
-        if callable(get_guild_channel):
-            return get_guild_channel(channel_id)
-        return None
-
-    def _discord_guild_name(self, guild_id: int) -> str | None:
-        manager = self._manager
-        bot = getattr(manager, "bot", None) if manager is not None else None
-        cache = getattr(bot, "cache", None) if bot is not None else None
-        get_guild = getattr(cache, "get_guild", None) if cache is not None else None
-        guild = get_guild(guild_id) if callable(get_guild) else None
-        guild_name = getattr(guild, "name", None)
-        if isinstance(guild_name, str) and guild_name.strip():
-            return guild_name
-        return None
+        return self._chats.build_room_snapshot(app, limit=limit)
 
     async def publish_app_web_chat(
         self,
@@ -1181,76 +1093,19 @@ class NodeApiService:
         actor_user_id: int,
         chat_request: NodeWebChatRequest,
     ) -> ChatEvent:
-        self._require_chat_relay_app(app)
-        if self._chat_relay is None:
-            raise _http_exception(503, "Web chat relay is not available on this node.")
-        return await self._chat_relay.publish_web_chat(
-            room_id=app.name,
-            session_id=chat_request.session_id,
-            author_display_name=chat_request.author_display_name,
-            author_id=str(actor_user_id),
-            discord_user_id=actor_user_id,
-            content=chat_request.content,
-            reply_to_event_id=chat_request.reply_to_event_id,
+        return await self._chats.publish_web_chat(
+            app=app,
+            actor_user_id=actor_user_id,
+            chat_request=chat_request,
         )
 
     async def publish_app_fake_chat(self, *, app: App, event: ChatEvent) -> ChatEvent:
-        self._require_chat_relay_app(app)
-        if event.room_id.casefold() != app.name.casefold():
-            raise _http_exception(
-                400, "Synthetic chat event room does not match the selected app."
-            )
-        if self._chat_relay is None:
-            raise _http_exception(503, "Chat relay is not available on this node.")
-        return await self._chat_relay.publish_chat_event(event=event)
+        return await self._chats.publish_fake_chat(app=app, event=event)
 
     async def queue_relay_tts(
         self, relay_request: node_api_relay.NodeRelayTTSRequest
     ) -> node_api_relay.NodeRelayTTSResult:
-        if self._relay_tts_service is None:
-            log.warning(
-                "Node API relay TTS unavailable: node=%s source_app=%s player=%s",
-                self.node_name,
-                relay_request.source_app,
-                relay_request.player_name,
-            )
-            raise _http_exception(503, "Relay TTS is not available on this node.")
-
-        try:
-            spoken, queue_size = await self._relay_tts_service.queue_relay_message(
-                relay_request.guild_id,
-                relay_request.channel_id,
-                relay_request.message_id,
-                relay_request.text,
-                user_id=relay_request.user_id,
-            )
-        except (RuntimeError, ValueError) as xcp:
-            reason = str(xcp)
-            traffic_log.info(
-                "Node API relay TTS skipped: node=%s source_app=%s player=%s guild=%s channel=%s message_id=%s reason=%s",
-                self.node_name,
-                relay_request.source_app,
-                relay_request.player_name,
-                relay_request.guild_id,
-                relay_request.channel_id,
-                relay_request.message_id,
-                reason,
-            )
-            return node_api_relay.NodeRelayTTSResult(queued=False, reason=reason)
-
-        traffic_log.info(
-            "Node API relay TTS queued: node=%s source_app=%s player=%s guild=%s channel=%s message_id=%s queue_size=%s",
-            self.node_name,
-            relay_request.source_app,
-            relay_request.player_name,
-            relay_request.guild_id,
-            relay_request.channel_id,
-            relay_request.message_id,
-            queue_size,
-        )
-        return node_api_relay.NodeRelayTTSResult(
-            queued=True, spoken=spoken, queue_size=queue_size
-        )
+        return await self._relay_tts.queue_request(relay_request)
 
     async def build_app_runtime_summary(
         self,
@@ -1522,140 +1377,11 @@ class NodeApiService:
         app: App,
         after_revision: int | None = None,
     ) -> None:
-        await websocket.accept()
-        update_queue: asyncio.Queue[NodeChatStreamEvent] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-
-        def _enqueue_update(event: NodeChatStreamEvent) -> None:
-            def _queue_put() -> None:
-                update_queue.put_nowait(event)
-
-            try:
-                loop.call_soon_threadsafe(_queue_put)
-            except RuntimeError:
-                return
-
-        def _enqueue_chat_update(update: ChatRoomUpdate) -> None:
-            _enqueue_update(
-                NodeChatStreamEvent(
-                    kind=NodeChatStreamEventKind.CHAT_CHANGED,
-                    room_id=app.name,
-                    snapshot=(
-                        self.build_chat_room_snapshot(
-                            app, limit=_NODE_CHAT_HISTORY_LIMIT
-                        )
-                        if update.event is None
-                        else None
-                    ),
-                    events=() if update.event is None else (update.event,),
-                    revision=update.revision,
-                )
-            )
-
-        room_subscription_id = ChatHub().subscribe(app.name, _enqueue_chat_update)
-        unsubscribe_runtime = self.subscribe_local_app_runtime(
-            app.name,
-            lambda update: _enqueue_update(
-                NodeChatStreamEvent(
-                    kind=NodeChatStreamEventKind.RUNTIME_CHANGED,
-                    room_id=app.name,
-                    app_stats=update.app_stats,
-                )
-            ),
+        await self._chats.serve_stream(
+            websocket=websocket,
+            app=app,
+            after_revision=after_revision,
         )
-
-        async def _wait_for_disconnect() -> None:
-            while True:
-                message = await websocket.receive()
-                if message.get("type") == "websocket.disconnect":
-                    return
-
-        async def _send_stream_event(event: NodeChatStreamEvent) -> None:
-            app_stats = event.app_stats
-            if event.kind in {
-                NodeChatStreamEventKind.INITIAL,
-                NodeChatStreamEventKind.RUNTIME_CHANGED,
-            }:
-                if app_stats is None:
-                    app_stats = await self.build_live_app_runtime_summary(app)
-            await websocket.send_json(
-                NodeChatStreamEvent(
-                    kind=event.kind,
-                    room_id=event.room_id,
-                    snapshot=event.snapshot,
-                    app_stats=app_stats,
-                    events=event.events,
-                    revision=event.revision,
-                ).to_mapping()
-            )
-
-        def _merge_stream_events(
-            first: NodeChatStreamEvent, second: NodeChatStreamEvent
-        ) -> NodeChatStreamEvent:
-            merged_events = (
-                second.events
-                if second.snapshot is not None
-                else first.events + second.events
-            )
-            return NodeChatStreamEvent(
-                kind=(
-                    NodeChatStreamEventKind.RUNTIME_CHANGED
-                    if NodeChatStreamEventKind.RUNTIME_CHANGED
-                    in {first.kind, second.kind}
-                    else NodeChatStreamEventKind.CHAT_CHANGED
-                ),
-                room_id=app.name,
-                snapshot=second.snapshot
-                if second.snapshot is not None
-                else first.snapshot,
-                app_stats=second.app_stats
-                if second.app_stats is not None
-                else first.app_stats,
-                events=merged_events,
-                revision=max(first.revision, second.revision),
-            )
-
-        disconnect_task = asyncio.create_task(_wait_for_disconnect())
-        try:
-            initial_snapshot = self.build_chat_room_snapshot(
-                app, limit=_NODE_CHAT_HISTORY_LIMIT
-            )
-            await _send_stream_event(
-                NodeChatStreamEvent(
-                    kind=NodeChatStreamEventKind.INITIAL,
-                    room_id=app.name,
-                    snapshot=initial_snapshot
-                    if after_revision != initial_snapshot.revision
-                    else None,
-                    revision=initial_snapshot.revision,
-                )
-            )
-            while True:
-                queue_task = asyncio.create_task(update_queue.get())
-                done, _pending = await asyncio.wait(
-                    {queue_task, disconnect_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if disconnect_task in done:
-                    queue_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await queue_task
-                    return
-                merged_event = queue_task.result()
-                while not update_queue.empty():
-                    merged_event = _merge_stream_events(
-                        merged_event, update_queue.get_nowait()
-                    )
-                await _send_stream_event(merged_event)
-        except WebSocketDisconnect:
-            return
-        finally:
-            disconnect_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await disconnect_task
-            ChatHub().unsubscribe(app.name, room_subscription_id)
-            unsubscribe_runtime()
-            await self._close_websocket_quietly(websocket)
 
     async def _serve_presence_stream(self, *, websocket: WebSocket) -> None:
         if not self._try_reserve_presence_stream_connection():
@@ -2306,68 +2032,22 @@ class NodeApiService:
         return self._app_installer.install_status(job_id=job_id)
 
     def read_app_installer_settings(self) -> NodeAppInstallerSettingsState:
-        if not self.system_capabilities().supports_app_installer_settings:
-            raise _http_exception(
-                400, "App installer settings are unavailable on this node."
-            )
-        manager = self._require_manager()
-        return NodeAppInstallerSettingsState(
-            node=self.node_name,
-            settings=manager.app_installer_settings(),
-            available_apps=tuple(
-                NodeAppInstallScopeOption(scope=recipe.scope, label=recipe.label)
-                for recipe in manager.list_steam_install_recipes()
-            ),
-        )
+        return self._nodes.read_app_installer_settings()
 
     def _require_app_installer_available(self) -> None:
-        if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL:
-            raise _http_exception(
-                400, "App installation is unavailable on portal nodes."
-            )
+        self._nodes.require_app_installer_available()
 
     def read_node_capacity(self) -> config.NodeCapacityProfile:
-        manager = self._require_manager()
-        return manager.node_capacity()
+        return self._nodes.read_capacity()
 
     def read_node_font_sources(self) -> config.NodeFontSourceSettings:
-        manager = self._require_manager()
-        return manager.node_font_sources()
+        return self._nodes.read_font_sources()
 
     def read_node_disk_settings(self) -> NodeDiskManagementState:
-        stats = Stats_System()
-        stats.refresh_disk_inventory()
-        activity_mountpoints = {disk.mountpoint_text for disk in stats.activity_disks}
-        primary_disk = stats.primary_disk
-        secondary_disk = stats.secondary_disk
-        bot_disk = stats.bot_disk
-        return NodeDiskManagementState(
-            node=self.node_name,
-            disks=tuple(
-                NodeDiskEntry(
-                    mountpoint=disk.mountpoint_text,
-                    display_name=disk.display_name,
-                    is_activity=disk.mountpoint_text in activity_mountpoints,
-                    is_primary=(
-                        primary_disk is not None
-                        and disk.mountpoint_text == primary_disk.mountpoint_text
-                    ),
-                    is_secondary=(
-                        secondary_disk is not None
-                        and disk.mountpoint_text == secondary_disk.mountpoint_text
-                    ),
-                    is_bot_disk=(
-                        bot_disk is not None
-                        and disk.mountpoint_text == bot_disk.mountpoint_text
-                    ),
-                )
-                for disk in stats.disks
-            ),
-            preferences=stats.disk_preferences,
-        )
+        return self._nodes.read_disk_settings()
 
     def read_discord_settings(self) -> config.DiscordSettings:
-        return self._require_manager().discord_settings()
+        return self._nodes.read_discord_settings()
 
     async def schedule_system_action(
         self,
@@ -2377,138 +2057,21 @@ class NodeApiService:
         silent: bool,
         actor_user_id: int,
     ) -> NodeSystemActionResult:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
-        if not self.system_capabilities().supports(action):
-            raise _http_exception(
-                400, f"Node action {action.value!r} is unavailable on this node."
-            )
-        handler = self._system_action_handler
-        if handler is None:
-            raise _http_exception(
-                503, "Node system actions are unavailable on this node."
-            )
-        with self._system_action_lock:
-            if self._pending_system_action is not None:
-                raise _http_exception(
-                    409,
-                    f"Node system action {self._pending_system_action.value!r} is already pending.",
-                )
-            self._pending_system_action = action
-
-        audit_log(
-            "node.system_action.scheduled",
-            actor_user_id=actor_user_id,
-            node=self.node_name,
-            action=action.value,
-        )
-
-        def _dispatch() -> None:
-            try:
-                handler(action, auto_restart_running_apps, silent)
-            except Exception:
-                with self._system_action_lock:
-                    self._pending_system_action = None
-                log.exception(
-                    "Node system action dispatch failed: node=%s action=%s",
-                    self.node_name,
-                    action.value,
-                )
-                return
-
-        asyncio.get_running_loop().call_later(_NODE_RESTART_DELAY_SECONDS, _dispatch)
-        action_label = node_api_system.SYSTEM_ACTION_LABELS[action]
-        return NodeSystemActionResult(
-            node=self.node_name,
+        return await self._nodes.schedule_system_action(
             action=action,
-            message=f"Scheduled {action_label} for {self.node_name}.",
+            auto_restart_running_apps=auto_restart_running_apps,
+            silent=silent,
+            actor_user_id=actor_user_id,
         )
 
     def system_capabilities(self) -> NodeSystemCapabilities:
-        manager = self._manager
-        is_portal = config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL
-        supports_app_auto_restart = not is_portal and manager is not None
-        supports_silent_restart = (
-            not is_portal and manager is not None and manager.bot is not None
-        )
-        supports_node_capacity = manager is not None
-        supports_node_font_sources = manager is not None
-        supports_discord_settings = manager is not None and manager.bot is not None
-        supports_app_installer_settings = not is_portal and manager is not None
-        if is_portal:
-            return NodeSystemCapabilities(
-                actions=(NodeSystemAction.RESTART_PROCESS,),
-                supports_app_auto_restart=supports_app_auto_restart,
-                supports_silent_restart=supports_silent_restart,
-                supports_node_capacity=supports_node_capacity,
-                supports_node_font_sources=supports_node_font_sources,
-                supports_discord_settings=supports_discord_settings,
-                supports_app_installer_settings=supports_app_installer_settings,
-            )
-        return NodeSystemCapabilities(
-            actions=(NodeSystemAction.RESTART_PROCESS, NodeSystemAction.REBOOT_HOST),
-            supports_app_auto_restart=supports_app_auto_restart,
-            supports_silent_restart=supports_silent_restart,
-            supports_node_capacity=supports_node_capacity,
-            supports_node_font_sources=supports_node_font_sources,
-            supports_discord_settings=supports_discord_settings,
-            supports_app_installer_settings=supports_app_installer_settings,
-        )
+        return self._nodes.system_capabilities()
 
     def read_restart_state(self) -> NodeRestartState:
-        process_start_timestamp = int(psutil.Process().create_time())
-        process_record = read_process_restart_record(
-            default_timestamp=process_start_timestamp
-        )
-        voice_record = read_voice_restart_record()
-        return NodeRestartState(
-            node=self.node_name,
-            process=NodeRestartRecord(
-                timestamp=process_record.timestamp, kind=process_record.kind
-            ),
-            voice=(
-                None
-                if voice_record is None
-                else NodeRestartRecord(
-                    timestamp=voice_record.timestamp, kind=voice_record.kind
-                )
-            ),
-        )
+        return self._nodes.read_restart_state()
 
     def read_restart_schedules(self) -> NodeRestartScheduleState:
-        maintenance = self._maintenance_service
-        if maintenance is None:
-            raise _http_exception(
-                503, "Restart scheduling is unavailable on this node."
-            )
-        if not maintenance.reload():
-            raise _http_exception(
-                503, "Restart scheduling configuration is temporarily unavailable."
-            )
-        return self._restart_schedule_state(maintenance)
-
-    def _restart_schedule_state(
-        self, maintenance: MaintenanceService
-    ) -> NodeRestartScheduleState:
-        return NodeRestartScheduleState(
-            node=self.node_name,
-            schedules=tuple(
-                NodeRestartScheduleEntry(
-                    target=target,
-                    enabled=(schedule := maintenance.schedule_for(target)).enabled,
-                    interval_minutes=schedule.interval_minutes,
-                    anchor_timestamp=schedule.anchor_timestamp,
-                    last_triggered_timestamp=schedule.last_triggered_timestamp,
-                    next_restart_timestamp=(
-                        int(next_restart.timestamp())
-                        if (next_restart := maintenance.next_restart_at(target))
-                        is not None
-                        else None
-                    ),
-                    skipped_through_timestamp=schedule.skipped_through_timestamp,
-                )
-                for target in self._maintenance_restart_targets
-            ),
-        )
+        return self._nodes.read_restart_schedules()
 
     async def update_restart_schedule(
         self,
@@ -2518,38 +2081,12 @@ class NodeApiService:
         anchor_timestamp: int | None,
         actor_user_id: int,
     ) -> NodeRestartScheduleState:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
-        maintenance = self._maintenance_service
-        if maintenance is None:
-            raise _http_exception(
-                503, "Restart scheduling is unavailable on this node."
-            )
-        if target not in self._maintenance_restart_targets:
-            raise _http_exception(
-                400, f"Restart target {target.value!r} is unavailable on this node."
-            )
-        if interval_minutes is not None and anchor_timestamp is None:
-            raise _http_exception(
-                400, "Enabled restart schedules require an anchor timestamp."
-            )
-        try:
-            updated_schedules = maintenance.update_restart_intervals(
-                {target: interval_minutes},
-                anchor_timestamp=anchor_timestamp,
-            )
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        updated_schedule = updated_schedules[target]
-        audit_log(
-            "node.restart_schedule.updated",
-            actor_user_id=actor_user_id,
-            node=self.node_name,
-            target=target.value,
+        return await self._nodes.update_restart_schedule(
+            target=target,
             interval_minutes=interval_minutes,
             anchor_timestamp=anchor_timestamp,
-            automatically_skipped_through_timestamp=updated_schedule.skipped_through_timestamp,
+            actor_user_id=actor_user_id,
         )
-        return self._restart_schedule_state(maintenance)
 
     async def skip_restart_schedule(
         self,
@@ -2557,28 +2094,10 @@ class NodeApiService:
         target: RestartTarget,
         actor_user_id: int,
     ) -> NodeRestartScheduleState:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
-        maintenance = self._maintenance_service
-        if maintenance is None:
-            raise _http_exception(
-                503, "Restart scheduling is unavailable on this node."
-            )
-        if target not in self._maintenance_restart_targets:
-            raise _http_exception(
-                400, f"Restart target {target.value!r} is unavailable on this node."
-            )
-        try:
-            schedule = maintenance.skip_next_restart(target)
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        audit_log(
-            "node.restart_schedule.skipped",
+        return await self._nodes.skip_restart_schedule(
+            target=target,
             actor_user_id=actor_user_id,
-            node=self.node_name,
-            target=target.value,
-            skipped_through_timestamp=schedule.skipped_through_timestamp,
         )
-        return self._restart_schedule_state(maintenance)
 
     async def mutate_node_capacity(
         self,
@@ -2586,14 +2105,9 @@ class NodeApiService:
         capacity: config.NodeCapacityProfile,
         actor_user_id: int,
     ) -> NodeCapacityMutationResult:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
-        manager = self._require_manager()
-        updated_capacity = manager.set_node_capacity(capacity)
-        self._invalidate_state_caches()
-        return NodeCapacityMutationResult(
-            node=self.node_name,
-            message=f"Updated node capacity for {self.node_name}.",
-            capacity=updated_capacity,
+        return await self._nodes.mutate_capacity(
+            capacity=capacity,
+            actor_user_id=actor_user_id,
         )
 
     async def mutate_app_installer_settings(
@@ -2602,22 +2116,9 @@ class NodeApiService:
         settings: config.AppInstallerSettings,
         actor_user_id: int,
     ) -> NodeAppInstallerSettingsMutationResult:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
-        if not self.system_capabilities().supports_app_installer_settings:
-            raise _http_exception(
-                400, "App installer settings are unavailable on this node."
-            )
-        updated_settings = self._require_manager().set_app_installer_settings(settings)
-        audit_log(
-            "node.app_installer_settings.updated",
+        return await self._nodes.mutate_app_installer_settings(
+            settings=settings,
             actor_user_id=actor_user_id,
-            node=self.node_name,
-            allowed_scopes=updated_settings.allowed_scopes,
-        )
-        return NodeAppInstallerSettingsMutationResult(
-            node=self.node_name,
-            message=f"Updated app install settings for {self.node_name}.",
-            settings=updated_settings,
         )
 
     async def mutate_node_disk_settings(
@@ -2626,22 +2127,10 @@ class NodeApiService:
         preferences: config.PersistedDiskPreferences,
         actor_user_id: int,
     ) -> NodeDiskSettingsMutationResult:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
-        updated_preferences = Stats_System().set_disk_preferences(preferences)
-        self._invalidate_state_caches()
-        audit_log(
-            "node.disk_settings.updated",
+        return await self._nodes.mutate_disk_settings(
+            preferences=preferences,
             actor_user_id=actor_user_id,
-            node=self.node_name,
-            activity_mounts=updated_preferences.activity_mounts,
-            primary_mount=updated_preferences.primary_mount,
-            secondary_mount=updated_preferences.secondary_mount,
-            label_mountpoints=sorted(updated_preferences.labels),
-        )
-        return NodeDiskSettingsMutationResult(
-            node=self.node_name,
-            message=f"Updated node disk settings for {self.node_name}.",
-            settings=self.read_node_disk_settings(),
+            read_disk_settings=lambda: self.read_node_disk_settings(),
         )
 
     async def mutate_node_font_sources(
@@ -2650,16 +2139,9 @@ class NodeApiService:
         settings: config.NodeFontSourceSettings,
         actor_user_id: int,
     ) -> NodeFontSourceSettingsMutationResult:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
-        manager = self._require_manager()
-        updated_settings = manager.set_node_font_sources(settings)
-        font_assets.schedule_startup_refresh(
-            google_font_urls=updated_settings.google_font_urls
-        )
-        return NodeFontSourceSettingsMutationResult(
-            node=self.node_name,
-            message=f"Updated node font sources for {self.node_name}.",
-            settings=updated_settings,
+        return await self._nodes.mutate_font_sources(
+            settings=settings,
+            actor_user_id=actor_user_id,
         )
 
     async def mutate_discord_settings(
@@ -2668,22 +2150,10 @@ class NodeApiService:
         settings: config.DiscordSettings,
         actor_user_id: int,
     ) -> NodeDiscordSettingsMutationResult:
-        manager = self._require_manager()
-        current_settings = self.read_discord_settings()
-        required_level = (
-            Power_Level.root
-            if current_settings.activity.refresh_interval_seconds
-            != settings.activity.refresh_interval_seconds
-            else Power_Level.sudo
-        )
-        await self._require_acl().perm_check(actor_user_id, required_level)
-        updated_settings = manager.set_discord_settings(settings)
-        if manager.activity_manager is not None:
-            await manager.activity_manager.refresh()
-        return NodeDiscordSettingsMutationResult(
-            node=self.node_name,
-            message=f"Updated Discord settings for {self.node_name}.",
-            settings=updated_settings,
+        return await self._nodes.mutate_discord_settings(
+            settings=settings,
+            actor_user_id=actor_user_id,
+            read_discord_settings=lambda: self.read_discord_settings(),
         )
 
     async def build_mod_download_response(
