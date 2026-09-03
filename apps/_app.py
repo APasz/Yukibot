@@ -5,9 +5,7 @@ import contextlib
 import enum
 import logging
 import os
-import signal
 import subprocess
-import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Collection, Coroutine, Mapping, Sequence
@@ -1426,22 +1424,28 @@ class App(Generic[ConfigT], ABC):
             return
 
         log.info(f"Scanning for leftover {self.proc_name} processes")
+        expected_process_name = self.proc_name.casefold()
+        expected_command_parts = tuple(part.casefold() for part in self.proc_cmd if part)
         for proc in psutil.process_iter(attrs=["name", "pid", "cmdline"]):
             try:
-                name = proc.info["name"].lower()
-                cmdline = proc.info.get("cmdline") or []
-                cmdline_strs = [arg.lower() for arg in cmdline]
-
-                if self.proc_name in name and all(
-                    cmd_part in arg for arg in cmdline_strs for cmd_part in self.proc_cmd
+                raw_name = proc.info.get("name")
+                raw_cmdline = proc.info.get("cmdline")
+                if not isinstance(raw_name, str) or not isinstance(raw_cmdline, list):
+                    continue
+                command_line = tuple(str(argument).casefold() for argument in raw_cmdline)
+                if expected_process_name not in raw_name.casefold() or not all(
+                    any(command_part in argument for argument in command_line)
+                    for command_part in expected_command_parts
                 ):
-                    log.info(f"Force-stopping stray process: {proc.info}")
-                    proc.terminate()
+                    continue
+                log.info(f"Force-stopping stray process: {proc.info}")
+                proc.terminate()
+                try:
                     proc.wait(timeout=10)
-                    os.kill(proc.info["pid"], signal.SIGKILL)
-                    time.sleep(0.5)
-
-                subprocess.run(["pkill", "-f", self.proc_name], check=False)
+                except psutil.TimeoutExpired:
+                    log.warning("Force-killing unresponsive stray process: %s", proc.info)
+                    proc.kill()
+                    proc.wait(timeout=5)
 
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue

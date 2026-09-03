@@ -58,6 +58,32 @@ class ArchiveSafetyTests(unittest.TestCase):
                     limits=ZipArchiveLimits(),
                 )
 
+    def test_zip_limits_reject_windows_path_traversal(self) -> None:
+        with TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "save.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("..\\outside.txt", b"unsafe")
+
+            with self.assertRaisesRegex(ValueError, "member path is invalid"):
+                validated_zip_entries(
+                    archive_path,
+                    archive_label="Save upload",
+                    limits=ZipArchiveLimits(),
+                )
+
+    def test_zip_limits_reject_windows_drive_qualified_path(self) -> None:
+        with TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "save.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("C:/outside.txt", b"unsafe")
+
+            with self.assertRaisesRegex(ValueError, "member path is invalid"):
+                validated_zip_entries(
+                    archive_path,
+                    archive_label="Save upload",
+                    limits=ZipArchiveLimits(),
+                )
+
 
 class NodeUploadLimitTests(unittest.TestCase):
     def test_streamed_upload_stops_at_configured_limit(self) -> None:

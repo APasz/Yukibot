@@ -3,7 +3,7 @@ from __future__ import annotations
 from .runtime_imports import TYPE_CHECKING, Logger, Pattern, config, logging, re
 
 if TYPE_CHECKING:
-    from nicegui.elements.codemirror.codemirror import SUPPORTED_LANGUAGES, SUPPORTED_THEMES
+    from nicegui.elements.codemirror.constants import SUPPORTED_LANGUAGES, SUPPORTED_THEMES
 
 
 log: Logger = logging.getLogger(__name__)

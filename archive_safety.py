@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import zipfile
 
 
@@ -24,6 +24,21 @@ class ZipArchiveLimits:
                 raise ValueError(f"{field.name} must be a positive integer.")
 
 
+def validated_archive_member_path(member_name: str, *, archive_label: str) -> PurePosixPath:
+    """Return a portable relative archive member path or raise ``ValueError``."""
+    path = PurePosixPath(member_name)
+    if (
+        not member_name
+        or "\x00" in member_name
+        or "\\" in member_name
+        or path.is_absolute()
+        or PureWindowsPath(member_name).drive
+        or ".." in path.parts
+    ):
+        raise ValueError(f"{archive_label} member path is invalid: {member_name}")
+    return path
+
+
 def validated_zip_entries(
     archive_path: Path | str,
     *,
@@ -41,12 +56,10 @@ def validated_zip_entries(
         for member_index, member in enumerate(archive.infolist(), start=1):
             if member_index > limits.member_count:
                 raise ValueError(f"{archive_label} exceeds the maximum member count.")
-            raw_name = member.filename.strip("/")
+            raw_name = member.filename.rstrip("/")
             if not raw_name:
                 continue
-            path = PurePosixPath(raw_name)
-            if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-                raise ValueError(f"{archive_label} member path is invalid: {member.filename}")
+            path = validated_archive_member_path(raw_name, archive_label=archive_label)
             if not member.is_dir():
                 file_count += 1
                 if file_count > limits.file_count:

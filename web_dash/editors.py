@@ -113,7 +113,7 @@ _SERVER_RENDERED_LIST_PAGE_SIZE = 40
 _SortableFileEntry = TypeVar("_SortableFileEntry", NodeSaveEntry, NodeBlueprintEntry)
 
 if TYPE_CHECKING:
-    from nicegui.elements.codemirror.codemirror import SUPPORTED_LANGUAGES
+    from nicegui.elements.codemirror.constants import SUPPORTED_LANGUAGES
     from nicegui.elements.dialog import Dialog
     from nicegui.elements.switch import Switch
     from nicegui.elements.upload_files import FileUpload

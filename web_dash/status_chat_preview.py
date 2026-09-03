@@ -466,7 +466,10 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
                     with ui.row().classes("mod-fake-chat-footer w-full"):
                         ui.button("Publish Event", on_click=_publish_preview_event).classes("mod-list-button")
                         ui.button("Close", on_click=preview_dialog.close).classes("mod-list-button secondary")
-        return preview_dialog.open
+        def open_preview() -> None:
+            preview_dialog.open()
+
+        return open_preview
 
     @staticmethod
     def _fake_chat_select_props(*, clearable: bool) -> str:

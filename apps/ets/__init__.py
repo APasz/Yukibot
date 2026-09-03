@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import re
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from re import Match
@@ -207,7 +206,6 @@ class ETS(App):
         log.info(f"{__name__}.stop")
         self._running = False
 
-        subprocess.run(["pkill", "-f", self.proc_name])
         if self._tail:
             await self._tail.stop()
 

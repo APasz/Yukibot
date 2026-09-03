@@ -14,6 +14,14 @@ from _file import File_Utils
 
 
 class FileUtilsTests(unittest.TestCase):
+    def test_normalise_archive_member_path_rejects_windows_path_traversal(self) -> None:
+        with self.assertRaisesRegex(ValueError, "member path is invalid"):
+            File_Utils._normalise_archive_member_path("..\\outside.txt")
+
+    def test_normalise_archive_member_path_rejects_windows_drive_qualified_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "member path is invalid"):
+            File_Utils._normalise_archive_member_path("C:/outside.txt")
+
     def test_link_creates_relative_symlink_for_absolute_source(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

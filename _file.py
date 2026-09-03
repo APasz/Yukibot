@@ -9,7 +9,7 @@ import tempfile
 import zipfile
 from collections.abc import AsyncIterator, Collection
 from logging import Logger
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from subprocess import CompletedProcess
 from types import ModuleType
 from typing import cast
@@ -19,6 +19,7 @@ import hikari
 
 import config
 from _async_utils import run_blocking
+from archive_safety import validated_archive_member_path
 
 log: Logger = logging.getLogger(__name__)
 
@@ -39,10 +40,8 @@ class File_Utils:
 
     @staticmethod
     def _normalise_archive_member_path(member_name: str) -> Path:
-        resolved: PurePosixPath = PurePosixPath(member_name)
-        if not member_name or resolved.is_absolute() or ".." in resolved.parts:
-            raise ValueError(f"Archive member path is invalid: {member_name}")
-        return Path(*resolved.parts)
+        path = validated_archive_member_path(member_name, archive_label="Archive")
+        return Path(*path.parts)
 
     @classmethod
     def _extract_zip_archive(cls, archive_path: Path, staging_dir: Path) -> None:

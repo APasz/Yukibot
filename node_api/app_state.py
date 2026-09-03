@@ -1902,10 +1902,8 @@ class NodeAppStateSubscriptionService:
                 system_changed = system_summary is not None and (
                     (not has_state) or system_summary != last_system_summary
                 )
-                health_changed = (
-                    needs_health
-                    and discord_health is not None
-                    and ((not has_state) or discord_health != last_discord_health)
+                health_changed = needs_health and (
+                    (not has_state) or discord_health != last_discord_health
                 )
                 for subscription in subscriptions:
                     include_apps = NodeStateTopic.APPS in subscription.topics

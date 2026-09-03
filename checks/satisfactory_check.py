@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, patch
 
+import psutil
 from pydantic import ValidationError
 
 from apps._app import App
@@ -1116,6 +1117,85 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         await app._terminate()
 
         self.assertIsNone(app.process)
+
+    def test_leftover_process_cleanup_matches_case_insensitively_and_requires_all_command_parts(self) -> None:
+        class _Process:
+            def __init__(self, *, name: str, pid: int, command_line: list[str]) -> None:
+                self.info = {"name": name, "pid": pid, "cmdline": command_line}
+                self.terminate_calls = 0
+                self.wait_timeouts: list[int] = []
+                self.kill_calls = 0
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def wait(self, timeout: int) -> None:
+                self.wait_timeouts.append(timeout)
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+
+        matching_process = _Process(
+            name="factoryserver-linux-shipping",
+            pid=123,
+            command_line=["./FactoryServer-Linux-Shipping", "--server", "FactoryGame"],
+        )
+        unrelated_process = _Process(
+            name="factoryserver-linux-shipping",
+            pid=456,
+            command_line=["./FactoryServer-Linux-Shipping", "--client"],
+        )
+        app = object.__new__(_DummyApp)
+        app.proc_name = "FactoryServer-Linux-Shipping"
+        app.proc_cmd = ["FactoryServer-Linux-Shipping", "--server"]
+
+        with patch(
+            "apps._app.psutil.process_iter",
+            return_value=(matching_process, unrelated_process),
+        ), patch("apps._app.subprocess.run") as run:
+            app._terminate_leftover_processes_sync()
+
+        self.assertEqual(matching_process.terminate_calls, 1)
+        self.assertEqual(matching_process.wait_timeouts, [10])
+        self.assertEqual(matching_process.kill_calls, 0)
+        self.assertEqual(unrelated_process.terminate_calls, 0)
+        run.assert_not_called()
+
+    def test_leftover_process_cleanup_escalates_after_termination_timeout(self) -> None:
+        class _UnresponsiveProcess:
+            info = {
+                "name": "factoryserver-linux-shipping",
+                "pid": 123,
+                "cmdline": ["./FactoryServer-Linux-Shipping", "--server"],
+            }
+
+            def __init__(self) -> None:
+                self.terminate_calls = 0
+                self.wait_timeouts: list[int] = []
+                self.kill_calls = 0
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def wait(self, timeout: int) -> None:
+                self.wait_timeouts.append(timeout)
+                if len(self.wait_timeouts) == 1:
+                    raise psutil.TimeoutExpired(timeout, pid=123)
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+
+        process = _UnresponsiveProcess()
+        app = object.__new__(_DummyApp)
+        app.proc_name = "FactoryServer-Linux-Shipping"
+        app.proc_cmd = ["FactoryServer-Linux-Shipping", "--server"]
+
+        with patch("apps._app.psutil.process_iter", return_value=(process,)):
+            app._terminate_leftover_processes_sync()
+
+        self.assertEqual(process.terminate_calls, 1)
+        self.assertEqual(process.wait_timeouts, [10, 5])
+        self.assertEqual(process.kill_calls, 1)
 
     async def test_shared_terminate_cancels_cross_loop_stderr_task(self) -> None:
         task_ready = threading.Event()

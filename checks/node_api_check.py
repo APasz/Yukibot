@@ -8121,6 +8121,67 @@ class NodeApiTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_local_node_health_subscription_notifies_when_health_is_cleared(self) -> None:
+        async def exercise() -> None:
+            health = DiscordHealthSnapshot(
+                service_state=DiscordServiceState.READY,
+                command_state=DiscordHealthComponentState.READY,
+                gateway_state=DiscordHealthComponentState.READY,
+                rest_state=DiscordHealthComponentState.READY,
+                state_changed_at=datetime(2026, 9, 3, 0, 0, tzinfo=timezone.utc),
+                last_rest_success_at=None,
+                last_rest_failure_at=None,
+                next_retry_at=None,
+                last_error=None,
+                gateway_latency_ms=42,
+                reconnecting_shard_ids=(),
+            )
+            service = NodeApiService()
+            service.set_discord_health(health)
+            notifications: list[NodeStateStreamEvent] = []
+            initial_notification = asyncio.Event()
+            cleared_notification = asyncio.Event()
+
+            def on_update(update: NodeStateStreamEvent) -> None:
+                notifications.append(update)
+                if update.is_initial:
+                    initial_notification.set()
+                elif update.health_changed and update.discord_health is None:
+                    cleared_notification.set()
+
+            with patch.object(
+                service._app_state_subscriptions,
+                "_node_state_interval_seconds",
+                0.01,
+            ):
+                unsubscribe = service.subscribe_local_node_state(
+                    on_update,
+                    topics=frozenset({NodeStateTopic.HEALTH}),
+                )
+                try:
+                    await asyncio.wait_for(initial_notification.wait(), timeout=0.2)
+                    service.set_discord_service_state(DiscordServiceState.READY)
+                    await asyncio.wait_for(cleared_notification.wait(), timeout=0.2)
+                finally:
+                    unsubscribe()
+                    await asyncio.sleep(0)
+
+            self.assertEqual(
+                notifications,
+                [
+                    NodeStateStreamEvent.initial(
+                        node_name=service.node_name,
+                        discord_health=health,
+                    ),
+                    NodeStateStreamEvent.health(
+                        node_name=service.node_name,
+                        discord_health=None,
+                    ),
+                ],
+            )
+
+        asyncio.run(exercise())
+
     def test_app_footprint_size_bytes_uses_cache_for_stable_paths(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
