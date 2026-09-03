@@ -16980,6 +16980,37 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("Nomad", markup)
         self.assertNotIn("Default ·", markup)
 
+    def test_render_sevendays_sandbox_options_section_allows_no_header_description(self) -> None:
+        service = ModWebService()
+        ui = MagicMock()
+        summary = ModWebSevenDaysSandboxOptionsSummary(
+            data_path=".yukibot/sandbox_options.json",
+            file_exists=True,
+            options=(
+                ModWebSevenDaysSandboxOptionEntry(
+                    section="General",
+                    key="BlockDamage",
+                    value_index=10,
+                    value_label="200%",
+                    default_index=7,
+                    default_label="100%",
+                ),
+            ),
+        )
+
+        service._render_sevendays_sandbox_options_section(
+            ui=cast(ModWebUi, ui),
+            model=cast(
+                ModWebBasePageModel,
+                cast(object, SimpleNamespace(sevendays_sandbox_options=summary)),
+            ),
+            user=cast(ModWebUser, object()),
+            tab=cast(ModWebAppTabDefinition, object()),
+        )
+
+        ui.label.assert_called_once_with("1 settings in 1 categories")
+        ui.html.assert_called_once()
+
     def test_minecraft_recipe_summary_reads_persisted_recipe_book(self) -> None:
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)

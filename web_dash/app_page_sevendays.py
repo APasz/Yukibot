@@ -70,6 +70,7 @@ class ModWebAppPageSevenDaysMixin(ModWebServiceSupport):
                 self._render_flat_tab_header(
                     ui=ui,
                     title="Sandbox settings",
+                    description=None,
                 )
                 ui.label(f"{option_count} settings in {section_count} categories").classes("mod-subtitle text-sm")
                 if summary.sandbox_code is not None or summary.generated_at is not None:

@@ -167,8 +167,6 @@ class ETS(App):
 
         self._tail: Tailer | None = None
         self._tail_machers = set()
-        # self.am_recevier = Receiver(self)
-        # self._players = Players(self)
         self._matchers = Matchers(self)
 
     @property
@@ -183,8 +181,6 @@ class ETS(App):
                 suffixes=frozenset[str]({".sii"}),
             ),
         )
-
-        self.shell = True
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")
@@ -219,20 +215,14 @@ class ETS(App):
         await self._terminate()
         return True
 
-    async def player_count(self):
-        return None  # await self._players.count()
-
-
-# 00:10:13.294 : [MP] APasz connected, client_id = 10
-# 00:10:13.294 : [MP] [Chat] APasz connected
-# 00:12:11.720 : [MP] APasz disconnected, client_id = 10
+    async def player_count(self) -> tuple[int, int] | None:
+        return None
 
 
 class Matchers:
     def __init__(self, app: ETS):
         self.app = app
         app._tail_machers.add(self.match_version)
-        # app._tail_machers.add(self.match_chat)
         app._tail_machers.add(self.match_transient)
 
     async def match_version(self, line: str) -> None:
@@ -241,16 +231,6 @@ class Matchers:
             return
         if match := _ETS_PACKSET_VERSION_RE.search(line):
             self.app.apply_version(match.group("version"), persist=True)
-
-    async def match_chat(self, line: str):
-        match = re.search(r"\[.*?\] \[CHAT\] \(\d+\) <([^>]+)> +(.+)", line, re.IGNORECASE)
-        player = None
-        if match:
-            player = str(match.group(1))
-            msg = str(match.group(2))
-            log.debug(f"Match_Chat: {player=} | {msg=}")
-            if msg and not msg.startswith(self.app.cfg.chat_ignore_symbol):
-                DC_Relay.add(DC_Bound(self.app, msg, player))
 
     async def match_transient(self, line: str):
         match: Match[str] | None = re.search(
@@ -279,6 +259,3 @@ class Matchers:
                     notice=notice,
                 )
             )
-
-
-# AiviA APasz

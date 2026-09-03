@@ -664,7 +664,6 @@ def main():
         config.CommandGroup.MISC: group_misc,
         config.CommandGroup.OPS: group_ops,
         config.CommandGroup.ONLINE: CMD_Online,
-        # config.CommandGroup.SAVES: group_saves,
         config.CommandGroup.MUSIC: group_music,
         config.CommandGroup.VOICE: group_voice,
     }
@@ -983,7 +982,6 @@ def main():
     async def on_started(event: hikari.StartedEvent):
         log.info("Started")
         discord_startup_supervisor.mark_gateway_ready()
-        # await client.sync_application_commands()
         await sync_bot_metadata(bot, initial=True)
         if profile.has_service(config.BotService.GAME_RELAY):
             dc_relay.log_chat_relay_summary()
@@ -1012,8 +1010,6 @@ def main():
             mess = await resolutator.message(int(mess_id), int(chan_id))
             if mess:
                 await mess.edit(f"{mess.content or ''} ...Done! :D")
-
-        # await se_app.setup()
 
     @bot.listen(hikari.ShardDisconnectedEvent)
     async def _on_discord_gateway_shard_disconnected(event: hikari.ShardDisconnectedEvent) -> None:

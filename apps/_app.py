@@ -249,7 +249,6 @@ class App(Generic[ConfigT], ABC):
     server_log: Path | None
     mods: Mod_Manager | None = None
     settings: Settings_Manager | None
-    saves = None
     updater: Update_Manager | None = None
     process: subprocess.Popen[Any] | None = None
     file_stdout: Path
@@ -332,7 +331,6 @@ class App(Generic[ConfigT], ABC):
             self.settings = Settings_Manager(cfg, stg)
         else:
             self.settings = None
-        self.saves = None  # TODO Save_Manager
         self.activity_manager = activity_manager
 
         self.providers = []
