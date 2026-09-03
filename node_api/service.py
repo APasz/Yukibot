@@ -19,7 +19,6 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import requests
 from fastapi import (
-    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -32,10 +31,10 @@ import apps._node_api as app_node_api
 import apps.factorio.node_api as factorio_node_api
 import apps.minecraft.node_api as minecraft_node_api
 import apps.satisfactory.node_api as satisfactory_node_api
-import apps.sevendays.node_api as sevendays_node_api
 import config
 from . import (
     app_installer,
+    app_game_service,
     app_operations,
     app_state,
     chat_service,
@@ -50,7 +49,6 @@ from . import (
     system_service,
 )
 from _async_utils import run_blocking
-from _audit import audit_log
 from _file import File_Utils
 from _manager import App_Manager, app_scope_from_name
 from _security import Access_Control, Power_Level
@@ -64,7 +62,6 @@ from apps._config import (
     ModPageDiscovery,
     ModPlacement,
 )
-from apps._console import ConsoleAction
 from apps.factorio.node_api import (
     NodeFactorioGenerationState,
     NodeFactorioGenerationUpdateRequest,
@@ -72,32 +69,13 @@ from apps.factorio.node_api import (
     NodeFactorioMapExchangeString,
     NodeFactorioModSettings,
 )
-from apps.minecraft import (
-    Minecraft,
-    MinecraftRecipeMutation,
-)
-from apps.minecraft.node_api import (
-    NodeMinecraftRecipeMutationAction,
-    NodeMinecraftRecipeMutationRequest,
-    NodeMinecraftRecipeMutationResult,
-    NodeMinecraftRecipeWorkspaceState,
-)
 from apps.satisfactory.node_api import (
     NodeBlueprintList,
     NodeBlueprintMutationResult,
 )
-from apps.sevendays import SevenDays
-from apps.sevendays.node_api import (
-    NodeSevenDaysSandboxOptionsState,
-)
 from mod_web_auth import ModWebAuthService, ModWebUser
 from .app_routes import register_app_routes
 from .app_installer_routes import register_app_installer_routes
-from .app_installer import (
-    NodeAppInstallCatalog,
-    NodeAppInstallRequest,
-    NodeAppInstallStatus,
-)
 from .app_state import (
     _ALL_NODE_STATE_TOPICS,
     NodeAppActivityProviderEntry,
@@ -116,8 +94,6 @@ from .console import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
-    NodeConsoleStdoutStreamEvent,
-    NodeConsoleStdoutStreamEventKind,
 )
 from .console_routes import register_console_routes
 from .core_routes import register_core_routes
@@ -179,7 +155,6 @@ class PortalNodeLatencyProbe:
     discord_service_state: DiscordServiceState | None
 
 
-_LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
 log = logging.getLogger(__name__)
 traffic_log = logging.getLogger(config.LOGGER_TRAFFIC)
@@ -250,9 +225,13 @@ class NodeApiService:
         self._system_history_task: asyncio.Task[None] | None = None
         self._app_mutations = app_state.NodeAppMutationService(
             node_name=lambda: self.node_name,
+            require_manager=self._require_manager,
+            require_acl=self._require_acl,
+            http_exception=_http_exception,
             invalidate_state_caches=lambda app_name: self._invalidate_state_caches(
                 app_name=app_name
             ),
+            invalidate_mod_inventory=self._invalidate_mod_inventory,
             build_runtime_summary=lambda app: self.build_app_runtime_summary(app),
             build_live_runtime_summary=lambda app: self.build_live_app_runtime_summary(
                 app
@@ -288,6 +267,8 @@ class NodeApiService:
         )
         self._client_packs = client_pack.NodeClientPackService(
             node_name=lambda: self.node_name,
+            require_acl=self._require_acl,
+            http_exception=_http_exception,
             invalidate_app_state=lambda app_name: self._invalidate_state_caches(
                 app_name=app_name
             ),
@@ -304,6 +285,15 @@ class NodeApiService:
             node_name=lambda: self.node_name,
             invalidate_state_caches=self._invalidate_state_caches,
             scope_policy=lambda: self._require_manager().app_installer_settings(),
+            require_manager=self._require_manager,
+            require_acl=self._require_acl,
+            require_available=self.node_management.require_app_installer_available,
+        )
+        self.app_games = app_game_service.NodeAppGameService(
+            node_name=lambda: self.node_name,
+            require_acl=self._require_acl,
+            http_exception=_http_exception,
+            traffic_log=traffic_log,
         )
         self._factorio = factorio_node_api.FactorioNodeApiService(
             node_name=lambda: self.node_name,
@@ -366,6 +356,12 @@ class NodeApiService:
     @property
     def api_base_url(self) -> str:
         return config.MOD_WEB_SERVER.node_api_base_url
+
+    @property
+    def app_installer(self) -> app_installer.NodeAppInstallerService:
+        """The node-local app installation domain service."""
+
+        return self._app_installer
 
     def set_manager(self, manager: App_Manager) -> None:
         self._manager = manager
@@ -477,8 +473,13 @@ class NodeApiService:
 
         register_core_routes(
             nicegui_app,
-            service=self,
             auth=self.request_auth,
+            list_apps=self.list_apps,
+            resolve_app=self._resolve_app,
+            build_live_app_entry=self.build_live_app_entry,
+            node_ping_headers=self._node_ping_headers,
+            serve_presence_stream=self._serve_presence_stream,
+            serve_node_state_stream=self._serve_node_state_stream,
             relay_tts=self.relay_tts,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
@@ -506,8 +507,8 @@ class NodeApiService:
 
         register_chat_routes(
             nicegui_app,
-            service=self,
             auth=self.request_auth,
+            resolve_app=self._resolve_app,
             chat=self.chat,
             api_prefix=_NODE_API_PREFIX,
             history_limit=_NODE_CHAT_HISTORY_LIMIT,
@@ -516,8 +517,13 @@ class NodeApiService:
 
         register_app_routes(
             nicegui_app,
-            service=self,
             auth=self.request_auth,
+            resolve_app=self._resolve_app,
+            mod_service=self._mod_service,
+            build_cached_runtime_summary=self.build_cached_app_runtime_summary,
+            games=self.app_games,
+            mutations=self._app_mutations,
+            serve_app_state_stream=self._serve_app_state_stream,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -525,8 +531,8 @@ class NodeApiService:
 
         register_app_installer_routes(
             nicegui_app,
-            service=self,
             auth=self.request_auth,
+            installer=self.app_installer,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -534,8 +540,9 @@ class NodeApiService:
 
         register_map_routes(
             nicegui_app,
-            service=self,
             auth=self.request_auth,
+            resolve_app=self._resolve_app,
+            map_annotation_creator_name=self._map_annotation_creator_name,
             maps=self.maps,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
@@ -543,17 +550,21 @@ class NodeApiService:
 
         register_mod_routes(
             nicegui_app,
-            service=self,
             auth=self.request_auth,
+            resolve_app=self._resolve_app,
+            mod_service=self._mod_service,
+            client_packs=self._client_packs,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
         )
 
         register_storage_routes(
             nicegui_app,
-            service=self,
             auth=self.request_auth,
+            resolve_app=self._resolve_app,
             storage=self.storage,
+            factorio=self._factorio,
+            blueprints=self._satisfactory_blueprints,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -561,16 +572,18 @@ class NodeApiService:
 
         register_settings_routes(
             nicegui_app,
-            service=self,
             auth=self.request_auth,
+            resolve_app=self._resolve_app,
+            operations=self._app_operations,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
         )
 
         register_console_routes(
             nicegui_app,
-            service=self,
             auth=self.request_auth,
+            resolve_app=self._resolve_app,
+            operations=self._app_operations,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -760,105 +773,9 @@ class NodeApiService:
             ),
         )
 
-    def build_minecraft_recipe_workspace_state(
-        self, app: App
-    ) -> NodeMinecraftRecipeWorkspaceState:
-        if not isinstance(app, Minecraft):
-            raise _http_exception(
-                404, f"App {app.name!r} does not expose Minecraft recipe data."
-            )
-        return minecraft_node_api.build_minecraft_recipe_workspace_state(app)
-
-    def build_sevendays_sandbox_options_state(
-        self, app: App
-    ) -> NodeSevenDaysSandboxOptionsState:
-        if not isinstance(app, SevenDays):
-            raise _http_exception(
-                404, f"App {app.name!r} does not expose 7D2D sandbox options."
-            )
-        return sevendays_node_api.build_sevendays_sandbox_options_state(app)
-
-    def build_minecraft_item_icon_response(self, app: App, *, item_id: str) -> Response:
-        if not isinstance(app, Minecraft):
-            raise _http_exception(
-                404, f"App {app.name!r} does not expose Minecraft recipe item icons."
-            )
-        try:
-            return minecraft_node_api.build_minecraft_item_icon_response(
-                app, item_id=item_id
-            )
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-
     @staticmethod
     def minecraft_item_icon_placeholder_svg(item_id: str) -> str:
         return minecraft_node_api.minecraft_item_icon_placeholder_svg(item_id)
-
-    async def append_minecraft_recipe_mutation(
-        self,
-        *,
-        app: App,
-        mutation: MinecraftRecipeMutation,
-        actor_user_id: int,
-    ) -> NodeMinecraftRecipeMutationResult:
-        mutation_request = NodeMinecraftRecipeMutationRequest(
-            action=NodeMinecraftRecipeMutationAction.ADD,
-            mutation=mutation,
-        )
-        return await self.mutate_minecraft_recipe_book(
-            app=app,
-            mutation_request=mutation_request,
-            actor_user_id=actor_user_id,
-        )
-
-    async def mutate_minecraft_recipe_book(
-        self,
-        *,
-        app: App,
-        mutation_request: NodeMinecraftRecipeMutationRequest,
-        actor_user_id: int,
-    ) -> NodeMinecraftRecipeMutationResult:
-        if not isinstance(app, Minecraft):
-            raise _http_exception(
-                404, f"App {app.name!r} does not expose Minecraft recipe data."
-            )
-        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
-        try:
-            minecraft_node_api.apply_minecraft_recipe_mutation(
-                app=app,
-                mutation_request=mutation_request,
-                actor_user_id=actor_user_id,
-            )
-        except IndexError as xcp:
-            raise _http_exception(404, str(xcp)) from xcp
-        except FileNotFoundError as xcp:
-            raise _http_exception(404, str(xcp)) from xcp
-        except ValueError as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        except RuntimeError as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-        except Exception as xcp:
-            raise _http_exception(
-                500, f"Minecraft recipe mutation failed: {xcp}"
-            ) from xcp
-        traffic_log.info(
-            "Node API Minecraft recipe mutation applied: node=%s app=%s actor=%s action=%s index=%s kind=%s",
-            self.node_name,
-            app.name,
-            actor_user_id,
-            mutation_request.action.value,
-            mutation_request.mutation_index,
-            None
-            if mutation_request.mutation is None
-            else mutation_request.mutation.to_mapping().get("kind"),
-        )
-        return NodeMinecraftRecipeMutationResult(
-            app_name=app.name,
-            app_friendly=app.friendly,
-            node=self.node_name,
-            message=f"Saved Minecraft recipe change for {app.friendly}.",
-            workspace=self.build_minecraft_recipe_workspace_state(app),
-        )
 
     @staticmethod
     def app_color_hex(color: int | None) -> str | None:
@@ -1059,7 +976,7 @@ class NodeApiService:
 
     @staticmethod
     def _map_annotation_creator_name(
-        app: App, *, actor_user_id: int, user: ModWebUser | None
+        app: App, actor_user_id: int, user: ModWebUser | None
     ) -> str | None:
         fallback_username = None if user is None else user.username
         return config.Name_Cache().discord_fallback_name(
@@ -1103,7 +1020,7 @@ class NodeApiService:
             uptime_seconds=_minute_bucket(summary.uptime_seconds),
         )
 
-    async def _serve_presence_stream(self, *, websocket: WebSocket) -> None:
+    async def _serve_presence_stream(self, websocket: WebSocket) -> None:
         if not self._try_reserve_presence_stream_connection():
             await websocket.close(
                 code=status.WS_1013_TRY_AGAIN_LATER,
@@ -1286,7 +1203,7 @@ class NodeApiService:
             discord_service_state=discord_service_state,
         )
 
-    async def _serve_node_state_stream(self, *, websocket: WebSocket) -> None:
+    async def _serve_node_state_stream(self, websocket: WebSocket) -> None:
         await websocket.accept()
         update_queue: asyncio.Queue[NodeStateStreamEvent] = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -1355,7 +1272,7 @@ class NodeApiService:
             unsubscribe()
             await self._close_websocket_quietly(websocket)
 
-    async def _serve_app_state_stream(self, *, websocket: WebSocket, app: App) -> None:
+    async def _serve_app_state_stream(self, websocket: WebSocket, app: App) -> None:
         await websocket.accept()
         update_queue: asyncio.Queue[NodeAppStateStreamEvent] = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -1456,103 +1373,6 @@ class NodeApiService:
             unsubscribe_runtime()
             unsubscribe_node()
             await self._close_websocket_quietly(websocket)
-
-    async def _serve_console_stdout_stream(
-        self,
-        *,
-        websocket: WebSocket,
-        app: App,
-        max_lines: int,
-    ) -> None:
-        await websocket.accept()
-
-        async def _wait_for_disconnect() -> None:
-            while True:
-                message = await websocket.receive()
-                if message.get("type") == "websocket.disconnect":
-                    return
-
-        async def _send_event(event: NodeConsoleStdoutStreamEvent) -> None:
-            await websocket.send_json(event.to_mapping())
-
-        disconnect_task = asyncio.create_task(_wait_for_disconnect())
-        previous_snapshot: NodeConsoleStdoutSnapshot | None = None
-        try:
-            initial_snapshot = self.build_console_stdout_snapshot(
-                app=app, max_lines=max_lines
-            )
-            await _send_event(
-                NodeConsoleStdoutStreamEvent(
-                    kind=NodeConsoleStdoutStreamEventKind.INITIAL,
-                    app_name=app.name,
-                    snapshot=initial_snapshot,
-                    truncated=initial_snapshot.truncated,
-                    running=initial_snapshot.running,
-                )
-            )
-            previous_snapshot = initial_snapshot
-            while True:
-                interval_task = asyncio.create_task(
-                    asyncio.sleep(_LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS)
-                )
-                done, _pending = await asyncio.wait(
-                    {interval_task, disconnect_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if disconnect_task in done:
-                    interval_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await interval_task
-                    return
-                next_snapshot = self.build_console_stdout_snapshot(
-                    app=app, max_lines=max_lines
-                )
-                if next_snapshot != previous_snapshot:
-                    appended_lines = self._console_stdout_appended_lines(
-                        previous_snapshot, next_snapshot
-                    )
-                    if appended_lines is None:
-                        event = NodeConsoleStdoutStreamEvent(
-                            kind=NodeConsoleStdoutStreamEventKind.RESET,
-                            app_name=app.name,
-                            snapshot=next_snapshot,
-                            truncated=next_snapshot.truncated,
-                            running=next_snapshot.running,
-                        )
-                    else:
-                        event = NodeConsoleStdoutStreamEvent(
-                            kind=NodeConsoleStdoutStreamEventKind.APPEND,
-                            app_name=app.name,
-                            appended_lines=appended_lines,
-                            truncated=next_snapshot.truncated,
-                            running=next_snapshot.running,
-                        )
-                    await _send_event(event)
-                    previous_snapshot = next_snapshot
-        except WebSocketDisconnect:
-            return
-        finally:
-            disconnect_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await disconnect_task
-            await self._close_websocket_quietly(websocket)
-
-    @staticmethod
-    def _console_stdout_appended_lines(
-        previous: NodeConsoleStdoutSnapshot,
-        updated: NodeConsoleStdoutSnapshot,
-    ) -> tuple[str, ...] | None:
-        if previous.app_name.casefold() != updated.app_name.casefold():
-            raise ValueError(
-                "Cannot compare console stdout snapshots for different apps."
-            )
-        if not previous.lines:
-            return updated.lines
-        max_overlap = min(len(previous.lines), len(updated.lines))
-        for overlap in range(max_overlap, 0, -1):
-            if previous.lines[-overlap:] == updated.lines[:overlap]:
-                return updated.lines[overlap:]
-        return None
 
     @staticmethod
     async def _close_websocket_quietly(websocket: WebSocket) -> None:
@@ -1690,13 +1510,10 @@ class NodeApiService:
         steam_update_selected_branch: str | None = None,
         update_branch_id: str | None = None,
     ) -> app_state.NodeAppMutationResult:
-        result = await self._app_mutations.mutate(
-            manager=self._require_manager(),
-            acl=self._require_acl(),
+        return await self._app_mutations.mutate(
             app=app,
             action=action,
             actor_user_id=actor_user_id,
-            http_exception=_http_exception,
             friendly_name=friendly_name,
             title_font_preset=title_font_preset,
             notes=notes,
@@ -1718,38 +1535,6 @@ class NodeApiService:
             steam_update_selected_branch=steam_update_selected_branch,
             update_branch_id=update_branch_id,
         )
-        if action is app_state.NodeAppMutationAction.DELETE:
-            self._invalidate_mod_inventory(app.name)
-            audit_log(
-                "node.app.deleted",
-                actor_user_id=actor_user_id,
-                node=self.node_name,
-                app_name=app.name,
-                scope=app.scope,
-            )
-        return result
-
-    async def build_app_install_catalog(self) -> NodeAppInstallCatalog:
-        self.node_management.require_app_installer_available()
-        return await self._app_installer.build_catalog(manager=self._require_manager())
-
-    async def start_app_install(
-        self,
-        *,
-        request: NodeAppInstallRequest,
-        actor_user_id: int,
-    ) -> NodeAppInstallStatus:
-        self.node_management.require_app_installer_available()
-        return await self._app_installer.start_install(
-            manager=self._require_manager(),
-            acl=self._require_acl(),
-            actor_user_id=actor_user_id,
-            request=request,
-        )
-
-    def app_install_status(self, *, job_id: str) -> NodeAppInstallStatus:
-        self.node_management.require_app_installer_available()
-        return self._app_installer.install_status(job_id=job_id)
 
     async def build_mod_download_response(
         self,
@@ -1760,7 +1545,6 @@ class NodeApiService:
         return await self._client_packs.build_mod_download_response(
             app=app,
             request=request,
-            http_exception=_http_exception,
         )
 
     async def run_bulk_metadata_operation(
@@ -2258,8 +2042,6 @@ class NodeApiService:
             app=app,
             update=update,
             actor_user_id=actor_user_id,
-            acl=self._require_acl(),
-            http_exception=_http_exception,
         )
 
     async def publish_client_pack_config(
@@ -2273,12 +2055,7 @@ class NodeApiService:
             app=app,
             update=update,
             actor_user_id=actor_user_id,
-            acl=self._require_acl(),
-            http_exception=_http_exception,
         )
-
-    def _resolve_console_action(self, app: App, action_key: str) -> ConsoleAction:
-        return self._app_operations.resolve_console_action(app, action_key)
 
     def apps_url(self, *, subject: str = "web", base_url: str | None = None) -> str:
         del subject

@@ -15,25 +15,25 @@ from node_auth import NodeApiScope
 
 
 class NodeAppInstallerRouteService(Protocol):
-    """Installation operations supplied by the node API service."""
+    """The small installation interface consumed by the HTTP registrar."""
 
-    async def build_app_install_catalog(self) -> NodeAppInstallCatalog: ...
+    async def build_catalog(self) -> NodeAppInstallCatalog: ...
 
-    async def start_app_install(
+    async def start_install(
         self,
         *,
         request: NodeAppInstallRequest,
         actor_user_id: int,
     ) -> NodeAppInstallStatus: ...
 
-    def app_install_status(self, *, job_id: str) -> NodeAppInstallStatus: ...
+    def install_status(self, *, job_id: str) -> NodeAppInstallStatus: ...
 
 
 def register_app_installer_routes(
     nicegui_app: Any,
     *,
-    service: NodeAppInstallerRouteService,
     auth: NodeAuthenticatedRouteService,
+    installer: NodeAppInstallerRouteService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
@@ -44,7 +44,7 @@ def register_app_installer_routes(
     async def _catalog(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API app installer catalog request: node=%s", auth.node_name)
         auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APP_MANAGE,))
-        return (await service.build_app_install_catalog()).to_mapping()
+        return (await installer.build_catalog()).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/app-installer/jobs")
     async def _start_job(
@@ -65,7 +65,10 @@ def register_app_installer_routes(
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
         try:
-            status = await service.start_app_install(request=payload, actor_user_id=actor_user_id)
+            status = await installer.start_install(
+                request=payload,
+                actor_user_id=actor_user_id,
+            )
         except ValueError as xcp:
             raise http_exception(400, str(xcp)) from xcp
         except RuntimeError as xcp:
@@ -91,7 +94,7 @@ def register_app_installer_routes(
         traffic_log.info("Node API app installer status request: node=%s job=%s", auth.node_name, job_id)
         auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APP_MANAGE,))
         try:
-            return service.app_install_status(job_id=job_id).to_mapping()
+            return installer.install_status(job_id=job_id).to_mapping()
         except LookupError as xcp:
             raise http_exception(404, "Install job was not found.") from xcp
 

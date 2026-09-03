@@ -66,10 +66,14 @@ class NodeClientPackService:
         self,
         *,
         node_name: Callable[[], str],
+        require_acl: Callable[[], Access_Control],
+        http_exception: HttpExceptionFactory,
         invalidate_app_state: Callable[[str], None],
         invalidate_mod_inventory: Callable[[str], None],
     ) -> None:
         self._node_name = node_name
+        self._require_acl = require_acl
+        self._http_exception = http_exception
         self._invalidate_app_state = invalidate_app_state
         self._invalidate_mod_inventory = invalidate_mod_inventory
         self._client_pack_locks: dict[str, asyncio.Lock] = {}
@@ -267,9 +271,9 @@ class NodeClientPackService:
         app: App,
         update: NodeClientPackConfigUpdateRequest,
         actor_user_id: int,
-        acl: Access_Control,
-        http_exception: HttpExceptionFactory,
     ) -> dict[str, object]:
+        acl = self._require_acl()
+        http_exception = self._http_exception
         if not app.mod_capabilities.supports_client_pack:
             raise http_exception(400, f"{app.friendly} does not support client pack generation.")
         manager = app.has_mod_manager
@@ -331,9 +335,9 @@ class NodeClientPackService:
         app: App,
         update: NodeClientPackPublishRequest,
         actor_user_id: int,
-        acl: Access_Control,
-        http_exception: HttpExceptionFactory,
     ) -> dict[str, object]:
+        acl = self._require_acl()
+        http_exception = self._http_exception
         if not app.mod_capabilities.supports_client_pack:
             raise http_exception(400, f"{app.friendly} does not support client pack generation.")
         await acl.perm_check(actor_user_id, Power_Level.admin)
@@ -480,15 +484,14 @@ class NodeClientPackService:
         *,
         app: App,
         request: NodeDownloadRequest,
-        http_exception: HttpExceptionFactory,
         _publish_lock_held: bool = False,
     ) -> FileResponse:
+        http_exception = self._http_exception
         if request.publish_client_pack and not _publish_lock_held:
             async with self._client_pack_lock(app.name):
                 return await self.build_mod_download_response(
                     app=app,
                     request=request,
-                    http_exception=http_exception,
                     _publish_lock_held=True,
                 )
         await app.has_mod_manager.reload_mods()

@@ -3,46 +3,25 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import HTTPException, Request, WebSocket, WebSocketException, status
 
 from _audit import audit_log
 from apps._app import App
-from apps._console import ConsoleAction
+from .app_operations import NodeAppOperationsService
 from .console import NodeConsoleActionExecuteRequest, NodeConsoleActionExecutionResult
-from .route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
+from .route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
-
-
-class NodeConsoleRouteService(Protocol):
-    """Console operations required by the console route registrar."""
-
-    def _resolve_app(self, app_name: str) -> App: ...
-
-    def _resolve_console_action(self, app: App, action_key: str) -> ConsoleAction: ...
-
-    async def _serve_console_stdout_stream(self, *, websocket: WebSocket, app: App, max_lines: int) -> None: ...
-
-    def build_console_action_list(self, *, app: App, actor_user_id: int) -> MappingResponse: ...
-
-    async def execute_console_action(
-        self,
-        *,
-        app: App,
-        action_key: str,
-        raw_value: str | None,
-        actor_user_id: int,
-    ) -> NodeConsoleActionExecutionResult: ...
-
-    async def read_console_stdout(self, *, app: App, actor_user_id: int, max_lines: int) -> MappingResponse: ...
 
 
 def register_console_routes(
     nicegui_app: Any,
     *,
-    service: NodeConsoleRouteService,
     auth: NodeAuthenticatedRouteService,
+    resolve_app: Callable[[str], App],
+    operations: NodeAppOperationsService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
@@ -59,8 +38,8 @@ def register_console_routes(
             request, access_token, app_name=app_name, scopes=(NodeApiScope.APP_CONTROL,)
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        app = service._resolve_app(app_name)
-        return service.build_console_action_list(app=app, actor_user_id=actor_user_id).to_mapping()
+        app = resolve_app(app_name)
+        return operations.build_console_action_list(app=app, actor_user_id=actor_user_id).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/console-actions/{{action_key}}")
     async def _execute_console_action_route(
@@ -81,8 +60,8 @@ def register_console_routes(
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
         execute_request: NodeConsoleActionExecuteRequest = NodeConsoleActionExecuteRequest.model_validate(payload)
-        app = service._resolve_app(app_name)
-        result = await service.execute_console_action(
+        app = resolve_app(app_name)
+        result: NodeConsoleActionExecutionResult = await operations.execute_console_action(
             app=app,
             action_key=action_key,
             raw_value=execute_request.value,
@@ -94,7 +73,7 @@ def register_console_routes(
             node_name=auth.node_name,
             app_name=app.name,
             console_action_key=action_key,
-            required_level=service._resolve_console_action(app, action_key).power_level.name,
+            required_level=operations.resolve_console_action(app, action_key).power_level.name,
             success=result.success,
         )
         return result.to_mapping()
@@ -113,8 +92,12 @@ def register_console_routes(
             request, access_token, app_name=app_name, scopes=(NodeApiScope.APP_CONTROL,)
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        app = service._resolve_app(app_name)
-        result = await service.read_console_stdout(app=app, actor_user_id=actor_user_id, max_lines=max_lines)
+        app = resolve_app(app_name)
+        result = await operations.read_console_stdout(
+            app=app,
+            actor_user_id=actor_user_id,
+            max_lines=max_lines,
+        )
         return result.to_mapping()
 
     @nicegui_app.websocket(f"{api_prefix}/apps/{{app_name}}/console/stdout/stream")
@@ -134,7 +117,11 @@ def register_console_routes(
             scopes=(NodeApiScope.APP_CONTROL,),
         )
         try:
-            app = service._resolve_app(app_name)
+            app = resolve_app(app_name)
         except HTTPException as xcp:
             raise auth.websocket_exception_from_http(xcp) from xcp
-        await service._serve_console_stdout_stream(websocket=websocket, app=app, max_lines=max_lines)
+        await operations.serve_console_stdout_stream(
+            websocket=websocket,
+            app=app,
+            max_lines=max_lines,
+        )

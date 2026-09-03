@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import HTTPException, Request, WebSocket
 from fastapi.responses import Response
@@ -11,78 +12,31 @@ from fastapi.responses import Response
 from _async_utils import run_blocking
 from apps._app import App
 from apps.minecraft.node_api import NodeMinecraftRecipeMutationRequest
+from .app_game_service import NodeAppGameService
 from .app_state import (
-    NodeAppMutationAction,
+    NodeAppMutationService,
     NodeAppMutationRequest,
+    NodeAppRuntimeSummary,
     required_app_mutation_scope,
 )
+from .mod_service import NodeModService
 from .route_contracts import (
     HttpExceptionFactory,
-    MappingResponse,
     NodeAuthenticatedRouteService,
 )
 from node_auth import NodeApiScope
 
 
-class NodeAppRouteService(Protocol):
-    """App operations exposed through the HTTP API."""
-
-    def _resolve_app(self, app_name: str) -> App: ...
-
-    async def build_mod_list(self, app: App) -> MappingResponse: ...
-
-    async def build_cached_app_runtime_summary(self, app: App) -> MappingResponse: ...
-
-    def build_sevendays_sandbox_options_state(self, app: App) -> MappingResponse: ...
-
-    def build_minecraft_recipe_workspace_state(self, app: App) -> MappingResponse: ...
-
-    async def mutate_minecraft_recipe_book(
-        self,
-        *,
-        app: App,
-        mutation_request: NodeMinecraftRecipeMutationRequest,
-        actor_user_id: int,
-    ) -> MappingResponse: ...
-
-    def build_minecraft_item_icon_response(self, app: App, *, item_id: str) -> Response: ...
-
-    async def _serve_app_state_stream(self, *, websocket: WebSocket, app: App) -> None: ...
-
-    async def mutate_app(
-        self,
-        *,
-        app: App,
-        action: NodeAppMutationAction,
-        actor_user_id: int,
-        friendly_name: str | None,
-        title_font_preset: str | None,
-        notes: str | None,
-        lifecycle_notice_started: bool | None,
-        lifecycle_notice_stopped: bool | None,
-        lifecycle_notice_crashed: bool | None,
-        relay_notice_player_session: bool | None,
-        relay_notice_player_death: bool | None,
-        relay_notice_progress: bool | None,
-        relay_advancements_enabled: bool | None,
-        factorio_chat_relay_use_shout: bool | None,
-        rcon_requires_online_players: bool | None,
-        disabled_activity_provider_ids: tuple[str, ...] | None,
-        running_cpu_points: int | None,
-        running_ram_points: int | None,
-        startup_cpu_points: int | None,
-        startup_ram_points: int | None,
-        steam_update_enabled: bool | None,
-        steam_update_selected_branch: str | None,
-        update_branch_id: str | None,
-    ) -> MappingResponse: ...
-
-
 def register_app_routes(
     nicegui_app: Any,
     *,
-    service: NodeAppRouteService,
     auth: NodeAuthenticatedRouteService,
+    resolve_app: Callable[[str], App],
+    mod_service: NodeModService,
+    build_cached_runtime_summary: Callable[[App], Awaitable[NodeAppRuntimeSummary]],
+    games: NodeAppGameService,
+    mutations: NodeAppMutationService,
+    serve_app_state_stream: Callable[[WebSocket, App], Awaitable[None]],
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
@@ -93,8 +47,8 @@ def register_app_routes(
     async def _list_mods(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API mods list request: node=%s app=%s", auth.node_name, app_name)
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
-        app = service._resolve_app(app_name)
-        return (await service.build_mod_list(app)).to_mapping()
+        app = resolve_app(app_name)
+        return (await mod_service.build_mod_list(app)).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/runtime")
     async def _runtime_summary(
@@ -108,8 +62,8 @@ def register_app_routes(
             app_name,
         )
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
-        app = service._resolve_app(app_name)
-        return (await service.build_cached_app_runtime_summary(app)).to_mapping()
+        app = resolve_app(app_name)
+        return (await build_cached_runtime_summary(app)).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/sevendays/sandbox-options")
     async def _sevendays_sandbox_options(
@@ -123,8 +77,8 @@ def register_app_routes(
             app_name,
         )
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
-        app = service._resolve_app(app_name)
-        return service.build_sevendays_sandbox_options_state(app).to_mapping()
+        app = resolve_app(app_name)
+        return games.build_sevendays_sandbox_options_state(app).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/minecraft/recipes")
     async def _minecraft_recipe_workspace(
@@ -138,8 +92,8 @@ def register_app_routes(
             app_name,
         )
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
-        app = service._resolve_app(app_name)
-        return service.build_minecraft_recipe_workspace_state(app).to_mapping()
+        app = resolve_app(app_name)
+        return games.build_minecraft_recipe_workspace_state(app).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/minecraft/recipes/mutations")
     async def _mutate_minecraft_recipe(
@@ -164,8 +118,8 @@ def register_app_routes(
             mutation_request = NodeMinecraftRecipeMutationRequest.from_mapping(payload)
         except ValueError as xcp:
             raise http_exception(400, str(xcp)) from xcp
-        app = service._resolve_app(app_name)
-        result = await service.mutate_minecraft_recipe_book(
+        app = resolve_app(app_name)
+        result = await games.mutate_minecraft_recipe_book(
             app=app,
             mutation_request=mutation_request,
             actor_user_id=actor_user_id,
@@ -186,8 +140,8 @@ def register_app_routes(
             item_id,
         )
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
-        app = service._resolve_app(app_name)
-        return await run_blocking(service.build_minecraft_item_icon_response, app, item_id=item_id)
+        app = resolve_app(app_name)
+        return await run_blocking(games.build_minecraft_item_icon_response, app, item_id=item_id)
 
     @nicegui_app.websocket(f"{api_prefix}/apps/{{app_name}}/state/stream")
     async def _app_state_stream(
@@ -207,10 +161,10 @@ def register_app_routes(
             scopes=(NodeApiScope.APPS_READ, NodeApiScope.MODS_READ),
         )
         try:
-            app = service._resolve_app(app_name)
+            app = resolve_app(app_name)
         except HTTPException as xcp:
             raise auth.websocket_exception_from_http(xcp) from xcp
-        await service._serve_app_state_stream(websocket=websocket, app=app)
+        await serve_app_state_stream(websocket, app)
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mutate")
     async def _mutate_app(
@@ -229,8 +183,8 @@ def register_app_routes(
             scopes=(required_scope,),
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        app = service._resolve_app(app_name)
-        result = await service.mutate_app(
+        app = resolve_app(app_name)
+        result = await mutations.mutate(
             app=app,
             action=mutation_request.action,
             actor_user_id=actor_user_id,

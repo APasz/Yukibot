@@ -411,31 +411,51 @@ class NodeAppInstallerService:
         node_name: Callable[[], str],
         invalidate_state_caches: Callable[[], None],
         scope_policy: Callable[[], NodeAppInstallScopePolicy] | None = None,
+        require_manager: Callable[[], NodeAppInstallerManager] | None = None,
+        require_acl: Callable[[], Access_Control] | None = None,
+        require_available: Callable[[], None] | None = None,
     ) -> None:
         self._node_name = node_name
         self._invalidate_state_caches = invalidate_state_caches
         self._scope_policy = scope_policy or _allow_all_install_scope_policy
+        self._require_manager = require_manager
+        self._require_acl = require_acl
+        self._require_available = require_available
         self._lock = threading.RLock()
         self._jobs: dict[str, _NodeAppInstallJob] = {}
         self._active_targets: set[Path] = set()
         self._active_instance_keys: set[tuple[str, str]] = set()
 
-    async def build_catalog(self, *, manager: NodeAppInstallerManager) -> NodeAppInstallCatalog:
+    async def build_catalog(
+        self,
+        *,
+        manager: NodeAppInstallerManager | None = None,
+    ) -> NodeAppInstallCatalog:
+        self._ensure_available()
+        resolved_manager = self._resolve_manager(manager)
         return NodeAppInstallCatalog(
             node=self._node_name(),
-            recipes=tuple(self._catalog_recipe(recipe) for recipe in await self._available_recipes(manager=manager)),
+            recipes=tuple(
+                self._catalog_recipe(recipe)
+                for recipe in await self._available_recipes(manager=resolved_manager)
+            ),
         )
 
     async def start_install(
         self,
         *,
-        manager: NodeAppInstallerManager,
-        acl: Access_Control,
         actor_user_id: int,
         request: NodeAppInstallRequest,
+        manager: NodeAppInstallerManager | None = None,
+        acl: Access_Control | None = None,
     ) -> NodeAppInstallStatus:
-        await acl.perm_check(actor_user_id, Power_Level.sudo)
-        recipe = await self._recipe_for_scope(manager=manager, scope=request.scope)
+        self._ensure_available()
+        resolved_manager = self._resolve_manager(manager)
+        resolved_acl = self._resolve_acl(acl)
+        await resolved_acl.perm_check(actor_user_id, Power_Level.sudo)
+        recipe = await self._recipe_for_scope(
+            manager=resolved_manager, scope=request.scope
+        )
         branch = self._recipe_branch(recipe=recipe, branch_id=request.steam_branch_id)
         normalised_request = request.model_copy(
             update={"scope": recipe.scope, "steam_branch_id": branch.branch_id}
@@ -445,7 +465,7 @@ class NodeAppInstallerService:
             value for input_key, value in normalised_request.inputs.items() if input_key.is_secret
         )
         create_request = self._create_request(normalised_request)
-        plan = manager.prepare_instance_creation(create_request)
+        plan = resolved_manager.prepare_instance_creation(create_request)
         if plan.directory.exists():
             raise ValueError("Install folder already exists.")
 
@@ -476,7 +496,7 @@ class NodeAppInstallerService:
             task = asyncio.create_task(
                 self._run_install(
                     job_id=job_id,
-                    manager=manager,
+                    manager=resolved_manager,
                     plan=plan,
                     create_request=create_request,
                     steam_update=recipe.steam_update.with_selected_branch(branch.branch_id),
@@ -488,11 +508,32 @@ class NodeAppInstallerService:
         return status
 
     def install_status(self, *, job_id: str) -> NodeAppInstallStatus:
+        self._ensure_available()
         with self._lock:
             job = self._jobs.get(job_id.strip())
             if job is None:
                 raise LookupError("Install job was not found.")
             return job.status
+
+    def _ensure_available(self) -> None:
+        if self._require_available is not None:
+            self._require_available()
+
+    def _resolve_manager(
+        self, manager: NodeAppInstallerManager | None
+    ) -> NodeAppInstallerManager:
+        if manager is not None:
+            return manager
+        if self._require_manager is None:
+            raise RuntimeError("App installer manager is not configured.")
+        return self._require_manager()
+
+    def _resolve_acl(self, acl: Access_Control | None) -> Access_Control:
+        if acl is not None:
+            return acl
+        if self._require_acl is None:
+            raise RuntimeError("App installer access control is not configured.")
+        return self._require_acl()
 
     def cancel_pending(self) -> None:
         with self._lock:

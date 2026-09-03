@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any, Protocol
+from collections.abc import Callable
+from typing import Annotated, Any
 
 from fastapi import File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -12,10 +13,11 @@ from _audit import audit_log
 from _security import Power_Level
 from apps._app import App
 from apps.factorio.node_api import (
+    FactorioNodeApiService,
     NodeFactorioGenerationUpdateRequest,
     NodeFactorioMapExchangeImportRequest,
 )
-from apps.satisfactory.node_api import NodeBlueprintMutationResult
+from apps.satisfactory.node_api import NodeBlueprintMutationResult, SatisfactoryBlueprintService
 from .files import (
     NodeConfigCreateRequest,
     NodeConfigWriteRequest,
@@ -24,68 +26,8 @@ from .files import (
     NodeSaveUploadTransport,
 )
 from .storage_service import NodeStorageService
-from .route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
+from .route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
-
-
-class NodeStorageRouteContext(Protocol):
-    """App-specific operations required by storage routes."""
-
-    def _resolve_app(self, app_name: str) -> App: ...
-
-    def factorio_generation_state(self, *, app: App) -> MappingResponse: ...
-
-    def update_factorio_generation(
-        self,
-        *,
-        app: App,
-        update: NodeFactorioGenerationUpdateRequest,
-    ) -> MappingResponse: ...
-
-    async def import_factorio_map_exchange_string(
-        self,
-        *,
-        app: App,
-        import_request: NodeFactorioMapExchangeImportRequest,
-    ) -> MappingResponse: ...
-
-    async def sync_factorio_generation_from_running_world(self, *, app: App) -> MappingResponse: ...
-
-    async def export_factorio_map_exchange_string(self, *, app: App) -> MappingResponse: ...
-
-    def factorio_mod_settings_state(self, *, app: App) -> MappingResponse: ...
-
-    def build_factorio_mod_settings_download_response(self, *, app: App) -> FileResponse: ...
-
-    async def upload_factorio_mod_settings(
-        self,
-        *,
-        app: App,
-        upload: UploadFile,
-        upload_name: str,
-        actor_user_id: int,
-    ) -> MappingResponse: ...
-
-    def delete_factorio_mod_settings(self, *, app: App) -> MappingResponse: ...
-
-    def build_blueprint_list(self, app: App, *, actor_user_id: int) -> MappingResponse: ...
-
-    async def upload_blueprint_files(
-        self,
-        *,
-        app: App,
-        session_name: str,
-        uploads: list[UploadFile],
-        actor_user_id: int,
-    ) -> NodeBlueprintMutationResult: ...
-
-    def delete_blueprint_file(
-        self,
-        *,
-        app: App,
-        blueprint_id: str,
-        actor_user_id: int,
-    ) -> NodeBlueprintMutationResult: ...
 
 
 FACTORIO_MOD_SETTINGS_ACCESS_LEVEL = Power_Level.sudo
@@ -95,9 +37,11 @@ FACTORIO_GENERATION_ACCESS_LEVEL = Power_Level.sudo
 def register_storage_routes(
     nicegui_app: Any,
     *,
-    service: NodeStorageRouteContext,
     auth: NodeAuthenticatedRouteService,
+    resolve_app: Callable[[str], App],
     storage: NodeStorageService,
+    factorio: FactorioNodeApiService,
+    blueprints: SatisfactoryBlueprintService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
@@ -112,7 +56,7 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         actor_user_id = auth.resolve_actor_if_available(context).actor_user_id
         return storage.build_config_list(app=app, actor_user_id=actor_user_id).to_mapping()
 
@@ -131,7 +75,7 @@ def register_storage_routes(
             scopes=(NodeApiScope.CONFIGS_WRITE,),
         )
         create_request = NodeConfigCreateRequest.model_validate(payload)
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         try:
             required_level = app.config_file_write_level_for_root(create_request.root_id)
         except ValueError as xcp:
@@ -170,9 +114,9 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         await auth.require_actor_level(context, FACTORIO_MOD_SETTINGS_ACCESS_LEVEL)
-        return service.factorio_mod_settings_state(app=app).to_mapping()
+        return factorio.mod_settings_state(app=app).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/factorio/generation")
     async def _factorio_generation_state(
@@ -187,9 +131,9 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         await auth.require_actor_level(context, FACTORIO_GENERATION_ACCESS_LEVEL)
-        return service.factorio_generation_state(app=app).to_mapping()
+        return factorio.generation_state(app=app).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/factorio/generation")
     async def _update_factorio_generation(
@@ -205,13 +149,13 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         context = await auth.require_actor_level(
             context,
             FACTORIO_GENERATION_ACCESS_LEVEL,
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        result = service.update_factorio_generation(
+        result = factorio.update_generation(
             app=app,
             update=NodeFactorioGenerationUpdateRequest.model_validate(payload),
         )
@@ -238,13 +182,13 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         context = await auth.require_actor_level(
             context,
             FACTORIO_GENERATION_ACCESS_LEVEL,
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        result = await service.import_factorio_map_exchange_string(
+        result = await factorio.import_map_exchange_string(
             app=app,
             import_request=NodeFactorioMapExchangeImportRequest.model_validate(payload),
         )
@@ -270,9 +214,9 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         await auth.require_actor_level(context, FACTORIO_GENERATION_ACCESS_LEVEL)
-        return (await service.export_factorio_map_exchange_string(app=app)).to_mapping()
+        return (await factorio.export_map_exchange_string(app=app)).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/factorio/generation/running-world")
     async def _sync_factorio_generation_from_running_world(
@@ -291,13 +235,13 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         context = await auth.require_actor_level(
             context,
             FACTORIO_GENERATION_ACCESS_LEVEL,
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        result = await service.sync_factorio_generation_from_running_world(app=app)
+        result = await factorio.sync_generation_from_running_world(app=app)
         audit_log(
             "factorio.running_world_generation_synced",
             actor_user_id=actor_user_id,
@@ -320,9 +264,9 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         await auth.require_actor_level(context, FACTORIO_MOD_SETTINGS_ACCESS_LEVEL)
-        return service.build_factorio_mod_settings_download_response(app=app)
+        return factorio.mod_settings_download_response(app=app)
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/factorio/mod-settings/upload")
     async def _upload_factorio_mod_settings(
@@ -339,17 +283,16 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         context = await auth.require_actor_level(
             context,
             FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        result = await service.upload_factorio_mod_settings(
+        result = await factorio.upload_mod_settings(
             app=app,
             upload=upload,
             upload_name=filename or upload.filename or "",
-            actor_user_id=actor_user_id,
         )
         audit_log(
             "factorio.mod_settings_uploaded",
@@ -373,13 +316,13 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         context = await auth.require_actor_level(
             context,
             FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        result = service.delete_factorio_mod_settings(app=app)
+        result = factorio.delete_mod_settings(app=app)
         audit_log(
             "factorio.mod_settings_deleted",
             actor_user_id=actor_user_id,
@@ -408,7 +351,7 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         try:
             required_level = app.config_file_read_level_for_root(root_id)
         except ValueError as xcp:
@@ -440,7 +383,7 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         try:
             required_level = app.config_file_read_level_for_id(config_id)
         except ValueError as xcp:
@@ -466,7 +409,7 @@ def register_storage_routes(
             scopes=(NodeApiScope.CONFIGS_WRITE,),
         )
         write_request = NodeConfigWriteRequest.model_validate(payload)
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         try:
             required_level = app.config_file_write_level_for_id(config_id)
         except ValueError as xcp:
@@ -504,7 +447,7 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         try:
             required_level = app.config_file_write_level_for_id(config_id)
         except ValueError as xcp:
@@ -526,7 +469,7 @@ def register_storage_routes(
     async def _list_saves(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API save list request: node=%s app=%s", auth.node_name, app_name)
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_READ,))
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         return (await storage.build_save_list(app)).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/saves/{{save_id:path}}/download")
@@ -540,7 +483,7 @@ def register_storage_routes(
             "Node API save download request: node=%s app=%s save=%s", auth.node_name, app_name, save_id
         )
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_DOWNLOAD,))
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         return await storage.build_save_download_response(app=app, save_id=save_id)
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/saves/upload")
@@ -566,7 +509,7 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.SAVES_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         context = await auth.require_actor_level(
             context,
             app.save_file_write_level,
@@ -608,7 +551,7 @@ def register_storage_routes(
             scopes=(NodeApiScope.SAVES_WRITE,),
         )
         rename_request: NodeSaveRenameRequest = NodeSaveRenameRequest.model_validate(payload)
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         context = await auth.require_actor_level(
             context,
             app.save_file_write_level,
@@ -645,7 +588,7 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.SAVES_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         context = await auth.require_actor_level(
             context,
             app.save_file_write_level,
@@ -679,9 +622,9 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.BLUEPRINTS_READ,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        return service.build_blueprint_list(app, actor_user_id=actor_user_id).to_mapping()
+        return blueprints.build_list(app=app, actor_user_id=actor_user_id).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/blueprints/upload")
     async def _upload_blueprint(
@@ -703,9 +646,9 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        result: NodeBlueprintMutationResult = await service.upload_blueprint_files(
+        result: NodeBlueprintMutationResult = await blueprints.upload_files(
             app=app,
             session_name=session_name,
             uploads=upload,
@@ -740,9 +683,9 @@ def register_storage_routes(
             app_name=app_name,
             scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
         )
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        result = service.delete_blueprint_file(
+        result = blueprints.delete_file(
             app=app,
             blueprint_id=blueprint_id,
             actor_user_id=actor_user_id,

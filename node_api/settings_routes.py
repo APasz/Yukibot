@@ -3,42 +3,24 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import Request
 
 from apps._app import App
-from .route_contracts import MappingResponse, NodeAuthenticatedRouteService
+from .app_operations import NodeAppOperationsService
+from .route_contracts import NodeAuthenticatedRouteService
 from .settings import NodeSettingMutationResult, NodeSettingWriteRequest
 from node_auth import NodeApiScope
-
-
-class NodeSettingsRouteService(Protocol):
-    """Settings operations required by the settings route registrar."""
-
-    def _resolve_app(self, app_name: str) -> App: ...
-
-    def build_setting_list(self, *, app: App, actor_user_id: int) -> MappingResponse: ...
-
-    async def update_setting(
-        self,
-        *,
-        app: App,
-        setting_key: str,
-        value: str,
-        actor_user_id: int,
-    ) -> NodeSettingMutationResult: ...
-
-    async def save_settings(self, *, app: App, actor_user_id: int) -> MappingResponse: ...
-
-    async def reload_settings(self, *, app: App, actor_user_id: int) -> MappingResponse: ...
 
 
 def register_settings_routes(
     nicegui_app: Any,
     *,
-    service: NodeSettingsRouteService,
     auth: NodeAuthenticatedRouteService,
+    resolve_app: Callable[[str], App],
+    operations: NodeAppOperationsService,
     api_prefix: str,
     traffic_log: logging.Logger,
 ) -> None:
@@ -54,8 +36,8 @@ def register_settings_routes(
             request, access_token, app_name=app_name, scopes=(NodeApiScope.SETTINGS_READ,)
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        app = service._resolve_app(app_name)
-        return service.build_setting_list(app=app, actor_user_id=actor_user_id).to_mapping()
+        app = resolve_app(app_name)
+        return operations.build_setting_list(app=app, actor_user_id=actor_user_id).to_mapping()
 
     @nicegui_app.put(f"{api_prefix}/apps/{{app_name}}/settings/{{setting_key}}")
     async def _write_setting(
@@ -73,8 +55,8 @@ def register_settings_routes(
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
         write_request: NodeSettingWriteRequest = NodeSettingWriteRequest.model_validate(payload)
-        app = service._resolve_app(app_name)
-        result: NodeSettingMutationResult = await service.update_setting(
+        app = resolve_app(app_name)
+        result: NodeSettingMutationResult = await operations.update_setting(
             app=app,
             setting_key=setting_key,
             value=write_request.value,
@@ -93,8 +75,8 @@ def register_settings_routes(
             request, access_token, app_name=app_name, scopes=(NodeApiScope.SETTINGS_WRITE,)
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        app = service._resolve_app(app_name)
-        return (await service.save_settings(app=app, actor_user_id=actor_user_id)).to_mapping()
+        app = resolve_app(app_name)
+        return (await operations.save_settings(app=app, actor_user_id=actor_user_id)).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/settings/reload")
     async def _reload_settings(
@@ -107,5 +89,5 @@ def register_settings_routes(
             request, access_token, app_name=app_name, scopes=(NodeApiScope.SETTINGS_WRITE,)
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        app = service._resolve_app(app_name)
-        return (await service.reload_settings(app=app, actor_user_id=actor_user_id)).to_mapping()
+        app = resolve_app(app_name)
+        return (await operations.reload_settings(app=app, actor_user_id=actor_user_id)).to_mapping()

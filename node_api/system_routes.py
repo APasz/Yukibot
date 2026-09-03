@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from typing import Any
 
 from fastapi import Request
 
@@ -14,15 +14,10 @@ from .route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 from restart_targets import RestartTarget
 
-
-class NodeSystemRouteContext(NodeAuthenticatedRouteService, Protocol):
-    """Authentication operations required by system routes."""
-
-
 def register_system_routes(
     nicegui_app: Any,
     *,
-    auth: NodeSystemRouteContext,
+    auth: NodeAuthenticatedRouteService,
     monitoring: NodeSystemMonitoringService,
     management: NodeManagementService,
     api_prefix: str,

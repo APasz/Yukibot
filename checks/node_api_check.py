@@ -221,6 +221,7 @@ from node_api.app_state import (
     required_app_mutation_level,
     required_app_mutation_scope,
 )
+from node_api.app_operations import NodeAppOperationsService
 from node_api.client_pack import NodeClientPackService
 from node_api.mod import (
     NodeBulkLauncherMetadataApplyRequest,
@@ -1088,7 +1089,7 @@ class NodeApiTests(unittest.TestCase):
             app.directory = directory
             service = NodeApiService()
 
-            workspace_state = service.build_minecraft_recipe_workspace_state(cast(App, app))
+            workspace_state = service.app_games.build_minecraft_recipe_workspace_state(cast(App, app))
 
         self.assertEqual(workspace_state.recipe_book.data_path, ".yukibot/recipes.json")
         self.assertEqual(
@@ -1134,7 +1135,7 @@ class NodeApiTests(unittest.TestCase):
                 )
             )
 
-            state = NodeApiService().build_sevendays_sandbox_options_state(cast(App, app))
+            state = NodeApiService().app_games.build_sevendays_sandbox_options_state(cast(App, app))
 
         self.assertEqual(state.data_path, ".yukibot/sandbox_options.json")
         self.assertTrue(state.file_exists)
@@ -1172,7 +1173,9 @@ class NodeApiTests(unittest.TestCase):
             app.directory = directory
             app.mods = cast(Any, SimpleNamespace(list_mods=lambda state=None: []))
 
-            response = NodeApiService().build_minecraft_item_icon_response(cast(App, app), item_id="minecraft:dirt")
+            response = NodeApiService().app_games.build_minecraft_item_icon_response(
+                cast(App, app), item_id="minecraft:dirt"
+            )
 
         self.assertIsInstance(response, FileResponse)
         assert isinstance(response, FileResponse)
@@ -1192,7 +1195,9 @@ class NodeApiTests(unittest.TestCase):
             app.directory = directory
             app.mods = cast(Any, SimpleNamespace(list_mods=lambda state=None: []))
 
-            response = NodeApiService().build_minecraft_item_icon_response(cast(App, app), item_id="minecraft:dirt")
+            response = NodeApiService().app_games.build_minecraft_item_icon_response(
+                cast(App, app), item_id="minecraft:dirt"
+            )
 
         self.assertEqual(response.media_type, "image/svg+xml")
         self.assertIn("<svg", response.body.decode("utf-8"))
@@ -1214,7 +1219,7 @@ class NodeApiTests(unittest.TestCase):
 
             with patch.object(config.Name_Cache(), "get_game_alias", return_value="YukiPlayer"):
                 result = asyncio.run(
-                    service.append_minecraft_recipe_mutation(
+                    service.app_games.append_minecraft_recipe_mutation(
                         app=cast(App, app),
                         mutation=MinecraftShapelessRecipe(
                             output=MinecraftRecipeItemStack("minecraft:gravel"),
@@ -1253,7 +1258,7 @@ class NodeApiTests(unittest.TestCase):
             with patch.object(config.Name_Cache(), "get_game_alias", return_value=None):
                 with self.assertRaisesRegex(HTTPException, "Link a Minecraft username"):
                     asyncio.run(
-                        service.append_minecraft_recipe_mutation(
+                        service.app_games.append_minecraft_recipe_mutation(
                             app=cast(App, app),
                             mutation=MinecraftShapelessRecipe(
                                 output=MinecraftRecipeItemStack("minecraft:gravel"),
@@ -1287,7 +1292,7 @@ class NodeApiTests(unittest.TestCase):
 
             with patch.object(config.Name_Cache(), "get_game_alias", return_value="YukiPlayer"):
                 replace_result = asyncio.run(
-                    service.mutate_minecraft_recipe_book(
+                    service.app_games.mutate_minecraft_recipe_book(
                         app=cast(App, app),
                         mutation_request=NodeMinecraftRecipeMutationRequest(
                             action=NodeMinecraftRecipeMutationAction.REPLACE,
@@ -1302,7 +1307,7 @@ class NodeApiTests(unittest.TestCase):
                     )
                 )
             delete_result = asyncio.run(
-                service.mutate_minecraft_recipe_book(
+                service.app_games.mutate_minecraft_recipe_book(
                     app=cast(App, app),
                     mutation_request=NodeMinecraftRecipeMutationRequest(
                         action=NodeMinecraftRecipeMutationAction.DELETE,
@@ -1779,7 +1784,7 @@ class NodeApiTests(unittest.TestCase):
         )
         updated = replace(previous, lines=("second", "third", "fourth"), truncated=True)
 
-        appended = NodeApiService._console_stdout_appended_lines(previous, updated)
+        appended = NodeAppOperationsService.console_stdout_appended_lines(previous, updated)
 
         self.assertEqual(appended, ("fourth",))
 
@@ -5905,6 +5910,35 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(persisted_overrides[-1]["client_pack_content_dirty"])
         self.assertIsNone(service._app_state_cache._app_entries)
 
+    def test_client_pack_service_resolves_acl_before_reloading_mods(self) -> None:
+        manager = Mock()
+        manager.reload_mods = AsyncMock()
+        acl_error = HTTPException(
+            status_code=503,
+            detail="Mod web permissions are not available.",
+        )
+        require_acl = Mock(side_effect=acl_error)
+        service = NodeClientPackService(
+            node_name=lambda: "yuki",
+            require_acl=require_acl,
+            http_exception=node_api._http_exception,
+            invalidate_app_state=lambda _app_name: None,
+            invalidate_mod_inventory=lambda _app_name: None,
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(
+                service.update_config(
+                    app=_build_app(manager),
+                    update=NodeClientPackConfigUpdateRequest(mods=()),
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertIs(raised.exception, acl_error)
+        require_acl.assert_called_once_with()
+        manager.reload_mods.assert_not_awaited()
+
     def test_update_client_pack_config_persists_minecraft_kubejs_exclusions(
         self,
     ) -> None:
@@ -6193,6 +6227,8 @@ class NodeApiTests(unittest.TestCase):
         )
         service = NodeClientPackService(
             node_name=lambda: "erin",
+            require_acl=lambda: cast(Access_Control, Mock()),
+            http_exception=node_api._http_exception,
             invalidate_app_state=lambda _app_name: None,
             invalidate_mod_inventory=lambda _app_name: None,
         )
@@ -6518,7 +6554,7 @@ class NodeApiTests(unittest.TestCase):
             ),
         ):
             result = asyncio.run(
-                service.mutate_app(
+                service._app_mutations.mutate(
                     app=app,
                     action=NodeAppMutationAction.DISABLE,
                     actor_user_id=42,
@@ -7392,9 +7428,9 @@ class NodeApiTests(unittest.TestCase):
         acl.perm_check = AsyncMock()
         service.set_acl(cast(Any, acl))
 
-        with patch("node_api.service.audit_log") as audit:
+        with patch("node_api.app_state.audit_log") as audit:
             result = asyncio.run(
-                service.mutate_app(
+                service._app_mutations.mutate(
                     app=app,
                     action=NodeAppMutationAction.DELETE,
                     actor_user_id=42,
@@ -8333,7 +8369,7 @@ class NodeApiTests(unittest.TestCase):
 
         with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
             with self.assertRaises(HTTPException) as raised:
-                asyncio.run(service.build_app_install_catalog())
+                asyncio.run(service.app_installer.build_catalog())
 
         self.assertEqual(raised.exception.status_code, 400)
 
@@ -8812,6 +8848,8 @@ class NodeApiTests(unittest.TestCase):
                 download = asyncio.run(
                     NodeClientPackService(
                         node_name=lambda: "yuki",
+                        require_acl=lambda: cast(Access_Control, Mock()),
+                        http_exception=node_api._http_exception,
                         invalidate_app_state=lambda _app_name: None,
                         invalidate_mod_inventory=lambda _app_name: None,
                     ).single_mod_download_file(app=app, mod=mod, http_exception=node_api._http_exception)
@@ -8846,6 +8884,8 @@ class NodeApiTests(unittest.TestCase):
             download = asyncio.run(
                 NodeClientPackService(
                     node_name=lambda: "yuki",
+                    require_acl=lambda: cast(Access_Control, Mock()),
+                    http_exception=node_api._http_exception,
                     invalidate_app_state=lambda _app_name: None,
                     invalidate_mod_inventory=lambda _app_name: None,
                 ).single_mod_download_file(app=app, mod=mod, http_exception=node_api._http_exception)
@@ -8951,6 +8991,8 @@ class NodeApiTests(unittest.TestCase):
                 download = asyncio.run(
                     NodeClientPackService(
                         node_name=lambda: "yuki",
+                        require_acl=lambda: cast(Access_Control, Mock()),
+                        http_exception=node_api._http_exception,
                         invalidate_app_state=lambda _app_name: None,
                         invalidate_mod_inventory=lambda _app_name: None,
                     ).single_mod_download_file(app=app, mod=mod, http_exception=node_api._http_exception)

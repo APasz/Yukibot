@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from typing import Any
 
 from fastapi import Request
 
@@ -12,15 +12,10 @@ from .node_service import NodeManagementService
 from .route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
-
-class NodeManagementRouteContext(NodeAuthenticatedRouteService, Protocol):
-    """Authentication operations required by node-management routes."""
-
-
 def register_node_management_routes(
     nicegui_app: Any,
     *,
-    auth: NodeManagementRouteContext,
+    auth: NodeAuthenticatedRouteService,
     management: NodeManagementService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
@@ -119,7 +114,7 @@ def register_node_management_routes(
 
 
 def _actor_user_id(
-    auth: NodeManagementRouteContext,
+    auth: NodeAuthenticatedRouteService,
     *,
     request: Request,
     access_token: str | None,

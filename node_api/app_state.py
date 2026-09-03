@@ -20,6 +20,7 @@ from typing import Protocol, cast
 from pydantic import BaseModel, field_validator, model_validator
 from pydantic.config import ConfigDict
 
+from _audit import audit_log
 from _manager import App_Manager, AppDetailsUpdate
 from _security import Access_Control, Power_Level
 from apps._app import App, AppRuntimeFault, AppVersionSource, ChatRelaySupport
@@ -845,7 +846,11 @@ class NodeAppMutationService:
         self,
         *,
         node_name: Callable[[], str],
+        require_manager: Callable[[], App_Manager],
+        require_acl: Callable[[], Access_Control],
+        http_exception: HttpExceptionFactory,
         invalidate_state_caches: Callable[[str], None],
+        invalidate_mod_inventory: Callable[[str], None],
         build_runtime_summary: Callable[[App], Awaitable[NodeAppRuntimeSummary]],
         build_live_runtime_summary: Callable[[App], Awaitable[NodeAppRuntimeSummary]],
         transition_ttl_seconds: float,
@@ -853,7 +858,11 @@ class NodeAppMutationService:
         if transition_ttl_seconds <= 0:
             raise ValueError("App transition cache TTL must be positive.")
         self._node_name = node_name
+        self._require_manager = require_manager
+        self._require_acl = require_acl
+        self._http_exception = http_exception
         self._invalidate_state_caches = invalidate_state_caches
+        self._invalidate_mod_inventory = invalidate_mod_inventory
         self._build_runtime_summary = build_runtime_summary
         self._build_live_runtime_summary = build_live_runtime_summary
         self._transition_ttl_seconds = transition_ttl_seconds
@@ -898,12 +907,9 @@ class NodeAppMutationService:
     async def mutate(
         self,
         *,
-        manager: App_Manager,
-        acl: Access_Control,
         app: App,
         action: NodeAppMutationAction,
         actor_user_id: int,
-        http_exception: HttpExceptionFactory,
         friendly_name: str | None = None,
         title_font_preset: str | None = None,
         notes: str | None = None,
@@ -925,6 +931,9 @@ class NodeAppMutationService:
         steam_update_selected_branch: str | None = None,
         update_branch_id: str | None = None,
     ) -> NodeAppMutationResult:
+        manager = self._require_manager()
+        acl = self._require_acl()
+        http_exception = self._http_exception
         await acl.perm_check(actor_user_id, required_app_mutation_level(action))
         app_key = app.name.casefold()
         if action is not NodeAppMutationAction.DELETE and app_key in self._deleting_app_keys:
@@ -1063,6 +1072,14 @@ class NodeAppMutationService:
 
         self._invalidate_state_caches(app.name)
         if action is NodeAppMutationAction.DELETE:
+            self._invalidate_mod_inventory(app.name)
+            audit_log(
+                "node.app.deleted",
+                actor_user_id=actor_user_id,
+                node=self._node_name(),
+                app_name=app.name,
+                scope=app.scope,
+            )
             app_stats = None
         elif action in {
             NodeAppMutationAction.START,

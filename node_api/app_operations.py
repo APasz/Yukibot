@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from typing import Protocol, cast
+
+from fastapi import WebSocket, WebSocketDisconnect
 
 from _security import Access_Control, Power_Level
 from apps._app import App, AppStdoutTail
@@ -21,6 +25,8 @@ from .console import (
     NodeConsoleActionList,
     NodeConsoleActionParameter,
     NodeConsoleStdoutSnapshot,
+    NodeConsoleStdoutStreamEvent,
+    NodeConsoleStdoutStreamEventKind,
 )
 from .route_contracts import HttpExceptionFactory
 from .settings import (
@@ -30,6 +36,9 @@ from .settings import (
     NodeSettingMutationResult,
     NodeSettingsActionResult,
 )
+
+
+_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 
 
 class RuntimeHttpExceptionFactory(Protocol):
@@ -239,6 +248,108 @@ class NodeAppOperationsService:
             truncated=stdout_tail.truncated,
             running=app.check_running(),
         )
+
+    async def serve_console_stdout_stream(
+        self,
+        *,
+        websocket: WebSocket,
+        app: App,
+        max_lines: int,
+    ) -> None:
+        """Stream a console tail, sending deltas when the rolling tail changes."""
+
+        await websocket.accept()
+
+        async def _wait_for_disconnect() -> None:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+
+        async def _send_event(event: NodeConsoleStdoutStreamEvent) -> None:
+            await websocket.send_json(event.to_mapping())
+
+        disconnect_task = asyncio.create_task(_wait_for_disconnect())
+        previous_snapshot: NodeConsoleStdoutSnapshot | None = None
+        try:
+            initial_snapshot = self.build_console_stdout_snapshot(
+                app=app, max_lines=max_lines
+            )
+            await _send_event(
+                NodeConsoleStdoutStreamEvent(
+                    kind=NodeConsoleStdoutStreamEventKind.INITIAL,
+                    app_name=app.name,
+                    snapshot=initial_snapshot,
+                    truncated=initial_snapshot.truncated,
+                    running=initial_snapshot.running,
+                )
+            )
+            previous_snapshot = initial_snapshot
+            while True:
+                interval_task = asyncio.create_task(
+                    asyncio.sleep(_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS)
+                )
+                done, _pending = await asyncio.wait(
+                    {interval_task, disconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect_task in done:
+                    interval_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await interval_task
+                    return
+                next_snapshot = self.build_console_stdout_snapshot(
+                    app=app, max_lines=max_lines
+                )
+                if next_snapshot != previous_snapshot:
+                    appended_lines = self.console_stdout_appended_lines(
+                        previous_snapshot, next_snapshot
+                    )
+                    if appended_lines is None:
+                        event = NodeConsoleStdoutStreamEvent(
+                            kind=NodeConsoleStdoutStreamEventKind.RESET,
+                            app_name=app.name,
+                            snapshot=next_snapshot,
+                            truncated=next_snapshot.truncated,
+                            running=next_snapshot.running,
+                        )
+                    else:
+                        event = NodeConsoleStdoutStreamEvent(
+                            kind=NodeConsoleStdoutStreamEventKind.APPEND,
+                            app_name=app.name,
+                            appended_lines=appended_lines,
+                            truncated=next_snapshot.truncated,
+                            running=next_snapshot.running,
+                        )
+                    await _send_event(event)
+                    previous_snapshot = next_snapshot
+        except WebSocketDisconnect:
+            return
+        finally:
+            disconnect_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await disconnect_task
+            with suppress(RuntimeError, WebSocketDisconnect):
+                await websocket.close()
+
+    @staticmethod
+    def console_stdout_appended_lines(
+        previous: NodeConsoleStdoutSnapshot,
+        updated: NodeConsoleStdoutSnapshot,
+    ) -> tuple[str, ...] | None:
+        """Return new tail lines, or ``None`` when a full snapshot is required."""
+
+        if previous.app_name.casefold() != updated.app_name.casefold():
+            raise ValueError(
+                "Cannot compare console stdout snapshots for different apps."
+            )
+        if not previous.lines:
+            return updated.lines
+        max_overlap = min(len(previous.lines), len(updated.lines))
+        for overlap in range(max_overlap, 0, -1):
+            if previous.lines[-overlap:] == updated.lines[:overlap]:
+                return updated.lines[overlap:]
+        return None
 
     async def execute_console_action(
         self,

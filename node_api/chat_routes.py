@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import HTTPException, Request, WebSocket
 
@@ -14,18 +15,11 @@ from .chat_service import NodeChatService
 from .route_contracts import NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
-
-class NodeChatRouteContext(Protocol):
-    """App-resolution operations required by chat routes."""
-
-    def _resolve_app(self, app_name: str) -> App: ...
-
-
 def register_chat_routes(
     nicegui_app: Any,
     *,
-    service: NodeChatRouteContext,
     auth: NodeAuthenticatedRouteService,
+    resolve_app: Callable[[str], App],
     chat: NodeChatService,
     api_prefix: str,
     history_limit: int,
@@ -42,7 +36,7 @@ def register_chat_routes(
     ) -> dict[str, object]:
         traffic_log.info("Node API chat snapshot request: node=%s app=%s", auth.node_name, app_name)
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CHAT_READ,))
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         return chat.build_room_snapshot(app, limit=limit).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/chat")
@@ -61,7 +55,7 @@ def register_chat_routes(
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
         chat_request = NodeWebChatRequest.model_validate(payload)
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         return (
             await chat.publish_web_chat(
                 app=app,
@@ -86,7 +80,7 @@ def register_chat_routes(
         )
         await auth.require_actor_level(context, Power_Level.root)
         chat_request = NodeChatInjectionRequest.model_validate(payload)
-        app = service._resolve_app(app_name)
+        app = resolve_app(app_name)
         return (await chat.publish_fake_chat(app=app, event=chat_request.to_chat_event())).to_mapping()
 
     @nicegui_app.websocket(f"{api_prefix}/apps/{{app_name}}/chat/stream")
@@ -104,7 +98,7 @@ def register_chat_routes(
             scopes=(NodeApiScope.CHAT_READ, NodeApiScope.MODS_READ),
         )
         try:
-            app = service._resolve_app(app_name)
+            app = resolve_app(app_name)
             chat.require_relay_app(app)
         except HTTPException as xcp:
             raise auth.websocket_exception_from_http(xcp) from xcp

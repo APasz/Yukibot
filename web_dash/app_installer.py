@@ -643,7 +643,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
         user: ModWebUser,
     ) -> NodeAppInstallCatalog:
         if node.is_current:
-            return await self._node_api.build_app_install_catalog()
+            return await self._node_api.app_installer.build_catalog()
         payload = await self._remote_json_async(
             node=node,
             app_name=None,
@@ -661,7 +661,10 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
         user: ModWebUser,
     ) -> NodeAppInstallStatus:
         if node.is_current:
-            return await self._node_api.start_app_install(request=request, actor_user_id=user.discord_id)
+            return await self._node_api.app_installer.start_install(
+                request=request,
+                actor_user_id=user.discord_id,
+            )
         payload = await self._remote_json_async(
             node=node,
             app_name=None,
@@ -681,7 +684,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
         user: ModWebUser,
     ) -> NodeAppInstallStatus:
         if node.is_current:
-            return self._node_api.app_install_status(job_id=job_id)
+            return self._node_api.app_installer.install_status(job_id=job_id)
         payload = await self._remote_json_async(
             node=node,
             app_name=None,

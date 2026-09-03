@@ -99,10 +99,10 @@ class _RouteService:
         self.start_requests: list[tuple[NodeAppInstallRequest, int]] = []
         self.start_error: Exception | None = None
 
-    async def build_app_install_catalog(self) -> NodeAppInstallCatalog:
+    async def build_catalog(self) -> NodeAppInstallCatalog:
         return NodeAppInstallCatalog(node=self.node_name, recipes=())
 
-    async def start_app_install(self, *, request: NodeAppInstallRequest, actor_user_id: int) -> NodeAppInstallStatus:
+    async def start_install(self, *, request: NodeAppInstallRequest, actor_user_id: int) -> NodeAppInstallStatus:
         if self.start_error is not None:
             raise self.start_error
         self.start_requests.append((request, actor_user_id))
@@ -114,7 +114,7 @@ class _RouteService:
             summary="Queued.",
         )
 
-    def app_install_status(self, *, job_id: str) -> NodeAppInstallStatus:
+    def install_status(self, *, job_id: str) -> NodeAppInstallStatus:
         if job_id != "job-1":
             raise LookupError
         return NodeAppInstallStatus(
@@ -626,8 +626,8 @@ class AppInstallerCheck(unittest.TestCase):
         auth = _RouteAuth()
         register_app_installer_routes(
             app,
-            service=service,
             auth=auth,
+            installer=service,
             api_prefix="/api",
             http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
             traffic_log=logging.getLogger(__name__),
@@ -679,8 +679,8 @@ class AppInstallerCheck(unittest.TestCase):
         service.start_error = ValueError("That release channel is not available.")
         register_app_installer_routes(
             app,
-            service=service,
             auth=auth,
+            installer=service,
             api_prefix="/api",
             http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
             traffic_log=logging.getLogger(__name__),
@@ -713,8 +713,8 @@ class AppInstallerCheck(unittest.TestCase):
         service.start_error = RuntimeError("An install is already using that folder.")
         register_app_installer_routes(
             app,
-            service=service,
             auth=auth,
+            installer=service,
             api_prefix="/api",
             http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
             traffic_log=logging.getLogger(__name__),
