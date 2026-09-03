@@ -8,9 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, TypeAlias, TypeVar
 
-from fastapi import Request
+from fastapi import HTTPException, Request, WebSocket, WebSocketException
 
-from node_auth import NodeAccessGrant, NodeApiScope
+from _security import Power_Level
+from node_auth import NodeApiScope
+from .request_auth import NodeRequestContext
 
 
 HttpExceptionFactory: TypeAlias = Callable[[int, str], Exception]
@@ -147,12 +149,12 @@ class MappingResponse(Protocol):
 
 
 class NodeAuthenticatedRouteService(Protocol):
-    """Authentication operations shared by node API route registrars."""
+    """Public request-authentication operations used by node API route registrars."""
 
     @property
     def node_name(self) -> str: ...
 
-    def _require_access(
+    def require_access(
         self,
         request: Request,
         access_token: str | None,
@@ -160,14 +162,34 @@ class NodeAuthenticatedRouteService(Protocol):
         app_name: str | None,
         scopes: tuple[NodeApiScope, ...],
         token_node_names: Sequence[str] | None = None,
-    ) -> NodeAccessGrant | None: ...
+    ) -> NodeRequestContext: ...
 
-    def _request_actor_user_id(
+    def with_current_web_user(
+        self,
+        context: NodeRequestContext,
+        request: Request,
+    ) -> NodeRequestContext: ...
+
+    def require_actor(self, context: NodeRequestContext) -> NodeRequestContext: ...
+
+    def resolve_actor_if_available(
+        self, context: NodeRequestContext
+    ) -> NodeRequestContext: ...
+
+    async def require_actor_level(
+        self,
+        context: NodeRequestContext,
+        required_level: Power_Level,
+    ) -> NodeRequestContext: ...
+
+    def require_websocket_token_access(
         self,
         *,
-        request: Request,
+        websocket: WebSocket,
         access_token: str | None,
         app_name: str | None,
         scopes: tuple[NodeApiScope, ...],
-        verified_grant: NodeAccessGrant | None = None,
-    ) -> int: ...
+    ) -> NodeRequestContext: ...
+
+    @staticmethod
+    def websocket_exception_from_http(error: HTTPException) -> WebSocketException: ...

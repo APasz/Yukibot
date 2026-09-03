@@ -31,7 +31,7 @@ def register_node_management_routes(
     @nicegui_app.get(f"{api_prefix}/node-capacity")
     async def _node_capacity(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API node capacity request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
         return management.read_capacity().model_dump(mode="json")
 
     @nicegui_app.post(f"{api_prefix}/node-capacity")
@@ -48,7 +48,7 @@ def register_node_management_routes(
     @nicegui_app.get(f"{api_prefix}/app-installer-settings")
     async def _app_installer_settings(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API app installer settings request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
         return management.read_app_installer_settings().to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/app-installer-settings")
@@ -65,7 +65,7 @@ def register_node_management_routes(
     @nicegui_app.get(f"{api_prefix}/node-disk-settings")
     async def _node_disk_settings(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API node disk settings request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
         return management.read_disk_settings().to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/node-disk-settings")
@@ -86,7 +86,7 @@ def register_node_management_routes(
     @nicegui_app.get(f"{api_prefix}/node-font-sources")
     async def _node_font_sources(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API node font sources request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
         return management.read_font_sources().model_dump(mode="json")
 
     @nicegui_app.post(f"{api_prefix}/node-font-sources")
@@ -103,7 +103,7 @@ def register_node_management_routes(
     @nicegui_app.get(f"{api_prefix}/discord-settings")
     async def _discord_settings(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API Discord settings request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
         return management.read_discord_settings().model_dump(mode="json")
 
     @nicegui_app.post(f"{api_prefix}/discord-settings")
@@ -125,11 +125,5 @@ def _actor_user_id(
     access_token: str | None,
     scope: NodeApiScope,
 ) -> int:
-    grant = auth._require_access(request, access_token, app_name=None, scopes=(scope,))
-    return auth._request_actor_user_id(
-        request=request,
-        access_token=access_token,
-        app_name=None,
-        scopes=(scope,),
-        verified_grant=grant,
-    )
+    context = auth.require_access(request, access_token, app_name=None, scopes=(scope,))
+    return auth.require_actor(context).require_actor_user_id()

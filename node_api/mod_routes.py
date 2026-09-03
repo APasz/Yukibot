@@ -50,7 +50,7 @@ from .route_contracts import NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
 
-class NodeModRouteService(NodeAuthenticatedRouteService, Protocol):
+class NodeModRouteService(Protocol):
     """Mod operations exposed through the HTTP API."""
 
     def _resolve_app(self, app_name: str) -> App: ...
@@ -207,6 +207,7 @@ def register_mod_routes(
     nicegui_app: Any,
     *,
     service: NodeModRouteService,
+    auth: NodeAuthenticatedRouteService,
     api_prefix: str,
     traffic_log: logging.Logger,
 ) -> None:
@@ -233,7 +234,7 @@ def register_mod_routes(
         traffic_log.info(
             "Node API mods archive request: node=%s app=%s enabled_only=%s selected_only=%s "
             "excluded_only=%s client_pack=%s purpose=%s format=%s selected=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
             enabled_only,
             selected_only,
@@ -246,7 +247,7 @@ def register_mod_routes(
         required_scopes = (NodeApiScope.MODS_DOWNLOAD,)
         if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN} or publish_client_pack:
             required_scopes = (NodeApiScope.MODS_DOWNLOAD, NodeApiScope.MODS_WRITE)
-        service._require_access(request, access_token, app_name=app_name, scopes=required_scopes)
+        auth.require_access(request, access_token, app_name=app_name, scopes=required_scopes)
         app = service._resolve_app(app_name)
         return await service.build_mod_download_response(
             app=app,
@@ -275,11 +276,11 @@ def register_mod_routes(
     ) -> FileResponse:
         traffic_log.info(
             "Node API single mod request: node=%s app=%s mod=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
             mod_name,
         )
-        service._require_access(
+        auth.require_access(
             request,
             access_token,
             app_name=app_name,
@@ -300,15 +301,14 @@ def register_mod_routes(
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API mod upload request: node=%s app=%s", service.node_name, app_name)
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        traffic_log.info("Node API mod upload request: node=%s app=%s", auth.node_name, app_name)
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
         )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         app = service._resolve_app(app_name)
         result = await service.upload_mod_files(
             app=app,
@@ -320,7 +320,7 @@ def register_mod_routes(
         audit_log(
             "mod.file_uploaded",
             actor_user_id=actor_user_id,
-            node_name=service.node_name,
+            node_name=auth.node_name,
             app_name=app.name,
             mod_name=",".join(mod.name for mod in result.mods),
             required_level=Power_Level.user.name,
@@ -336,18 +336,12 @@ def register_mod_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API mod link install request: node=%s app=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
         )
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         install_request = NodeModPortalInstallRequest.model_validate(payload)
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         app = service._resolve_app(app_name)
         result = await service.install_mod_from_link(
             app=app,
@@ -359,7 +353,7 @@ def register_mod_routes(
         audit_log(
             "mod.link_installed",
             actor_user_id=actor_user_id,
-            node_name=service.node_name,
+            node_name=auth.node_name,
             app_name=app.name,
             mod_name=",".join(mod.name for mod in result.mods),
             required_level=Power_Level.user.name,
@@ -375,10 +369,10 @@ def register_mod_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API mod link resolve request: node=%s app=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
         )
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         resolve_request = NodeModPortalInstallRequest.model_validate(payload)
         app = service._resolve_app(app_name)
         result = await service.resolve_mod_link_dependencies(
@@ -397,10 +391,10 @@ def register_mod_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API mod link version list request: node=%s app=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
         )
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         resolve_request = NodeModPortalInstallRequest.model_validate(payload)
         app = service._resolve_app(app_name)
         result = await service.list_mod_link_versions(app=app, url=resolve_request.url)
@@ -416,19 +410,13 @@ def register_mod_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API mod mutation request: node=%s app=%s mod=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
             mod_name,
         )
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         mutation_request = NodeModMutationRequest.model_validate(payload)
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         app = service._resolve_app(app_name)
         result = await service.mutate_mod(
             app=app,
@@ -448,11 +436,11 @@ def register_mod_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API mod update check request: node=%s app=%s mod=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
             mod_name,
         )
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         update_request = NodeModUpdateRequest.model_validate({"version": version})
         app = service._resolve_app(app_name)
         result = await service.check_mod_update(app=app, mod_name=mod_name, version=update_request.version)
@@ -467,11 +455,11 @@ def register_mod_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API mod version list request: node=%s app=%s mod=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
             mod_name,
         )
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         app = service._resolve_app(app_name)
         result = await service.list_installed_mod_versions(app=app, mod_name=mod_name)
         return result.to_mapping()
@@ -486,19 +474,13 @@ def register_mod_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API mod update request: node=%s app=%s mod=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
             mod_name,
         )
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         update_request = NodeModUpdateRequest.model_validate(payload or {})
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         app = service._resolve_app(app_name)
         result = await service.update_mod(
             app=app,
@@ -509,7 +491,7 @@ def register_mod_routes(
         audit_log(
             "mod.updated",
             actor_user_id=actor_user_id,
-            node_name=service.node_name,
+            node_name=auth.node_name,
             app_name=app.name,
             mod_name=",".join(mod.name for mod in result.mods),
             required_level=Power_Level.user.name,
@@ -526,19 +508,13 @@ def register_mod_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API mod properties update request: node=%s app=%s mod=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
             mod_name,
         )
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         update_request = NodeModPropertiesUpdateRequest.model_validate(payload)
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         result = await service.update_mod_properties(
             app=service._resolve_app(app_name),
             mod_name=mod_name,
@@ -555,15 +531,9 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         update_request = NodeModNotesUpdateRequest.model_validate(payload)
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         result = await service.update_mod_notes(
             app=service._resolve_app(app_name),
             mod_name=mod_name,
@@ -580,20 +550,14 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        grant = service._require_access(
+        context = auth.require_access(
             request,
             access_token,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_WRITE,),
         )
         fetch_request = NodeModMetadataFetchRequest.model_validate(payload)
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         resolution = await service.fetch_mod_launcher_metadata(
             app=service._resolve_app(app_name),
             mod_name=mod_name,
@@ -612,20 +576,14 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        grant = service._require_access(
+        context = auth.require_access(
             request,
             access_token,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_WRITE,),
         )
         resolve_request = NodeModMetadataResolveRequest.model_validate(payload)
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         discovery = await service.resolve_mod_launcher_metadata(
             app=service._resolve_app(app_name),
             mod_name=mod_name,
@@ -642,20 +600,14 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        grant = service._require_access(
+        context = auth.require_access(
             request,
             access_token,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_WRITE,),
         )
         resolve_request = NodeModPageResolveRequest.model_validate(payload)
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         discovery = await service.find_mod_pages(
             app=service._resolve_app(app_name),
             mod_name=mod_name,
@@ -671,19 +623,13 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        grant = service._require_access(
+        context = auth.require_access(
             request,
             access_token,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_WRITE,),
         )
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         discovery_request = NodeBulkLauncherMetadataRequest.model_validate(payload)
         discovery = await service.run_bulk_metadata_operation(
             app_name=app_name,
@@ -703,19 +649,13 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        grant = service._require_access(
+        context = auth.require_access(
             request,
             access_token,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_WRITE,),
         )
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         apply_request = NodeBulkLauncherMetadataApplyRequest.model_validate(payload)
         result = await service.run_bulk_metadata_operation(
             app_name=app_name,
@@ -737,19 +677,13 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        grant = service._require_access(
+        context = auth.require_access(
             request,
             access_token,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_WRITE,),
         )
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         cancelled = service.cancel_bulk_metadata_operation(
             app_name=app_name,
             operation_id=operation_id,
@@ -757,7 +691,7 @@ def register_mod_routes(
         traffic_log.info(
             "Node API bulk mod metadata cancellation: node=%s app=%s operation=%s "
             "cancelled=%s actor=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
             operation_id,
             cancelled,
@@ -774,17 +708,11 @@ def register_mod_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API client-pack configuration request: node=%s app=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
         )
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         return await service.update_client_pack_config(
             app=service._resolve_app(app_name),
             update=NodeClientPackConfigUpdateRequest.model_validate(payload),
@@ -798,14 +726,8 @@ def register_mod_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-            verified_grant=grant,
-        )
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         return await service.publish_client_pack_config(
             app=service._resolve_app(app_name),
             update=NodeClientPackPublishRequest.model_validate(payload),

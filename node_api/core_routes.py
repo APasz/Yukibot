@@ -15,7 +15,7 @@ from .route_contracts import MappingResponse, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
 
-class NodeCoreRouteService(NodeAuthenticatedRouteService, Protocol):
+class NodeCoreRouteService(Protocol):
     """Core node operations exposed through the HTTP API."""
 
     async def list_apps(self) -> Sequence[MappingResponse]: ...
@@ -26,15 +26,6 @@ class NodeCoreRouteService(NodeAuthenticatedRouteService, Protocol):
 
     def _node_ping_headers(self) -> Mapping[str, str]: ...
 
-    def _require_websocket_token_access(
-        self,
-        *,
-        websocket: WebSocket,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-    ) -> object: ...
-
     async def _serve_presence_stream(self, *, websocket: WebSocket) -> None: ...
 
     async def _serve_node_state_stream(self, *, websocket: WebSocket) -> None: ...
@@ -43,6 +34,7 @@ def register_core_routes(
     nicegui_app: Any,
     *,
     service: NodeCoreRouteService,
+    auth: NodeAuthenticatedRouteService,
     relay_tts: NodeRelayTTSService,
     api_prefix: str,
     traffic_log: logging.Logger,
@@ -51,9 +43,9 @@ def register_core_routes(
 
     @nicegui_app.get(f"{api_prefix}/apps")
     async def _list_apps(request: Request, access_token: str | None = None) -> dict[str, object]:
-        traffic_log.info("Node API apps request: node=%s", service.node_name)
-        service._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
-        return {"node": service.node_name, "apps": [entry.to_mapping() for entry in await service.list_apps()]}
+        traffic_log.info("Node API apps request: node=%s", auth.node_name)
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
+        return {"node": auth.node_name, "apps": [entry.to_mapping() for entry in await service.list_apps()]}
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}")
     async def _app_summary(
@@ -61,8 +53,8 @@ def register_core_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API app summary request: node=%s app=%s", service.node_name, app_name)
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.APPS_READ,))
+        traffic_log.info("Node API app summary request: node=%s app=%s", auth.node_name, app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.APPS_READ,))
         return (await service.build_live_app_entry(service._resolve_app(app_name))).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/ping")
@@ -71,7 +63,7 @@ def register_core_routes(
 
     @nicegui_app.websocket(f"{api_prefix}/presence/stream")
     async def _presence_stream(websocket: WebSocket) -> None:
-        traffic_log.info("Node API presence stream request: node=%s", service.node_name)
+        traffic_log.info("Node API presence stream request: node=%s", auth.node_name)
         await service._serve_presence_stream(websocket=websocket)
 
     @nicegui_app.websocket(f"{api_prefix}/state/stream")
@@ -79,8 +71,8 @@ def register_core_routes(
         websocket: WebSocket,
         access_token: str | None = None,
     ) -> None:
-        traffic_log.info("Node API node state stream request: node=%s", service.node_name)
-        service._require_websocket_token_access(
+        traffic_log.info("Node API node state stream request: node=%s", auth.node_name)
+        auth.require_websocket_token_access(
             websocket=websocket,
             access_token=access_token,
             app_name=None,
@@ -94,6 +86,6 @@ def register_core_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        service._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.RELAY_TTS,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.RELAY_TTS,))
         relay_request = NodeRelayTTSRequest.model_validate(payload)
         return (await relay_tts.queue_request(relay_request)).to_mapping()

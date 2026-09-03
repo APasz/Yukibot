@@ -35,19 +35,19 @@ def register_system_routes(
     @nicegui_app.get(f"{api_prefix}/system")
     async def _system_summary(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API system summary request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
         return monitoring.build_summary().to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/system/history")
     async def _system_history(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API system history request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
         return monitoring.build_history().to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/system/logs")
     async def _system_logs(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API system log catalog request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
         return monitoring.build_log_catalog().to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/system/logs/{{log_path:path}}")
@@ -60,25 +60,25 @@ def register_system_routes(
         traffic_log.info("Node API system log tail request: node=%s log=%s", auth.node_name, log_path)
         if max_lines < 1 or max_lines > max_log_lines:
             raise http_exception(400, f"System log line limit must be between 1 and {max_log_lines}.")
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
         return monitoring.build_log_tail(log_path=log_path, max_lines=max_lines).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/system/capabilities")
     async def _system_capabilities(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API system capabilities request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
         return management.system_capabilities().to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/system/restart-state")
     async def _restart_state(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API restart state request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
         return management.read_restart_state().to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/system/restart-schedules")
     async def _restart_schedules(request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API restart schedule request: node=%s", auth.node_name)
-        auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
         return management.read_restart_schedules().to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/system/restart-schedules")
@@ -88,14 +88,13 @@ def register_system_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API restart schedule update request: node=%s", auth.node_name)
-        grant = auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=None,
             scopes=(NodeApiScope.NODE_OPERATE,),
-            verified_grant=grant,
         )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         target = _restart_target(payload.get("target"), http_exception=http_exception)
         interval_minutes = _optional_int(
             payload.get("interval_minutes"),
@@ -126,14 +125,13 @@ def register_system_routes(
             auth.node_name,
             target_name,
         )
-        grant = auth._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=None,
             scopes=(NodeApiScope.NODE_OPERATE,),
-            verified_grant=grant,
         )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         target = _restart_target(target_name, http_exception=http_exception)
         return (await management.skip_restart_schedule(target=target, actor_user_id=actor_user_id)).to_mapping()
 
@@ -144,19 +142,13 @@ def register_system_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API system action request: node=%s", auth.node_name)
-        grant = auth._require_access(
+        context = auth.require_access(
             request,
             access_token,
             app_name=None,
             scopes=(NodeApiScope.NODE_OPERATE,),
         )
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=None,
-            scopes=(NodeApiScope.NODE_OPERATE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         raw_action = payload.get("action")
         if not isinstance(raw_action, str):
             raise http_exception(400, "Node system action is invalid.")

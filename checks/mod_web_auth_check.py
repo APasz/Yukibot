@@ -272,7 +272,7 @@ class ModWebAuthTests(unittest.TestCase):
             FakeRequest(cookies={_SESSION_COOKIE_NAME: session.session_id}, headers={}),
         )
 
-        service._require_access(
+        service.request_auth.require_access(
             request,
             access_token=None,
             app_name="minecraft",
@@ -300,20 +300,20 @@ class ModWebAuthTests(unittest.TestCase):
         service.set_acl(acl)
         request = cast(Request, FakeRequest(cookies={_SESSION_COOKIE_NAME: session.session_id}, headers={}))
 
-        service._require_access(
+        service.request_auth.require_access(
             request,
             access_token=None,
             app_name=None,
             scopes=(NodeApiScope.APPS_READ,),
         )
-        service._require_access(
+        service.request_auth.require_access(
             request,
             access_token=None,
             app_name="minecraft",
             scopes=(NodeApiScope.CHAT_WRITE,),
         )
         with self.assertRaises(Exception) as raised:
-            service._require_access(
+            service.request_auth.require_access(
                 request,
                 access_token=None,
                 app_name="minecraft",
@@ -344,14 +344,14 @@ class ModWebAuthTests(unittest.TestCase):
         session_id = self._cookie_value(response, _SESSION_COOKIE_NAME)
         request = cast(Request, FakeRequest(cookies={_SESSION_COOKIE_NAME: session_id}, headers={}))
 
-        service._require_access(
+        service.request_auth.require_access(
             request,
             access_token=None,
             app_name="minecraft",
             scopes=(NodeApiScope.MODS_DOWNLOAD,),
         )
         with self.assertRaises(Exception) as raised:
-            service._require_access(
+            service.request_auth.require_access(
                 request,
                 access_token=None,
                 app_name="minecraft",
@@ -382,7 +382,7 @@ class ModWebAuthTests(unittest.TestCase):
         session_id = self._cookie_value(response, _SESSION_COOKIE_NAME)
         request = cast(Request, FakeRequest(cookies={_SESSION_COOKIE_NAME: session_id}, headers={}))
 
-        service._require_access(
+        service.request_auth.require_access(
             request,
             access_token=None,
             app_name="minecraft",

@@ -243,6 +243,7 @@ from node_api.mod import (
 )
 from node_api.mod_service import NodeModService
 from node_api.relay import NodeRelayTTSRequest, RemoteRelayTTSForwarder
+from node_api.request_auth import NodeRequestAuth, NodeRequestContext
 from node_api.route_contracts import DiscordHealthComponentState, DiscordHealthSnapshot, DiscordServiceState
 from node_auth import NodeAccessGrant, NodeApiScope, verify_node_token
 from restart_state import RestartKind, RestartRecord
@@ -583,7 +584,7 @@ class NodeApiTests(unittest.TestCase):
                 "Node API authentication is not configured",
             ) as raised,
         ):
-            NodeApiService()._require_access(
+            NodeApiService().request_auth.require_access(
                 self._request(),
                 None,
                 app_name=None,
@@ -599,14 +600,14 @@ class NodeApiTests(unittest.TestCase):
             patch.object(config, "INDEV", True),
             patch.object(config, "ALLOW_UNAUTH_NODE_API", False),
         ):
-            grant = NodeApiService()._require_access(
+            context = NodeApiService().request_auth.require_access(
                 self._request(),
                 None,
                 app_name=None,
                 scopes=(NodeApiScope.APPS_READ,),
             )
 
-        self.assertIsNone(grant)
+        self.assertIsNone(context.grant)
 
     def test_node_api_allows_explicit_unauthenticated_access(self) -> None:
         server = replace(config.MOD_WEB_SERVER, token_secret=None)
@@ -615,17 +616,17 @@ class NodeApiTests(unittest.TestCase):
             patch.object(config, "INDEV", False),
             patch.object(config, "ALLOW_UNAUTH_NODE_API", True),
         ):
-            grant = NodeApiService()._require_access(
+            context = NodeApiService().request_auth.require_access(
                 self._request(),
                 None,
                 app_name=None,
                 scopes=(NodeApiScope.APPS_READ,),
             )
 
-        self.assertIsNone(grant)
+        self.assertIsNone(context.grant)
 
     def test_request_token_ignores_query_parameter_value(self) -> None:
-        self.assertEqual(NodeApiService._request_token(self._request(), "query-token"), "")
+        self.assertEqual(NodeRequestAuth._request_token(self._request(), "query-token"), "")
 
     def test_app_color_hex_formats_embed_color(self) -> None:
         self.assertEqual(NodeApiService.app_color_hex(0x22C55E), "#22C55E")
@@ -708,11 +709,11 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
 
         self.assertEqual(
-            service._required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.MODS_DOWNLOAD,)),
+            service.request_auth.required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.MODS_DOWNLOAD,)),
             Power_Level.user,
         )
         self.assertEqual(
-            service._required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.CONFIGS_READ,)),
+            service.request_auth.required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.CONFIGS_READ,)),
             Power_Level.visitor,
         )
 
@@ -722,11 +723,11 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
 
         self.assertEqual(
-            service._required_web_level(app_name=None, scopes=(NodeApiScope.NODE_OPERATE,)),
+            service.request_auth.required_web_level(app_name=None, scopes=(NodeApiScope.NODE_OPERATE,)),
             Power_Level.sudo,
         )
         self.assertEqual(
-            service._required_web_level(app_name=None, scopes=(NodeApiScope.NODE_MANAGE,)),
+            service.request_auth.required_web_level(app_name=None, scopes=(NodeApiScope.NODE_MANAGE,)),
             Power_Level.root,
         )
 
@@ -1902,8 +1903,12 @@ class NodeApiTests(unittest.TestCase):
     def test_websocket_exception_from_http_maps_policy_and_internal_failures(
         self,
     ) -> None:
-        policy_error = NodeApiService._websocket_exception_from_http(HTTPException(status_code=404, detail="Missing"))
-        internal_error = NodeApiService._websocket_exception_from_http(HTTPException(status_code=503, detail="Busy"))
+        policy_error = NodeApiService().request_auth.websocket_exception_from_http(
+            HTTPException(status_code=404, detail="Missing")
+        )
+        internal_error = NodeApiService().request_auth.websocket_exception_from_http(
+            HTTPException(status_code=503, detail="Busy")
+        )
 
         self.assertEqual(policy_error.code, 1008)
         self.assertEqual(policy_error.reason, "Missing")
@@ -4731,7 +4736,7 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
 
         self.assertEqual(
-            service._required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.CHAT_INJECT,)),
+            service.request_auth.required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.CHAT_INJECT,)),
             Power_Level.root,
         )
 
@@ -5113,9 +5118,10 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(update_result.setting.value_text, "")
 
     def test_actor_user_id_from_subject_requires_web_prefix(self) -> None:
-        self.assertEqual(NodeApiService._actor_user_id_from_subject("web:42"), 42)
+        auth = NodeApiService().request_auth
+        self.assertEqual(auth._actor_user_id_from_subject("web:42"), 42)
         with self.assertRaises(Exception) as raised:
-            NodeApiService._actor_user_id_from_subject("relay-tts:erin")
+            auth._actor_user_id_from_subject("relay-tts:erin")
 
         self.assertEqual(getattr(raised.exception, "status_code"), 403)
 
@@ -5136,13 +5142,9 @@ class NodeApiTests(unittest.TestCase):
 
         with self.assertRaisesRegex(HTTPException, "Insufficient level: Sudo < Root") as raised:
             asyncio.run(
-                service._require_actor_level_for_request(
-                    request=self._request(),
-                    access_token=None,
-                    app_name="factorio_alpha",
-                    scopes=(NodeApiScope.CONFIGS_READ,),
-                    required_level=Power_Level.root,
-                    verified_grant=grant,
+                service.request_auth.require_actor_level(
+                    NodeRequestContext(grant=grant),
+                    Power_Level.root,
                 )
             )
 

@@ -10,10 +10,10 @@ from fastapi import Request
 from apps._app import App
 from .route_contracts import MappingResponse, NodeAuthenticatedRouteService
 from .settings import NodeSettingMutationResult, NodeSettingWriteRequest
-from node_auth import NodeAccessGrant, NodeApiScope
+from node_auth import NodeApiScope
 
 
-class NodeSettingsRouteService(NodeAuthenticatedRouteService, Protocol):
+class NodeSettingsRouteService(Protocol):
     """Settings operations required by the settings route registrar."""
 
     def _resolve_app(self, app_name: str) -> App: ...
@@ -38,6 +38,7 @@ def register_settings_routes(
     nicegui_app: Any,
     *,
     service: NodeSettingsRouteService,
+    auth: NodeAuthenticatedRouteService,
     api_prefix: str,
     traffic_log: logging.Logger,
 ) -> None:
@@ -48,17 +49,11 @@ def register_settings_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API setting list request: node=%s app=%s", service.node_name, app_name)
-        grant: NodeAccessGrant | None = service._require_access(
+        traffic_log.info("Node API setting list request: node=%s app=%s", auth.node_name, app_name)
+        context = auth.require_access(
             request, access_token, app_name=app_name, scopes=(NodeApiScope.SETTINGS_READ,)
         )
-        actor_user_id: int = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.SETTINGS_READ,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         app = service._resolve_app(app_name)
         return service.build_setting_list(app=app, actor_user_id=actor_user_id).to_mapping()
 
@@ -71,18 +66,12 @@ def register_settings_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info(
-            "Node API setting write request: node=%s app=%s setting=%s", service.node_name, app_name, setting_key
+            "Node API setting write request: node=%s app=%s setting=%s", auth.node_name, app_name, setting_key
         )
-        grant: NodeAccessGrant | None = service._require_access(
+        context = auth.require_access(
             request, access_token, app_name=app_name, scopes=(NodeApiScope.SETTINGS_WRITE,)
         )
-        actor_user_id: int = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.SETTINGS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         write_request: NodeSettingWriteRequest = NodeSettingWriteRequest.model_validate(payload)
         app = service._resolve_app(app_name)
         result: NodeSettingMutationResult = await service.update_setting(
@@ -99,17 +88,11 @@ def register_settings_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API settings save request: node=%s app=%s", service.node_name, app_name)
-        grant: NodeAccessGrant | None = service._require_access(
+        traffic_log.info("Node API settings save request: node=%s app=%s", auth.node_name, app_name)
+        context = auth.require_access(
             request, access_token, app_name=app_name, scopes=(NodeApiScope.SETTINGS_WRITE,)
         )
-        actor_user_id: int = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.SETTINGS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         app = service._resolve_app(app_name)
         return (await service.save_settings(app=app, actor_user_id=actor_user_id)).to_mapping()
 
@@ -119,16 +102,10 @@ def register_settings_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API settings reload request: node=%s app=%s", service.node_name, app_name)
-        grant: NodeAccessGrant | None = service._require_access(
+        traffic_log.info("Node API settings reload request: node=%s app=%s", auth.node_name, app_name)
+        context = auth.require_access(
             request, access_token, app_name=app_name, scopes=(NodeApiScope.SETTINGS_WRITE,)
         )
-        actor_user_id: int = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.SETTINGS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         app = service._resolve_app(app_name)
         return (await service.reload_settings(app=app, actor_user_id=actor_user_id)).to_mapping()

@@ -19,13 +19,10 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import requests
 from fastapi import (
-    HTTPException,
-    Request,
     Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
-    WebSocketException,
     status,
 )
 from fastapi.responses import FileResponse
@@ -127,6 +124,7 @@ from .core_routes import register_core_routes
 from .map_routes import register_map_routes
 from .mod_routes import register_mod_routes
 from .node_routes import register_node_management_routes
+from .request_auth import NodeRequestAuth
 from .route_contracts import (
     NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
     NODE_DISCORD_SERVICE_STATE_HEADER,
@@ -143,13 +141,7 @@ from .storage_routes import register_storage_routes
 from .system import NodeSystemSummary
 from .system_routes import register_system_routes
 from .upload import NodeApiRequestBodyLimitMiddleware
-from node_auth import (
-    NodeAccessGrant,
-    NodeApiScope,
-    NodeTokenError,
-    issue_node_token,
-    verify_node_token,
-)
+from node_auth import NodeApiScope
 
 if TYPE_CHECKING:
     from _manager import App_Manager
@@ -189,33 +181,6 @@ class PortalNodeLatencyProbe:
 
 _LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
-_NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
-    NodeApiScope.APPS_READ: Power_Level.visitor,
-    NodeApiScope.MAP_READ: Power_Level.visitor,
-    NodeApiScope.MAP_WRITE: Power_Level.user,
-    NodeApiScope.CHAT_READ: Power_Level.visitor,
-    NodeApiScope.CHAT_WRITE: Power_Level.visitor,
-    NodeApiScope.CHAT_INJECT: Power_Level.root,
-    NodeApiScope.MODS_READ: Power_Level.visitor,
-    NodeApiScope.MODS_DOWNLOAD: Power_Level.user,
-    NodeApiScope.MODS_WRITE: Power_Level.user,
-    NodeApiScope.CONFIGS_READ: Power_Level.visitor,
-    NodeApiScope.CONFIGS_WRITE: Power_Level.sudo,
-    NodeApiScope.SAVES_READ: Power_Level.user,
-    NodeApiScope.SAVES_DOWNLOAD: Power_Level.user,
-    NodeApiScope.SAVES_WRITE: Power_Level.user,
-    NodeApiScope.BLUEPRINTS_READ: Power_Level.user,
-    NodeApiScope.BLUEPRINTS_WRITE: Power_Level.user,
-    NodeApiScope.SETTINGS_READ: Power_Level.user,
-    NodeApiScope.SETTINGS_WRITE: Power_Level.user,
-    NodeApiScope.FILES_READ: Power_Level.user,
-    NodeApiScope.FILES_DOWNLOAD: Power_Level.user,
-    NodeApiScope.FILES_UPLOAD: Power_Level.user,
-    NodeApiScope.APP_CONTROL: Power_Level.user,
-    NodeApiScope.APP_MANAGE: Power_Level.sudo,
-    NodeApiScope.NODE_OPERATE: Power_Level.sudo,
-    NodeApiScope.NODE_MANAGE: Power_Level.root,
-}
 log = logging.getLogger(__name__)
 traffic_log = logging.getLogger(config.LOGGER_TRAFFIC)
 
@@ -253,7 +218,11 @@ class NodeApiService:
         self._discord_service_state: DiscordServiceState | None = None
         self._discord_health: DiscordHealthSnapshot | None = None
         self._acl: Access_Control | None = None
-        self._web_auth: ModWebAuthService | None = None
+        self.request_auth: NodeRequestAuth = NodeRequestAuth(
+            node_name=lambda: self.node_name,
+            http_exception=_http_exception,
+            logger=log,
+        )
         self._app_footprint_cache: dict[str, NodeAppFootprintSnapshot] = {}
         self._app_state_cache = app_state.NodeAppStateCache(
             app_entry_ttl_seconds=_NODE_APP_ENTRY_CACHE_TTL_SECONDS,
@@ -449,10 +418,11 @@ class NodeApiService:
 
     def set_acl(self, acl: Access_Control) -> None:
         self._acl = acl
+        self.request_auth.set_acl(acl)
         self.node_management.set_acl(acl)
 
     def set_web_auth(self, web_auth: ModWebAuthService) -> None:
-        self._web_auth = web_auth
+        self.request_auth.set_web_auth(web_auth)
 
     def begin_shutdown(self) -> None:
         self._shutting_down = True
@@ -508,6 +478,7 @@ class NodeApiService:
         register_core_routes(
             nicegui_app,
             service=self,
+            auth=self.request_auth,
             relay_tts=self.relay_tts,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
@@ -515,7 +486,7 @@ class NodeApiService:
 
         register_system_routes(
             nicegui_app,
-            auth=self,
+            auth=self.request_auth,
             monitoring=self.system_monitoring,
             management=self.node_management,
             api_prefix=_NODE_API_PREFIX,
@@ -526,7 +497,7 @@ class NodeApiService:
 
         register_node_management_routes(
             nicegui_app,
-            auth=self,
+            auth=self.request_auth,
             management=self.node_management,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
@@ -535,7 +506,8 @@ class NodeApiService:
 
         register_chat_routes(
             nicegui_app,
-            auth=self,
+            service=self,
+            auth=self.request_auth,
             chat=self.chat,
             api_prefix=_NODE_API_PREFIX,
             history_limit=_NODE_CHAT_HISTORY_LIMIT,
@@ -545,6 +517,7 @@ class NodeApiService:
         register_app_routes(
             nicegui_app,
             service=self,
+            auth=self.request_auth,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -553,6 +526,7 @@ class NodeApiService:
         register_app_installer_routes(
             nicegui_app,
             service=self,
+            auth=self.request_auth,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -560,7 +534,8 @@ class NodeApiService:
 
         register_map_routes(
             nicegui_app,
-            auth=self,
+            service=self,
+            auth=self.request_auth,
             maps=self.maps,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
@@ -569,13 +544,15 @@ class NodeApiService:
         register_mod_routes(
             nicegui_app,
             service=self,
+            auth=self.request_auth,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
         )
 
         register_storage_routes(
             nicegui_app,
-            auth=self,
+            service=self,
+            auth=self.request_auth,
             storage=self.storage,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
@@ -585,6 +562,7 @@ class NodeApiService:
         register_settings_routes(
             nicegui_app,
             service=self,
+            auth=self.request_auth,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
         )
@@ -592,6 +570,7 @@ class NodeApiService:
         register_console_routes(
             nicegui_app,
             service=self,
+            auth=self.request_auth,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -1123,56 +1102,6 @@ class NodeApiService:
             bot_uptime_seconds=_minute_bucket(summary.bot_uptime_seconds),
             uptime_seconds=_minute_bucket(summary.uptime_seconds),
         )
-
-    def _require_websocket_token_access(
-        self,
-        *,
-        websocket: WebSocket,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-    ) -> NodeAccessGrant:
-        secret = config.MOD_WEB_SERVER.token_secret
-        if secret is None:
-            raise WebSocketException(
-                code=status.WS_1011_INTERNAL_ERROR,
-                reason="Node token secret is not configured.",
-            )
-        token = self._request_token(websocket, access_token)
-        try:
-            grant = verify_node_token(
-                secret=secret,
-                token=token,
-                node=self.node_name,
-                app=app_name,
-                required_scopes=scopes,
-            )
-        except NodeTokenError as xcp:
-            log.warning(
-                "Node API websocket access rejected: node=%s app=%s scopes=%s reason=%s",
-                self.node_name,
-                app_name,
-                ",".join(scope.value for scope in scopes),
-                xcp,
-            )
-            raise WebSocketException(
-                code=status.WS_1008_POLICY_VIOLATION, reason=str(xcp)
-            ) from xcp
-        log.debug(
-            "Node API websocket token access accepted: node=%s app=%s scopes=%s",
-            self.node_name,
-            app_name,
-            ",".join(scope.value for scope in scopes),
-        )
-        return grant
-
-    @staticmethod
-    def _websocket_exception_from_http(error: HTTPException) -> WebSocketException:
-        if error.status_code in {400, 401, 403, 404, 409}:
-            code = status.WS_1008_POLICY_VIOLATION
-        else:
-            code = status.WS_1011_INTERNAL_ERROR
-        return WebSocketException(code=code, reason=str(error.detail))
 
     async def _serve_presence_stream(self, *, websocket: WebSocket) -> None:
         if not self._try_reserve_presence_stream_connection():
@@ -2481,262 +2410,12 @@ class NodeApiService:
         scopes: tuple[NodeApiScope, ...],
         ttl_seconds: int = _NODE_TOKEN_TTL_SECONDS,
     ) -> str | None:
-        secret: str | None = config.MOD_WEB_SERVER.token_secret
-        if secret is None:
-            return None
-        log.debug(
-            "Issuing node API access token: node=%s app=%s scopes=%s subject=%s ttl_seconds=%s",
-            self.node_name,
-            app_name,
-            ",".join(scope.value for scope in scopes),
-            subject,
-            ttl_seconds,
-        )
-        return issue_node_token(
-            secret=secret,
-            grant=NodeAccessGrant(
-                subject=subject,
-                node=self.node_name,
-                app=app_name,
-                scopes=frozenset(scopes),
-                expires_at=int(time.time()) + ttl_seconds,
-            ),
-        )
-
-    def _require_access(
-        self,
-        request: Request,
-        access_token: str | None,
-        *,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-        token_node_names: Sequence[str] | None = None,
-    ) -> NodeAccessGrant | None:
-        secret: str | None = config.MOD_WEB_SERVER.token_secret
-        token_error: NodeTokenError | None = None
-        if secret is not None:
-            try:
-                grant: NodeAccessGrant = self._verified_token_grant(
-                    request=request,
-                    access_token=access_token,
-                    app_name=app_name,
-                    scopes=scopes,
-                    node_names=token_node_names,
-                )
-            except NodeTokenError as xcp:
-                token_error = xcp
-            else:
-                log.debug(
-                    "Node API token access accepted: node=%s app=%s scopes=%s",
-                    self.node_name,
-                    app_name,
-                    scopes,
-                )
-                return grant
-
-        if self._require_web_session_access(
-            request=request, app_name=app_name, scopes=scopes
-        ):
-            return None
-
-        if secret is None and (config.INDEV or config.ALLOW_UNAUTH_NODE_API):
-            log.debug(
-                "Node API auth disabled: node=%s app=%s scopes=%s",
-                self.node_name,
-                app_name,
-                scopes,
-            )
-            return None
-
-        reason: NodeTokenError = token_error or NodeTokenError(
-            "Node API authentication is not configured."
-        )
-        log.warning(
-            "Node API access rejected: node=%s app=%s scopes=%s reason=%s",
-            self.node_name,
-            app_name,
-            ",".join(scope.value for scope in scopes),
-            reason,
-        )
-        raise _http_exception(403, str(reason)) from token_error
-
-    def _verified_token_grant(
-        self,
-        *,
-        request: Request,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-        node_names: Sequence[str] | None = None,
-    ) -> NodeAccessGrant:
-        secret: str | None = config.MOD_WEB_SERVER.token_secret
-        if secret is None:
-            raise NodeTokenError("Node token secret is not configured.")
-        token: str = self._request_token(request, access_token)
-        resolved_node_names = node_names or (self.node_name,)
-        token_error: NodeTokenError | None = None
-        for node_name in resolved_node_names:
-            try:
-                return verify_node_token(
-                    secret=secret,
-                    token=token,
-                    node=node_name,
-                    app=app_name,
-                    required_scopes=scopes,
-                )
-            except NodeTokenError as xcp:
-                token_error = xcp
-        raise token_error or NodeTokenError("Node token node target is not configured.")
-
-    def _request_actor_user_id(
-        self,
-        *,
-        request: Request,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-        verified_grant: NodeAccessGrant | None = None,
-    ) -> int:
-        grant: NodeAccessGrant | None = verified_grant
-        if grant is None and config.MOD_WEB_SERVER.token_secret is not None:
-            try:
-                grant = self._verified_token_grant(
-                    request=request,
-                    access_token=access_token,
-                    app_name=app_name,
-                    scopes=scopes,
-                )
-            except NodeTokenError:
-                grant = None
-
-        if grant is not None:
-            return self._actor_user_id_from_subject(grant.subject)
-
-        if self._web_auth is None:
-            raise _http_exception(
-                403, "Mod mutation requires an authenticated Discord user."
-            )
-        user: ModWebUser | None = self._web_auth.current_user(request)
-        if user is None:
-            raise _http_exception(
-                403, "Mod mutation requires an authenticated Discord user."
-            )
-        return user.discord_id
-
-    def _request_actor_user_id_if_available(
-        self,
-        *,
-        request: Request,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-        verified_grant: NodeAccessGrant | None = None,
-    ) -> int | None:
-        if self._acl is None:
-            return None
-        if verified_grant is None and (
-            self._web_auth is None or not self._web_auth.enabled
-        ):
-            return None
-        return self._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        return self.request_auth.issue_access_token(
+            subject=subject,
             app_name=app_name,
             scopes=scopes,
-            verified_grant=verified_grant,
+            ttl_seconds=ttl_seconds,
         )
-
-    async def _require_actor_level_for_request(
-        self,
-        *,
-        request: Request,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-        required_level: Power_Level,
-        verified_grant: NodeAccessGrant | None = None,
-    ) -> None:
-        if self._acl is None:
-            return
-        if verified_grant is None and (
-            self._web_auth is None or not self._web_auth.enabled
-        ):
-            return
-        actor_user_id = self._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=scopes,
-            verified_grant=verified_grant,
-        )
-        try:
-            await self._acl.perm_check(actor_user_id, required_level)
-        except PermissionError as xcp:
-            raise _http_exception(403, str(xcp)) from xcp
-
-    @staticmethod
-    def _actor_user_id_from_subject(subject: str) -> int:
-        prefix = "web:"
-        if not subject.startswith(prefix):
-            raise _http_exception(
-                403, f"Node token subject cannot act as a web user: {subject}"
-            )
-        raw_user_id = subject[len(prefix) :].strip()
-        if not raw_user_id.isdigit():
-            raise _http_exception(
-                403, f"Node token subject is invalid for web actions: {subject}"
-            )
-        return int(raw_user_id)
-
-    def _require_web_session_access(
-        self,
-        *,
-        request: Request,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-    ) -> bool:
-        if self._web_auth is None or not self._web_auth.enabled:
-            return False
-
-        if self._acl is None:
-            log.warning(
-                "Node API web session auth unavailable because Access_Control is not attached."
-            )
-            raise _http_exception(503, "Mod web permissions are not available.")
-
-        required_level = self._required_web_level(app_name=app_name, scopes=scopes)
-        user = self._web_auth.current_user(request)
-        if user is None:
-            raise _http_exception(401, "Discord login is required.")
-        if not self._acl.can(user.discord_id, required_level):
-            raise _http_exception(
-                403,
-                f"Insufficient level: {self._acl.level_of(user.discord_id).name.title()} < {required_level.name.title()}",
-            )
-        log.debug(
-            "Node API web session access accepted: node=%s app=%s scopes=%s user_id=%s",
-            self.node_name,
-            app_name,
-            ",".join(scope.value for scope in scopes),
-            user.discord_id,
-        )
-        return True
-
-    def _required_web_level(
-        self, *, app_name: str | None, scopes: tuple[NodeApiScope, ...]
-    ) -> Power_Level:
-        if not scopes:
-            raise _http_exception(403, "Node API access requires at least one scope.")
-        required_levels: list[Power_Level] = []
-        for scope in scopes:
-            level = _NODE_API_SCOPE_WEB_LEVELS.get(scope)
-            if level is None:
-                raise _http_exception(
-                    403,
-                    f"Node API scope cannot be granted by a web session: {scope.value}.",
-                )
-            required_levels.append(level)
-        return max(required_levels)
 
     def _resolve_app(self, app_name: str) -> App:
         manager = self._require_manager()
@@ -2788,14 +2467,6 @@ class NodeApiService:
         ):
             return None
         return friendly_name
-
-    @staticmethod
-    def _request_token(request: Any, _access_token: str | None) -> str:
-        auth_header = request.headers.get("authorization", "")
-        scheme, _, token = auth_header.partition(" ")
-        if scheme.casefold() == "bearer" and token:
-            return token.strip()
-        return ""
 
     def _base_url(self, base_url: str | None) -> str:
         return (base_url or self.api_base_url).rstrip("/")

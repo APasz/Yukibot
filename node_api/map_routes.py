@@ -13,7 +13,7 @@ from fastapi.responses import Response
 from _async_utils import run_blocking
 from apps._app import App
 from map_annotations import MapAnnotationDraft
-from mod_web_auth import ModWebAuthService, ModWebUser
+from mod_web_auth import ModWebUser
 from .map_service import NodeMapService, NodeMapProxyResponse
 from .route_contracts import NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
@@ -30,10 +30,8 @@ def _response_headers(proxy_response: NodeMapProxyResponse) -> dict[str, str]:
     return headers
 
 
-class NodeMapRouteContext(NodeAuthenticatedRouteService, Protocol):
-    """Authentication and identity operations required by map routes."""
-
-    _web_auth: ModWebAuthService | None
+class NodeMapRouteContext(Protocol):
+    """App and map-identity operations required by map routes."""
 
     def _resolve_app(self, app_name: str) -> App: ...
 
@@ -48,7 +46,8 @@ class NodeMapRouteContext(NodeAuthenticatedRouteService, Protocol):
 def register_map_routes(
     nicegui_app: Any,
     *,
-    auth: NodeMapRouteContext,
+    service: NodeMapRouteContext,
+    auth: NodeAuthenticatedRouteService,
     maps: NodeMapService,
     api_prefix: str,
     traffic_log: logging.Logger,
@@ -78,8 +77,8 @@ def register_map_routes(
         access_token: str | None = None,
     ) -> Response:
         traffic_log.info("Node API map manifest request: node=%s app=%s", auth.node_name, app_name)
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+        app = service._resolve_app(app_name)
         manifest, source = await run_blocking(maps.build_manifest_result, app)
         return Response(
             content=json.dumps(manifest.to_mapping()),
@@ -94,8 +93,8 @@ def register_map_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API map annotation list request: node=%s app=%s", auth.node_name, app_name)
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+        app = service._resolve_app(app_name)
         annotations = await run_blocking(maps.build_annotation_list, app)
         return annotations.to_mapping()
 
@@ -107,18 +106,22 @@ def register_map_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API map annotation create request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_WRITE,))
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.MAP_WRITE,),
-            verified_grant=grant,
         )
-        app = auth._resolve_app(app_name)
+        context = auth.require_actor(context)
+        actor_user_id = context.require_actor_user_id()
+        app = service._resolve_app(app_name)
         draft = MapAnnotationDraft.from_mapping(payload)
-        user = None if auth._web_auth is None else auth._web_auth.current_user(request)
-        created_by_name = auth._map_annotation_creator_name(app, actor_user_id=actor_user_id, user=user)
+        context = auth.with_current_web_user(context, request)
+        created_by_name = service._map_annotation_creator_name(
+            app,
+            actor_user_id=actor_user_id,
+            user=context.web_user,
+        )
         result = await run_blocking(
             lambda: maps.create_annotation(
                 app=app,
@@ -142,8 +145,8 @@ def register_map_routes(
             app_name,
             annotation_id,
         )
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_WRITE,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_WRITE,))
+        app = service._resolve_app(app_name)
         result = await run_blocking(
             lambda: maps.delete_annotation(app=app, annotation_id=annotation_id)
         )
@@ -156,8 +159,8 @@ def register_map_routes(
         access_token: str | None = None,
     ) -> Response:
         traffic_log.info("Node API map players request: node=%s app=%s", auth.node_name, app_name)
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+        app = service._resolve_app(app_name)
         proxy_response = await _proxy_response(
             app,
             "tiles/players.json",
@@ -182,8 +185,8 @@ def register_map_routes(
             app_name,
             world_name,
         )
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+        app = service._resolve_app(app_name)
         proxy_response = await _proxy_response(
             app,
             f"tiles/{quote(world_name, safe='')}/settings.json",
@@ -209,8 +212,8 @@ def register_map_routes(
             app_name,
             world_name,
         )
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+        app = service._resolve_app(app_name)
         proxy_response = await _proxy_response(
             app,
             f"tiles/{quote(world_name, safe='')}/markers.json",
@@ -240,8 +243,8 @@ def register_map_routes(
             z,
             tile_name,
         )
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+        app = service._resolve_app(app_name)
         proxy_response = await _proxy_response(
             app,
             f"tiles/{quote(world_name, safe='')}/{z}/{quote(tile_name, safe='')}",
@@ -266,8 +269,8 @@ def register_map_routes(
             app_name,
             asset_path,
         )
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+        app = service._resolve_app(app_name)
         proxy_response = await _proxy_response(
             app,
             f"images/{quote(asset_path, safe='/')}",

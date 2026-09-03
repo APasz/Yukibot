@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
-from fastapi import HTTPException, Request, WebSocket, WebSocketException
+from fastapi import HTTPException, Request, WebSocket
 from fastapi.responses import Response
 
 from _async_utils import run_blocking
@@ -24,7 +24,7 @@ from .route_contracts import (
 from node_auth import NodeApiScope
 
 
-class NodeAppRouteService(NodeAuthenticatedRouteService, Protocol):
+class NodeAppRouteService(Protocol):
     """App operations exposed through the HTTP API."""
 
     def _resolve_app(self, app_name: str) -> App: ...
@@ -46,17 +46,6 @@ class NodeAppRouteService(NodeAuthenticatedRouteService, Protocol):
     ) -> MappingResponse: ...
 
     def build_minecraft_item_icon_response(self, app: App, *, item_id: str) -> Response: ...
-
-    def _require_websocket_token_access(
-        self,
-        *,
-        websocket: WebSocket,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-    ) -> object: ...
-
-    def _websocket_exception_from_http(self, error: HTTPException) -> WebSocketException: ...
 
     async def _serve_app_state_stream(self, *, websocket: WebSocket, app: App) -> None: ...
 
@@ -93,6 +82,7 @@ def register_app_routes(
     nicegui_app: Any,
     *,
     service: NodeAppRouteService,
+    auth: NodeAuthenticatedRouteService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
@@ -101,8 +91,8 @@ def register_app_routes(
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/mods")
     async def _list_mods(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
-        traffic_log.info("Node API mods list request: node=%s app=%s", service.node_name, app_name)
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+        traffic_log.info("Node API mods list request: node=%s app=%s", auth.node_name, app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         app = service._resolve_app(app_name)
         return (await service.build_mod_list(app)).to_mapping()
 
@@ -114,10 +104,10 @@ def register_app_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API runtime summary request: node=%s app=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
         )
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         app = service._resolve_app(app_name)
         return (await service.build_cached_app_runtime_summary(app)).to_mapping()
 
@@ -129,10 +119,10 @@ def register_app_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API 7D2D sandbox options request: node=%s app=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
         )
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         app = service._resolve_app(app_name)
         return service.build_sevendays_sandbox_options_state(app).to_mapping()
 
@@ -144,10 +134,10 @@ def register_app_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API Minecraft recipe workspace request: node=%s app=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
         )
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         app = service._resolve_app(app_name)
         return service.build_minecraft_recipe_workspace_state(app).to_mapping()
 
@@ -160,17 +150,16 @@ def register_app_routes(
     ) -> dict[str, object]:
         traffic_log.info(
             "Node API Minecraft recipe mutation request: node=%s app=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
         )
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.APP_MANAGE,))
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.APP_MANAGE,),
-            verified_grant=grant,
         )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         try:
             mutation_request = NodeMinecraftRecipeMutationRequest.from_mapping(payload)
         except ValueError as xcp:
@@ -192,11 +181,11 @@ def register_app_routes(
     ) -> Response:
         traffic_log.info(
             "Node API Minecraft recipe item icon request: node=%s app=%s item=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
             item_id,
         )
-        service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
         app = service._resolve_app(app_name)
         return await run_blocking(service.build_minecraft_item_icon_response, app, item_id=item_id)
 
@@ -208,10 +197,10 @@ def register_app_routes(
     ) -> None:
         traffic_log.info(
             "Node API app state stream request: node=%s app=%s",
-            service.node_name,
+            auth.node_name,
             app_name,
         )
-        service._require_websocket_token_access(
+        auth.require_websocket_token_access(
             websocket=websocket,
             access_token=access_token,
             app_name=app_name,
@@ -220,7 +209,7 @@ def register_app_routes(
         try:
             app = service._resolve_app(app_name)
         except HTTPException as xcp:
-            raise service._websocket_exception_from_http(xcp) from xcp
+            raise auth.websocket_exception_from_http(xcp) from xcp
         await service._serve_app_state_stream(websocket=websocket, app=app)
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mutate")
@@ -230,17 +219,16 @@ def register_app_routes(
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info("Node API app mutation request: node=%s app=%s", service.node_name, app_name)
+        traffic_log.info("Node API app mutation request: node=%s app=%s", auth.node_name, app_name)
         mutation_request: NodeAppMutationRequest = NodeAppMutationRequest.model_validate(payload)
         required_scope = required_app_mutation_scope(mutation_request.action)
-        grant = service._require_access(request, access_token, app_name=app_name, scopes=(required_scope,))
-        actor_user_id = service._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(required_scope,),
-            verified_grant=grant,
         )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         app = service._resolve_app(app_name)
         result = await service.mutate_app(
             app=app,

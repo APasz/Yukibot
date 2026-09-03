@@ -25,34 +25,13 @@ from .files import (
 )
 from .storage_service import NodeStorageService
 from .route_contracts import HttpExceptionFactory, MappingResponse, NodeAuthenticatedRouteService
-from node_auth import NodeAccessGrant, NodeApiScope
+from node_auth import NodeApiScope
 
 
-class NodeStorageRouteContext(NodeAuthenticatedRouteService, Protocol):
-    """Authentication and app-specific operations required by storage routes."""
+class NodeStorageRouteContext(Protocol):
+    """App-specific operations required by storage routes."""
 
     def _resolve_app(self, app_name: str) -> App: ...
-
-    def _request_actor_user_id_if_available(
-        self,
-        *,
-        request: Request,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-        verified_grant: NodeAccessGrant | None = None,
-    ) -> int | None: ...
-
-    async def _require_actor_level_for_request(
-        self,
-        *,
-        request: Request,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-        required_level: Power_Level,
-        verified_grant: NodeAccessGrant | None = None,
-    ) -> None: ...
 
     def factorio_generation_state(self, *, app: App) -> MappingResponse: ...
 
@@ -116,7 +95,8 @@ FACTORIO_GENERATION_ACCESS_LEVEL = Power_Level.sudo
 def register_storage_routes(
     nicegui_app: Any,
     *,
-    auth: NodeStorageRouteContext,
+    service: NodeStorageRouteContext,
+    auth: NodeAuthenticatedRouteService,
     storage: NodeStorageService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
@@ -126,15 +106,14 @@ def register_storage_routes(
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/configs")
     async def _list_configs(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API config list request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
-        app = auth._resolve_app(app_name)
-        actor_user_id = auth._request_actor_user_id_if_available(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
-            verified_grant=grant,
         )
+        app = service._resolve_app(app_name)
+        actor_user_id = auth.resolve_actor_if_available(context).actor_user_id
         return storage.build_config_list(app=app, actor_user_id=actor_user_id).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/configs")
@@ -145,28 +124,23 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API config create request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+        )
         create_request = NodeConfigCreateRequest.model_validate(payload)
-        app = auth._resolve_app(app_name)
+        app = service._resolve_app(app_name)
         try:
             required_level = app.config_file_write_level_for_root(create_request.root_id)
         except ValueError as xcp:
             raise http_exception(400, str(xcp)) from xcp
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            required_level=required_level,
-            verified_grant=grant,
+        context = await auth.require_actor_level(
+            context,
+            required_level,
         )
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         result = storage.create_config_file(
             app=app,
             root_id=create_request.root_id,
@@ -190,17 +164,15 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API Factorio mod settings state request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
-            required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
-            verified_grant=grant,
         )
-        return auth.factorio_mod_settings_state(app=app).to_mapping()
+        app = service._resolve_app(app_name)
+        await auth.require_actor_level(context, FACTORIO_MOD_SETTINGS_ACCESS_LEVEL)
+        return service.factorio_mod_settings_state(app=app).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/factorio/generation")
     async def _factorio_generation_state(
@@ -209,17 +181,15 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API Factorio generation state request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
-            required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
-            verified_grant=grant,
         )
-        return auth.factorio_generation_state(app=app).to_mapping()
+        app = service._resolve_app(app_name)
+        await auth.require_actor_level(context, FACTORIO_GENERATION_ACCESS_LEVEL)
+        return service.factorio_generation_state(app=app).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/factorio/generation")
     async def _update_factorio_generation(
@@ -229,24 +199,19 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API Factorio generation update request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
-            required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
-            verified_grant=grant,
         )
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            verified_grant=grant,
+        app = service._resolve_app(app_name)
+        context = await auth.require_actor_level(
+            context,
+            FACTORIO_GENERATION_ACCESS_LEVEL,
         )
-        result = auth.update_factorio_generation(
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = service.update_factorio_generation(
             app=app,
             update=NodeFactorioGenerationUpdateRequest.model_validate(payload),
         )
@@ -267,24 +232,19 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API Factorio map exchange import request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
-            required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
-            verified_grant=grant,
         )
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            verified_grant=grant,
+        app = service._resolve_app(app_name)
+        context = await auth.require_actor_level(
+            context,
+            FACTORIO_GENERATION_ACCESS_LEVEL,
         )
-        result = await auth.import_factorio_map_exchange_string(
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = await service.import_factorio_map_exchange_string(
             app=app,
             import_request=NodeFactorioMapExchangeImportRequest.model_validate(payload),
         )
@@ -304,17 +264,15 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API Factorio map exchange export request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
-            required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
-            verified_grant=grant,
         )
-        return (await auth.export_factorio_map_exchange_string(app=app)).to_mapping()
+        app = service._resolve_app(app_name)
+        await auth.require_actor_level(context, FACTORIO_GENERATION_ACCESS_LEVEL)
+        return (await service.export_factorio_map_exchange_string(app=app)).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/factorio/generation/running-world")
     async def _sync_factorio_generation_from_running_world(
@@ -327,24 +285,19 @@ def register_storage_routes(
             auth.node_name,
             app_name,
         )
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
-            required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
-            verified_grant=grant,
         )
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            verified_grant=grant,
+        app = service._resolve_app(app_name)
+        context = await auth.require_actor_level(
+            context,
+            FACTORIO_GENERATION_ACCESS_LEVEL,
         )
-        result = await auth.sync_factorio_generation_from_running_world(app=app)
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = await service.sync_factorio_generation_from_running_world(app=app)
         audit_log(
             "factorio.running_world_generation_synced",
             actor_user_id=actor_user_id,
@@ -361,17 +314,15 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> FileResponse:
         traffic_log.info("Node API Factorio mod settings download request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
-            required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
-            verified_grant=grant,
         )
-        return auth.build_factorio_mod_settings_download_response(app=app)
+        app = service._resolve_app(app_name)
+        await auth.require_actor_level(context, FACTORIO_MOD_SETTINGS_ACCESS_LEVEL)
+        return service.build_factorio_mod_settings_download_response(app=app)
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/factorio/mod-settings/upload")
     async def _upload_factorio_mod_settings(
@@ -382,24 +333,19 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API Factorio mod settings upload request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
-            required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
-            verified_grant=grant,
         )
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            verified_grant=grant,
+        app = service._resolve_app(app_name)
+        context = await auth.require_actor_level(
+            context,
+            FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
         )
-        result = await auth.upload_factorio_mod_settings(
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = await service.upload_factorio_mod_settings(
             app=app,
             upload=upload,
             upload_name=filename or upload.filename or "",
@@ -421,24 +367,19 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API Factorio mod settings delete request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE,),
-            required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
-            verified_grant=grant,
         )
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            verified_grant=grant,
+        app = service._resolve_app(app_name)
+        context = await auth.require_actor_level(
+            context,
+            FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
         )
-        result = auth.delete_factorio_mod_settings(app=app)
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = service.delete_factorio_mod_settings(app=app)
         audit_log(
             "factorio.mod_settings_deleted",
             actor_user_id=actor_user_id,
@@ -461,27 +402,22 @@ def register_storage_routes(
             app_name,
             root_id,
         )
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
-        app = auth._resolve_app(app_name)
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_READ,),
+        )
+        app = service._resolve_app(app_name)
         try:
             required_level = app.config_file_read_level_for_root(root_id)
         except ValueError as xcp:
             raise http_exception(400, str(xcp)) from xcp
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_READ,),
-            required_level=required_level,
-            verified_grant=grant,
+        context = await auth.require_actor_level(
+            context,
+            required_level,
         )
-        actor_user_id = auth._request_actor_user_id_if_available(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_READ,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.resolve_actor_if_available(context).actor_user_id
         return await storage.build_config_root_download_response(
             app=app,
             root_id=root_id,
@@ -498,20 +434,18 @@ def register_storage_routes(
         traffic_log.info(
             "Node API config read request: node=%s app=%s config=%s", auth.node_name, app_name, config_id
         )
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
-        app = auth._resolve_app(app_name)
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_READ,),
+        )
+        app = service._resolve_app(app_name)
         try:
             required_level = app.config_file_read_level_for_id(config_id)
         except ValueError as xcp:
             raise http_exception(400, str(xcp)) from xcp
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_READ,),
-            required_level=required_level,
-            verified_grant=grant,
-        )
+        await auth.require_actor_level(context, required_level)
         return storage.read_config_file(app=app, config_id=config_id).to_mapping()
 
     @nicegui_app.put(f"{api_prefix}/apps/{{app_name}}/configs/{{config_id:path}}")
@@ -525,28 +459,20 @@ def register_storage_routes(
         traffic_log.info(
             "Node API config write request: node=%s app=%s config=%s", auth.node_name, app_name, config_id
         )
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+        )
         write_request = NodeConfigWriteRequest.model_validate(payload)
-        app = auth._resolve_app(app_name)
+        app = service._resolve_app(app_name)
         try:
             required_level = app.config_file_write_level_for_id(config_id)
         except ValueError as xcp:
             raise http_exception(400, str(xcp)) from xcp
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            required_level=required_level,
-            verified_grant=grant,
-        )
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            verified_grant=grant,
-        )
+        context = await auth.require_actor_level(context, required_level)
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         result = storage.write_config_file(
             app=app,
             config_id=config_id,
@@ -572,27 +498,19 @@ def register_storage_routes(
         traffic_log.info(
             "Node API config delete request: node=%s app=%s config=%s", auth.node_name, app_name, config_id
         )
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
-        app = auth._resolve_app(app_name)
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+        )
+        app = service._resolve_app(app_name)
         try:
             required_level = app.config_file_write_level_for_id(config_id)
         except ValueError as xcp:
             raise http_exception(400, str(xcp)) from xcp
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            required_level=required_level,
-            verified_grant=grant,
-        )
-        actor_user_id = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.CONFIGS_WRITE,),
-            verified_grant=grant,
-        )
+        context = await auth.require_actor_level(context, required_level)
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         result = storage.delete_config_file(app=app, config_id=config_id)
         audit_log(
             "config.file_deleted",
@@ -607,8 +525,8 @@ def register_storage_routes(
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/saves")
     async def _list_saves(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API save list request: node=%s app=%s", auth.node_name, app_name)
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_READ,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_READ,))
+        app = service._resolve_app(app_name)
         return (await storage.build_save_list(app)).to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/saves/{{save_id:path}}/download")
@@ -621,8 +539,8 @@ def register_storage_routes(
         traffic_log.info(
             "Node API save download request: node=%s app=%s save=%s", auth.node_name, app_name, save_id
         )
-        auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_DOWNLOAD,))
-        app = auth._resolve_app(app_name)
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_DOWNLOAD,))
+        app = service._resolve_app(app_name)
         return await storage.build_save_download_response(app=app, save_id=save_id)
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/saves/upload")
@@ -642,25 +560,18 @@ def register_storage_routes(
             root_id,
             upload_transport.value,
         )
-        grant: NodeAccessGrant | None = auth._require_access(
-            request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_WRITE,)
-        )
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.SAVES_WRITE,),
-            required_level=app.save_file_write_level,
-            verified_grant=grant,
         )
-        actor_user_id: int = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.SAVES_WRITE,),
-            verified_grant=grant,
+        app = service._resolve_app(app_name)
+        context = await auth.require_actor_level(
+            context,
+            app.save_file_write_level,
         )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         result: NodeSaveMutationResult = await storage.upload_save_file(
             app=app,
             root_id=root_id,
@@ -690,26 +601,19 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API save rename request: node=%s app=%s save=%s", auth.node_name, app_name, save_id)
-        grant: NodeAccessGrant | None = auth._require_access(
-            request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_WRITE,)
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.SAVES_WRITE,),
         )
         rename_request: NodeSaveRenameRequest = NodeSaveRenameRequest.model_validate(payload)
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.SAVES_WRITE,),
-            required_level=app.save_file_write_level,
-            verified_grant=grant,
+        app = service._resolve_app(app_name)
+        context = await auth.require_actor_level(
+            context,
+            app.save_file_write_level,
         )
-        actor_user_id: int = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.SAVES_WRITE,),
-            verified_grant=grant,
-        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         result: NodeSaveMutationResult = await storage.rename_save_file(
             app=app,
             save_id=save_id,
@@ -735,25 +639,18 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API save delete request: node=%s app=%s save=%s", auth.node_name, app_name, save_id)
-        grant: NodeAccessGrant | None = auth._require_access(
-            request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_WRITE,)
-        )
-        app = auth._resolve_app(app_name)
-        await auth._require_actor_level_for_request(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.SAVES_WRITE,),
-            required_level=app.save_file_write_level,
-            verified_grant=grant,
         )
-        actor_user_id: int = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.SAVES_WRITE,),
-            verified_grant=grant,
+        app = service._resolve_app(app_name)
+        context = await auth.require_actor_level(
+            context,
+            app.save_file_write_level,
         )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
         result: NodeSaveMutationResult = await storage.delete_save_file(
             app=app,
             save_id=save_id,
@@ -776,16 +673,15 @@ def register_storage_routes(
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API blueprint list request: node=%s app=%s", auth.node_name, app_name)
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.BLUEPRINTS_READ,))
-        app = auth._resolve_app(app_name)
-        actor_user_id: int = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.BLUEPRINTS_READ,),
-            verified_grant=grant,
         )
-        return auth.build_blueprint_list(app, actor_user_id=actor_user_id).to_mapping()
+        app = service._resolve_app(app_name)
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        return service.build_blueprint_list(app, actor_user_id=actor_user_id).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/blueprints/upload")
     async def _upload_blueprint(
@@ -801,16 +697,15 @@ def register_storage_routes(
             app_name,
             session_name,
         )
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.BLUEPRINTS_WRITE,))
-        app = auth._resolve_app(app_name)
-        actor_user_id: int = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
-            verified_grant=grant,
         )
-        result: NodeBlueprintMutationResult = await auth.upload_blueprint_files(
+        app = service._resolve_app(app_name)
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result: NodeBlueprintMutationResult = await service.upload_blueprint_files(
             app=app,
             session_name=session_name,
             uploads=upload,
@@ -839,16 +734,15 @@ def register_storage_routes(
             app_name,
             blueprint_id,
         )
-        grant = auth._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.BLUEPRINTS_WRITE,))
-        app = auth._resolve_app(app_name)
-        actor_user_id: int = auth._request_actor_user_id(
-            request=request,
-            access_token=access_token,
+        context = auth.require_access(
+            request,
+            access_token,
             app_name=app_name,
             scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
-            verified_grant=grant,
         )
-        result = auth.delete_blueprint_file(
+        app = service._resolve_app(app_name)
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = service.delete_blueprint_file(
             app=app,
             blueprint_id=blueprint_id,
             actor_user_id=actor_user_id,

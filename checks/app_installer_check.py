@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import unittest
-from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -30,7 +29,8 @@ from node_api.app_installer import (
 )
 from node_api.app_installer_routes import register_app_installer_routes
 from node_api.node_routes import register_node_management_routes
-from node_auth import NodeAccessGrant, NodeApiScope
+from node_api.request_auth import NodeRequestContext
+from node_auth import NodeApiScope
 
 
 class _InstallerManager:
@@ -96,35 +96,8 @@ class _RouteService:
     node_name = "node-a"
 
     def __init__(self) -> None:
-        self.access_requests: list[tuple[str | None, tuple[NodeApiScope, ...]]] = []
         self.start_requests: list[tuple[NodeAppInstallRequest, int]] = []
         self.start_error: Exception | None = None
-
-    def _require_access(
-        self,
-        request: Request,
-        access_token: str | None,
-        *,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-        token_node_names: Sequence[str] | None = None,
-    ) -> NodeAccessGrant | None:
-        del request, access_token, token_node_names
-        self.access_requests.append((app_name, scopes))
-        return None
-
-    def _request_actor_user_id(
-        self,
-        *,
-        request: Request,
-        access_token: str | None,
-        app_name: str | None,
-        scopes: tuple[NodeApiScope, ...],
-        verified_grant: NodeAccessGrant | None = None,
-    ) -> int:
-        del request, access_token, app_name, scopes
-        assert verified_grant is None
-        return 42
 
     async def build_app_install_catalog(self) -> NodeAppInstallCatalog:
         return NodeAppInstallCatalog(node=self.node_name, recipes=())
@@ -151,6 +124,28 @@ class _RouteService:
             state=NodeAppInstallState.READY,
             summary="Installed.",
         )
+
+
+class _RouteAuth:
+    node_name = "node-a"
+
+    def __init__(self) -> None:
+        self.access_requests: list[tuple[str | None, tuple[NodeApiScope, ...]]] = []
+
+    def require_access(
+        self,
+        request: Request,
+        access_token: str | None,
+        *,
+        app_name: str | None,
+        scopes: tuple[NodeApiScope, ...],
+    ) -> NodeRequestContext:
+        del request, access_token
+        self.access_requests.append((app_name, scopes))
+        return NodeRequestContext(grant=None)
+
+    def require_actor(self, context: NodeRequestContext) -> NodeRequestContext:
+        return replace(context, actor_user_id=42)
 
 
 class _NodeSettingsRouteService(_RouteService):
@@ -628,9 +623,11 @@ class AppInstallerCheck(unittest.TestCase):
     def test_routes_use_sudo_app_manage_scope_and_preserve_recipe_inputs(self) -> None:
         app = FastAPI()
         service = _RouteService()
+        auth = _RouteAuth()
         register_app_installer_routes(
             app,
             service=service,
+            auth=auth,
             api_prefix="/api",
             http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
             traffic_log=logging.getLogger(__name__),
@@ -661,7 +658,7 @@ class AppInstallerCheck(unittest.TestCase):
         self.assertEqual(catalog_response.status_code, 200)
         self.assertEqual(start_response.status_code, 200)
         self.assertEqual(status_response.status_code, 200)
-        self.assertEqual(service.access_requests, [(None, (NodeApiScope.APP_MANAGE,))] * 3)
+        self.assertEqual(auth.access_requests, [(None, (NodeApiScope.APP_MANAGE,))] * 3)
         self.assertEqual(service.start_requests[0][1], 42)
         self.assertEqual(service.start_requests[0][0].inputs, {AppInstallInput.ADMIN_PASSWORD: "secret"})
         audit.assert_called_once_with(
@@ -678,10 +675,12 @@ class AppInstallerCheck(unittest.TestCase):
     def test_start_route_returns_bad_request_for_invalid_install_details(self) -> None:
         app = FastAPI()
         service = _RouteService()
+        auth = _RouteAuth()
         service.start_error = ValueError("That release channel is not available.")
         register_app_installer_routes(
             app,
             service=service,
+            auth=auth,
             api_prefix="/api",
             http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
             traffic_log=logging.getLogger(__name__),
@@ -710,10 +709,12 @@ class AppInstallerCheck(unittest.TestCase):
     def test_start_route_returns_conflict_for_an_active_install_target(self) -> None:
         app = FastAPI()
         service = _RouteService()
+        auth = _RouteAuth()
         service.start_error = RuntimeError("An install is already using that folder.")
         register_app_installer_routes(
             app,
             service=service,
+            auth=auth,
             api_prefix="/api",
             http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
             traffic_log=logging.getLogger(__name__),
@@ -742,9 +743,10 @@ class AppInstallerCheck(unittest.TestCase):
     def test_node_settings_routes_use_root_node_manage_scope(self) -> None:
         app = FastAPI()
         service = _NodeSettingsRouteService()
+        auth = _RouteAuth()
         register_node_management_routes(
             app,
-            auth=cast(Any, service),
+            auth=cast(Any, auth),
             management=cast(Any, service),
             api_prefix="/api",
             http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
@@ -765,7 +767,7 @@ class AppInstallerCheck(unittest.TestCase):
         self.assertEqual(read_response.json()["settings"], {"allowed_scopes": ["demo"]})
         self.assertEqual(update_response.status_code, 200)
         self.assertEqual(update_response.json()["settings"], {"allowed_scopes": []})
-        self.assertEqual(service.access_requests, [(None, (NodeApiScope.NODE_MANAGE,))] * 2)
+        self.assertEqual(auth.access_requests, [(None, (NodeApiScope.NODE_MANAGE,))] * 2)
         self.assertEqual(
             service.mutation_requests,
             [(config.AppInstallerSettings(allowed_scopes=()), 42)],
