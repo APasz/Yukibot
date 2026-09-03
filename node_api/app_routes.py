@@ -20,6 +20,7 @@ from .app_state import (
     required_app_mutation_scope,
 )
 from .mod_service import NodeModService
+from .realtime_service import NodeRealtimeService
 from .route_contracts import (
     HttpExceptionFactory,
     NodeAuthenticatedRouteService,
@@ -36,7 +37,7 @@ def register_app_routes(
     build_cached_runtime_summary: Callable[[App], Awaitable[NodeAppRuntimeSummary]],
     games: NodeAppGameService,
     mutations: NodeAppMutationService,
-    serve_app_state_stream: Callable[[WebSocket, App], Awaitable[None]],
+    realtime: NodeRealtimeService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
@@ -164,7 +165,7 @@ def register_app_routes(
             app = resolve_app(app_name)
         except HTTPException as xcp:
             raise auth.websocket_exception_from_http(xcp) from xcp
-        await serve_app_state_stream(websocket, app)
+        await realtime.serve_app_state_stream(websocket, app)
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mutate")
     async def _mutate_app(

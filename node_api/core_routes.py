@@ -10,9 +10,11 @@ from fastapi import Request, WebSocket, status
 from fastapi.responses import Response
 
 from apps._app import App
+from .realtime_service import NodeRealtimeService
 from .relay import NodeRelayTTSRequest, NodeRelayTTSService
 from .route_contracts import MappingResponse, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
+
 
 def register_core_routes(
     nicegui_app: Any,
@@ -22,8 +24,7 @@ def register_core_routes(
     resolve_app: Callable[[str], App],
     build_live_app_entry: Callable[[App], Awaitable[MappingResponse]],
     node_ping_headers: Callable[[], Mapping[str, str]],
-    serve_presence_stream: Callable[[WebSocket], Awaitable[None]],
-    serve_node_state_stream: Callable[[WebSocket], Awaitable[None]],
+    realtime: NodeRealtimeService,
     relay_tts: NodeRelayTTSService,
     api_prefix: str,
     traffic_log: logging.Logger,
@@ -53,7 +54,7 @@ def register_core_routes(
     @nicegui_app.websocket(f"{api_prefix}/presence/stream")
     async def _presence_stream(websocket: WebSocket) -> None:
         traffic_log.info("Node API presence stream request: node=%s", auth.node_name)
-        await serve_presence_stream(websocket)
+        await realtime.serve_presence_stream(websocket)
 
     @nicegui_app.websocket(f"{api_prefix}/state/stream")
     async def _node_state_stream(
@@ -67,7 +68,7 @@ def register_core_routes(
             app_name=None,
             scopes=(NodeApiScope.APPS_READ,),
         )
-        await serve_node_state_stream(websocket)
+        await realtime.serve_node_state_stream(websocket)
 
     @nicegui_app.post(f"{api_prefix}/relay/tts")
     async def _queue_relay_tts(

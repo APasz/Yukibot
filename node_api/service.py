@@ -3,27 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import threading
 import time
 import uuid
-from collections import deque
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
-from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import requests
-from fastapi import (
-    UploadFile,
-    WebSocket,
-    WebSocketDisconnect,
-    status,
-)
+from fastapi import UploadFile
 from fastapi.responses import FileResponse
 from starlette.middleware.cors import CORSMiddleware
 
@@ -100,6 +92,7 @@ from .core_routes import register_core_routes
 from .map_routes import register_map_routes
 from .mod_routes import register_mod_routes
 from .node_routes import register_node_management_routes
+from .realtime_service import NodeRealtimeService
 from .request_auth import NodeRequestAuth
 from .route_contracts import (
     NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
@@ -114,7 +107,6 @@ from .settings import (
 )
 from .settings_routes import register_settings_routes
 from .storage_routes import register_storage_routes
-from .system import NodeSystemSummary
 from .system_routes import register_system_routes
 from .upload import NodeApiRequestBodyLimitMiddleware
 from node_auth import NodeApiScope
@@ -142,10 +134,6 @@ _FULL_APP_RUNTIME_CACHE_TTL_SECONDS = 2.0
 _LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS = 0.75
 _LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS = 2.0
 _NODE_SYSTEM_LOG_MAX_LINES = 500
-_MAX_PRESENCE_STREAM_CONNECTIONS = 64
-_MAX_PRESENCE_STREAM_MESSAGES_PER_MINUTE = 24
-
-
 @dataclass(frozen=True, slots=True)
 class PortalNodeLatencyProbe:
     """Portal's current HTTP and Discord latency observations for one node."""
@@ -220,8 +208,6 @@ class NodeApiService:
             logger=log,
             restart_delay_seconds=_NODE_RESTART_DELAY_SECONDS,
         )
-        self._presence_stream_connection_count = 0
-        self._presence_stream_connection_lock = threading.Lock()
         self._system_history_task: asyncio.Task[None] | None = None
         self._app_mutations = app_state.NodeAppMutationService(
             node_name=lambda: self.node_name,
@@ -247,7 +233,7 @@ class NodeApiService:
             ),
             list_apps=lambda: self.list_apps(),
             build_system_summary=lambda: self.system_monitoring.build_summary(),
-            stream_system_summary=self._stream_system_summary,
+            stream_system_summary=NodeRealtimeService.stream_system_summary,
             discord_health=lambda: self._discord_service_health()[1],
             app_runtime_interval_seconds=_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS,
             node_state_interval_seconds=_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS,
@@ -280,6 +266,22 @@ class NodeApiService:
             http_exception=_http_exception,
             runtime_http_exception=self._runtime_http_exception,
             traffic_log=traffic_log,
+        )
+        self.realtime = NodeRealtimeService(
+            node_name=lambda: self.node_name,
+            discord_service_state=lambda: self._discord_service_health()[0],
+            discord_heartbeat_latency_ms=self._discord_heartbeat_latency_ms,
+            subscriptions=self._app_state_subscriptions,
+            list_apps=lambda: self.list_apps(),
+            build_live_app_runtime_summary=lambda app: self.build_live_app_runtime_summary(
+                app
+            ),
+            build_system_summary=lambda: self.system_monitoring.build_summary(),
+            discord_health=lambda: self._discord_service_health()[1],
+            build_console_stdout_snapshot=lambda app, max_lines: self._app_operations.build_console_stdout_snapshot(
+                app=app,
+                max_lines=max_lines,
+            ),
         )
         self._app_installer = app_installer.NodeAppInstallerService(
             node_name=lambda: self.node_name,
@@ -478,8 +480,7 @@ class NodeApiService:
             resolve_app=self._resolve_app,
             build_live_app_entry=self.build_live_app_entry,
             node_ping_headers=self._node_ping_headers,
-            serve_presence_stream=self._serve_presence_stream,
-            serve_node_state_stream=self._serve_node_state_stream,
+            realtime=self.realtime,
             relay_tts=self.relay_tts,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
@@ -523,7 +524,7 @@ class NodeApiService:
             build_cached_runtime_summary=self.build_cached_app_runtime_summary,
             games=self.app_games,
             mutations=self._app_mutations,
-            serve_app_state_stream=self._serve_app_state_stream,
+            realtime=self.realtime,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -584,6 +585,7 @@ class NodeApiService:
             auth=self.request_auth,
             resolve_app=self._resolve_app,
             operations=self._app_operations,
+            realtime=self.realtime,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
@@ -993,6 +995,8 @@ class NodeApiService:
         *,
         include_update_state: bool = False,
     ) -> Callable[[], None]:
+        """Subscribe a local consumer to one app's runtime state updates."""
+
         return self._app_state_subscriptions.subscribe_app_runtime(
             app_name,
             callback,
@@ -1005,91 +1009,12 @@ class NodeApiService:
         *,
         topics: frozenset[NodeStateTopic] = _ALL_NODE_STATE_TOPICS,
     ) -> Callable[[], None]:
+        """Subscribe a local consumer to selected node state updates."""
+
         return self._app_state_subscriptions.subscribe_node_state(
-            callback, topics=topics
+            callback,
+            topics=topics,
         )
-
-    @staticmethod
-    def _stream_system_summary(summary: NodeSystemSummary) -> NodeSystemSummary:
-        def _minute_bucket(seconds: int | None) -> int | None:
-            return None if seconds is None else (seconds // 60) * 60
-
-        return replace(
-            summary,
-            bot_uptime_seconds=_minute_bucket(summary.bot_uptime_seconds),
-            uptime_seconds=_minute_bucket(summary.uptime_seconds),
-        )
-
-    async def _serve_presence_stream(self, websocket: WebSocket) -> None:
-        if not self._try_reserve_presence_stream_connection():
-            await websocket.close(
-                code=status.WS_1013_TRY_AGAIN_LATER,
-                reason="Presence stream capacity reached.",
-            )
-            return
-        await websocket.accept()
-        message_times: deque[float] = deque()
-        try:
-            while True:
-                message = await websocket.receive()
-                if message.get("type") == "websocket.disconnect":
-                    return
-                now = time.monotonic()
-                while message_times and now - message_times[0] >= 60.0:
-                    message_times.popleft()
-                if len(message_times) >= _MAX_PRESENCE_STREAM_MESSAGES_PER_MINUTE:
-                    await websocket.close(
-                        code=status.WS_1008_POLICY_VIOLATION,
-                        reason="Presence stream message rate exceeded.",
-                    )
-                    return
-                message_times.append(now)
-                sample_id: str | None = None
-                payload: Mapping[str, object] | None = None
-                payload_text = message.get("text")
-                if isinstance(payload_text, str) and payload_text:
-                    try:
-                        raw_payload = json.loads(payload_text)
-                    except ValueError:
-                        raw_payload = None
-                    if isinstance(raw_payload, Mapping):
-                        payload = cast(Mapping[str, object], raw_payload)
-                        raw_sample_id = payload.get("sample_id")
-                        if raw_sample_id is not None:
-                            sample_id = str(raw_sample_id)
-                response: dict[str, object] = {
-                    "type": "pong",
-                    "node": self.node_name,
-                    "sample_id": sample_id,
-                }
-                discord_service_state, _ = self._discord_service_health()
-                if discord_service_state is not None:
-                    response["discord_service_state"] = discord_service_state.value
-                discord_latency_ms = self._discord_heartbeat_latency_ms()
-                if discord_latency_ms is not None:
-                    response["discord_latency_ms"] = discord_latency_ms
-                await websocket.send_json(response)
-        except WebSocketDisconnect:
-            return
-        finally:
-            await self._close_websocket_quietly(websocket)
-            self._release_presence_stream_connection()
-
-    def _try_reserve_presence_stream_connection(self) -> bool:
-        with self._presence_stream_connection_lock:
-            if (
-                self._presence_stream_connection_count
-                >= _MAX_PRESENCE_STREAM_CONNECTIONS
-            ):
-                return False
-            self._presence_stream_connection_count += 1
-            return True
-
-    def _release_presence_stream_connection(self) -> None:
-        with self._presence_stream_connection_lock:
-            if self._presence_stream_connection_count <= 0:
-                raise RuntimeError("Presence stream connection count underflow.")
-            self._presence_stream_connection_count -= 1
 
     def _discord_heartbeat_latency_ms(self) -> int | None:
         if config.ACTIVE_BOT_PROFILE.name not in {
@@ -1201,237 +1126,6 @@ class NodeApiService:
             latency_ms=max(1, round((time.perf_counter() - started_at) * 1000)),
             discord_latency_ms=discord_latency_ms,
             discord_service_state=discord_service_state,
-        )
-
-    async def _serve_node_state_stream(self, websocket: WebSocket) -> None:
-        await websocket.accept()
-        update_queue: asyncio.Queue[NodeStateStreamEvent] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-        skip_initial = True
-
-        def _enqueue_update(event: NodeStateStreamEvent) -> None:
-            nonlocal skip_initial
-            if skip_initial and event.is_initial:
-                skip_initial = False
-                return
-
-            def _queue_put() -> None:
-                update_queue.put_nowait(event)
-
-            try:
-                loop.call_soon_threadsafe(_queue_put)
-            except RuntimeError:
-                return
-
-        unsubscribe = self.subscribe_local_node_state(_enqueue_update)
-
-        async def _wait_for_disconnect() -> None:
-            while True:
-                message = await websocket.receive()
-                if message.get("type") == "websocket.disconnect":
-                    return
-
-        async def _send_stream_event(event: NodeStateStreamEvent) -> None:
-            await websocket.send_json(event.to_mapping())
-
-        disconnect_task = asyncio.create_task(_wait_for_disconnect())
-        try:
-            await _send_stream_event(
-                NodeStateStreamEvent.initial(
-                    node_name=self.node_name,
-                    app_entries=await self.list_apps(),
-                    system_summary=self._stream_system_summary(
-                        self.system_monitoring.build_summary()
-                    ),
-                    discord_health=self._discord_service_health()[1],
-                )
-            )
-            while True:
-                queue_task = asyncio.create_task(update_queue.get())
-                done, _pending = await asyncio.wait(
-                    {queue_task, disconnect_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if disconnect_task in done:
-                    queue_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await queue_task
-                    return
-                merged_event = queue_task.result()
-                while not update_queue.empty():
-                    merged_event = self._merge_node_state_stream_events(
-                        merged_event, update_queue.get_nowait()
-                    )
-                await _send_stream_event(merged_event)
-        except WebSocketDisconnect:
-            return
-        finally:
-            disconnect_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await disconnect_task
-            unsubscribe()
-            await self._close_websocket_quietly(websocket)
-
-    async def _serve_app_state_stream(self, websocket: WebSocket, app: App) -> None:
-        await websocket.accept()
-        update_queue: asyncio.Queue[NodeAppStateStreamEvent] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-        skip_runtime_initial = True
-        skip_node_initial = True
-
-        def _enqueue_runtime_update(event: NodeAppStateStreamEvent) -> None:
-            nonlocal skip_runtime_initial
-            if skip_runtime_initial and event.is_initial:
-                skip_runtime_initial = False
-                return
-
-            def _queue_put() -> None:
-                update_queue.put_nowait(event)
-
-            try:
-                loop.call_soon_threadsafe(_queue_put)
-            except RuntimeError:
-                return
-
-        def _enqueue_node_update(event: NodeStateStreamEvent) -> None:
-            nonlocal skip_node_initial
-            if skip_node_initial and event.is_initial:
-                skip_node_initial = False
-                return
-            system_summary = event.system_summary
-            if system_summary is None:
-                return
-
-            def _queue_put() -> None:
-                update_queue.put_nowait(
-                    NodeAppStateStreamEvent.system(
-                        app_name=app.name,
-                        system_summary=system_summary,
-                    )
-                )
-
-            try:
-                loop.call_soon_threadsafe(_queue_put)
-            except RuntimeError:
-                return
-
-        unsubscribe_runtime = self.subscribe_local_app_runtime(
-            app.name,
-            _enqueue_runtime_update,
-            include_update_state=True,
-        )
-        unsubscribe_node = self.subscribe_local_node_state(
-            _enqueue_node_update,
-            topics=frozenset({NodeStateTopic.SYSTEM}),
-        )
-
-        async def _wait_for_disconnect() -> None:
-            while True:
-                message = await websocket.receive()
-                if message.get("type") == "websocket.disconnect":
-                    return
-
-        async def _send_stream_event(event: NodeAppStateStreamEvent) -> None:
-            await websocket.send_json(event.to_mapping())
-
-        disconnect_task = asyncio.create_task(_wait_for_disconnect())
-        try:
-            await _send_stream_event(
-                NodeAppStateStreamEvent.initial(
-                    app_name=app.name,
-                    app_stats=await self.build_live_app_runtime_summary(app),
-                    system_summary=self._stream_system_summary(
-                        self.system_monitoring.build_summary()
-                    ),
-                    update_info=app.update_info,
-                    update_status=app.update_status,
-                )
-            )
-            while True:
-                queue_task = asyncio.create_task(update_queue.get())
-                done, _pending = await asyncio.wait(
-                    {queue_task, disconnect_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if disconnect_task in done:
-                    queue_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await queue_task
-                    return
-                merged_event = queue_task.result()
-                while not update_queue.empty():
-                    merged_event = self._merge_app_state_stream_events(
-                        merged_event, update_queue.get_nowait()
-                    )
-                await _send_stream_event(merged_event)
-        except WebSocketDisconnect:
-            return
-        finally:
-            disconnect_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await disconnect_task
-            unsubscribe_runtime()
-            unsubscribe_node()
-            await self._close_websocket_quietly(websocket)
-
-    @staticmethod
-    async def _close_websocket_quietly(websocket: WebSocket) -> None:
-        with suppress(RuntimeError, WebSocketDisconnect):
-            await websocket.close()
-
-    @staticmethod
-    def _merge_node_state_stream_events(
-        first: NodeStateStreamEvent,
-        second: NodeStateStreamEvent,
-    ) -> NodeStateStreamEvent:
-        if first.node_name.casefold() != second.node_name.casefold():
-            raise ValueError(
-                "Cannot merge node state stream events for different nodes."
-            )
-        return NodeStateStreamEvent(
-            node_name=first.node_name,
-            is_initial=first.is_initial or second.is_initial,
-            apps_changed=first.apps_changed or second.apps_changed,
-            system_changed=first.system_changed or second.system_changed,
-            health_changed=first.health_changed or second.health_changed,
-            app_entries=second.app_entries
-            if second.app_entries is not None
-            else first.app_entries,
-            system_summary=second.system_summary
-            if second.system_summary is not None
-            else first.system_summary,
-            discord_health=second.discord_health
-            if second.health_changed
-            else first.discord_health,
-        )
-
-    @staticmethod
-    def _merge_app_state_stream_events(
-        first: NodeAppStateStreamEvent,
-        second: NodeAppStateStreamEvent,
-    ) -> NodeAppStateStreamEvent:
-        if first.app_name.casefold() != second.app_name.casefold():
-            raise ValueError("Cannot merge app state stream events for different apps.")
-        return NodeAppStateStreamEvent(
-            app_name=first.app_name,
-            is_initial=first.is_initial or second.is_initial,
-            runtime_changed=first.runtime_changed or second.runtime_changed,
-            system_changed=first.system_changed or second.system_changed,
-            update_changed=first.update_changed or second.update_changed,
-            app_stats=second.app_stats
-            if second.app_stats is not None
-            else first.app_stats,
-            system_summary=second.system_summary
-            if second.system_summary is not None
-            else first.system_summary,
-            update_info=second.update_info
-            if second.update_info is not None or second.update_changed
-            else first.update_info,
-            update_status=(
-                second.update_status
-                if second.update_status is not None or second.update_changed
-                else first.update_status
-            ),
         )
 
     async def _app_player_snapshot(self, app: App) -> _NodeAppPlayerSnapshot | None:

@@ -12,6 +12,7 @@ from _audit import audit_log
 from apps._app import App
 from .app_operations import NodeAppOperationsService
 from .console import NodeConsoleActionExecuteRequest, NodeConsoleActionExecutionResult
+from .realtime_service import NodeRealtimeService
 from .route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
@@ -22,6 +23,7 @@ def register_console_routes(
     auth: NodeAuthenticatedRouteService,
     resolve_app: Callable[[str], App],
     operations: NodeAppOperationsService,
+    realtime: NodeRealtimeService,
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
@@ -120,7 +122,7 @@ def register_console_routes(
             app = resolve_app(app_name)
         except HTTPException as xcp:
             raise auth.websocket_exception_from_http(xcp) from xcp
-        await operations.serve_console_stdout_stream(
+        await realtime.serve_console_stdout_stream(
             websocket=websocket,
             app=app,
             max_lines=max_lines,

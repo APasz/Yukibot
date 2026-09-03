@@ -221,8 +221,8 @@ from node_api.app_state import (
     required_app_mutation_level,
     required_app_mutation_scope,
 )
-from node_api.app_operations import NodeAppOperationsService
 from node_api.client_pack import NodeClientPackService
+from node_api.realtime_service import NodeRealtimeService
 from node_api.mod import (
     NodeBulkLauncherMetadataApplyRequest,
     NodeBulkLauncherMetadataRequest,
@@ -1559,6 +1559,71 @@ class NodeApiTests(unittest.TestCase):
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
         self.assertIn("/api/node/apps/{app_name}/factorio/generation/running-world", handlers)
 
+    def test_websocket_routes_delegate_to_realtime_service(self) -> None:
+        app = FastAPI()
+        service = NodeApiService()
+        app_instance = _build_app(Mock())
+        websocket = cast(Any, object())
+
+        def endpoint_for(path: str) -> Any:
+            for route in app.routes:
+                endpoint = getattr(route, "endpoint", None)
+                if getattr(route, "path", None) == path and callable(endpoint):
+                    return endpoint
+            raise AssertionError(f"Missing websocket route: {path}")
+
+        presence = AsyncMock()
+        node_state = AsyncMock()
+        app_state = AsyncMock()
+        stdout = AsyncMock()
+        with (
+            patch.object(service.realtime, "serve_presence_stream", new=presence),
+            patch.object(service.realtime, "serve_node_state_stream", new=node_state),
+            patch.object(service.realtime, "serve_app_state_stream", new=app_state),
+            patch.object(service.realtime, "serve_console_stdout_stream", new=stdout),
+            patch.object(service.request_auth, "require_websocket_token_access") as require_access,
+            patch.object(service, "_resolve_app", return_value=app_instance),
+        ):
+            service.register_routes(app)
+
+            async def exercise() -> None:
+                await endpoint_for("/api/node/presence/stream")(websocket=websocket)
+                await endpoint_for("/api/node/state/stream")(
+                    websocket=websocket,
+                    access_token="token",
+                )
+                await endpoint_for("/api/node/apps/{app_name}/state/stream")(
+                    websocket=websocket,
+                    app_name=app_instance.name,
+                    access_token="token",
+                )
+                await endpoint_for("/api/node/apps/{app_name}/console/stdout/stream")(
+                    websocket=websocket,
+                    app_name=app_instance.name,
+                    access_token="token",
+                    max_lines=200,
+                )
+
+            asyncio.run(exercise())
+
+        presence.assert_awaited_once_with(websocket)
+        node_state.assert_awaited_once_with(websocket)
+        app_state.assert_awaited_once_with(websocket, app_instance)
+        stdout.assert_awaited_once_with(
+            websocket=websocket,
+            app=app_instance,
+            max_lines=200,
+        )
+        self.assertEqual(require_access.call_count, 3)
+
+    def test_shutdown_closes_state_subscriptions_after_realtime_extraction(self) -> None:
+        service = NodeApiService()
+        service._app_state_subscriptions.close = Mock()  # type: ignore[method-assign]
+
+        service.begin_shutdown()
+
+        service._app_state_subscriptions.close.assert_called_once_with()  # type: ignore[union-attr]
+
     def test_node_api_does_not_expose_mod_domain_contracts(self) -> None:
         for name in (
             "NodeModEntry",
@@ -1784,7 +1849,7 @@ class NodeApiTests(unittest.TestCase):
         )
         updated = replace(previous, lines=("second", "third", "fourth"), truncated=True)
 
-        appended = NodeAppOperationsService.console_stdout_appended_lines(previous, updated)
+        appended = NodeRealtimeService.console_stdout_appended_lines(previous, updated)
 
         self.assertEqual(appended, ("fourth",))
 
@@ -4834,7 +4899,7 @@ class NodeApiTests(unittest.TestCase):
 
         service = NodeApiService()
 
-        asyncio.run(service._serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
+        asyncio.run(service.realtime.serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
 
         self.assertEqual(
             sent_payloads,
@@ -4881,7 +4946,7 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
         service.set_discord_health(health)
 
-        asyncio.run(service._serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
+        asyncio.run(service.realtime.serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
 
         self.assertEqual(
             sent_payloads,
@@ -4977,7 +5042,7 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
         portal_latencies = AsyncMock(return_value={"yuki": 12, "erin": 34})
         with patch.object(service, "portal_node_latencies_async", new=portal_latencies):
-            asyncio.run(service._serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
+            asyncio.run(service.realtime.serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
 
         self.assertEqual(
             sent_payloads,
@@ -5009,7 +5074,7 @@ class NodeApiTests(unittest.TestCase):
 
         service = NodeApiService()
 
-        asyncio.run(service._serve_presence_stream(websocket=cast(Any, _DisconnectingWebSocket())))
+        asyncio.run(service.realtime.serve_presence_stream(websocket=cast(Any, _DisconnectingWebSocket())))
 
     def test_build_chat_room_snapshot_counts_discord_guilds_as_separate_endpoints(
         self,
