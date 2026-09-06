@@ -16,6 +16,7 @@ from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT
 
 from .assets import CacheableTextAsset, cacheable_text_asset
 from .constants import (
+    _MOD_WEB_APP_PAGE_RESPONSE_TIMEOUT_SECONDS,
     _MOD_WEB_PAGE_PATH,
     _PORTAL_HEALTH_PATH,
     _PORTAL_NODE_LATENCIES_PATH,
@@ -23,7 +24,7 @@ from .constants import (
     log,
     traffic_log,
 )
-from .nicegui_protocols import ModWebFastApiApp, ModWebNotificationType, ModWebRouteUi
+from .nicegui_protocols import ModWebFastApiApp, ModWebNotificationType, ModWebRouteCallable, ModWebRouteUi
 from .runtime_imports import (
     Access_Control,
     Awaitable,
@@ -91,6 +92,14 @@ class _ModWebGZipMiddleware(GZipMiddleware):
 
 
 class ModWebRoutesMixin(ModWebServiceSupport):
+    @staticmethod
+    def _app_page_route(
+        *,
+        ui: ModWebRouteUi,
+        path: str,
+    ) -> Callable[[ModWebRouteCallable], ModWebRouteCallable]:
+        return ui.page(path, response_timeout=_MOD_WEB_APP_PAGE_RESPONSE_TIMEOUT_SECONDS)
+
     @staticmethod
     def _mod_download_required_level(pack_purpose: PackPurpose | None) -> Power_Level:
         if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN}:
@@ -1131,22 +1140,22 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             if user is not None:
                 await self._render_app_installer_page(ui=ui, user=user)
 
-        @ui.page("/apps/{app_name}")
+        @self._app_page_route(ui=ui, path="/apps/{app_name}")
         async def _app_alias_page(app_name: str, request: Request) -> None:
             traffic_log.info("Rendering app alias page: app=%s", app_name)
             await self._render_mods_page(ui=ui, app_name=app_name, request=request)
 
-        @ui.page("/app/{app_name}")
+        @self._app_page_route(ui=ui, path="/app/{app_name}")
         async def _single_app_alias_page(app_name: str, request: Request) -> None:
             traffic_log.info("Rendering app alias page: app=%s", app_name)
             await self._render_mods_page(ui=ui, app_name=app_name, request=request)
 
-        @ui.page("/mods/{app_name}")
+        @self._app_page_route(ui=ui, path="/mods/{app_name}")
         async def _mods_alias_page(app_name: str, request: Request) -> None:
             traffic_log.info("Rendering mods alias page: app=%s", app_name)
             await self._render_mods_page(ui=ui, app_name=app_name, request=request)
 
-        @ui.page("/mod-web/apps/{app_name}")
+        @self._app_page_route(ui=ui, path="/mod-web/apps/{app_name}")
         async def _mod_web_apps_alias_page(app_name: str, request: Request) -> None:
             traffic_log.info("Rendering mod web apps alias page: app=%s", app_name)
             await self._render_mods_page(ui=ui, app_name=app_name, request=request)
@@ -1161,7 +1170,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             traffic_log.info("Rendering mod web chat page: app=%s", app_name)
             await self._render_chat_page(ui=ui, app_name=app_name, request=request)
 
-        @ui.page(_MOD_WEB_PAGE_PATH)
+        @self._app_page_route(ui=ui, path=_MOD_WEB_PAGE_PATH)
         async def _mods_page(app_name: str, request: Request) -> None:
             traffic_log.info("Rendering mod web mods page: app=%s", app_name)
             await self._render_mods_page(ui=ui, app_name=app_name, request=request)
@@ -1171,7 +1180,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             traffic_log.info("Rendering mod web node system page: node=%s", node_name)
             await self._render_node_system_page(ui=ui, node_name=node_name, request=request)
 
-        @ui.page("/mod-web/nodes/{node_name}/mods/{app_name}")
+        @self._app_page_route(ui=ui, path="/mod-web/nodes/{node_name}/mods/{app_name}")
         async def _node_mods_page(node_name: str, app_name: str, request: Request) -> None:
             traffic_log.info("Rendering mod web node mods page: node=%s app=%s", node_name, app_name)
             await self._render_node_mods_page(ui=ui, node_name=node_name, app_name=app_name, request=request)

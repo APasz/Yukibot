@@ -208,8 +208,12 @@ from web_dash.assets import (
 from web_dash.backend import ModWebDashboardBackend
 from web_dash.constants import (
     _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+    _MOD_WEB_APP_PAGE_RESPONSE_TIMEOUT_SECONDS,
     _PORTAL_HEALTH_PATH,
+    _REMOTE_NODE_GET_MAX_ATTEMPTS,
+    _REMOTE_NODE_GET_RETRY_DELAY_SECONDS,
     _REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
+    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
 )
 from web_dash.home import (
     _APP_INSTALLER_POLICY_SELECT_PROPS,
@@ -225,7 +229,7 @@ from web_dash.home import (
     _RestartWeekday,
 )
 from web_dash.links import current_node_app_url, mod_web_node_system_path
-from web_dash.nicegui_protocols import ModWebUi
+from web_dash.nicegui_protocols import ModWebRouteUi, ModWebUi
 from web_dash.remote_node_monitor import RemoteNodeAvailability, RemoteNodeMonitor, RemoteNodeMonitorSnapshot
 from web_dash.routes import _ModWebGZipMiddleware
 from web_dash.service import ModWebService
@@ -825,6 +829,39 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(gzip_body.encoding, AssetContentEncoding.GZIP)
         self.assertIsNone(plain_body.encoding)
         self.assertEqual(plain_body.content, asset.content)
+
+    def test_app_page_route_uses_extended_response_timeout(self) -> None:
+        class FakeRouteUi:
+            def __init__(self) -> None:
+                self.page_calls: list[tuple[str, dict[str, object]]] = []
+
+            def page(self, path: str, *args: object, **kwargs: object) -> Callable[[object], object]:
+                self.page_calls.append((path, dict(kwargs)))
+                return lambda route: route
+
+        ui = FakeRouteUi()
+
+        self.assertGreater(
+            _MOD_WEB_APP_PAGE_RESPONSE_TIMEOUT_SECONDS,
+            _REMOTE_NODE_GET_MAX_ATTEMPTS * _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS
+            + _REMOTE_NODE_GET_RETRY_DELAY_SECONDS,
+        )
+
+        decorator = ModWebService._app_page_route(
+            ui=cast(ModWebRouteUi, cast(object, ui)),
+            path="/mod-web/nodes/{node_name}/mods/{app_name}",
+        )
+
+        self.assertTrue(callable(decorator))
+        self.assertEqual(
+            ui.page_calls,
+            [
+                (
+                    "/mod-web/nodes/{node_name}/mods/{app_name}",
+                    {"response_timeout": _MOD_WEB_APP_PAGE_RESPONSE_TIMEOUT_SECONDS},
+                )
+            ],
+        )
 
     def test_extract_html_tag_contents_combines_matching_blocks(self) -> None:
         html = "<style>.first { color: red; }</style><style>.second { color: blue; }</style>"
@@ -20531,11 +20568,13 @@ class ModWebTests(unittest.TestCase):
         self.assertIn('"--q-primary": "#22C55E"', style_html)
         self.assertIn("target.style.setProperty(name, value)", style_html)
 
-    def test_touch_tooltip_placement_uses_browser_touch_capabilities(self) -> None:
+    def test_touch_tooltip_placement_excludes_hover_capable_touch_clients(self) -> None:
         javascript = ModWebService._user_tooltip_placement_javascript(True)
 
-        self.assertIn("navigator.maxTouchPoints", javascript)
-        self.assertIn("(any-pointer: coarse)", javascript)
+        self.assertIn("(pointer: coarse)", javascript)
+        self.assertIn("(hover: hover)", javascript)
+        self.assertNotIn("navigator.maxTouchPoints", javascript)
+        self.assertNotIn("(any-pointer: coarse)", javascript)
         self.assertIn("element?.tag !== 'q-tooltip'", javascript)
         self.assertIn("'anchor', 'top middle'", javascript)
         self.assertIn("'self', 'bottom middle'", javascript)
