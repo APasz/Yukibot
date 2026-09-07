@@ -19,13 +19,14 @@ from node_api.app_installer import (
 )
 from node_auth import NodeApiScope
 
-from .nicegui_protocols import ModWebUi
+from .nicegui_protocols import ModWebNotificationType, ModWebUi
 from .runtime_imports import Button, Card, Input, Label, ModWebUser, Select, Textarea, Timer, asyncio
 from .service_base import ModWebServiceSupport
 from .types import ModWebNodeLink
 from .ui_helpers import ModWebUiHelpersMixin
 
 if TYPE_CHECKING:
+    from nicegui.client import Client
     from nicegui.elements.link import Link
     from nicegui.events import ValueChangeEventArguments
 
@@ -33,6 +34,19 @@ _INSTALL_STATUS_REFRESH_SECONDS = 1.0
 _INSTALL_FIELD_PROPS = "filled square dense clearable hide-bottom-space color=accent"
 _INSTALL_SELECT_PROPS = "filled square dense hide-bottom-space color=accent options-dark popup-content-class=mod-setting-menu"
 _AppInstallerTextField = Literal["instance_key", "friendly_name", "subfolder", "port_text", "steam_branch_id"]
+
+
+def _notify_in_page_client(
+    *,
+    ui: ModWebUi,
+    client: Client,
+    message: str,
+    tone: ModWebNotificationType,
+    multi_line: bool = False,
+) -> None:
+    """Emit a notification outside a refreshable event handler's deleted slot."""
+    with client:
+        ui.notify(message, type=tone, multi_line=multi_line)
 
 
 class _AppInstallerWizardStep(enum.StrEnum):
@@ -231,6 +245,32 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
         state = _AppInstallerPageState(node_name=nodes[0].node_name)
         page_token = uuid4().hex
         status_controls: _AppInstallerStatusControls | None = None
+        from nicegui.context import context as nicegui_context
+
+        notification_client = nicegui_context.client
+        page_closed = False
+
+        def mark_page_closed() -> None:
+            nonlocal page_closed
+            page_closed = True
+
+        self._register_client_cleanup(ui=ui, cleanup=mark_page_closed)
+
+        def notify(
+            message: str,
+            *,
+            tone: ModWebNotificationType,
+            multi_line: bool = False,
+        ) -> None:
+            if page_closed:
+                return
+            _notify_in_page_client(
+                ui=ui,
+                client=notification_client,
+                message=message,
+                tone=tone,
+                multi_line=multi_line,
+            )
 
         def selected_node() -> ModWebNodeLink:
             node = nodes_by_name.get(state.node_name.casefold())
@@ -250,10 +290,10 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
 
         def reject_when_wizard_locked() -> bool:
             if install_is_active():
-                ui.notify("Wait for the install to finish.", type="warning")
+                notify("Wait for the install to finish.", tone="warning")
                 return True
             if page_lock_is_held_by_other():
-                ui.notify("Another dashboard session is already starting or running an install.", type="warning")
+                notify("Another dashboard session is already starting or running an install.", tone="warning")
                 return True
             return False
 
@@ -376,10 +416,10 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 return
             requested_node_name = event.value
             if requested_node_name is None:
-                ui.notify("Choose an available node.", type="warning")
+                notify("Choose an available node.", tone="warning")
                 return
             if requested_node_name.casefold() not in nodes_by_name:
-                ui.notify("Choose an available node.", type="warning")
+                notify("Choose an available node.", tone="warning")
                 return
             if requested_node_name.casefold() == state.node_name.casefold():
                 return
@@ -396,7 +436,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 return
             recipe = _recipe_from_catalog(catalog=state.catalog, scope=event.value)
             if recipe is None:
-                ui.notify("Choose an available app.", type="warning")
+                notify("Choose an available app.", tone="warning")
                 return
             state.apply_recipe(recipe)
             render_wizard.refresh()
@@ -416,7 +456,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             if reject_when_wizard_locked():
                 return
             if _recipe_from_catalog(catalog=state.catalog, scope=state.recipe_scope) is None:
-                ui.notify("Choose an app.", type="warning")
+                notify("Choose an app.", tone="warning")
                 return
             state.step = _AppInstallerWizardStep.DETAILS
             render_wizard.refresh()
@@ -450,7 +490,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 return
             recipe = _recipe_from_catalog(catalog=state.catalog, scope=state.recipe_scope)
             if recipe is None:
-                ui.notify("Choose an app first.", type="warning")
+                notify("Choose an app first.", tone="warning")
                 return
             try:
                 request = NodeAppInstallRequest(
@@ -463,11 +503,11 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                     inputs=dict(state.inputs),
                 )
             except Exception as xcp:
-                ui.notify(f"Could not start install: {xcp}", type="negative", multi_line=True)
+                notify(f"Could not start install: {xcp}", tone="negative", multi_line=True)
                 return
 
             if not self._app_installer_page_lock.acquire(owner_token=page_token, node_name=state.node_name):
-                ui.notify("Another dashboard session is already starting or running an install.", type="warning")
+                notify("Another dashboard session is already starting or running an install.", tone="warning")
                 render_wizard.refresh()
                 return
             state.install_starting = True
@@ -479,7 +519,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 raise
             except Exception as xcp:
                 self._app_installer_page_lock.release(owner_token=page_token)
-                ui.notify(f"Could not start install: {xcp}", type="negative", multi_line=True)
+                notify(f"Could not start install: {xcp}", tone="negative", multi_line=True)
             else:
                 self._app_installer_page_lock.record_job(
                     owner_token=page_token,
@@ -490,7 +530,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 state.status = status
                 state.status_error = None
                 update_status_view()
-                ui.notify("Install started.", type="positive")
+                notify("Install started.", tone="positive")
             finally:
                 state.install_starting = False
                 render_wizard.refresh()

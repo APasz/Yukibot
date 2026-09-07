@@ -199,7 +199,7 @@ from web_dash.app_page import (
     _MinecraftRecipeEditorSelection,
     _MinecraftRecipeEditorState,
 )
-from web_dash.app_installer import _AppInstallerPageLock
+from web_dash.app_installer import _AppInstallerPageLock, _notify_in_page_client
 from web_dash.app_page_factorio import (
     _ENEMY_EXPANSION_SETTINGS,
     ModWebAppPageFactorioMixin,
@@ -3782,6 +3782,48 @@ class ModWebTests(unittest.TestCase):
         self.assertFalse(lock.release_completed_job(job_id="job-2"))
         self.assertTrue(lock.release_completed_job(job_id="job-1"))
         self.assertTrue(lock.acquire(owner_token="second", node_name="yuki"))
+
+    def test_app_installer_notification_reenters_captured_page_client(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.in_context = False
+                self.enter_count = 0
+                self.exit_count = 0
+
+            def __enter__(self) -> "FakeClient":
+                self.in_context = True
+                self.enter_count += 1
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                del args
+                self.in_context = False
+                self.exit_count += 1
+                return False
+
+        class FakeUi:
+            def __init__(self, *, client: FakeClient) -> None:
+                self.client = client
+                self.notifications: list[tuple[str, str | None, bool]] = []
+
+            def notify(self, message: str, *, type: str | None = None, multi_line: bool = False) -> None:
+                if not self.client.in_context:
+                    raise RuntimeError("The parent element this slot belongs to has been deleted.")
+                self.notifications.append((message, type, multi_line))
+
+        client = FakeClient()
+        ui = FakeUi(client=client)
+
+        _notify_in_page_client(
+            ui=cast(ModWebUi, cast(object, ui)),
+            client=cast(Any, client),
+            message="Install started.",
+            tone="positive",
+        )
+
+        self.assertEqual(client.enter_count, 1)
+        self.assertEqual(client.exit_count, 1)
+        self.assertEqual(ui.notifications, [("Install started.", "positive", False)])
 
     def test_render_node_system_page_reconnects_after_transient_node_restart(
         self,
