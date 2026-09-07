@@ -369,6 +369,27 @@ class MirrorServiceCheck(unittest.TestCase):
             'shell.run("/example/startup.lua")',
         )
 
+    def test_mirror_timestamp_markup_has_a_compact_utc_fallback(self) -> None:
+        markup = ModWebMirrorsMixin._mirror_timestamp_markup(
+            label="Published",
+            timestamp="2026-09-06T16:09:23+00:00",
+        )
+
+        self.assertEqual(
+            markup,
+            'Published:<br><time class="mod-mirror-local-time" datetime="2026-09-06T16:09:23+00:00" '
+            'data-utc="2026-09-06T16:09:23+00:00" title="UTC: 2026-09-06T16:09:23+00:00">'
+            "6 Sep 2026, 16:09 UTC</time>",
+        )
+
+    def test_mirror_timestamp_localisation_uses_browser_locale_and_full_hover_context(self) -> None:
+        javascript = ModWebMirrorsMixin._mirror_local_time_javascript()
+
+        self.assertIn("dateStyle: 'medium', timeStyle: 'short'", javascript)
+        self.assertIn("dateStyle: 'full', timeStyle: 'long'", javascript)
+        self.assertIn("Local: ${detailFormatter.format(instant)}", javascript)
+        self.assertIn("UTC: ${instant.toISOString()}", javascript)
+
     def test_malicious_archive_fails_without_a_public_snapshot(self) -> None:
         with TemporaryDirectory() as temporary_name:
             temporary_root = Path(temporary_name)

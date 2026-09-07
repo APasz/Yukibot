@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
@@ -19,6 +20,7 @@ from mirror_models import (
     MirrorProject,
     MirrorSyncState,
     MirrorTrackingMode,
+    timestamp_as_utc_datetime,
 )
 from mirror_service import MirrorService
 
@@ -36,6 +38,7 @@ _MIRROR_TRACKING_MODE_OPTIONS: Final[dict[str, str]] = {
     MirrorTrackingMode.BRANCH.value: "Track branch",
     MirrorTrackingMode.PINNED_COMMIT.value: "Pin exact commit",
 }
+_MIRROR_LOCAL_TIME_CLASS: Final[str] = "mod-mirror-local-time"
 
 
 class _MirrorReferenceSelector(Protocol):
@@ -141,6 +144,7 @@ class ModWebMirrorsMixin(ModWebServiceSupport):
                         project=project,
                         can_manage_all=can_manage_all,
                     )
+            ui.run_javascript(self._mirror_local_time_javascript(), timeout=0.1)
 
     def _render_mirror_project_card(
         self,
@@ -166,12 +170,13 @@ class ModWebMirrorsMixin(ModWebServiceSupport):
                 ui.label(f"ID: {project.project_id}").classes("mod-subtitle")
                 if project.published_revision is not None:
                     ui.label(f"Revision: {project.published_revision[:12]}").classes("mod-subtitle")
-                if project.published_at is not None:
-                    ui.label(f"Published: {project.published_at}").classes("mod-subtitle")
-                if project.last_checked_at is not None:
-                    ui.label(f"Last source check: {project.last_checked_at}").classes("mod-subtitle")
-                if project.next_check_at is not None:
-                    ui.label(f"Next daily check: {project.next_check_at}").classes("mod-subtitle")
+                for label, timestamp in (
+                    ("Published", project.published_at),
+                    ("Last source check", project.last_checked_at),
+                    ("Next daily check", project.next_check_at),
+                ):
+                    if timestamp is not None:
+                        self._render_mirror_timestamp(ui=ui, label=label, timestamp=timestamp)
                 if project.publish_root:
                     ui.label(f"Publish root: {project.publish_root}").classes("mod-subtitle")
             if project.status_detail is not None:
@@ -239,6 +244,42 @@ class ModWebMirrorsMixin(ModWebServiceSupport):
                         on_click=lambda project=project: self._open_computercraft_setup_dialog(ui=ui, project=project),
                     ).classes("mod-list-button secondary")
                     ui.link("Manifest", f"{base_url}/manifest.json", new_tab=True).classes("mod-list-button secondary")
+
+    @classmethod
+    def _render_mirror_timestamp(cls, *, ui: ModWebUi, label: str, timestamp: str) -> None:
+        ui.html(cls._mirror_timestamp_markup(label=label, timestamp=timestamp)).classes("mod-subtitle")
+
+    @staticmethod
+    def _mirror_timestamp_markup(*, label: str, timestamp: str) -> str:
+        utc_timestamp = timestamp_as_utc_datetime(timestamp)
+        iso_timestamp = utc_timestamp.isoformat()
+        fallback_text = f"{utc_timestamp.day} {utc_timestamp:%b %Y, %H:%M UTC}"
+        safe_iso_timestamp = escape(iso_timestamp, quote=True)
+        return (
+            f"{escape(label)}:<br>"
+            f'<time class="{_MIRROR_LOCAL_TIME_CLASS}" datetime="{safe_iso_timestamp}" '
+            f'data-utc="{safe_iso_timestamp}" title="UTC: {safe_iso_timestamp}">{escape(fallback_text)}</time>'
+        )
+
+    @staticmethod
+    def _mirror_local_time_javascript() -> str:
+        return f"""
+            (() => {{
+                const selector = '.{_MIRROR_LOCAL_TIME_CLASS}[data-utc]';
+                const displayFormatter = new Intl.DateTimeFormat(undefined, {{
+                    dateStyle: 'medium', timeStyle: 'short',
+                }});
+                const detailFormatter = new Intl.DateTimeFormat(undefined, {{
+                    dateStyle: 'full', timeStyle: 'long',
+                }});
+                document.querySelectorAll(selector).forEach((element) => {{
+                    const instant = new Date(element.dataset.utc);
+                    if (Number.isNaN(instant.getTime())) return;
+                    element.textContent = displayFormatter.format(instant);
+                    element.title = `Local: ${{detailFormatter.format(instant)}}\\nUTC: ${{instant.toISOString()}}`;
+                }});
+            }})();
+        """
 
     def _open_computercraft_setup_dialog(self, *, ui: ModWebUi, project: MirrorProject) -> None:
         has_computercraft_startup = (
