@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import HTTPException, Request, WebSocket
+from fastapi import Body, HTTPException, Request, WebSocket
 from fastapi.responses import Response
+from pydantic import ValidationError
 
 from _async_utils import run_blocking
 from apps._app import App
@@ -170,12 +171,18 @@ def register_app_routes(
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mutate")
     async def _mutate_app(
         app_name: str,
-        payload: dict[str, object],
         request: Request,
+        payload: Annotated[object, Body()],
         access_token: str | None = None,
     ) -> dict[str, object]:
         traffic_log.info("Node API app mutation request: node=%s app=%s", auth.node_name, app_name)
-        mutation_request: NodeAppMutationRequest = NodeAppMutationRequest.model_validate(payload)
+        if not isinstance(payload, dict):
+            raise http_exception(400, "App mutation request is invalid.")
+        try:
+            mutation_request = NodeAppMutationRequest.model_validate(payload)
+        except ValidationError:
+            # Pydantic error details retain submitted input, which may be a secret token.
+            raise http_exception(400, "App mutation request is invalid.") from None
         required_scope = required_app_mutation_scope(mutation_request.action)
         context = auth.require_access(
             request,
@@ -209,5 +216,6 @@ def register_app_routes(
             steam_update_enabled=mutation_request.steam_update_enabled,
             steam_update_selected_branch=mutation_request.steam_update_selected_branch,
             update_branch_id=mutation_request.update_branch_id,
+            steam_game_server_login_token=mutation_request.steam_game_server_login_token,
         )
         return result.to_mapping()

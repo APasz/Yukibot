@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 import json
 import struct
 import unittest
@@ -12,12 +13,12 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast, get_type_hints
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 from urllib.parse import urlsplit
 
 import hikari
 import requests
-from fastapi import FastAPI, HTTPException, Request, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, UploadFile, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from httpx import ASGITransport, AsyncClient, Response
 from modmux.models import Provider
@@ -93,6 +94,7 @@ from apps._settings import (
     Settings_Manager,
     StringSettingSpec,
 )
+from apps._steam import SteamGameServerLoginTokenStatus
 from apps._updater import (
     AppUpdateBranchState,
     AppUpdateInfo,
@@ -185,6 +187,7 @@ from node_api.console import (
 )
 from node_api.files import (
     NodeConfigList,
+    NodeSaveBatchMutationResult,
     NodeSaveList,
     NodeSaveMutationResult,
 )
@@ -217,6 +220,7 @@ from node_api.app_installer import (
 from apps.satisfactory.node_api import NodeBlueprintList, NodeBlueprintMutationResult
 from node_api.app_state import (
     NodeAppMutationAction,
+    NodeAppMutationRequest,
     NodeAppMutationResult,
     required_app_mutation_level,
     required_app_mutation_scope,
@@ -257,10 +261,13 @@ async def _asgi_request(
     method: str,
     path: str,
     headers: dict[str, str],
+    json_payload: object | None = None,
 ) -> Response:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.request(method, path, headers=headers)
+        if json_payload is None:
+            return await client.request(method, path, headers=headers)
+        return await client.request(method, path, headers=headers, json=json_payload)
 
 
 class _DummyApp(App[Any]):
@@ -269,6 +276,25 @@ class _DummyApp(App[Any]):
 
     async def stop(self) -> bool:
         return True
+
+
+class _SteamGameServerLoginTokenApp(_DummyApp):
+    _steam_game_server_login_token: str | None = None
+
+    @property
+    def steam_game_server_login_token_status(self) -> SteamGameServerLoginTokenStatus | None:
+        return SteamGameServerLoginTokenStatus(
+            game_app_id=440,
+            configured=self._steam_game_server_login_token is not None,
+        )
+
+    def _set_steam_game_server_login_token(self, token: str | None) -> None:
+        self._steam_game_server_login_token = token
+
+
+class _LeakySteamGameServerLoginTokenApp(_SteamGameServerLoginTokenApp):
+    def _set_steam_game_server_login_token(self, token: str | None) -> None:
+        raise ValueError(f"Unable to persist {token}")
 
 
 class _ConsoleActionApp(_DummyApp):
@@ -705,6 +731,95 @@ class NodeApiTests(unittest.TestCase):
             required_app_mutation_level(NodeAppMutationAction.SELECT_UPDATE_BRANCH),
             Power_Level.sudo,
         )
+
+    def test_app_mutation_steam_game_server_login_token_requires_manage_scope_and_root_level(
+        self,
+    ) -> None:
+        for action in (
+            NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN,
+            NodeAppMutationAction.CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN,
+        ):
+            self.assertEqual(required_app_mutation_scope(action), NodeApiScope.APP_MANAGE)
+            self.assertEqual(required_app_mutation_level(action), Power_Level.root)
+
+    def test_app_mutation_request_keeps_steam_game_server_login_token_write_only(self) -> None:
+        request = NodeAppMutationRequest.model_validate(
+            {
+                "action": NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN.value,
+                "steam_game_server_login_token": "  token-value  ",
+            }
+        )
+
+        self.assertEqual(request.steam_game_server_login_token, "token-value")
+        self.assertNotIn("token-value", repr(request))
+        self.assertNotIn("steam_game_server_login_token", request.model_dump())
+        self.assertNotIn("token-value", request.model_dump_json())
+        with self.assertRaisesRegex(ValueError, "token-set"):
+            NodeAppMutationRequest.model_validate(
+                {"action": NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN.value}
+            )
+        with self.assertRaisesRegex(ValueError, "must not include"):
+            NodeAppMutationRequest.model_validate(
+                {
+                    "action": NodeAppMutationAction.CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN.value,
+                    "steam_game_server_login_token": "token-value",
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "only allowed"):
+            NodeAppMutationRequest.model_validate(
+                {
+                    "action": NodeAppMutationAction.START.value,
+                    "steam_game_server_login_token": "token-value",
+                }
+            )
+
+    def test_app_mutation_route_redacts_invalid_steam_game_server_login_token(self) -> None:
+        app = FastAPI()
+        NodeApiService().register_routes(app)
+        token = "token-value"
+
+        for payload in (
+            {
+                "action": NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN.value,
+                "steam_game_server_login_token": f"invalid {token}",
+            },
+            token,
+        ):
+            response = asyncio.run(
+                _asgi_request(
+                    app,
+                    method="POST",
+                    path="/api/node/apps/minecraft_alpha/mutate",
+                    headers={},
+                    json_payload=payload,
+                )
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json(), {"detail": "App mutation request is invalid."})
+            self.assertNotIn(token, response.text)
+
+    def test_app_mutation_route_redacts_malformed_steam_game_server_login_token_payload(self) -> None:
+        app = FastAPI()
+        NodeApiService().register_routes(app)
+        token = "token-value"
+
+        async def _request() -> Response:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+                return await client.post(
+                    "/api/node/apps/minecraft_alpha/mutate",
+                    content=(
+                        b'{"action":"set_steam_game_server_login_token",'
+                        b'"steam_game_server_login_token":"token-value"'
+                    ),
+                    headers={"content-type": "application/json"},
+                )
+
+        response = asyncio.run(_request())
+
+        self.assertEqual(response.status_code, 422)
+        self.assertNotIn(token, response.text)
 
     def test_mod_download_requires_user_but_config_read_allows_visitors(self) -> None:
         service = NodeApiService()
@@ -2417,6 +2532,155 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsInstance(result, NodeSaveMutationResult)
         self.assertEqual(result.save.id, "saves/incoming.zip")
         self.assertIn("Uploaded save", result.message)
+
+    def test_upload_save_files_to_inferred_roots_uploads_each_distinct_destination(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_source = root / "server_packages.sii"
+            data_source = root / "server_packages.dat"
+            config_source.write_bytes(b"package configuration")
+            data_source.write_bytes(b"package data")
+            config_entry = AppSaveEntry(
+                id="server-packages-config/server_packages.sii",
+                label="server_packages.sii",
+                relative_path="server_packages.sii",
+                root_id="server-packages-config",
+                root_label="Server packages config (.sii)",
+                kind=AppSaveEntryKind.FILE,
+                size_bytes=21,
+                modified_at=datetime(2026, 5, 30, 12, 0, 0),
+            )
+            data_entry = AppSaveEntry(
+                id="server-packages-data/server_packages.dat",
+                label="server_packages.dat",
+                relative_path="server_packages.dat",
+                root_id="server-packages-data",
+                root_label="Server packages data (.dat)",
+                kind=AppSaveEntryKind.FILE,
+                size_bytes=12,
+                modified_at=datetime(2026, 5, 30, 12, 0, 0),
+            )
+            config_upload = UploadFile(file=BytesIO(), filename="server_packages.sii")
+            data_upload = UploadFile(file=BytesIO(), filename="server_packages.dat")
+            app = SimpleNamespace(
+                name="ets_alpha",
+                friendly="ETS2 Alpha",
+                supports_save_uploads=True,
+                resolve_save_upload_root_id=Mock(
+                    side_effect=("server-packages-config", "server-packages-data")
+                ),
+                validate_save_upload_file=Mock(),
+                upload_save_file_async=AsyncMock(side_effect=(config_entry, data_entry)),
+            )
+
+            with patch(
+                "node_api.storage_service.persist_upload_to_temp",
+                new=AsyncMock(side_effect=(config_source, data_source)),
+            ):
+                result = asyncio.run(
+                    NodeApiService().storage.upload_save_files_to_inferred_roots(
+                        app=cast(App[App_Config], cast(object, app)),
+                        uploads=(config_upload, data_upload),
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertIsInstance(result, NodeSaveBatchMutationResult)
+        self.assertEqual(
+            tuple(save.id for save in result.saves),
+            ("server-packages-config/server_packages.sii", "server-packages-data/server_packages.dat"),
+        )
+        app.resolve_save_upload_root_id.assert_has_calls(
+            [call("server_packages.sii"), call("server_packages.dat")]
+        )
+        app.upload_save_file_async.assert_has_awaits(
+            [
+                call(
+                    root_id="server-packages-config",
+                    upload_name="server_packages.sii",
+                    source_path=config_source,
+                ),
+                call(
+                    root_id="server-packages-data",
+                    upload_name="server_packages.dat",
+                    source_path=data_source,
+                ),
+            ]
+        )
+        app.validate_save_upload_file.assert_has_calls(
+            [
+                call(
+                    root_id="server-packages-config",
+                    upload_name="server_packages.sii",
+                    source_path=config_source,
+                ),
+                call(
+                    root_id="server-packages-data",
+                    upload_name="server_packages.dat",
+                    source_path=data_source,
+                ),
+            ]
+        )
+
+    def test_upload_save_files_to_inferred_roots_validates_every_file_before_writing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_source = root / "server_packages.sii"
+            data_source = root / "server_packages.dat"
+            config_source.write_bytes(b"package configuration")
+            data_source.write_bytes(b"package data")
+            app = SimpleNamespace(
+                name="ets_alpha",
+                friendly="ETS2 Alpha",
+                supports_save_uploads=True,
+                resolve_save_upload_root_id=Mock(
+                    side_effect=("server-packages-config", "server-packages-data")
+                ),
+                validate_save_upload_file=Mock(side_effect=(None, ValueError("Package data is empty."))),
+                upload_save_file_async=AsyncMock(),
+            )
+            config_upload = UploadFile(file=BytesIO(), filename="server_packages.sii")
+            data_upload = UploadFile(file=BytesIO(), filename="server_packages.dat")
+
+            with (
+                patch(
+                    "node_api.storage_service.persist_upload_to_temp",
+                    new=AsyncMock(side_effect=(config_source, data_source)),
+                ),
+                self.assertRaises(HTTPException) as raised,
+            ):
+                asyncio.run(
+                    NodeApiService().storage.upload_save_files_to_inferred_roots(
+                        app=cast(App[App_Config], cast(object, app)),
+                        uploads=(config_upload, data_upload),
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        app.upload_save_file_async.assert_not_awaited()
+
+    def test_upload_save_files_to_inferred_roots_rejects_duplicate_destinations_before_writing(self) -> None:
+        app = SimpleNamespace(
+            name="ets_alpha",
+            friendly="ETS2 Alpha",
+            supports_save_uploads=True,
+            resolve_save_upload_root_id=Mock(return_value="server-packages-config"),
+        )
+        config_upload = UploadFile(file=BytesIO(), filename="server_packages.sii")
+        duplicate_upload = UploadFile(file=BytesIO(), filename="server_packages.sii")
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(
+                NodeApiService().storage.upload_save_files_to_inferred_roots(
+                    app=cast(App[App_Config], cast(object, app)),
+                    uploads=(config_upload, duplicate_upload),
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("Multiple uploads resolve", str(raised.exception.detail))
 
     def test_upload_save_path_maps_runtime_api_unavailable_to_503(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -4357,6 +4621,22 @@ class NodeApiTests(unittest.TestCase):
             entry.resource_points.cpu_points_startup if entry.resource_points is not None else None,
             5,
         )
+
+    def test_build_app_entry_exposes_only_steam_game_server_login_token_status(self) -> None:
+        app = _build_app(Mock())
+        app.__class__ = _SteamGameServerLoginTokenApp
+        steam_app = cast(_SteamGameServerLoginTokenApp, app)
+        steam_app._steam_game_server_login_token = "token-value"
+
+        entry = NodeApiService().build_app_entry(steam_app)
+        mapped = entry.to_mapping()
+
+        self.assertIsNotNone(entry.steam_game_server_login_token_status)
+        assert entry.steam_game_server_login_token_status is not None
+        self.assertEqual(entry.steam_game_server_login_token_status.game_app_id, 440)
+        self.assertTrue(entry.steam_game_server_login_token_status.configured)
+        self.assertNotIn("token-value", json.dumps(mapped))
+        self.assertEqual(NodeAppEntry.from_mapping(mapped), entry)
 
     def test_build_app_entry_captures_relay_advancement_metadata(self) -> None:
         class _RelayApp(_DummyApp):
@@ -6588,6 +6868,127 @@ class NodeApiTests(unittest.TestCase):
             )
 
         self.assertEqual(getattr(raised.exception, "status_code"), 409)
+
+    def test_mutate_app_sets_steam_game_server_login_token_without_auditing_secret(self) -> None:
+        app = _build_app(Mock())
+        app.__class__ = _SteamGameServerLoginTokenApp
+        steam_app = cast(_SteamGameServerLoginTokenApp, app)
+        steam_app._steam_game_server_login_token = None
+        service = NodeApiService()
+        service.set_manager(cast(Any, Mock()))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+        runtime_summary = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version=None,
+            player_count=None,
+            player_capacity=None,
+            relay_support=steam_app.chat_relay_support,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+
+        with (
+            patch.object(service, "build_app_runtime_summary", new=AsyncMock(return_value=runtime_summary)),
+            patch("node_api.app_state.audit_log") as audit_log,
+        ):
+            result = asyncio.run(
+                service.mutate_app(
+                    app=steam_app,
+                    action=NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN,
+                    actor_user_id=42,
+                    steam_game_server_login_token="  token-value  ",
+                )
+            )
+
+        self.assertEqual(steam_app._steam_game_server_login_token, "token-value")
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+        audit_log.assert_called_once_with(
+            "node.app.steam_game_server_login_token.updated",
+            actor_user_id=42,
+            node=service.node_name,
+            app_name=steam_app.name,
+            scope=steam_app.scope,
+            configured=True,
+        )
+        self.assertEqual(result.action, NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN)
+        self.assertEqual(result.message, "Updated Steam game server login token for Minecraft Alpha.")
+
+    def test_mutate_app_clears_steam_game_server_login_token(self) -> None:
+        app = _build_app(Mock())
+        app.__class__ = _SteamGameServerLoginTokenApp
+        steam_app = cast(_SteamGameServerLoginTokenApp, app)
+        steam_app._steam_game_server_login_token = "token-value"
+        service = NodeApiService()
+        service.set_manager(cast(Any, Mock()))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+        runtime_summary = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version=None,
+            player_count=None,
+            player_capacity=None,
+            relay_support=steam_app.chat_relay_support,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+
+        with (
+            patch.object(service, "build_app_runtime_summary", new=AsyncMock(return_value=runtime_summary)),
+            patch("node_api.app_state.audit_log") as audit_log,
+        ):
+            result = asyncio.run(
+                service.mutate_app(
+                    app=steam_app,
+                    action=NodeAppMutationAction.CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN,
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertIsNone(steam_app._steam_game_server_login_token)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+        audit_log.assert_called_once_with(
+            "node.app.steam_game_server_login_token.cleared",
+            actor_user_id=42,
+            node=service.node_name,
+            app_name=steam_app.name,
+            scope=steam_app.scope,
+            configured=False,
+        )
+        self.assertEqual(result.action, NodeAppMutationAction.CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN)
+        self.assertEqual(result.message, "Removed Steam game server login token from Minecraft Alpha.")
+
+    def test_mutate_app_redacts_game_server_login_token_writer_failures(self) -> None:
+        app = _build_app(Mock())
+        app.__class__ = _LeakySteamGameServerLoginTokenApp
+        steam_app = cast(_LeakySteamGameServerLoginTokenApp, app)
+        service = NodeApiService()
+        service.set_manager(cast(Any, Mock()))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+        token = "token-value"
+
+        with self.assertRaises(Exception) as raised:
+            asyncio.run(
+                service.mutate_app(
+                    app=steam_app,
+                    action=NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN,
+                    actor_user_id=42,
+                    steam_game_server_login_token=token,
+                )
+            )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        self.assertEqual(getattr(raised.exception, "detail"), "Unable to update the Steam game server login token.")
+        self.assertNotIn(token, str(raised.exception))
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
 
     def test_mutate_app_disable_updates_enabled_state(self) -> None:
         app = _build_app(Mock())

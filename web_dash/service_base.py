@@ -55,6 +55,7 @@ from .runtime_imports import (
     NodeModPortalVersionList,
     NodeModUpdateCheckResult,
     NodeModUploadBatchResult,
+    NodeSaveBatchMutationResult,
     NodeRestartScheduleState,
     NodeRestartState,
     NodeSaveList,
@@ -735,6 +736,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_direct_save_upload_target"]) -> Callable[..., ModWebDirectUploadTarget]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_direct_inferred_save_upload_target"]) -> Callable[..., ModWebDirectUploadTarget]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_start_direct_upload_transfer"]) -> Callable[..., int]: ...
 
     @overload
@@ -888,6 +892,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_remote_save_upload"]) -> Callable[..., NodeSaveMutationResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_inferred_save_uploads"]) -> Callable[..., NodeSaveBatchMutationResult]: ...
 
     @overload
     def __getattr__(

@@ -352,6 +352,8 @@ class ConfigFileTests(unittest.TestCase):
 
         self.assertEqual([(root.id, root.path.name) for root in beammp_roots], [("server", "ServerConfig.toml")])
         self.assertEqual([(root.id, root.path.name) for root in ets_roots], [("server", "server_config.sii")])
+        self.assertEqual(ets_roots[0].read_power_level_override, Power_Level.root)
+        self.assertEqual(ets_roots[0].write_power_level_override, Power_Level.root)
         self.assertEqual(
             [(root.id, root.path.name) for root in factorio_roots],
             [
@@ -387,6 +389,24 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(app.config_file_read_level_for_root("server"), Power_Level.root)
         self.assertEqual(app.config_file_read_level_for_root("map-settings"), Power_Level.sudo)
         self.assertEqual(app.config_file_read_level_for_root("map-gen-settings"), Power_Level.sudo)
+
+    def test_ets_server_config_root_remains_root_only_when_settings_are_less_restricted(self) -> None:
+        app = object.__new__(ETS)
+        app.directory = Path("/srv/ets")
+        app.settings = SimpleNamespace(
+            app=SimpleNamespace(
+                options=(
+                    SimpleNamespace(power_level=Power_Level.sudo),
+                )
+            )
+        )
+        app.config_file_read_level_override = None
+        app.config_file_write_level_override = None
+
+        self.assertEqual(app.config_file_read_level, Power_Level.sudo)
+        self.assertEqual(app.config_file_write_level, Power_Level.sudo)
+        self.assertEqual(app.config_file_read_level_for_root("server"), Power_Level.root)
+        self.assertEqual(app.config_file_write_level_for_root("server"), Power_Level.root)
 
 
 if __name__ == "__main__":

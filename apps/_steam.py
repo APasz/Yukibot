@@ -1,4 +1,4 @@
-"""SteamCMD app metadata discovery shared by Steam-backed apps."""
+"""Steam integration helpers shared by Steam-backed apps."""
 
 from __future__ import annotations
 
@@ -18,7 +18,43 @@ from apps._config import SteamUpdateBranch, SteamUpdateConfig, SteamUpdatePreset
 log = logging.getLogger(__name__)
 
 STEAM_BRANCH_CACHE_TTL_SECONDS: Final[float] = 12 * 60 * 60
+STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL: Final[str] = "https://steamcommunity.com/dev/managegameservers"
 _STEAM_APP_INFO_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class SteamGameServerLoginTokenStatus:
+    """Non-secret status for an app's Steam Game Server Login Token."""
+
+    game_app_id: int
+    configured: bool
+
+    def __post_init__(self) -> None:
+        if type(self.game_app_id) is not int:
+            raise TypeError("Steam game server game app ID must be an integer.")
+        if self.game_app_id <= 0:
+            raise ValueError("Steam game server game app ID must be positive.")
+        if type(self.configured) is not bool:
+            raise TypeError("Steam game server login token configured state must be boolean.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "SteamGameServerLoginTokenStatus":
+        game_app_id = payload.get("game_app_id")
+        configured = payload.get("configured")
+        if isinstance(game_app_id, bool) or not isinstance(game_app_id, int):
+            raise ValueError("Steam game server login token status is invalid.")
+        if not isinstance(configured, bool):
+            raise ValueError("Steam game server login token status is invalid.")
+        try:
+            return cls(game_app_id=game_app_id, configured=configured)
+        except ValueError as xcp:
+            raise ValueError("Steam game server login token status is invalid.") from xcp
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "game_app_id": self.game_app_id,
+            "configured": self.configured,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +66,19 @@ class _SteamBranchCacheEntry:
 _STEAM_BRANCH_CACHE_LOCK = threading.RLock()
 _STEAM_BRANCH_CACHE: dict[int, _SteamBranchCacheEntry] = {}
 _STEAM_BRANCH_FETCHES: dict[int, asyncio.Task[tuple[SteamUpdateBranch, ...]]] = {}
+
+
+def normalise_steam_game_server_login_token(raw: object) -> str:
+    """Validate and normalise a write-only Steam Game Server Login Token."""
+
+    if not isinstance(raw, str):
+        raise TypeError("Steam game server login token must be text.")
+    token = raw.strip()
+    if not token:
+        raise ValueError("Steam game server login token must not be empty.")
+    if any(character.isspace() for character in token):
+        raise ValueError("Steam game server login token must not contain whitespace.")
+    return token
 
 
 def steam_update_preset_for_scope(scope: str | None) -> SteamUpdatePreset | None:

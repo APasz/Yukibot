@@ -17,7 +17,13 @@ from typing import Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 import config
-from _manager import AppInstallInput, AppInstanceCreateRequest, AppInstanceCreationPlan, AppSteamInstallRecipe
+from _manager import (
+    AppInstallInput,
+    AppInstanceCreateRequest,
+    AppInstanceCreationPlan,
+    AppSteamInstallPostProcessor,
+    AppSteamInstallRecipe,
+)
 from _async_utils import run_blocking
 from _security import Access_Control, Power_Level
 from apps._config import AppVersion, SteamUpdateBranch, SteamUpdateConfig
@@ -500,6 +506,7 @@ class NodeAppInstallerService:
                     plan=plan,
                     create_request=create_request,
                     steam_update=recipe.steam_update.with_selected_branch(branch.branch_id),
+                    post_steam_install=recipe.post_steam_install,
                     secret_values=secret_values,
                 ),
                 name=f"app-install-{job_id}",
@@ -549,6 +556,7 @@ class NodeAppInstallerService:
         plan: AppInstanceCreationPlan,
         create_request: AppInstanceCreateRequest,
         steam_update: SteamUpdateConfig,
+        post_steam_install: AppSteamInstallPostProcessor | None,
         secret_values: tuple[str, ...],
     ) -> None:
         app_name: str | None = None
@@ -593,6 +601,14 @@ class NodeAppInstallerService:
                 raise RuntimeError("SteamCMD did not confirm the install.")
             if not any(staging_directory.iterdir()):
                 raise RuntimeError("SteamCMD completed without installing files.")
+            if post_steam_install is not None:
+                self._set_status(
+                    job_id=job_id,
+                    state=NodeAppInstallState.INSTALLING,
+                    summary="Preparing app.",
+                    progress_percent=99.0,
+                )
+                await post_steam_install(staging_directory, create_request)
 
             self._set_status(
                 job_id=job_id,

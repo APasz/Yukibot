@@ -381,6 +381,44 @@ class NodeSaveMutationResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class NodeSaveBatchMutationResult:
+    app_name: str
+    app_friendly: str
+    node: str
+    message: str
+    saves: tuple[NodeSaveEntry, ...]
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeSaveBatchMutationResult":
+        raw_saves = payload.get("saves")
+        if isinstance(raw_saves, (str, bytes)) or not isinstance(raw_saves, Sequence):
+            raise ValueError("Node save upload saves are invalid.")
+        saves: list[NodeSaveEntry] = []
+        for raw_save in raw_saves:
+            if not isinstance(raw_save, Mapping):
+                raise ValueError("Node save upload saves are invalid.")
+            saves.append(NodeSaveEntry.from_mapping(raw_save))
+        if not saves:
+            raise ValueError("Node save upload saves are invalid.")
+        return cls(
+            app_name=_required_string(payload, "app_name"),
+            app_friendly=_required_string(payload, "app_friendly"),
+            node=_required_string(payload, "node"),
+            message=_required_string(payload, "message"),
+            saves=tuple(saves),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "message": self.message,
+            "saves": [save.to_mapping() for save in self.saves],
+        }
+
+
 class NodeSaveRenameRequest(BaseModel):
     new_name: str
 

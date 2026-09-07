@@ -17,7 +17,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, cast
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.config import ConfigDict
 
 from _audit import audit_log
@@ -32,6 +32,7 @@ from apps._config import (
     normalise_activity_provider_ids,
     normalise_app_title_font,
 )
+from apps._steam import SteamGameServerLoginTokenStatus, normalise_steam_game_server_login_token
 from apps._node_api import (
     optional_int,
     optional_string,
@@ -99,12 +100,19 @@ class NodeAppMutationAction(StrEnum):
     UPDATE = "update"
     VERIFY = "verify"
     SELECT_UPDATE_BRANCH = "select_update_branch"
+    SET_STEAM_GAME_SERVER_LOGIN_TOKEN = "set_steam_game_server_login_token"
+    CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN = "clear_steam_game_server_login_token"
 
 
 def required_app_mutation_level(action: NodeAppMutationAction) -> Power_Level:
     if action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP}:
         return Power_Level.user
     if action is NodeAppMutationAction.DELETE:
+        return Power_Level.root
+    if action in {
+        NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN,
+        NodeAppMutationAction.CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN,
+    }:
         return Power_Level.root
     if action in {
         NodeAppMutationAction.KILL,
@@ -133,6 +141,8 @@ def required_app_mutation_scope(action: NodeAppMutationAction) -> NodeApiScope:
         NodeAppMutationAction.UPDATE,
         NodeAppMutationAction.VERIFY,
         NodeAppMutationAction.SELECT_UPDATE_BRANCH,
+        NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN,
+        NodeAppMutationAction.CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN,
     }:
         return NodeApiScope.APP_MANAGE
     raise ValueError(f"Unsupported app mutation action: {action}")
@@ -160,6 +170,7 @@ class NodeAppMutationRequest(BaseModel):
     steam_update_enabled: bool | None = None
     steam_update_selected_branch: str | None = None
     update_branch_id: str | None = None
+    steam_game_server_login_token: str | None = Field(default=None, exclude=True, repr=False)
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -172,6 +183,19 @@ class NodeAppMutationRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_payload(self) -> "NodeAppMutationRequest":
+        if self.action is NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN:
+            if self.steam_game_server_login_token is None:
+                raise ValueError("Steam game server login token is required for token-set requests.")
+            self.steam_game_server_login_token = normalise_steam_game_server_login_token(
+                self.steam_game_server_login_token
+            )
+            return self
+        if self.action is NodeAppMutationAction.CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN:
+            if self.steam_game_server_login_token is not None:
+                raise ValueError("Token-clear requests must not include a Steam game server login token.")
+            return self
+        if self.steam_game_server_login_token is not None:
+            raise ValueError("Steam game server login token is only allowed for token-set requests.")
         if self.action is NodeAppMutationAction.SELECT_UPDATE_BRANCH:
             if self.update_branch_id is None or not self.update_branch_id.strip():
                 raise ValueError("Update branch id is required for branch-selection requests.")
@@ -331,6 +355,7 @@ class NodeAppEntry:
     relay_advancement_term: str | None = None
     factorio_chat_relay_use_shout: bool | None = None
     rcon_requires_online_players: bool | None = None
+    steam_game_server_login_token_status: SteamGameServerLoginTokenStatus | None = None
     activity_providers: tuple[NodeAppActivityProviderEntry, ...] = ()
 
     @classmethod
@@ -389,6 +414,7 @@ class NodeAppEntry:
         relay_advancement_term = payload.get("relay_advancement_term")
         factorio_chat_relay_use_shout = payload.get("factorio_chat_relay_use_shout")
         rcon_requires_online_players = payload.get("rcon_requires_online_players")
+        raw_steam_game_server_login_token_status = payload.get("steam_game_server_login_token_status")
         raw_activity_providers = payload.get("activity_providers", ())
         if not isinstance(name, str) or not name:
             raise ValueError("Node app entry name is invalid.")
@@ -521,6 +547,10 @@ class NodeAppEntry:
             raise ValueError("Node app entry factorio_chat_relay_use_shout is invalid.")
         if rcon_requires_online_players is not None and not isinstance(rcon_requires_online_players, bool):
             raise ValueError("Node app entry rcon_requires_online_players is invalid.")
+        if raw_steam_game_server_login_token_status is not None and not isinstance(
+            raw_steam_game_server_login_token_status, Mapping
+        ):
+            raise ValueError("Node app entry Steam game server login token status is invalid.")
         if not isinstance(raw_activity_providers, list | tuple):
             raise ValueError("Node app entry activity_providers is invalid.")
         if any(not isinstance(provider_payload, Mapping) for provider_payload in raw_activity_providers):
@@ -590,6 +620,13 @@ class NodeAppEntry:
             relay_advancement_term=relay_advancement_term,
             factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
             rcon_requires_online_players=rcon_requires_online_players,
+            steam_game_server_login_token_status=(
+                SteamGameServerLoginTokenStatus.from_mapping(
+                    cast(Mapping[str, object], raw_steam_game_server_login_token_status)
+                )
+                if raw_steam_game_server_login_token_status is not None
+                else None
+            ),
             activity_providers=tuple(
                 NodeAppActivityProviderEntry.from_mapping(cast(Mapping[str, object], provider_payload))
                 for provider_payload in raw_activity_providers
@@ -656,6 +693,11 @@ class NodeAppEntry:
             "relay_advancement_term": self.relay_advancement_term,
             "factorio_chat_relay_use_shout": self.factorio_chat_relay_use_shout,
             "rcon_requires_online_players": self.rcon_requires_online_players,
+            "steam_game_server_login_token_status": (
+                self.steam_game_server_login_token_status.to_mapping()
+                if self.steam_game_server_login_token_status is not None
+                else None
+            ),
             "activity_providers": [provider.to_mapping() for provider in self.activity_providers],
         }
 
@@ -930,6 +972,7 @@ class NodeAppMutationService:
         steam_update_enabled: bool | None = None,
         steam_update_selected_branch: str | None = None,
         update_branch_id: str | None = None,
+        steam_game_server_login_token: str | None = None,
     ) -> NodeAppMutationResult:
         manager = self._require_manager()
         acl = self._require_acl()
@@ -1031,6 +1074,33 @@ class NodeAppMutationService:
                 ),
             )
             message = f"Updated details for {app.friendly}."
+        elif action is NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN:
+            if steam_game_server_login_token is None:
+                raise ValueError("Steam game server login token must not be empty.")
+            self._write_steam_game_server_login_token(
+                app=app,
+                token=steam_game_server_login_token,
+            )
+            audit_log(
+                "node.app.steam_game_server_login_token.updated",
+                actor_user_id=actor_user_id,
+                node=self._node_name(),
+                app_name=app.name,
+                scope=app.scope,
+                configured=True,
+            )
+            message = f"Updated Steam game server login token for {app.friendly}."
+        elif action is NodeAppMutationAction.CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN:
+            self._write_steam_game_server_login_token(app=app, token=None)
+            audit_log(
+                "node.app.steam_game_server_login_token.cleared",
+                actor_user_id=actor_user_id,
+                node=self._node_name(),
+                app_name=app.name,
+                scope=app.scope,
+                configured=False,
+            )
+            message = f"Removed Steam game server login token from {app.friendly}."
         elif action is NodeAppMutationAction.SELECT_UPDATE_BRANCH:
             if app.updater is None:
                 raise ValueError(f"{app.friendly} does not support updates.")
@@ -1104,6 +1174,27 @@ class NodeAppMutationService:
             message=message,
             app_stats=app_stats,
         )
+
+    def _write_steam_game_server_login_token(self, *, app: App, token: str | None) -> None:
+        """Write a token without permitting a game-specific writer to disclose it."""
+
+        try:
+            app.set_steam_game_server_login_token(token)
+        except Exception as xcp:
+            operation = "removal" if token is None else "update"
+            self._log.warning(
+                "Steam game server login token %s failed: node=%s app=%s error_type=%s",
+                operation,
+                self._node_name(),
+                app.name,
+                type(xcp).__name__,
+            )
+            detail = (
+                "Unable to remove the Steam game server login token."
+                if token is None
+                else "Unable to update the Steam game server login token."
+            )
+            raise self._http_exception(400, detail) from None
 
     def _track_task(
         self,

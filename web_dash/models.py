@@ -69,6 +69,7 @@ from .runtime_imports import (
     NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
+    SteamGameServerLoginTokenStatus,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
     NodeConfigContent,
@@ -85,6 +86,7 @@ from .runtime_imports import (
     NodeModList,
     NodeModPortalVersionList,
     NodeModUploadBatchResult,
+    NodeSaveBatchMutationResult,
     NodeSaveList,
     NodeSaveMutationResult,
     NodeSettingList,
@@ -819,6 +821,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
             factorio_chat_relay_use_shout=page_data.app_entry.factorio_chat_relay_use_shout,
             rcon_requires_online_players=page_data.app_entry.rcon_requires_online_players,
+            steam_game_server_login_token_status=page_data.app_entry.steam_game_server_login_token_status,
             activity_providers=page_data.app_entry.activity_providers,
             load_warnings=page_data.load_warnings,
             minecraft_recipes=page_data.minecraft_recipes,
@@ -882,6 +885,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
             factorio_chat_relay_use_shout=page_data.app_entry.factorio_chat_relay_use_shout,
             rcon_requires_online_players=page_data.app_entry.rcon_requires_online_players,
+            steam_game_server_login_token_status=page_data.app_entry.steam_game_server_login_token_status,
             activity_providers=page_data.app_entry.activity_providers,
             load_warnings=page_data.load_warnings,
             factorio_generation=page_data.factorio_generation,
@@ -953,6 +957,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_advancement_term: str | None = None,
         factorio_chat_relay_use_shout: bool | None = None,
         rcon_requires_online_players: bool | None = None,
+        steam_game_server_login_token_status: SteamGameServerLoginTokenStatus | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
         load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
         minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None,
@@ -1022,6 +1027,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_advancement_term=relay_advancement_term,
                     factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
                     rcon_requires_online_players=rcon_requires_online_players,
+                    steam_game_server_login_token_status=steam_game_server_login_token_status,
                     activity_providers=activity_providers,
                     load_warnings=load_warnings,
                     minecraft_recipes=minecraft_recipes,
@@ -1086,6 +1092,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_advancement_term: str | None = None,
         factorio_chat_relay_use_shout: bool | None = None,
         rcon_requires_online_players: bool | None = None,
+        steam_game_server_login_token_status: SteamGameServerLoginTokenStatus | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
         load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
         factorio_generation: NodeFactorioGenerationState | None = None,
@@ -1139,6 +1146,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_advancement_term=relay_advancement_term,
                     factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
                     rcon_requires_online_players=rcon_requires_online_players,
+                    steam_game_server_login_token_status=steam_game_server_login_token_status,
                     activity_providers=activity_providers,
                     load_warnings=load_warnings,
                     factorio_generation=factorio_generation,
@@ -1646,6 +1654,19 @@ class ModWebModelsMixin(ModWebServiceSupport):
             path=f"/apps/{quote(model.app_name, safe='')}/saves/upload",
         )
 
+    def _direct_inferred_save_upload_target(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+    ) -> ModWebDirectUploadTarget:
+        return self._direct_upload_target(
+            model=model,
+            user=user,
+            scope=NodeApiScope.SAVES_WRITE,
+            path=f"/apps/{quote(model.app_name, safe='')}/saves/upload-inferred",
+        )
+
     def _direct_upload_target(
         self,
         *,
@@ -1925,6 +1946,51 @@ class ModWebModelsMixin(ModWebServiceSupport):
         except ValueError as xcp:
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
         return NodeSaveMutationResult.from_mapping(_json_object(payload, context="Remote node response"))
+
+    def _remote_inferred_save_uploads(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        upload_files: tuple[tuple[str, Path], ...],
+        user: ModWebUser,
+    ) -> NodeSaveBatchMutationResult:
+        token: str = self._remote_token(
+            node=node,
+            app_name=app_name,
+            scopes=(NodeApiScope.SAVES_WRITE,),
+            user=user,
+        )
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/saves/upload-inferred"
+        opened_handles: list[BinaryIO] = []
+        try:
+            request_files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
+            for upload_name, upload_path in upload_files:
+                handle = upload_path.open("rb")
+                opened_handles.append(handle)
+                request_files.append(("upload", (upload_name, handle, "application/octet-stream")))
+            response: Response = self._remote_sync_http_client().post(
+                url,
+                data={"upload_transport": "relay"},
+                files=request_files,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        finally:
+            for handle in opened_handles:
+                handle.close()
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Remote node rejected the request: url={url} status={response.status_code} "
+                f"detail={self._response_detail(response)}"
+            )
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError as xcp:
+            raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        return NodeSaveBatchMutationResult.from_mapping(_json_object(payload, context="Remote node response"))
 
     def _remote_blueprint_upload(
         self,

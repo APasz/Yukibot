@@ -194,6 +194,17 @@ class UpdaterTests(unittest.TestCase):
         self.assertIs(preset, STEAM_UPDATE_PRESET)
         self.assertEqual(preset.app_id, STEAM_APP_ID)
 
+    def test_steam_update_preset_resolves_ets_app_metadata(self) -> None:
+        from apps.ets import STEAM_APP_ID, STEAM_UPDATE_PRESET
+
+        preset = steam_update_preset_for_scope("ets")
+
+        self.assertIsNotNone(preset)
+        assert preset is not None
+        self.assertIs(preset, STEAM_UPDATE_PRESET)
+        self.assertEqual(preset.app_id, STEAM_APP_ID)
+        self.assertEqual(STEAM_APP_ID, 1948160)
+
     def test_steamcmd_update_manager_select_branch_persists_choice(self) -> None:
         with TemporaryDirectory() as temp_dir:
             app = _FakeApp(Path(temp_dir))

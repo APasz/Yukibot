@@ -2304,10 +2304,19 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         app.file_stdout = Path("/tmp/dummy_stdout.log")
         app.file_errout = Path("/tmp/dummy_stderr.log")
         app.shell = False
+        app.launch_environment = Mock(return_value={"XDG_DATA_HOME": "/tmp/ets-data"})
 
-        with patch("apps._app.subprocess.Popen", side_effect=FileNotFoundError("missing executable")):
+        with (
+            patch.dict("apps._app.os.environ", {"PRESERVED": "yes"}, clear=True),
+            patch("apps._app.subprocess.Popen", side_effect=FileNotFoundError("missing executable")) as launch,
+        ):
             with self.assertRaisesRegex(FileNotFoundError, "missing executable"):
                 await app._launch_process()
+
+        self.assertEqual(
+            launch.call_args.kwargs["env"],
+            {"PRESERVED": "yes", "XDG_DATA_HOME": "/tmp/ets-data"},
+        )
 
     async def test_load_apps_disables_instance_when_directory_is_missing(self) -> None:
         manager = object.__new__(App_Manager)
@@ -3195,6 +3204,30 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(recipes), 1)
         self.assertEqual(recipes[0].scope, "sevendays")
         self.assertEqual(recipes[0].default_port, 26900)
+
+    def test_ets_steam_install_recipe_initialises_the_server_before_registration(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            scope_path = temp_path / "apps" / "ets"
+            scope_path.mkdir(parents=True)
+            (scope_path / "__init__.py").write_text("", encoding="utf-8")
+            (scope_path / "instances.json").write_text("{}", encoding="utf-8")
+
+            os.chdir(temp_path)
+            try:
+                recipes = manager.list_steam_install_recipes()
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(len(recipes), 1)
+        recipe = recipes[0]
+        self.assertEqual(recipe.scope, "ets")
+        self.assertEqual(recipe.label, "Euro Truck Simulator 2")
+        self.assertEqual(recipe.default_port, 27015)
+        self.assertEqual(recipe.steam_update.app_id, 1948160)
+        self.assertIsNotNone(recipe.post_steam_install)
 
     async def test_load_instance_syncs_initial_instance_metadata(self) -> None:
         manager = object.__new__(App_Manager)

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from dataclasses import replace
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Never, Protocol
 
 from fastapi import UploadFile
 from fastapi.responses import FileResponse, Response
@@ -24,18 +24,26 @@ from .files import (
     NodeConfigMutationResult,
     NodeConfigRootEntry,
     NodeSaveEntry,
+    NodeSaveBatchMutationResult,
     NodeSaveList,
     NodeSaveMutationResult,
     NodeSaveRootEntry,
     NodeSaveUploadTransport,
 )
-from .upload import persist_upload_to_temp
+from .upload import persist_upload_to_temp, validated_upload_filename
 
 
 class RuntimeHttpExceptionFactory(Protocol):
     """Translate app runtime failures to an HTTP-compatible exception."""
 
     def __call__(self, *, app: App, action: str, error: RuntimeError) -> Exception: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _InferredSaveUploadRequest:
+    upload: UploadFile
+    upload_name: str
+    root_id: str
 
 
 class NodeStorageService:
@@ -397,18 +405,8 @@ class NodeStorageService:
                 upload_name=upload_name,
                 source_path=source_path,
             )
-        except FileNotFoundError as xcp:
-            raise self._http_exception(404, str(xcp)) from xcp
-        except FileExistsError as xcp:
-            raise self._http_exception(409, str(xcp)) from xcp
-        except ValueError as xcp:
-            raise self._http_exception(400, str(xcp)) from xcp
-        except RuntimeError as xcp:
-            raise self._runtime_http_exception(
-                app=app, action="Save upload", error=xcp
-            ) from xcp
         except Exception as xcp:
-            raise self._http_exception(500, f"Save upload failed: {xcp}") from xcp
+            self._raise_save_upload_error(app=app, error=xcp)
 
         self._traffic_log.info(
             "Node API save uploaded: node=%s app=%s root=%s save=%s actor=%s transport=%s",
@@ -426,6 +424,114 @@ class NodeStorageService:
             message=f"Uploaded save `{updated.label}` for {app.friendly}.",
             save=self._save_entry(updated, can_delete=save_can_delete),
         )
+
+    async def upload_save_files_to_inferred_roots(
+        self,
+        *,
+        app: App,
+        uploads: Sequence[UploadFile],
+        actor_user_id: int,
+        upload_transport: NodeSaveUploadTransport = NodeSaveUploadTransport.DIRECT,
+    ) -> NodeSaveBatchMutationResult:
+        if not app.supports_save_uploads:
+            raise self._http_exception(409, f"{app.friendly} does not support save uploads.")
+        requests = self._resolve_inferred_save_upload_requests(app=app, uploads=uploads)
+        staged_uploads: list[tuple[_InferredSaveUploadRequest, Path]] = []
+        try:
+            for upload_request in requests:
+                staged_uploads.append((upload_request, await persist_upload_to_temp(upload_request.upload)))
+            self._validate_staged_save_uploads(app=app, staged_uploads=staged_uploads)
+            results: list[NodeSaveMutationResult] = []
+            for upload_request, source_path in staged_uploads:
+                results.append(
+                    await self.upload_save_path(
+                        app=app,
+                        root_id=upload_request.root_id,
+                        source_path=source_path,
+                        upload_name=upload_request.upload_name,
+                        actor_user_id=actor_user_id,
+                        upload_transport=upload_transport,
+                    )
+                )
+        finally:
+            for _, source_path in staged_uploads:
+                source_path.unlink(missing_ok=True)
+
+        save_count = len(results)
+        self._traffic_log.info(
+            "Node API inferred save uploads completed: node=%s app=%s saves=%s actor=%s transport=%s",
+            self._node_name(),
+            app.name,
+            save_count,
+            actor_user_id,
+            upload_transport.value,
+        )
+        return NodeSaveBatchMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self._node_name(),
+            message=f"Uploaded {save_count} save file{'s' if save_count != 1 else ''} for {app.friendly}.",
+            saves=tuple(result.save for result in results),
+        )
+
+    def _resolve_inferred_save_upload_requests(
+        self,
+        *,
+        app: App,
+        uploads: Sequence[UploadFile],
+    ) -> tuple[_InferredSaveUploadRequest, ...]:
+        if not uploads:
+            raise self._http_exception(400, "At least one save upload is required.")
+        root_ids: set[str] = set()
+        requests: list[_InferredSaveUploadRequest] = []
+        for upload in uploads:
+            try:
+                upload_name = validated_upload_filename(upload.filename or "", kind="Save")
+                root_id = app.resolve_save_upload_root_id(upload_name)
+            except ValueError as xcp:
+                raise self._http_exception(400, str(xcp)) from xcp
+            if root_id in root_ids:
+                raise self._http_exception(400, f"Multiple uploads resolve to save root {root_id!r}.")
+            root_ids.add(root_id)
+            requests.append(
+                _InferredSaveUploadRequest(
+                    upload=upload,
+                    upload_name=upload_name,
+                    root_id=root_id,
+                )
+            )
+        return tuple(requests)
+
+    def _validate_staged_save_uploads(
+        self,
+        *,
+        app: App,
+        staged_uploads: Sequence[tuple[_InferredSaveUploadRequest, Path]],
+    ) -> None:
+        try:
+            for upload_request, source_path in staged_uploads:
+                app.validate_save_upload_file(
+                    root_id=upload_request.root_id,
+                    upload_name=upload_request.upload_name,
+                    source_path=source_path,
+                )
+        except Exception as xcp:
+            self._raise_save_upload_error(app=app, error=xcp)
+
+    def _raise_save_upload_error(self, *, app: App, error: Exception) -> Never:
+        if isinstance(error, FileNotFoundError):
+            raise self._http_exception(404, str(error)) from error
+        if isinstance(error, FileExistsError):
+            raise self._http_exception(409, str(error)) from error
+        if isinstance(error, ValueError):
+            raise self._http_exception(400, str(error)) from error
+        if isinstance(error, RuntimeError):
+            raise self._runtime_http_exception(
+                app=app,
+                action="Save upload",
+                error=error,
+            ) from error
+        raise self._http_exception(500, f"Save upload failed: {error}") from error
 
     async def rename_save_file(
         self,

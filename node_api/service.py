@@ -54,6 +54,7 @@ from apps._config import (
     ModPageDiscovery,
     ModPlacement,
 )
+from apps._steam import SteamGameServerLoginTokenStatus
 from apps.factorio.node_api import (
     NodeFactorioGenerationState,
     NodeFactorioGenerationUpdateRequest,
@@ -169,6 +170,21 @@ def _normalised_auth_url(raw: str) -> str:
             "",
         )
     )
+
+
+def _validated_steam_game_server_login_token_status(
+    raw_status: object,
+    *,
+    app_class_name: str,
+) -> SteamGameServerLoginTokenStatus | None:
+    if raw_status is None:
+        return None
+    if not isinstance(raw_status, SteamGameServerLoginTokenStatus):
+        raise TypeError(
+            f"{app_class_name}.steam_game_server_login_token_status must return "
+            "SteamGameServerLoginTokenStatus or None."
+        )
+    return raw_status
 
 
 _BulkMetadataOperationResult = TypeVar("_BulkMetadataOperationResult")
@@ -684,6 +700,10 @@ class NodeApiService:
         rcon_requires_online_players = getattr(
             app, "rcon_requires_online_players_enabled", None
         )
+        steam_game_server_login_token_status = _validated_steam_game_server_login_token_status(
+            app.steam_game_server_login_token_status,
+            app_class_name=type(app).__name__,
+        )
         return NodeAppEntry(
             name=app.name,
             friendly=app.friendly,
@@ -763,6 +783,7 @@ class NodeApiService:
                 else None
             ),
             rcon_requires_online_players=rcon_requires_online_players,
+            steam_game_server_login_token_status=steam_game_server_login_token_status,
             activity_providers=tuple(
                 NodeAppActivityProviderEntry(
                     provider_id=entry.provider_id,
@@ -1203,6 +1224,7 @@ class NodeApiService:
         steam_update_enabled: bool | None = None,
         steam_update_selected_branch: str | None = None,
         update_branch_id: str | None = None,
+        steam_game_server_login_token: str | None = None,
     ) -> app_state.NodeAppMutationResult:
         return await self._app_mutations.mutate(
             app=app,
@@ -1228,6 +1250,7 @@ class NodeApiService:
             steam_update_enabled=steam_update_enabled,
             steam_update_selected_branch=steam_update_selected_branch,
             update_branch_id=update_branch_id,
+            steam_game_server_login_token=steam_game_server_login_token,
         )
 
     async def build_mod_download_response(

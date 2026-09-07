@@ -29,6 +29,7 @@ from .runtime_imports import (
     NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
+    SteamGameServerLoginTokenStatus,
     NodeBlueprintList,
     NodeChatRoomSnapshot,
     NodeConfigList,
@@ -811,6 +812,10 @@ class ModWebBasePageModel:
     relay_advancement_term: str | None = field(default=None, kw_only=True)
     factorio_chat_relay_use_shout: bool | None = field(default=None, kw_only=True)
     rcon_requires_online_players: bool | None = field(default=None, kw_only=True)
+    steam_game_server_login_token_status: SteamGameServerLoginTokenStatus | None = field(
+        default=None,
+        kw_only=True,
+    )
     activity_providers: tuple[NodeAppActivityProviderEntry, ...] = field(default=(), kw_only=True)
     load_warnings: tuple["ModWebPageLoadWarning", ...] = field(default=(), kw_only=True)
     app_scope: str | None = field(default=None, kw_only=True)

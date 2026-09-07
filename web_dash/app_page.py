@@ -22,6 +22,7 @@ from apps._config import (
     normalise_app_title_font,
     resolve_app_title_font,
 )
+from apps._steam import STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL
 from font_assets import font_assets
 from mod_web_theme import mod_web_tooltip_css
 
@@ -6790,6 +6791,14 @@ class ModWebAppPageMixin(
         can_delete_instance: bool = self._user_has_level(
             user, required_app_mutation_level(NodeAppMutationAction.DELETE)
         )
+        steam_game_server_login_token_status = model.steam_game_server_login_token_status
+        can_manage_steam_game_server_login_token: bool = (
+            steam_game_server_login_token_status is not None
+            and self._user_has_level(
+                user,
+                required_app_mutation_level(NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN),
+            )
+        )
         if not can_manage_app_state and not can_edit_app_details:
             self._render_flat_tab_empty_state(
                 ui=ui,
@@ -6807,6 +6816,10 @@ class ModWebAppPageMixin(
         startup_ram_points_input: Input | None = None
         steam_update_enabled_checkbox: Checkbox | None = None
         steam_update_branch_select: Select | None = None
+        steam_game_server_login_token_input: Input | None = None
+        steam_game_server_login_token_save_button: Button | None = None
+        steam_game_server_login_token_clear_dialog: Dialog | None = None
+        steam_game_server_login_token_clear_submit_button: Button | None = None
         lifecycle_started_checkbox: Checkbox | None = None
         lifecycle_stopped_checkbox: Checkbox | None = None
         lifecycle_crashed_checkbox: Checkbox | None = None
@@ -6875,6 +6888,94 @@ class ModWebAppPageMixin(
             on_change: Callable[[object], object] | None = None,
         ) -> Checkbox:
             return ui.checkbox(label, value=value, on_change=on_change).props("dense").classes("mod-app-details-toggle")
+
+        async def _submit_steam_game_server_login_token() -> None:
+            token_input = steam_game_server_login_token_input
+            if token_input is None:
+                raise RuntimeError("Steam game server login token input was not rendered.")
+            token = _value_as_text(token_input).strip()
+            if not token:
+                ui.notify("Steam game server login token must not be empty.", type="negative")
+                return
+            try:
+                result = await self._mutate_app(
+                    model=current_runtime_model,
+                    action=NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN,
+                    user=user,
+                    steam_game_server_login_token=token,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Steam game server login token update failed: node=%s app=%s error_type=%s",
+                    current_runtime_model.node_name,
+                    current_runtime_model.app_name,
+                    type(xcp).__name__,
+                )
+                ui.notify("Unable to update the Steam game server login token.", type="negative")
+                return
+            token_input.set_value("")
+            ui.notify(result.message, type="positive")
+            self._guarded_reload(ui=ui)
+
+        async def _handle_steam_game_server_login_token_save(_: object | None = None) -> None:
+            if steam_game_server_login_token_save_button is None:
+                raise RuntimeError("Steam game server login token Save button was not rendered.")
+            await self._run_with_loading_button(
+                button=steam_game_server_login_token_save_button,
+                action=_submit_steam_game_server_login_token,
+            )
+
+        async def _clear_steam_game_server_login_token() -> None:
+            try:
+                result = await self._mutate_app(
+                    model=current_runtime_model,
+                    action=NodeAppMutationAction.CLEAR_STEAM_GAME_SERVER_LOGIN_TOKEN,
+                    user=user,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Steam game server login token removal failed: node=%s app=%s error_type=%s",
+                    current_runtime_model.node_name,
+                    current_runtime_model.app_name,
+                    type(xcp).__name__,
+                )
+                ui.notify("Unable to remove the Steam game server login token.", type="negative")
+                return
+            if steam_game_server_login_token_clear_dialog is not None:
+                steam_game_server_login_token_clear_dialog.close()
+            ui.notify(result.message, type="positive")
+            self._guarded_reload(ui=ui)
+
+        async def _handle_steam_game_server_login_token_clear(_: object | None = None) -> None:
+            if steam_game_server_login_token_clear_submit_button is None:
+                raise RuntimeError("Steam game server login token removal button was not rendered.")
+            await self._run_with_loading_button(
+                button=steam_game_server_login_token_clear_submit_button,
+                action=_clear_steam_game_server_login_token,
+            )
+
+        def _open_steam_game_server_login_token_clear_dialog() -> None:
+            nonlocal steam_game_server_login_token_clear_dialog
+            nonlocal steam_game_server_login_token_clear_submit_button
+            if steam_game_server_login_token_clear_dialog is None:
+                with ui.dialog() as created_dialog:
+                    steam_game_server_login_token_clear_dialog = created_dialog
+                    with ui.card().classes("mod-card mod-dialog-card"):
+                        with ui.column().classes("w-full gap-4 p-5"):
+                            with ui.column().classes("gap-1"):
+                                ui.label("Remove Steam game server login token?").classes(
+                                    "text-xl font-black mod-title-small"
+                                )
+                                ui.label(
+                                    "The app will use anonymous Steam server login after its next restart."
+                                ).classes("mod-subtitle text-sm")
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                ui.button("Cancel", on_click=created_dialog.close).classes("mod-list-button secondary")
+                                steam_game_server_login_token_clear_submit_button = ui.button(
+                                    "Remove Token",
+                                    on_click=_handle_steam_game_server_login_token_clear,
+                                ).classes("mod-list-button danger")
+            steam_game_server_login_token_clear_dialog.open()
 
         async def _submit_properties() -> None:
             if (
@@ -7142,8 +7243,6 @@ class ModWebAppPageMixin(
                                     value=model.update_info is not None,
                                     on_change=lambda _: _sync_steam_update_controls(),
                                 )
-                                if steam_update_app_id is not None:
-                                    ui.label(f"Steam App ID: {steam_update_app_id}").classes("mod-subtitle text-xs")
                                 steam_update_branch_select = (
                                     ui.select(
                                         steam_update_branch_options,
@@ -7154,6 +7253,52 @@ class ModWebAppPageMixin(
                                     .classes("mod-app-details-field")
                                 )
                                 _sync_steam_update_controls()
+                        if steam_game_server_login_token_status is not None:
+                            with ui.column().classes("mod-app-details-subsection"):
+                                ui.label("Steam Game Server Login Token").classes("mod-stat-label")
+                                ui.label(
+                                    "Status: "
+                                    + (
+                                        "Configured"
+                                        if steam_game_server_login_token_status.configured
+                                        else "Not configured"
+                                    )
+                                ).classes("mod-subtitle text-xs")
+                                ui.link(
+                                    "Manage tokens on Steam",
+                                    STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL,
+                                ).props('target="_blank" rel="noopener noreferrer"').classes(
+                                    "mod-list-button secondary"
+                                )
+                                if can_manage_steam_game_server_login_token:
+                                    steam_game_server_login_token_input = (
+                                        ui.input(
+                                            "Replace token"
+                                            if steam_game_server_login_token_status.configured
+                                            else "Login token",
+                                            value="",
+                                        )
+                                        .props(
+                                            "filled square dense hide-bottom-space color=accent "
+                                            "type=password autocomplete=off spellcheck=false autocorrect=off "
+                                            "autocapitalize=off"
+                                        )
+                                        .classes("mod-app-details-field")
+                                    )
+                                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                                        steam_game_server_login_token_save_button = ui.button(
+                                            "Save Token",
+                                            on_click=_handle_steam_game_server_login_token_save,
+                                        ).classes("mod-list-button")
+                                        if steam_game_server_login_token_status.configured:
+                                            ui.button(
+                                                "Remove Token",
+                                                on_click=_open_steam_game_server_login_token_clear_dialog,
+                                            ).classes("mod-list-button danger")
+                                else:
+                                    ui.label("Root access is required to change this token.").classes(
+                                        "mod-subtitle text-xs"
+                                    )
                         with ui.column().classes("mod-app-details-subsection"):
                             ui.label("Resource Points").classes("mod-stat-label")
                             ui.label(

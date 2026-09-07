@@ -104,6 +104,7 @@ from apps._config import (
 )
 from apps._node_api import NodeModUploadSource
 from apps._steam import (
+    SteamGameServerLoginTokenStatus,
     cached_steam_update_branches,
     merge_steam_update_branches,
     steam_update_preset_for_scope,
@@ -221,6 +222,7 @@ from node_api.files import (
     NodeConfigList,
     NodeConfigMutationResult,
     NodeConfigRootEntry,
+    NodeSaveBatchMutationResult,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveMutationResult,
@@ -279,6 +281,7 @@ __all__: tuple[str, ...] = (
     "BulkLauncherMetadataStatus",
     "SteamUpdateBranch",
     "SteamUpdatePreset",
+    "SteamGameServerLoginTokenStatus",
     "AppUpdateInfo",
     "AppUpdateOperationKind",
     "AppUpdateState",
@@ -409,6 +412,7 @@ __all__: tuple[str, ...] = (
     "NodeModUploadBatchResult",
     "NodeModUploadResult",
     "NodeModUploadSource",
+    "NodeSaveBatchMutationResult",
     "NodeSaveEntry",
     "NodeSaveList",
     "NodeSaveMutationResult",

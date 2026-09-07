@@ -5,6 +5,7 @@ import contextlib
 import enum
 import logging
 import os
+import signal
 import subprocess
 from abc import ABC, abstractmethod
 from collections import deque
@@ -55,6 +56,7 @@ from apps._console import ConsoleAction, ConsoleResponseSource
 from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveRoot, list_app_save_files, resolve_app_save_path
 from apps._settings import App_Settings, Settings_Manager
+from apps._steam import SteamGameServerLoginTokenStatus, normalise_steam_game_server_login_token
 from apps._updater import AppUpdateInfo, AppUpdateStatus, Update_Manager
 from config import Activity_Manager, Name_Cache
 from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource, render_pack_text
@@ -261,6 +263,7 @@ class App(Generic[ConfigT], ABC):
     cmd_start: list[str]
     cmd_cwd: Path | None = None
     shell: bool = False
+    uses_process_group_termination: bool = False
     _stderr_task = None
     _running: bool = False
     chat_channel: hikari.Snowflake | None = None
@@ -523,6 +526,33 @@ class App(Generic[ConfigT], ABC):
     @property
     def supports_update_tab(self) -> bool:
         return self.update_info is not None
+
+    @property
+    def steam_game_server_login_token_status(self) -> SteamGameServerLoginTokenStatus | None:
+        """Return non-secret Steam Game Server Login Token support and status."""
+
+        return None
+
+    def set_steam_game_server_login_token(self, token: str | None) -> None:
+        """Set or clear this app's write-only Steam Game Server Login Token.
+
+        Subclasses expose support through :attr:`steam_game_server_login_token_status`
+        and implement the protected writer. They must never return, log, or include
+        the raw token in an exception message.
+        """
+
+        if self.steam_game_server_login_token_status is None:
+            raise ValueError(f"{self.friendly} does not support Steam Game Server Login Tokens.")
+        normalised_token = None if token is None else normalise_steam_game_server_login_token(token)
+        self._set_steam_game_server_login_token(normalised_token)
+
+    def _set_steam_game_server_login_token(self, token: str | None) -> None:
+        """Persist a normalised Steam Game Server Login Token, or clear it with ``None``."""
+
+        del token
+        raise NotImplementedError(
+            f"{type(self).__name__} exposes Steam Game Server Login Token support but has no token writer."
+        )
 
     def detect_installed_version(self) -> AppVersion | None:
         return None
@@ -1065,6 +1095,23 @@ class App(Generic[ConfigT], ABC):
     async def upload_save_file_async(self, *, root_id: str, upload_name: str, source_path: Path) -> AppSaveEntry:
         return self.upload_save_file(root_id=root_id, upload_name=upload_name, source_path=source_path)
 
+    def validate_save_upload_file(
+        self,
+        *,
+        root_id: str,
+        upload_name: str,
+        source_path: Path,
+    ) -> None:
+        """Validate a staged save upload before it changes save storage."""
+
+        del root_id, upload_name, source_path
+
+    def resolve_save_upload_root_id(self, upload_name: str) -> str:
+        """Resolve an upload destination when an app can derive it from a filename."""
+
+        del upload_name
+        raise ValueError(f"{self.friendly} requires a save upload destination.")
+
     def relocate_save_file(
         self,
         *,
@@ -1277,8 +1324,15 @@ class App(Generic[ConfigT], ABC):
             self.file_errout,
         )
 
+    def launch_environment(self) -> Mapping[str, str]:
+        """Return environment overrides required by this app's process."""
+
+        return {}
+
     async def _launch_process(self):
         self.log_launch_context()
+        environment = os.environ.copy()
+        environment.update(self.launch_environment())
         try:
             self.process = subprocess.Popen(
                 self.cmd_start,
@@ -1290,6 +1344,7 @@ class App(Generic[ConfigT], ABC):
                 text=True,
                 encoding=config.STR_ENCODE,
                 shell=self.shell,
+                env=environment,
             )
         except Exception:
             log.exception(f"Failed to launch: {self.name}")
@@ -1389,7 +1444,7 @@ class App(Generic[ConfigT], ABC):
             log.info(f"Terminating {self.name} via stored process")
 
             try:
-                process.terminate()
+                self._signal_stored_process(process, signal.SIGTERM)
                 await run_blocking(process.wait, 5)
                 await self._drain_stderr_task()
             except Exception as xcp:
@@ -1401,7 +1456,7 @@ class App(Generic[ConfigT], ABC):
                 await asyncio.sleep(0.3)
             else:
                 try:
-                    process.kill()
+                    self._signal_stored_process(process, signal.SIGKILL)
                     await run_blocking(process.wait, 5)
                     await self._drain_stderr_task()
                     log.warning(f"{self.name} kill escalation")
@@ -1416,6 +1471,19 @@ class App(Generic[ConfigT], ABC):
 
         await run_blocking(self._terminate_leftover_processes_sync)
 
+    def _signal_stored_process(
+        self,
+        process: subprocess.Popen[Any],
+        signal_number: signal.Signals,
+    ) -> None:
+        if self.uses_process_group_termination:
+            os.killpg(process.pid, signal_number)
+            return
+        if signal_number is signal.SIGTERM:
+            process.terminate()
+            return
+        process.kill()
+
     def _terminate_leftover_processes_sync(self) -> None:
         if not self.proc_name:
             log.warning("No process name specified for process scan")
@@ -1424,16 +1492,19 @@ class App(Generic[ConfigT], ABC):
         log.info(f"Scanning for leftover {self.proc_name} processes")
         expected_process_name = self.proc_name.casefold()
         expected_command_parts = tuple(part.casefold() for part in self.proc_cmd if part)
-        for proc in psutil.process_iter(attrs=["name", "pid", "cmdline"]):
+        for proc in psutil.process_iter(attrs=["name", "pid", "cmdline", "cwd"]):
             try:
                 raw_name = proc.info.get("name")
                 raw_cmdline = proc.info.get("cmdline")
                 if not isinstance(raw_name, str) or not isinstance(raw_cmdline, list):
                     continue
                 command_line = tuple(str(argument).casefold() for argument in raw_cmdline)
-                if expected_process_name not in raw_name.casefold() or not all(
-                    any(command_part in argument for argument in command_line)
-                    for command_part in expected_command_parts
+                raw_cwd = proc.info.get("cwd")
+                process_cwd = raw_cwd if isinstance(raw_cwd, str) else None
+                if expected_process_name not in raw_name.casefold() or not self._matches_leftover_process(
+                    command_line=command_line,
+                    expected_command_parts=expected_command_parts,
+                    process_cwd=process_cwd,
                 ):
                     continue
                 log.info(f"Force-stopping stray process: {proc.info}")
@@ -1449,6 +1520,19 @@ class App(Generic[ConfigT], ABC):
                 continue
             except Exception as xcp:
                 log.exception(f"Failed to stop {proc.info}: {xcp}")
+
+    def _matches_leftover_process(
+        self,
+        *,
+        command_line: tuple[str, ...],
+        expected_command_parts: tuple[str, ...],
+        process_cwd: str | None,
+    ) -> bool:
+        del self, process_cwd
+        return all(
+            any(command_part in argument for argument in command_line)
+            for command_part in expected_command_parts
+        )
 
     def check_running(self) -> bool:
         return bool(self.process) and self.process.poll() is None

@@ -308,6 +308,17 @@ class AppInstallerCheck(unittest.TestCase):
                 acl.perm_check = AsyncMock()
                 invalidated = Mock()
                 service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=invalidated)
+                prepared_requests: list[AppInstanceCreateRequest] = []
+
+                async def _prepare_install(
+                    staging_directory: Path,
+                    create_request: AppInstanceCreateRequest,
+                ) -> None:
+                    self.assertEqual(manager.create_requests, [])
+                    prepared_requests.append(create_request)
+                    (staging_directory / "prepared.txt").write_text("ready", encoding="utf-8")
+
+                manager.recipe = replace(manager.recipe, post_steam_install=_prepare_install)
                 request = NodeAppInstallRequest(
                     scope="demo",
                     instance_key="alpha",
@@ -343,7 +354,9 @@ class AppInstallerCheck(unittest.TestCase):
                 self.assertEqual(status.state, NodeAppInstallState.READY)
                 self.assertEqual(status.app_name, "demo_alpha")
                 self.assertTrue((root / "demo-alpha" / "installed.txt").is_file())
+                self.assertTrue((root / "demo-alpha" / "prepared.txt").is_file())
                 self.assertEqual(manager.loaded_instances, [("demo", "alpha")])
+                self.assertEqual(prepared_requests, [manager.create_requests[0]])
                 self.assertEqual(manager.create_requests[0].admin_password, "secret")
                 self.assertEqual(manager.create_requests[0].steam_branch, "public")
                 self.assertEqual(manager.create_requests[0].initial_version, AppVersion(main="0.0"))

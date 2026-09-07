@@ -21,6 +21,7 @@ from apps.satisfactory.node_api import NodeBlueprintMutationResult, Satisfactory
 from .files import (
     NodeConfigCreateRequest,
     NodeConfigWriteRequest,
+    NodeSaveBatchMutationResult,
     NodeSaveMutationResult,
     NodeSaveRenameRequest,
     NodeSaveUploadTransport,
@@ -530,6 +531,51 @@ def register_storage_routes(
             app_name=app.name,
             save_id=result.save.id,
             root_id=root_id,
+            required_level=app.save_file_write_level.name,
+            upload_transport=upload_transport.value,
+        )
+        return result.to_mapping()
+
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/saves/upload-inferred")
+    async def _upload_saves_to_inferred_roots(
+        app_name: str,
+        request: Request,
+        upload: Annotated[list[UploadFile], File()],
+        upload_transport: Annotated[NodeSaveUploadTransport, Form()] = NodeSaveUploadTransport.DIRECT,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        traffic_log.info(
+            "Node API inferred save upload request: node=%s app=%s uploads=%s transport=%s",
+            auth.node_name,
+            app_name,
+            len(upload),
+            upload_transport.value,
+        )
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.SAVES_WRITE,),
+        )
+        app = resolve_app(app_name)
+        context = await auth.require_actor_level(
+            context,
+            app.save_file_write_level,
+        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result: NodeSaveBatchMutationResult = await storage.upload_save_files_to_inferred_roots(
+            app=app,
+            uploads=upload,
+            actor_user_id=actor_user_id,
+            upload_transport=upload_transport,
+        )
+        audit_log(
+            "save.files_uploaded",
+            actor_user_id=actor_user_id,
+            node_name=auth.node_name,
+            app_name=app.name,
+            save_ids=tuple(save.id for save in result.saves),
+            root_ids=tuple(save.root_id for save in result.saves),
             required_level=app.save_file_write_level.name,
             upload_transport=upload_transport.value,
         )

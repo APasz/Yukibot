@@ -62,6 +62,7 @@ from apps._config import (
     SteamUpdateBranch,
     is_client_pack_candidate,
 )
+from apps._steam import SteamGameServerLoginTokenStatus
 from apps._console import ConsoleResponseSource
 from apps._updater import (
     AppUpdateBranchState,
@@ -159,7 +160,10 @@ from node_api.system import (
     NodeSystemSample,
     NodeSystemSummary,
 )
-from node_api.app_state import ClientPackFilePreview, NodeAppMutationAction
+from node_api.app_state import (
+    ClientPackFilePreview,
+    NodeAppMutationAction,
+)
 from node_api.app_installer import NodeAppInstallScopeOption, NodeAppInstallerSettingsState
 from node_api.console import NodeConsoleActionEntry, NodeConsoleActionParameter
 from node_api.mod import (
@@ -2717,6 +2721,55 @@ class ModWebTests(unittest.TestCase):
                 "startup_ram_points": None,
                 "steam_update_enabled": None,
                 "steam_update_selected_branch": None,
+            },
+            timeout=15.0,
+        )
+
+    def test_remote_app_mutation_sends_steam_game_server_login_token(self) -> None:
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        payload = {
+            "app_name": "factorio_alpha",
+            "app_friendly": "Factorio Alpha",
+            "node": "erin",
+            "action": NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN.value,
+            "message": "Updated Steam game server login token for Factorio Alpha.",
+            "app_stats": None,
+        }
+
+        with patch.object(
+            ModWebService,
+            "_remote_json_async",
+            new=AsyncMock(return_value=payload),
+        ) as remote_json:
+            result = asyncio.run(
+                ModWebService()._remote_app_mutation_async(
+                    node,
+                    "factorio_alpha",
+                    NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN,
+                    user,
+                    steam_game_server_login_token="token-value",
+                )
+            )
+
+        self.assertEqual(result.action, NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="factorio_alpha",
+            path="/apps/factorio_alpha/mutate",
+            scopes=(NodeApiScope.APP_MANAGE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "action": NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN.value,
+                "steam_game_server_login_token": "token-value",
             },
             timeout=15.0,
         )
@@ -10907,6 +10960,7 @@ class ModWebTests(unittest.TestCase):
             service = ModWebService()
             mod_target = service._direct_mod_upload_target(model=model, user=user)
             save_target = service._direct_save_upload_target(model=model, user=user)
+            inferred_save_target = service._direct_inferred_save_upload_target(model=model, user=user)
 
         mod_grant = verify_node_token(
             secret="shared-secret",
@@ -10930,6 +10984,10 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             save_target.url,
             "https://erin.example/api/node/apps/minecraft%20alpha/saves/upload",
+        )
+        self.assertEqual(
+            inferred_save_target.url,
+            "https://erin.example/api/node/apps/minecraft%20alpha/saves/upload-inferred",
         )
         self.assertEqual(mod_grant.subject, "web:42")
         self.assertEqual(save_grant.subject, "web:42")
@@ -14095,6 +14153,14 @@ class ModWebTests(unittest.TestCase):
                 ),
             ),
             patch.object(
+                service,
+                "_direct_inferred_save_upload_target",
+                return_value=ModWebDirectUploadTarget(
+                    url="https://node.example/api/node/apps/ets_alpha/saves/upload-inferred",
+                    authorization_header="Bearer ets-save-token",
+                ),
+            ),
+            patch.object(
                 ModWebService,
                 "_render_flat_tab_header",
                 side_effect=lambda **kwargs: None,
@@ -14160,6 +14226,61 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(ui.upload_control.props["form-fields"], [])
             self.assertTrue(ui.upload_control.reset_called)
             self.assertIn("portal fallback", ui.notifications[-1][0])
+
+            ets_model = cast(
+                ModWebPageModel,
+                cast(
+                    object,
+                    SimpleNamespace(
+                        app_friendly="ETS2 Alpha",
+                        app_color_hex="#2563EB",
+                        app_scope=config.AppScopes.ets.value,
+                        search_query="",
+                        node_name="yuki",
+                        app_name="ets_alpha",
+                        supports_save_uploads=True,
+                        supports_save_rename=False,
+                        save_write_level=Power_Level.user,
+                        saves=NodeSaveList(
+                            app_name="ets_alpha",
+                            app_friendly="ETS2 Alpha",
+                            node="yuki",
+                            roots=(
+                                NodeSaveRootEntry(
+                                    id="server-packages-config",
+                                    label="Server packages config (.sii)",
+                                ),
+                                NodeSaveRootEntry(
+                                    id="server-packages-data",
+                                    label="Server packages data (.dat)",
+                                ),
+                            ),
+                            saves=(),
+                        ),
+                    ),
+                ),
+            )
+            ets_ui = FakeUi()
+            service._render_saves_editor(ui=cast(ModWebUi, cast(object, ets_ui)), model=ets_model, user=user)
+
+            self.assertEqual(ets_ui.selects, [])
+            self.assertEqual(
+                ets_ui.upload_control.props["url"],
+                "https://node.example/api/node/apps/ets_alpha/saves/upload-inferred",
+            )
+            self.assertEqual(
+                ets_ui.upload_control.props["headers"],
+                [{"name": "Authorization", "value": "Bearer ets-save-token"}],
+            )
+            self.assertEqual(
+                ets_ui.upload_control.props["form-fields"],
+                [{"name": "upload_transport", "value": "direct"}],
+            )
+            self.assertTrue(ets_ui.upload_kwargs["multiple"])
+            self.assertEqual(ets_ui.upload_kwargs["max_files"], 2)
+            self.assertEqual(ets_ui.upload_kwargs["label"], "Choose ETS2 Server Package Files")
+            self.assertTrue(callable(ets_ui.upload_kwargs["on_multi_upload"]))
+            self.assertEqual(ets_ui.upload_control.props["accept"], ".sii,.dat")
 
         self.assertIn("No saves match that search.", [label.text for label in ui.labels])
 
@@ -19209,6 +19330,10 @@ class ModWebTests(unittest.TestCase):
                 del value
                 return self
 
+            def props(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
             def __enter__(self) -> "FakeContainer":
                 return self
 
@@ -19241,6 +19366,10 @@ class ModWebTests(unittest.TestCase):
                 self.class_value = replace if replace is not None else value
                 return self
 
+            def props(self, value: str | None = None, *, remove: str | None = None) -> "FakeButton":
+                del value, remove
+                return self
+
             def set_text(self, text: str) -> None:
                 self.text = text
 
@@ -19263,6 +19392,9 @@ class ModWebTests(unittest.TestCase):
             def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeInput":
                 self.class_value = replace if replace is not None else value
                 return self
+
+            def set_value(self, value: object) -> None:
+                self.value = value
 
         class FakeSelect(FakeInput):
             def __init__(self, options: object, value: object, label: str) -> None:
@@ -19291,6 +19423,7 @@ class ModWebTests(unittest.TestCase):
                 self.selects: list[FakeSelect] = []
                 self.checkboxes: list[FakeCheckbox] = []
                 self.labels: list[str] = []
+                self.links: list[tuple[str, str]] = []
                 self.dialogs: list[FakeDialog] = []
                 self.navigate = SimpleNamespace(reload=lambda: None, to=lambda _target: None)
 
@@ -19328,6 +19461,10 @@ class ModWebTests(unittest.TestCase):
 
             def label(self, text: str) -> FakeContainer:
                 self.labels.append(text)
+                return FakeContainer()
+
+            def link(self, text: str, target: str) -> FakeContainer:
+                self.links.append((text, target))
                 return FakeContainer()
 
             def dialog(self) -> FakeDialog:
@@ -19385,6 +19522,13 @@ class ModWebTests(unittest.TestCase):
             activity_providers=(NodeAppActivityProviderEntry(provider_id="day", label="Day Counter", enabled=False),),
         )
         user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+        token_model = replace(
+            model,
+            steam_game_server_login_token_status=SteamGameServerLoginTokenStatus(
+                game_app_id=440,
+                configured=True,
+            ),
+        )
 
         with patch.object(
             service,
@@ -19393,7 +19537,7 @@ class ModWebTests(unittest.TestCase):
         ):
             service._render_app_properties_section(
                 ui=cast(ModWebUi, cast(object, ui)),
-                model=model,
+                model=token_model,
                 user=user,
                 tab=service._app_properties_tab_definition(),
             )
@@ -19452,16 +19596,53 @@ class ModWebTests(unittest.TestCase):
                 "mod-app-details-toggle",
             ],
         )
+        self.assertIn("Steam Game Server Login Token", ui.labels)
+        self.assertIn("Status: Configured", ui.labels)
+        self.assertIn("Game App ID: 440", ui.labels)
+        self.assertIn("Root access is required to change this token.", ui.labels)
+        self.assertEqual(ui.links[0][0], "Manage tokens on Steam")
+        self.assertNotIn("Save Token", [button.text for button in ui.buttons])
+        self.assertNotIn("Remove Token", [button.text for button in ui.buttons])
 
         root_ui = FakeUi()
         with patch.object(service, "_user_has_level", return_value=True):
             service._render_app_properties_section(
                 ui=cast(ModWebUi, cast(object, root_ui)),
-                model=model,
+                model=token_model,
                 user=user,
                 tab=service._app_properties_tab_definition(),
             )
 
+        token_input = next(
+            control
+            for control in root_ui.inputs
+            if control.props_value is not None and "type=password" in control.props_value
+        )
+        self.assertEqual(token_input.value, "")
+        self.assertIn("Save Token", [button.text for button in root_ui.buttons])
+        self.assertIn("Remove Token", [button.text for button in root_ui.buttons])
+        token_input.value = "token-value"
+        save_token_button = next(button for button in root_ui.buttons if button.text == "Save Token")
+        self.assertIsNotNone(save_token_button.on_click)
+        assert save_token_button.on_click is not None
+
+        async def _save_token() -> None:
+            await cast(Awaitable[None], save_token_button.on_click())
+
+        with patch.object(
+            service,
+            "_mutate_app",
+            new=AsyncMock(return_value=SimpleNamespace(message="Updated token.")),
+        ) as mutate_app:
+            asyncio.run(_save_token())
+
+        self.assertEqual(token_input.value, "")
+        mutate_app.assert_awaited_once_with(
+            model=token_model,
+            action=NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN,
+            user=user,
+            steam_game_server_login_token="token-value",
+        )
         delete_instance_button = next(button for button in root_ui.buttons if button.text == "Delete Instance")
         self.assertIsNotNone(delete_instance_button.on_click)
         assert delete_instance_button.on_click is not None

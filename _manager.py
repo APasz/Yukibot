@@ -32,6 +32,7 @@ from apps._config import (
     normalise_optional_friendly_name,
     normalise_optional_text,
 )
+from apps.ets import ETS_DEFAULT_CONNECTION_PORT, prepare_ets_server_installation, resolve_ets_connection_port
 from apps._steam import (
     cached_steam_update_branches,
     merge_steam_update_branches,
@@ -86,6 +87,9 @@ class AppInstanceCreateRequest:
     initial_version: AppVersion | None = None
 
 
+type AppSteamInstallPostProcessor = Callable[[Path, AppInstanceCreateRequest], Awaitable[None]]
+
+
 class AppInstallInput(enum.StrEnum):
     """A typed app-specific value requested by an installation recipe."""
 
@@ -117,6 +121,7 @@ class AppSteamInstallRecipe:
     default_port: int | None
     steam_update: SteamUpdateConfig
     inputs: tuple[AppInstallInput, ...] = ()
+    post_steam_install: AppSteamInstallPostProcessor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +176,7 @@ class AppInstanceTemplate:
     api_port: int | None = None
     steam_update: SteamUpdateConfig | None = None
     steam_update_factory: Callable[[], SteamUpdateConfig] | None = None
+    post_steam_install: AppSteamInstallPostProcessor | None = None
 
     def __post_init__(self) -> None:
         if self.steam_update is not None and self.steam_update_factory is not None:
@@ -223,6 +229,15 @@ def _required_scope_steam_update_template(scope: str) -> SteamUpdateConfig:
     return preset.build_config()
 
 
+async def _prepare_ets_steam_install(
+    directory: Path,
+    request: AppInstanceCreateRequest,
+) -> None:
+    """Create ETS2's isolated server home before its instance is registered."""
+
+    await prepare_ets_server_installation(directory=directory, connection_port=request.port)
+
+
 _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
     "beammp": AppInstanceTemplate(
         mods_dir="{WD}/Resources/Client",
@@ -232,8 +247,11 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
         join_port=30814,
     ),
     "ets": AppInstanceTemplate(
+        label="Euro Truck Simulator 2",
         server_log_file="{WD}/home_data/Euro Truck Simulator 2/server.log.txt",
-        join_port=27015,
+        join_port=ETS_DEFAULT_CONNECTION_PORT,
+        steam_update_factory=lambda: _required_scope_steam_update_template("ets"),
+        post_steam_install=_prepare_ets_steam_install,
     ),
     "factorio": AppInstanceTemplate(
         mods_dir="{WD}/mods",
@@ -1295,6 +1313,7 @@ class App_Manager(metaclass=config.Singleton):
                         template_payload=template_payload,
                     ),
                     inputs=template.install_inputs,
+                    post_steam_install=template.post_steam_install,
                 )
             )
         return tuple(sorted(recipes, key=lambda recipe: recipe.label.casefold()))
@@ -1307,6 +1326,8 @@ class App_Manager(metaclass=config.Singleton):
         friendly_name = _validate_required_friendly_name(request.friendly_name)
         subfolder = self._validate_subfolder(request.subfolder)
         self._validate_optional_port(request.port)
+        if scope == "ets":
+            resolve_ets_connection_port(request.port)
         server_log_file = self._validate_optional_config_path(
             request.server_log_file,
             label="Server log file",

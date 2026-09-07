@@ -58,10 +58,11 @@ from .runtime_imports import (
     NodeConsoleActionParameter,
     NodeConsoleStdoutSnapshot,
     NodeFactorioModSettings,
-    NodeModEntry,
     NodeModDependencyResolutionResult,
+    NodeModEntry,
     NodeModPortalVersionList,
     NodeModUploadBatchResult,
+    NodeSaveBatchMutationResult,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveMutationResult,
@@ -78,8 +79,8 @@ from .runtime_imports import (
     Select,
     Textarea,
     Timer,
-    Upload,
     TypeVar,
+    Upload,
     asyncio,
     cached_member_role_color,
     cast,
@@ -798,11 +799,19 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         can_write: bool = self._user_has_level(user, model.save_write_level)
         app_scope: object = getattr(model, "app_scope", None)
         is_sevendays_app: bool = app_scope == config.AppScopes.sevendays.value
-        show_search: bool = not is_sevendays_app and len(save_options) > 1
-        show_sort: bool = not is_sevendays_app and len(save_options) > 1
-        show_root_selector: bool = not is_sevendays_app and model.supports_save_uploads and len(saves.roots) > 1
-        show_upload_action: bool = model.supports_save_uploads and can_write and (
-            selected_root_id is not None or is_sevendays_app
+        is_ets_app: bool = app_scope == config.AppScopes.ets.value
+        upload_item_label = "ETS2 server package file" if is_ets_app else "save"
+        upload_item_title = "ETS2 Server Package" if is_ets_app else "Save"
+        upload_selection_label = "ETS2 server package file" if is_ets_app else "save archive"
+        show_search: bool = not is_sevendays_app and not is_ets_app and len(save_options) > 1
+        show_sort: bool = not is_sevendays_app and not is_ets_app and len(save_options) > 1
+        show_root_selector: bool = (
+            not is_sevendays_app and not is_ets_app and model.supports_save_uploads and len(saves.roots) > 1
+        )
+        show_upload_action: bool = (
+            model.supports_save_uploads
+            and can_write
+            and (selected_root_id is not None or is_ets_app or is_sevendays_app)
         )
         show_write_lock_note: bool = (model.supports_save_uploads or model.supports_save_rename) and not can_write
         current_search_query: str = model.search_query
@@ -828,8 +837,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 direct_save_transfer_id = self._start_direct_upload_transfer(
                     model=model,
                     user=user,
-                    label="Save upload",
-                    detail_text=f"Sending a save directly to {model.app_friendly}.",
+                    label=f"{upload_item_title} upload",
+                    detail_text=f"Sending a {upload_item_label} directly to {model.app_friendly}.",
                 )
             except RuntimeError as xcp:
                 ui.notify(f"Upload started, but tray tracking is unavailable: {xcp}", type="warning")
@@ -844,7 +853,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if error is None:
                 self._backend.complete_transfer(
                     transfer_id=transfer_id,
-                    detail_text=f"Uploaded a save for {model.app_friendly}.",
+                    detail_text=f"Uploaded a {upload_item_label} for {model.app_friendly}.",
                 )
             else:
                 self._backend.fail_transfer(transfer_id=transfer_id, detail_text=error)
@@ -950,10 +959,37 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             sevendays_new_staged_upload_name = None
             sevendays_new_inspection = None
 
+        async def upload_ets_server_packages(event: "MultiUploadEventArguments") -> None:
+            upload_files = tuple(event.files)
+            if not 1 <= len(upload_files) <= 2:
+                ui.notify("Choose one or both ETS2 server package files.", type="warning")
+                return
+            log.info(
+                "Relaying ETS2 server package upload through mod web: app=%s node=%s files=%s",
+                model.app_name,
+                model.node_name,
+                len(upload_files),
+            )
+            try:
+                result = await self._upload_save_files_to_inferred_roots(
+                    model=model,
+                    upload_files=upload_files,
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"ETS2 server package upload failed: {xcp}", type="negative", multi_line=True)
+                return
+            upload_dialog.close()
+            ui.notify(result.message, type="positive")
+            self._guarded_reload(ui=ui)
+
         async def upload_generic_save(event: "MultiUploadEventArguments") -> None:
+            if is_ets_app:
+                await upload_ets_server_packages(event)
+                return
             upload_files = tuple(event.files)
             if len(upload_files) != 1:
-                ui.notify("Choose exactly one save archive.", type="warning")
+                ui.notify(f"Choose exactly one {upload_selection_label}.", type="warning")
                 return
             log.info(
                 "Relaying fallback save upload through mod web: app=%s node=%s filename=%s",
@@ -969,7 +1005,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     user=user,
                 )
             except Exception as xcp:
-                ui.notify(f"Save upload failed: {xcp}", type="negative", multi_line=True)
+                ui.notify(f"{upload_item_title} upload failed: {xcp}", type="negative", multi_line=True)
                 return
             upload_dialog.close()
             ui.notify(result.message, type="positive")
@@ -980,15 +1016,19 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 raise RuntimeError("Save upload control is not available.")
             if use_indirect_save_upload:
                 return
-            target: ModWebDirectUploadTarget = self._direct_save_upload_target(model=model, user=user)
+            target: ModWebDirectUploadTarget = (
+                self._direct_inferred_save_upload_target(model=model, user=user)
+                if is_ets_app
+                else self._direct_save_upload_target(model=model, user=user)
+            )
             save_upload_control.props["url"] = target.url
             save_upload_control.props["headers"] = [
                 {"name": "Authorization", "value": target.authorization_header},
             ]
-            save_upload_control.props["form-fields"] = [
-                {"name": "root_id", "value": selected_save_root_id()},
-                {"name": "upload_transport", "value": "direct"},
-            ]
+            form_fields: list[dict[str, str]] = [{"name": "upload_transport", "value": "direct"}]
+            if not is_ets_app:
+                form_fields.insert(0, {"name": "root_id", "value": selected_save_root_id()})
+            save_upload_control.props["form-fields"] = form_fields
             save_upload_control.props["field-name"] = "upload"
 
         def configure_indirect_save_upload() -> None:
@@ -1005,7 +1045,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 return
             log.info("Direct save upload started: app=%s node=%s", model.app_name, model.node_name)
             ui.notify(
-                f"Upload acknowledged. Sending the save directly to {model.app_friendly}.",
+                f"Upload acknowledged. Sending the {upload_item_label} directly to {model.app_friendly}.",
                 type="info",
             )
             ensure_direct_save_transfer()
@@ -1016,14 +1056,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             log.info("Direct save upload completed: app=%s node=%s", model.app_name, model.node_name)
             finish_direct_save_transfer(error=None)
             upload_dialog.close()
-            ui.notify(f"Uploaded the save for {model.app_friendly}.", type="positive")
+            ui.notify(f"Uploaded the {upload_item_label} for {model.app_friendly}.", type="positive")
             self._guarded_reload(ui=ui)
 
         def direct_save_upload_failed() -> None:
             nonlocal use_indirect_save_upload
             if use_indirect_save_upload:
                 return
-            error = f"Direct save upload failed before {model.app_friendly} accepted it."
+            error = f"Direct {upload_item_label} upload failed before {model.app_friendly} accepted it."
             log.warning("%s app=%s node=%s; enabling portal fallback", error, model.app_name, model.node_name)
             finish_direct_save_transfer(error=error)
             use_indirect_save_upload = True
@@ -1037,7 +1077,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         def direct_save_upload_rejected() -> None:
             if use_indirect_save_upload:
                 return
-            error = "The selected save was rejected before upload."
+            error = f"The selected {upload_item_label} was rejected before upload."
             finish_direct_save_transfer(error=error)
             ui.notify(f"{error} Check the file type and upload limits.", type="warning")
 
@@ -1189,11 +1229,21 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
                     with ui.column().classes("gap-0"):
-                        title = "Upload 7D2D World" if is_sevendays_app else "Upload Save"
+                        title = (
+                            "Upload 7D2D World"
+                            if is_sevendays_app
+                            else "Upload ETS2 Server Package"
+                            if is_ets_app
+                            else "Upload Save"
+                        )
                         description = (
                             "Import a generated world, optionally with its matching save. Delete old saves or worlds first."
                             if is_sevendays_app
-                            else "Upload a replacement save archive for this app."
+                            else (
+                                "Choose either or both exported package files. Both are required before the server can start."
+                                if is_ets_app
+                                else "Upload a replacement save archive for this app."
+                            )
                         )
                         ui.label(title).classes("text-xl font-black mod-title-small")
                         ui.label(description).classes("mod-subtitle text-sm")
@@ -1219,14 +1269,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                 .classes("mod-config-select")
                             )
                         save_upload_control = ui.upload(
-                            label="Choose Save Archive",
+                            label="Choose ETS2 Server Package Files" if is_ets_app else "Choose Save Archive",
                             auto_upload=True,
                             multiple=True,
-                            max_files=1,
+                            max_files=2 if is_ets_app else 1,
                             on_multi_upload=upload_generic_save,
                         ).classes("mod-file-upload-zone")
                         indirect_save_upload_url = str(save_upload_control.props["url"])
-                        save_upload_control.props["accept"] = ".zip"
+                        save_upload_control.props["accept"] = ".sii,.dat" if is_ets_app else ".zip"
                         if show_upload_action:
                             save_upload_control.on("start", direct_save_upload_started, args=[])
                             save_upload_control.on("uploaded", direct_save_upload_succeeded, args=[])
@@ -1241,9 +1291,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             self._register_client_cleanup(ui=ui, cleanup=interrupt_direct_save_transfer)
                             if root_select is not None:
                                 root_select.on("update:model-value", lambda: refresh_direct_save_upload_target())
-                        ui.label("ZIP archives upload directly to the node, with a portal fallback if needed.").classes(
-                            "mod-subtitle text-sm"
-                        )
                     with ui.row().classes("w-full justify-end"):
                         ui.button("Close", on_click=close_upload_dialog).classes("mod-list-button secondary")
 
@@ -1251,8 +1298,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             with ui.column().classes(self._tab_section_body_classes()):
                 self._render_flat_tab_header(
                     ui=ui,
-                    title="Saves",
-                    description=self._save_card_description(model=model, save_count=len(saves.saves)),
+                    title="Server Packages" if is_ets_app else "Saves",
+                    description=(
+                        "Export packages from a matching ETS2 client with export_server_packages while a map is "
+                        "loaded, then upload both files below."
+                        if is_ets_app
+                        else self._save_card_description(model=model, save_count=len(saves.saves))
+                    ),
                 )
 
                 @ui.refreshable
@@ -1440,18 +1492,28 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         with ui.row().classes("mod-tab-toolbar-actions"):
                             if show_upload_action:
                                 ui.button(
-                                    "Upload World" if is_sevendays_app else "Upload Save",
-                                    on_click=(
-                                        lambda: open_sevendays_upload(world_name=None)
+                                    (
+                                        "Upload World"
                                         if is_sevendays_app
-                                        else open_save_upload_dialog()
+                                        else "Upload ETS2 Server Package"
+                                        if is_ets_app
+                                        else "Upload Save"
+                                    ),
+                                    on_click=(
+                                        lambda: (
+                                            open_sevendays_upload(world_name=None)
+                                            if is_sevendays_app
+                                            else open_save_upload_dialog()
+                                        )
                                     ),
                                 ).classes("mod-list-button")
 
                 if not saves.saves and not is_sevendays_app:
-                    ui.label("No saves are currently available for this app.").classes(
-                        "mod-subtitle text-sm mod-tab-empty-detail"
-                    )
+                    ui.label(
+                        "Upload both ETS2 server package files before starting this app."
+                        if is_ets_app
+                        else "No saves are currently available for this app."
+                    ).classes("mod-subtitle text-sm mod-tab-empty-detail")
                     if show_write_lock_note:
                         ui.label(
                             f"{model.save_write_level.name.title()} access is required to manage saves for this app."
@@ -2482,12 +2544,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                     value=creatable_roots[0].id,
                                 )
                                 .props(self._config_select_props(clearable=False))
-                                .classes("w-full")
+                                .classes("w-full mod-config-select")
                             )
                             create_path_input = (
                                 ui.input(label="File path", placeholder="example.js")
                                 .props("filled square dense clearable hide-bottom-space color=accent")
-                                .classes("w-full")
+                                .classes("w-full mod-config-input")
                             )
                             with ui.row().classes("w-full justify-end gap-2"):
                                 ui.button("Cancel", on_click=created_dialog.close).classes("mod-list-button secondary")
@@ -3128,6 +3190,63 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         else:
             for transfer_id in transfer_ids:
                 self._backend.complete_transfer(transfer_id=transfer_id, detail_text=f"Installed for {model.app_friendly}.")
+            return result
+        finally:
+            for _, temp_path in resolved_uploads:
+                temp_path.unlink(missing_ok=True)
+
+    async def _upload_save_files_to_inferred_roots(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        upload_files: tuple["FileUpload", ...],
+        user: ModWebUser,
+    ) -> NodeSaveBatchMutationResult:
+        if not self._user_has_level(user, model.save_write_level):
+            raise PermissionError(
+                f"{model.save_write_level.name.title()} access is required to upload saves for {model.app_friendly}."
+            )
+        if not upload_files:
+            raise ValueError("Choose at least one save file.")
+        transfer_ids = self._backend.start_upload_transfers(
+            user_id=user.discord_id,
+            filenames=tuple(upload_file.name for upload_file in upload_files),
+            detail_text=f"Staging save files for {model.app_friendly}.",
+            node_color_hex=self._node_role_color_hex(node_name=model.node_name),
+            app_color_hex=model.app_color_hex,
+        )
+        resolved_uploads: list[tuple[str, Path]] = []
+        try:
+            for upload_file, transfer_id in zip(upload_files, transfer_ids, strict=True):
+                resolved_uploads.append(
+                    (
+                        upload_file.name,
+                        await self._persist_uploaded_file_for_transfer(
+                            upload_file=upload_file,
+                            transfer_id=transfer_id,
+                            active_detail_text=f"Receiving save files for {model.app_friendly}.",
+                        ),
+                    )
+                )
+            self._mark_transfers_applying(
+                transfer_ids=transfer_ids,
+                detail_text=f"Applying save files to {model.app_friendly}.",
+            )
+            node = self._remote_node_link(model.node_name)
+            result = await run_blocking(
+                self._remote_inferred_save_uploads,
+                node,
+                model.app_name,
+                tuple(resolved_uploads),
+                user,
+            )
+        except Exception as xcp:
+            for transfer_id in transfer_ids:
+                self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Save upload failed: {xcp}")
+            raise
+        else:
+            for transfer_id in transfer_ids:
+                self._backend.complete_transfer(transfer_id=transfer_id, detail_text=f"Saved to {model.app_friendly}.")
             return result
         finally:
             for _, temp_path in resolved_uploads:

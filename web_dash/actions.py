@@ -433,6 +433,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         steam_update_enabled: bool | None = None,
         steam_update_selected_branch: str | None = None,
         update_branch_id: str | None = None,
+        steam_game_server_login_token: str | None = None,
         timeout_seconds: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> NodeAppMutationResult:
         json_payload: dict[str, object] = {"action": action.value}
@@ -471,6 +472,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload["steam_update_selected_branch"] = steam_update_selected_branch
         if update_branch_id is not None:
             json_payload["update_branch_id"] = update_branch_id
+        if steam_game_server_login_token is not None:
+            json_payload["steam_game_server_login_token"] = steam_game_server_login_token
         payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
@@ -1236,6 +1239,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         steam_update_enabled: bool | None = None,
         steam_update_selected_branch: str | None = None,
         update_branch_id: str | None = None,
+        steam_game_server_login_token: str | None = None,
         timeout_seconds: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> NodeAppMutationResult:
         required_level: Power_Level = required_app_mutation_level(action)
@@ -1267,6 +1271,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             steam_update_enabled=steam_update_enabled,
             steam_update_selected_branch=steam_update_selected_branch,
             update_branch_id=update_branch_id,
+            steam_game_server_login_token=steam_game_server_login_token,
             timeout_seconds=timeout_seconds,
         )
 
