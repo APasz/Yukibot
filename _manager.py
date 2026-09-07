@@ -32,7 +32,14 @@ from apps._config import (
     normalise_optional_friendly_name,
     normalise_optional_text,
 )
-from apps.ets import ETS_DEFAULT_CONNECTION_PORT, prepare_ets_server_installation, resolve_ets_connection_port
+from apps._scs_truck_simulator import (
+    SCS_DEFAULT_CONNECTION_PORT,
+    SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE,
+    ScsTruckSimulatorProfile,
+    prepare_scs_server_installation,
+    resolve_scs_connection_port,
+    scs_server_log_file_template,
+)
 from apps._steam import (
     cached_steam_update_branches,
     merge_steam_update_branches,
@@ -229,13 +236,28 @@ def _required_scope_steam_update_template(scope: str) -> SteamUpdateConfig:
     return preset.build_config()
 
 
-async def _prepare_ets_steam_install(
+async def _prepare_scs_truck_simulator_steam_install(
     directory: Path,
     request: AppInstanceCreateRequest,
 ) -> None:
-    """Create ETS2's isolated server home before its instance is registered."""
+    """Create an SCS truck simulator's isolated server home before registration."""
 
-    await prepare_ets_server_installation(directory=directory, connection_port=request.port)
+    profile = SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE.get(request.scope)
+    if profile is None:
+        raise ValueError(f"SCS truck simulator profile is not defined for scope {request.scope!r}.")
+    await prepare_scs_server_installation(directory=directory, connection_port=request.port, profile=profile)
+
+
+def _scs_truck_simulator_instance_template(profile: ScsTruckSimulatorProfile) -> AppInstanceTemplate:
+    """Build the standard SteamCMD installation template for one SCS profile."""
+
+    return AppInstanceTemplate(
+        label=profile.display_name,
+        server_log_file=scs_server_log_file_template(profile),
+        join_port=SCS_DEFAULT_CONNECTION_PORT,
+        steam_update_factory=lambda scope=profile.scope: _required_scope_steam_update_template(scope),
+        post_steam_install=_prepare_scs_truck_simulator_steam_install,
+    )
 
 
 _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
@@ -246,13 +268,10 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
         server_log_file="{WD}/Server.log",
         join_port=30814,
     ),
-    "ets": AppInstanceTemplate(
-        label="Euro Truck Simulator 2",
-        server_log_file="{WD}/home_data/Euro Truck Simulator 2/server.log.txt",
-        join_port=ETS_DEFAULT_CONNECTION_PORT,
-        steam_update_factory=lambda: _required_scope_steam_update_template("ets"),
-        post_steam_install=_prepare_ets_steam_install,
-    ),
+    **{
+        profile.scope: _scs_truck_simulator_instance_template(profile)
+        for profile in SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE.values()
+    },
     "factorio": AppInstanceTemplate(
         mods_dir="{WD}/mods",
         client_mods_dir="{WD}/mods",
@@ -1326,8 +1345,9 @@ class App_Manager(metaclass=config.Singleton):
         friendly_name = _validate_required_friendly_name(request.friendly_name)
         subfolder = self._validate_subfolder(request.subfolder)
         self._validate_optional_port(request.port)
-        if scope == "ets":
-            resolve_ets_connection_port(request.port)
+        scs_profile = SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE.get(scope)
+        if scs_profile is not None:
+            resolve_scs_connection_port(profile=scs_profile, port=request.port)
         server_log_file = self._validate_optional_config_path(
             request.server_log_file,
             label="Server log file",

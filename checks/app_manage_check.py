@@ -57,6 +57,7 @@ from apps._console import (
     execute_console_action,
 )
 from apps._mod import Mod
+from apps._scs_truck_simulator import ATS_PROFILE
 from apps._settings import ChoiceOption, ChoiceSpec
 from apps.minecraft import Minecraft, Minecraft_Config, MinecraftLoader, MinecraftRuntimeInfo
 from apps.sevendays import SevenDays
@@ -3228,6 +3229,49 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recipe.default_port, 27015)
         self.assertEqual(recipe.steam_update.app_id, 1948160)
         self.assertIsNotNone(recipe.post_steam_install)
+
+    async def test_ats_steam_install_recipe_initialises_the_server_before_registration(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            scope_path = temp_path / "apps" / "ats"
+            scope_path.mkdir(parents=True)
+            (scope_path / "__init__.py").write_text("", encoding="utf-8")
+            (scope_path / "instances.json").write_text("{}", encoding="utf-8")
+
+            os.chdir(temp_path)
+            try:
+                recipes = manager.list_steam_install_recipes()
+            finally:
+                os.chdir(original_cwd)
+
+            recipe = recipes[0]
+            post_steam_install = recipe.post_steam_install
+            self.assertIsNotNone(post_steam_install)
+            assert post_steam_install is not None
+            with patch("_manager.prepare_scs_server_installation", new=AsyncMock()) as prepare_install:
+                await post_steam_install(
+                    temp_path / "ats-alpha",
+                    AppInstanceCreateRequest(
+                        scope="ats",
+                        instance_key="alpha",
+                        friendly_name="ATS Alpha",
+                        subfolder="ats-alpha",
+                        port=32000,
+                    ),
+                )
+            prepare_install.assert_awaited_once_with(
+                directory=temp_path / "ats-alpha",
+                connection_port=32000,
+                profile=ATS_PROFILE,
+            )
+
+        self.assertEqual(len(recipes), 1)
+        self.assertEqual(recipe.scope, "ats")
+        self.assertEqual(recipe.label, "American Truck Simulator")
+        self.assertEqual(recipe.default_port, 27015)
+        self.assertEqual(recipe.steam_update.app_id, 2239530)
 
     async def test_load_instance_syncs_initial_instance_metadata(self) -> None:
         manager = object.__new__(App_Manager)

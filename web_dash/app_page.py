@@ -7264,6 +7264,9 @@ class ModWebAppPageMixin(
                                         else "Not configured"
                                     )
                                 ).classes("mod-subtitle text-xs")
+                                ui.label(
+                                    f"Game App ID: {steam_game_server_login_token_status.game_app_id}"
+                                ).classes("mod-subtitle text-xs")
                                 ui.link(
                                     "Manage tokens on Steam",
                                     STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL,

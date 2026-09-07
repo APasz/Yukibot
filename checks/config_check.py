@@ -180,6 +180,7 @@ class AppModCapabilitiesTests(unittest.TestCase):
             "factorio": ModDistributionMode.RAW_ENABLED,
             "beammp": ModDistributionMode.SERVER_PUSH,
             "ets": ModDistributionMode.NONE,
+            "ats": ModDistributionMode.NONE,
             "satisfactory": ModDistributionMode.NONE,
         }
 

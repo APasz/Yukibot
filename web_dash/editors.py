@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from _async_utils import run_blocking
 from apps._blueprint_files import BlueprintUploadPair, classify_blueprint_upload_filenames
+from apps._scs_truck_simulator import SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE
 from apps.sevendays import SevenDaysSaveArchiveInspection, inspect_sevendays_save_archive
 
 from .constants import (
@@ -799,19 +800,23 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         can_write: bool = self._user_has_level(user, model.save_write_level)
         app_scope: object = getattr(model, "app_scope", None)
         is_sevendays_app: bool = app_scope == config.AppScopes.sevendays.value
-        is_ets_app: bool = app_scope == config.AppScopes.ets.value
-        upload_item_label = "ETS2 server package file" if is_ets_app else "save"
-        upload_item_title = "ETS2 Server Package" if is_ets_app else "Save"
-        upload_selection_label = "ETS2 server package file" if is_ets_app else "save archive"
-        show_search: bool = not is_sevendays_app and not is_ets_app and len(save_options) > 1
-        show_sort: bool = not is_sevendays_app and not is_ets_app and len(save_options) > 1
+        scs_profile = SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE.get(app_scope) if isinstance(app_scope, str) else None
+        is_scs_truck_simulator_app: bool = scs_profile is not None
+        scs_app_abbreviation = "" if scs_profile is None else scs_profile.abbreviation
+        upload_item_label = f"{scs_app_abbreviation} server package file" if is_scs_truck_simulator_app else "save"
+        upload_item_title = f"{scs_app_abbreviation} Server Package" if is_scs_truck_simulator_app else "Save"
+        upload_selection_label = (
+            f"{scs_app_abbreviation} server package file" if is_scs_truck_simulator_app else "save archive"
+        )
+        show_search: bool = not is_sevendays_app and not is_scs_truck_simulator_app and len(save_options) > 1
+        show_sort: bool = not is_sevendays_app and not is_scs_truck_simulator_app and len(save_options) > 1
         show_root_selector: bool = (
-            not is_sevendays_app and not is_ets_app and model.supports_save_uploads and len(saves.roots) > 1
+            not is_sevendays_app and not is_scs_truck_simulator_app and model.supports_save_uploads and len(saves.roots) > 1
         )
         show_upload_action: bool = (
             model.supports_save_uploads
             and can_write
-            and (selected_root_id is not None or is_ets_app or is_sevendays_app)
+            and (selected_root_id is not None or is_scs_truck_simulator_app or is_sevendays_app)
         )
         show_write_lock_note: bool = (model.supports_save_uploads or model.supports_save_rename) and not can_write
         current_search_query: str = model.search_query
@@ -959,13 +964,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             sevendays_new_staged_upload_name = None
             sevendays_new_inspection = None
 
-        async def upload_ets_server_packages(event: "MultiUploadEventArguments") -> None:
+        async def upload_scs_server_packages(event: "MultiUploadEventArguments") -> None:
             upload_files = tuple(event.files)
             if not 1 <= len(upload_files) <= 2:
-                ui.notify("Choose one or both ETS2 server package files.", type="warning")
+                ui.notify(f"Choose one or both {scs_app_abbreviation} server package files.", type="warning")
                 return
             log.info(
-                "Relaying ETS2 server package upload through mod web: app=%s node=%s files=%s",
+                "Relaying %s server package upload through mod web: app=%s node=%s files=%s",
+                scs_app_abbreviation,
                 model.app_name,
                 model.node_name,
                 len(upload_files),
@@ -977,15 +983,15 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     user=user,
                 )
             except Exception as xcp:
-                ui.notify(f"ETS2 server package upload failed: {xcp}", type="negative", multi_line=True)
+                ui.notify(f"{scs_app_abbreviation} server package upload failed: {xcp}", type="negative", multi_line=True)
                 return
             upload_dialog.close()
             ui.notify(result.message, type="positive")
             self._guarded_reload(ui=ui)
 
         async def upload_generic_save(event: "MultiUploadEventArguments") -> None:
-            if is_ets_app:
-                await upload_ets_server_packages(event)
+            if is_scs_truck_simulator_app:
+                await upload_scs_server_packages(event)
                 return
             upload_files = tuple(event.files)
             if len(upload_files) != 1:
@@ -1018,7 +1024,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 return
             target: ModWebDirectUploadTarget = (
                 self._direct_inferred_save_upload_target(model=model, user=user)
-                if is_ets_app
+                if is_scs_truck_simulator_app
                 else self._direct_save_upload_target(model=model, user=user)
             )
             save_upload_control.props["url"] = target.url
@@ -1026,7 +1032,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 {"name": "Authorization", "value": target.authorization_header},
             ]
             form_fields: list[dict[str, str]] = [{"name": "upload_transport", "value": "direct"}]
-            if not is_ets_app:
+            if not is_scs_truck_simulator_app:
                 form_fields.insert(0, {"name": "root_id", "value": selected_save_root_id()})
             save_upload_control.props["form-fields"] = form_fields
             save_upload_control.props["field-name"] = "upload"
@@ -1232,8 +1238,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         title = (
                             "Upload 7D2D World"
                             if is_sevendays_app
-                            else "Upload ETS2 Server Package"
-                            if is_ets_app
+                            else f"Upload {scs_app_abbreviation} Server Package"
+                            if is_scs_truck_simulator_app
                             else "Upload Save"
                         )
                         description = (
@@ -1241,7 +1247,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             if is_sevendays_app
                             else (
                                 "Choose either or both exported package files. Both are required before the server can start."
-                                if is_ets_app
+                                if is_scs_truck_simulator_app
                                 else "Upload a replacement save archive for this app."
                             )
                         )
@@ -1269,14 +1275,18 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                 .classes("mod-config-select")
                             )
                         save_upload_control = ui.upload(
-                            label="Choose ETS2 Server Package Files" if is_ets_app else "Choose Save Archive",
+                            label=(
+                                f"Choose {scs_app_abbreviation} Server Package Files"
+                                if is_scs_truck_simulator_app
+                                else "Choose Save Archive"
+                            ),
                             auto_upload=True,
                             multiple=True,
-                            max_files=2 if is_ets_app else 1,
+                            max_files=2 if is_scs_truck_simulator_app else 1,
                             on_multi_upload=upload_generic_save,
                         ).classes("mod-file-upload-zone")
                         indirect_save_upload_url = str(save_upload_control.props["url"])
-                        save_upload_control.props["accept"] = ".sii,.dat" if is_ets_app else ".zip"
+                        save_upload_control.props["accept"] = ".sii,.dat" if is_scs_truck_simulator_app else ".zip"
                         if show_upload_action:
                             save_upload_control.on("start", direct_save_upload_started, args=[])
                             save_upload_control.on("uploaded", direct_save_upload_succeeded, args=[])
@@ -1298,11 +1308,11 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             with ui.column().classes(self._tab_section_body_classes()):
                 self._render_flat_tab_header(
                     ui=ui,
-                    title="Server Packages" if is_ets_app else "Saves",
+                    title="Server Packages" if is_scs_truck_simulator_app else "Saves",
                     description=(
-                        "Export packages from a matching ETS2 client with export_server_packages while a map is "
-                        "loaded, then upload both files below."
-                        if is_ets_app
+                        f"Export packages from a matching {scs_app_abbreviation} client with export_server_packages "
+                        "while a map is loaded, then upload both files below."
+                        if is_scs_truck_simulator_app
                         else self._save_card_description(model=model, save_count=len(saves.saves))
                     ),
                 )
@@ -1495,8 +1505,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                     (
                                         "Upload World"
                                         if is_sevendays_app
-                                        else "Upload ETS2 Server Package"
-                                        if is_ets_app
+                                        else f"Upload {scs_app_abbreviation} Server Package"
+                                        if is_scs_truck_simulator_app
                                         else "Upload Save"
                                     ),
                                     on_click=(
@@ -1510,8 +1520,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
                 if not saves.saves and not is_sevendays_app:
                     ui.label(
-                        "Upload both ETS2 server package files before starting this app."
-                        if is_ets_app
+                        f"Upload both {scs_app_abbreviation} server package files before starting this app."
+                        if is_scs_truck_simulator_app
                         else "No saves are currently available for this app."
                     ).classes("mod-subtitle text-sm mod-tab-empty-detail")
                     if show_write_lock_note:

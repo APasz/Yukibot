@@ -99,6 +99,7 @@ _MOD_CAPABILITIES_BY_SCOPE: dict[str, AppModCapabilities] = {
         supports_raw_download=True,
     ),
     "ets": _DEFAULT_MOD_CAPABILITIES,
+    "ats": _DEFAULT_MOD_CAPABILITIES,
     "satisfactory": _DEFAULT_MOD_CAPABILITIES,
 }
 
@@ -824,6 +825,7 @@ _APP_TITLE_FONT_AUTO_BY_SCOPE: dict[str, AppTitleFont] = {
     "sevendays": AppTitleFont.BEBAS_NEUE,
     "beammp": AppTitleFont.MONTSERRAT,
     "ets": AppTitleFont.OSWALD,
+    "ats": AppTitleFont.OSWALD,
 }
 
 _APP_TITLE_FONT_BY_VALUE: dict[str, AppTitleFont] = {font.value: font for font in AppTitleFont}

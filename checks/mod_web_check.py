@@ -7843,6 +7843,7 @@ class ModWebTests(unittest.TestCase):
                 "7 Days to Die",
                 "BeamMP",
                 "Euro Truck Simulator 2",
+                "American Truck Simulator",
                 "Factorio",
                 "Satisfactory",
             ),
@@ -14281,6 +14282,24 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(ets_ui.upload_kwargs["label"], "Choose ETS2 Server Package Files")
             self.assertTrue(callable(ets_ui.upload_kwargs["on_multi_upload"]))
             self.assertEqual(ets_ui.upload_control.props["accept"], ".sii,.dat")
+
+            ats_model_object = cast(SimpleNamespace, cast(object, ets_model))
+            ats_model_object.app_friendly = "ATS Alpha"
+            ats_model_object.app_scope = config.AppScopes.ats.value
+            ats_model_object.app_name = "ats_alpha"
+            ats_model_object.saves = NodeSaveList(
+                app_name="ats_alpha",
+                app_friendly="ATS Alpha",
+                node="yuki",
+                roots=ats_model_object.saves.roots,
+                saves=(),
+            )
+            ats_ui = FakeUi()
+            service._render_saves_editor(ui=cast(ModWebUi, cast(object, ats_ui)), model=ets_model, user=user)
+
+            self.assertEqual(ats_ui.upload_kwargs["label"], "Choose ATS Server Package Files")
+            self.assertEqual(ats_ui.upload_kwargs["max_files"], 2)
+            self.assertEqual(ats_ui.upload_control.props["accept"], ".sii,.dat")
 
         self.assertIn("No saves match that search.", [label.text for label in ui.labels])
 

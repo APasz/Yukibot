@@ -117,13 +117,13 @@ SteamCMD-backed apps fetch their publisher-provided version and beta branches fr
 
 New Satisfactory servers are claimed from the game client. Use the admin password entered during installation when claiming the server; Yukibot waits for that claim and enables API management automatically afterwards.
 
-### ETS2 first setup
+### ETS2 and ATS first setup
 
-Euro Truck Simulator 2 dedicated servers install and update through SteamCMD. New installs enable Steam updates automatically; existing instances can enable them from **Properties → Update Configuration**. Each Yukibot instance receives an isolated ETS2 data home and its selected connection port; the query port is the next port number. Permit both TCP and UDP for that pair (the default is 27015/27016).
+Euro Truck Simulator 2 and American Truck Simulator dedicated servers install and update through SteamCMD. New installs enable Steam updates automatically; existing instances can enable them from **Properties → Update Configuration**. Each Yukibot instance receives an isolated data home and its selected connection port; the query port is the next port number. Permit both TCP and UDP for that pair (the default is 27015/27016).
 
-SCS requires a package pair exported by a matching ETS2 client. Enable the developer console, load a map, and run `export_server_packages`; then use the instance's **Saves** tab (headed **Server Packages** for ETS2) to upload both `server_packages.sii` and `server_packages.dat`. Yukibot blocks startup until both non-empty files are present.
+SCS requires a package pair exported by a matching game client. Enable the developer console, load a map, and run `export_server_packages`; then use the instance's **Saves** tab (headed **Server Packages**) to upload both `server_packages.sii` and `server_packages.dat`. Yukibot blocks startup until both non-empty files are present.
 
-For a persistent Steam server identity, create a Steam Game Server Login Token from **Properties → Steam Game Server Login Token**. ETS2 tokens must use the game App ID `227300`, not the dedicated-server App ID `1948160`.
+For a persistent Steam server identity, create a Steam Game Server Login Token from **Properties → Steam Game Server Login Token**. Tokens must use the game App ID, not the dedicated-server App ID: ETS2 is `227300` (server `1948160`), and ATS is `270880` (server `2239530`).
 
 ### Type Checking
 

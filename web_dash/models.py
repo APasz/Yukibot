@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO
 
+from apps._scs_truck_simulator import SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE
 from apps.minecraft import (
     Minecraft,
     MinecraftCookingRecipe,
@@ -264,14 +265,18 @@ class ModWebModelsMixin(ModWebServiceSupport):
     )
     _NODE_SCOPED_PATH_PREFIX: str = "/mod-web/nodes/"
     _DEFAULT_APP_COLOR_HEX: str = "#96212B"
+    _SCS_APP_COLOR_HEX_BY_SCOPE: dict[str, str] = {
+        scope: f"#{profile.manage_embed_color:06X}"
+        for scope, profile in SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE.items()
+    }
     _APP_COLOR_HEX_BY_SCOPE: dict[str, str] = {
         "base": "#6B7280",
         "beammp": "#F97316",
-        "ets": "#2563EB",
         "factorio": "#DC6B0F",
         "minecraft": "#22C55E",
         "satisfactory": "#F59E0B",
         "sevendays": "#B91C1C",
+        **_SCS_APP_COLOR_HEX_BY_SCOPE,
     }
 
     @staticmethod

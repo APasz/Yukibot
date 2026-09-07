@@ -393,7 +393,7 @@ class ETSVersionDetectionTests(unittest.TestCase):
             )
 
             async def _prepare() -> None:
-                with patch("apps.ets.asyncio.create_subprocess_exec", new=AsyncMock()) as launch:
+                with patch("apps._scs_truck_simulator.asyncio.create_subprocess_exec", new=AsyncMock()) as launch:
                     await prepare_ets_server_installation(directory=root, connection_port=31000)
                 launch.assert_not_awaited()
 
@@ -439,8 +439,8 @@ class ETSVersionDetectionTests(unittest.TestCase):
 
             async def _prepare() -> None:
                 with (
-                    patch("apps.ets.asyncio.create_subprocess_exec", new=AsyncMock(side_effect=_launch)),
-                    patch("apps.ets.os.killpg") as killpg,
+                    patch("apps._scs_truck_simulator.asyncio.create_subprocess_exec", new=AsyncMock(side_effect=_launch)),
+                    patch("apps._scs_truck_simulator.os.killpg") as killpg,
                 ):
                     await prepare_ets_server_installation(directory=root, connection_port=32000)
                 killpg.assert_called_once_with(process.pid, signal.SIGTERM)
@@ -477,8 +477,8 @@ class ETSVersionDetectionTests(unittest.TestCase):
 
             async def _prepare() -> None:
                 with (
-                    patch("apps.ets.asyncio.create_subprocess_exec", new=AsyncMock(side_effect=_launch)),
-                    patch("apps.ets.os.killpg") as killpg,
+                    patch("apps._scs_truck_simulator.asyncio.create_subprocess_exec", new=AsyncMock(side_effect=_launch)),
+                    patch("apps._scs_truck_simulator.os.killpg") as killpg,
                 ):
                     await prepare_ets_server_installation(directory=root, connection_port=None)
                 killpg.assert_called_once_with(4321, signal.SIGTERM)

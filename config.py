@@ -268,6 +268,7 @@ class AppScopes(enum.StrEnum):
     sevendays = "sevendays"
     beammp = "beammp"
     ets = "ets"
+    ats = "ats"
     factorio = "factorio"
     satisfactory = "satisfactory"
 
@@ -282,6 +283,8 @@ class AppScopes(enum.StrEnum):
                 return "BeamMP"
             case AppScopes.ets:
                 return "Euro Truck Simulator 2"
+            case AppScopes.ats:
+                return "American Truck Simulator"
             case AppScopes.factorio:
                 return "Factorio"
             case AppScopes.satisfactory:
