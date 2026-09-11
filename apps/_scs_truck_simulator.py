@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from re import Match
 from types import MappingProxyType
-from typing import ClassVar, Final, cast
+from typing import Any, ClassVar, Final, cast
 
 import hikari
 
@@ -168,6 +168,13 @@ class _ScsServerConfigAssignment:
 class _ScsServerConfigAssignmentLocation:
     index: int
     assignment: _ScsServerConfigAssignment
+
+
+@dataclass(frozen=True, slots=True)
+class _ScsServerConfigBlockLocation:
+    opening_line_index: int
+    closing_line_index: int
+    closing_column: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,6 +490,161 @@ def _parse_scs_server_config_string(raw_value: str) -> str:
 
 def _serialise_scs_server_config_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _serialise_scs_server_config_setting_value(setting: Setting[Any]) -> str:
+    value_text = setting.serialise_value()
+    if setting.value_type is str:
+        return _serialise_scs_server_config_string(value_text)
+    return value_text
+
+
+def _scs_server_config_leading_whitespace(value: str) -> str:
+    return value[: len(value) - len(value.lstrip())]
+
+
+def _find_scs_server_config_block(
+    *,
+    lines: list[str],
+    config_path: Path,
+    profile: ScsTruckSimulatorProfile,
+) -> _ScsServerConfigBlockLocation | None:
+    """Locate the enclosing SII object for managed server settings."""
+
+    opening_line_index: int | None = None
+    brace_depth = 0
+    in_block_comment = False
+    for line_index, line in enumerate(lines):
+        content, _ = _split_line_ending(line)
+        code_content, in_block_comment = _mask_scs_server_config_comments(
+            content,
+            in_block_comment=in_block_comment,
+        )
+        is_server_config_declaration = False
+        if opening_line_index is None:
+            assignment_match = _SCS_SERVER_CONFIG_ASSIGNMENT_RE.fullmatch(code_content)
+            is_server_config_declaration = (
+                assignment_match is not None and assignment_match.group("key").casefold() == "server_config"
+            )
+
+        in_string = False
+        escaped = False
+        for column, character in enumerate(code_content):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    in_string = False
+                continue
+            if character == '"':
+                in_string = True
+                continue
+            if opening_line_index is None:
+                if is_server_config_declaration and character == "{":
+                    opening_line_index = line_index
+                    brace_depth = 1
+                continue
+            if character == "{":
+                brace_depth += 1
+                continue
+            if character == "}":
+                brace_depth -= 1
+                if brace_depth == 0:
+                    return _ScsServerConfigBlockLocation(
+                        opening_line_index=opening_line_index,
+                        closing_line_index=line_index,
+                        closing_column=column,
+                    )
+
+    if opening_line_index is not None:
+        raise ValueError(f"{profile.abbreviation} server config has an unterminated server_config block: {config_path}")
+    return None
+
+
+def _scs_server_config_indentation(
+    *,
+    lines: list[str],
+    block: _ScsServerConfigBlockLocation,
+    last_setting_location: _ScsServerConfigAssignmentLocation | None,
+) -> str:
+    if (
+        last_setting_location is not None
+        and block.opening_line_index < last_setting_location.index < block.closing_line_index
+    ):
+        return _scs_server_config_leading_whitespace(last_setting_location.assignment.prefix)
+
+    in_block_comment = False
+    for line_index, line in enumerate(lines):
+        assignment, in_block_comment = _parse_scs_server_config_assignment(
+            line,
+            in_block_comment=in_block_comment,
+        )
+        if (
+            assignment is not None
+            and block.opening_line_index < line_index < block.closing_line_index
+        ):
+            return _scs_server_config_leading_whitespace(assignment.prefix)
+
+    opening_content, _ = _split_line_ending(lines[block.opening_line_index])
+    return f"{_scs_server_config_leading_whitespace(opening_content)} "
+
+
+def _scs_server_config_line_ending(lines: list[str]) -> str:
+    for line in lines:
+        _, line_ending = _split_line_ending(line)
+        if line_ending:
+            return line_ending
+    return "\n"
+
+
+def _append_missing_scs_server_config_settings(
+    *,
+    lines: list[str],
+    assignments: list[str],
+    block: _ScsServerConfigBlockLocation | None,
+    last_setting_location: _ScsServerConfigAssignmentLocation | None,
+) -> None:
+    if not assignments:
+        return
+
+    line_ending = _scs_server_config_line_ending(lines)
+    if block is not None:
+        indentation = _scs_server_config_indentation(
+            lines=lines,
+            block=block,
+            last_setting_location=last_setting_location,
+        )
+        inserted_lines = [f"{indentation}{assignment}{line_ending}" for assignment in assignments]
+        if block.opening_line_index != block.closing_line_index:
+            lines[block.closing_line_index:block.closing_line_index] = inserted_lines
+            return
+
+        content, closing_line_ending = _split_line_ending(lines[block.closing_line_index])
+        before_closing_brace = content[: block.closing_column].rstrip()
+        after_closing_brace = content[block.closing_column :]
+        closing_indentation = _scs_server_config_leading_whitespace(content)
+        lines[block.closing_line_index] = (
+            f"{before_closing_brace}{line_ending}{''.join(inserted_lines)}"
+            f"{closing_indentation}{after_closing_brace}{closing_line_ending}"
+        )
+        return
+
+    # Wrapper-free configs have no enclosing SII object to target.
+    insertion_index = len(lines)
+    indentation = ""
+    if last_setting_location is not None:
+        insertion_index = last_setting_location.index + 1
+        indentation = _scs_server_config_leading_whitespace(last_setting_location.assignment.prefix)
+        content, existing_line_ending = _split_line_ending(lines[last_setting_location.index])
+        if not existing_line_ending:
+            lines[last_setting_location.index] = f"{content}{line_ending}"
+    elif lines:
+        content, existing_line_ending = _split_line_ending(lines[-1])
+        if not existing_line_ending:
+            lines[-1] = f"{content}{line_ending}"
+    lines[insertion_index:insertion_index] = [f"{indentation}{assignment}{line_ending}" for assignment in assignments]
 
 
 def _find_scs_server_config_assignment(
@@ -918,6 +1080,7 @@ class ScsTruckSimulatorSettings(App_Settings):
         seen_keys: set[str] = set()
         in_block_comment = False
         lines = data.splitlines(keepends=True)
+        last_setting_location: _ScsServerConfigAssignmentLocation | None = None
         for index, line in enumerate(lines):
             assignment, in_block_comment = _parse_scs_server_config_assignment(
                 line,
@@ -934,15 +1097,31 @@ class ScsTruckSimulatorSettings(App_Settings):
                     f"{self.profile.abbreviation} server config contains multiple {setting.key} entries: {self.pointer}"
                 )
             seen_keys.add(setting_key)
-            value_text = setting.serialise_value()
-            if setting.value_type is str:
-                value_text = _serialise_scs_server_config_string(value_text)
+            value_text = _serialise_scs_server_config_setting_value(setting)
             lines[index] = f"{assignment.prefix}{value_text}{assignment.suffix}{assignment.line_ending}"
+            last_setting_location = _ScsServerConfigAssignmentLocation(index=index, assignment=assignment)
         _ensure_scs_server_config_block_comments_closed(
             in_block_comment=in_block_comment,
             config_path=self.pointer,
             profile=self.profile,
         )
+        missing_assignments = [
+            f"{setting.key}: {_serialise_scs_server_config_setting_value(setting)}"
+            for setting in self.options
+            if setting.key.casefold() not in seen_keys
+        ]
+        if missing_assignments:
+            block = _find_scs_server_config_block(
+                lines=lines,
+                config_path=self.pointer,
+                profile=self.profile,
+            )
+            _append_missing_scs_server_config_settings(
+                lines=lines,
+                assignments=missing_assignments,
+                block=block,
+                last_setting_location=last_setting_location,
+            )
         self.pointer.write_text("".join(lines), config.STR_ENCODE)
         return data
 

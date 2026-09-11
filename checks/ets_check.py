@@ -156,10 +156,78 @@ class ETSSettingsTests(unittest.TestCase):
 
             settings = ETS_Settings(config_path)
             settings_by_key = {setting.key: setting for setting in settings.options}
+            settings.save()
+            saved = config_path.read_text(encoding="utf-8")
 
         self.assertEqual(settings_by_key["lobby_name"].value, "")
         self.assertEqual(settings_by_key["max_players"].value, 8)
         self.assertFalse(settings_by_key["traffic"].value)
+        self.assertIn('lobby_name: ""', saved)
+        self.assertIn("name_tags: true", saved)
+
+    def test_server_config_settings_save_missing_values_inside_server_config_block(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "server_config.sii"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "SiiNunit",
+                        "{",
+                        "server_config : _nameless.1c95.f2e0 {",
+                        " traffic: false",
+                        ' description: "Text with { brace"',
+                        " server_logon_token: TOKEN // preserve unknown fields",
+                        "}",
+                        "}",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            settings = ETS_Settings(config_path)
+            settings_by_key = {setting.key: setting for setting in settings.options}
+            settings_by_key["lobby_name"].update('New "Lobby"')
+            settings_by_key["max_players"].update("4")
+
+            settings.save()
+            saved = config_path.read_text(encoding="utf-8")
+            reloaded = ETS_Settings(config_path)
+            reloaded_by_key = {setting.key: setting for setting in reloaded.options}
+            saved_lines = saved.splitlines()
+            reloaded.save()
+            saved_after_round_trip = config_path.read_text(encoding="utf-8")
+
+        server_config_closing_index = saved_lines.index("}")
+        for setting in reloaded.options:
+            matching_indexes = [
+                index
+                for index, line in enumerate(saved_lines)
+                if line.lstrip().startswith(f"{setting.key}:")
+            ]
+            self.assertEqual(len(matching_indexes), 1, setting.key)
+            self.assertLess(matching_indexes[0], server_config_closing_index, setting.key)
+        self.assertEqual(reloaded_by_key["lobby_name"].value, 'New "Lobby"')
+        self.assertEqual(reloaded_by_key["max_players"].value, 4)
+        self.assertIn(' description: "Text with { brace"', saved)
+        self.assertIn(" server_logon_token: TOKEN // preserve unknown fields", saved)
+        self.assertEqual(saved_after_round_trip, saved)
+
+    def test_server_config_settings_expand_compact_server_config_block_when_saving_missing_values(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "server_config.sii"
+            config_path.write_text("SiiNunit\n{\nserver_config : Server {}\n}", encoding="utf-8")
+            settings = ETS_Settings(config_path)
+            traffic = next(setting for setting in settings.options if setting.key == "traffic")
+            traffic.update("false")
+
+            settings.save()
+            saved = config_path.read_text(encoding="utf-8")
+            reloaded = ETS_Settings(config_path)
+            reloaded_by_key = {setting.key: setting for setting in reloaded.options}
+
+        self.assertIn("server_config : Server {\n", saved)
+        self.assertIn("\n lobby_name: \"\"\n", saved)
+        self.assertTrue(saved.endswith("\n}\n}"))
+        self.assertFalse(reloaded_by_key["traffic"].value)
 
     def test_server_config_settings_reject_malformed_quoted_text_and_duplicate_keys(self) -> None:
         with TemporaryDirectory() as tmp:
