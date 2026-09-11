@@ -39,6 +39,7 @@ from apps.minecraft import (
     MinecraftStonecuttingRecipe,
     Mod_MC,
     _detect_minecraft_mod_version,
+    _squaremap_internal_webserver_port,
     _load_squaremap_web_address,
     _managed_kubejs_recipe_script_source,
     generated_minecraft_recipe_id,
@@ -1178,6 +1179,34 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
             config_path.write_text('web-address: "http://localhost:8080" # dev web root\n', encoding="utf-8")
 
             self.assertEqual(_load_squaremap_web_address(config_path), "http://localhost:8080")
+
+    def test_squaremap_internal_webserver_port_reads_enabled_configuration(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.yml"
+            config_path.write_text(
+                "settings:\n  internal-webserver:\n    enabled: true\n    port: 18080\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(_squaremap_internal_webserver_port(config_path), 18080)
+
+    def test_squaremap_internal_webserver_port_omits_disabled_listener(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.yml"
+            config_path.write_text(
+                "settings:\n  internal-webserver:\n    enabled: false\n    port: 18080\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(_squaremap_internal_webserver_port(config_path))
+
+    def test_squaremap_internal_webserver_port_rejects_a_non_file_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.yml"
+            config_path.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "config is not a file"):
+                _squaremap_internal_webserver_port(config_path)
 
     def test_cancel_background_task_handles_foreign_event_loop(self) -> None:
         app = object.__new__(Minecraft)

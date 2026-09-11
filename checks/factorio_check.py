@@ -241,12 +241,18 @@ class FactorioVersionDetectionTests(unittest.TestCase):
     def test_selected_save_changes_the_generated_start_command(self) -> None:
         app = cast(Any, object.__new__(Factorio))
         with patch("apps.factorio.config.env_req", return_value="secret"):
-            command = app._factorio_start_command(Path("/srv/factorio/data/server-settings.json"), save_file="Alpha.zip")
+            command = app._factorio_start_command(
+                Path("/srv/factorio/data/server-settings.json"),
+                save_file="Alpha.zip",
+                game_port=34197,
+            )
 
         self.assertEqual(
             command[:3],
             ["bin/x64/factorio", "--start-server", "saves/Alpha.zip"],
         )
+        self.assertIn("--port", command)
+        self.assertIn("34197", command)
 
     def test_factorio_does_not_support_save_renames(self) -> None:
         app = cast(Any, object.__new__(Factorio))

@@ -295,6 +295,21 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(manager.launched, [app_b, app_a])
 
+    def test_restart_auto_launch_plan_rejects_port_conflicts(self) -> None:
+        candidate = _build_fake_app(friendly="Minecraft Alpha")
+        active = _build_fake_app(friendly="Factorio Lab")
+        manager = _LaunchManager()
+        manager.listening_port_conflict = Mock(return_value=object())  # type: ignore[method-assign]
+
+        fits = main._restart_auto_launch_fits_after_ready(
+            manager,
+            candidate,
+            active_apps=(active,),
+        )
+
+        self.assertFalse(fits)
+        manager.listening_port_conflict.assert_called_once_with(candidate, other_apps=(active,))
+
     def test_clear_managed_files_once_skips_when_service_disabled(self) -> None:
         with TemporaryDirectory() as temp_dir:
             folder = Path(temp_dir)

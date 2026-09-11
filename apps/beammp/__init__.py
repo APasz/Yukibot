@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from logging import Logger
 from pathlib import Path
 from re import Match
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import hikari
 import tomli_w
@@ -25,7 +25,7 @@ from _discord import (
     render_plain_reference_prefix,
 )
 from _security import Power_Level
-from apps._app import App
+from apps._app import App, AppPortClaim, NetworkProtocol, tcp_udp_port_claims
 from apps._config import App_Config, AppVersion, Mod_Config, ModPageLink
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._mod import Mod, humanise_mod_identifier
@@ -50,6 +50,8 @@ from relay_notices import (
 log: Logger = logging.getLogger(__name__)
 
 _BEAMMP_METADATA_MAX_BYTES = 1_048_576
+_BEAMMP_DEFAULT_PORT: Final[int] = 30814
+_BEAMMP_DEFAULT_HTTP_PORT: Final[int] = 8080
 _BEAMMP_MOD_VERSION_RE = re.compile(
     r"(?:^|[-_. ])v?(?P<version>\d+(?:\.\d+)+(?:[-+._][A-Za-z0-9]+)*)$",
     re.IGNORECASE,
@@ -62,6 +64,78 @@ class BeamMpModMetadata:
     title: str | None = None
     version: str | None = None
     homepage: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BeamMPNetworkPorts:
+    game_port: int
+    http_port: int | None
+
+
+def _beammp_config_port(
+    raw_port: object | None,
+    *,
+    default_port: int,
+    label: str,
+    pointer: Path,
+) -> int:
+    if raw_port is None:
+        return default_port
+    if type(raw_port) is not int:
+        raise ValueError(f"BeamMP {label} must be an integer: {pointer}")
+    if not 1 <= raw_port <= 65535:
+        raise ValueError(f"BeamMP {label} must be between 1 and 65535: {pointer}")
+    return raw_port
+
+
+def _beammp_network_ports(pointer: Path, *, fallback: int | None) -> BeamMPNetworkPorts:
+    default_port = _beammp_config_port(
+        fallback,
+        default_port=_BEAMMP_DEFAULT_PORT,
+        label="configured port",
+        pointer=pointer,
+    )
+    if not pointer.exists():
+        return BeamMPNetworkPorts(game_port=default_port, http_port=None)
+    if not pointer.is_file():
+        raise ValueError(f"BeamMP server config is not a file: {pointer}")
+    data = cast(Mapping[str, object], tomllib.loads(pointer.read_text(config.STR_ENCODE)))
+    general = data.get("General")
+    if general is None:
+        game_port = default_port
+    elif not isinstance(general, Mapping):
+        raise ValueError(f"BeamMP General config must be a table: {pointer}")
+    else:
+        game_port = _beammp_config_port(
+            general.get("Port"),
+            default_port=default_port,
+            label="Port",
+            pointer=pointer,
+        )
+
+    http = data.get("HTTP")
+    if http is None:
+        return BeamMPNetworkPorts(game_port=game_port, http_port=None)
+    if not isinstance(http, Mapping):
+        raise ValueError(f"BeamMP HTTP config must be a table: {pointer}")
+    enabled = http.get("HTTPServerEnabled", False)
+    if type(enabled) is not bool:
+        raise ValueError(f"BeamMP HTTPServerEnabled must be a boolean: {pointer}")
+    http_port = (
+        _beammp_config_port(
+            http.get("HTTPServerPort"),
+            default_port=_BEAMMP_DEFAULT_HTTP_PORT,
+            label="HTTPServerPort",
+            pointer=pointer,
+        )
+        if enabled
+        else None
+    )
+    return BeamMPNetworkPorts(game_port=game_port, http_port=http_port)
+
+
+def _beammp_server_port(pointer: Path, *, fallback: int | None) -> int:
+    return _beammp_network_ports(pointer, fallback=fallback).game_port
 
 
 def _beammp_metadata_text(payload: Mapping[str, object], *field_names: str) -> str | None:
@@ -371,6 +445,30 @@ class BeamMP(App[App_Config]):
                 suffixes=frozenset[str]({".toml"}),
             ),
         )
+
+    @property
+    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+        ports = _beammp_network_ports(
+            self.directory / "ServerConfig.toml",
+            fallback=self.cfg.join_port,
+        )
+        claims = list(tcp_udp_port_claims(port=ports.game_port, purpose="game server"))
+        if ports.http_port is not None:
+            claims.append(AppPortClaim(protocol=NetworkProtocol.TCP, port=ports.http_port, purpose="HTTP server"))
+        return tuple(claims)
+
+    def launch_environment(self) -> Mapping[str, str]:
+        """Keep BeamMP's environment-level port overrides aligned with its reservation."""
+
+        ports = _beammp_network_ports(
+            self.directory / "ServerConfig.toml",
+            fallback=self.cfg.join_port,
+        )
+        return {
+            "BEAMMP_PORT": str(ports.game_port),
+            "BEAMMP_PROVIDER_PORT_ENV": "",
+            "BEAMMP_PROVIDER_DISABLE_CONFIG": "0",
+        }
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")

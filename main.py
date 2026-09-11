@@ -152,6 +152,8 @@ def _restart_auto_launch_fits_after_ready(
 ) -> bool:
     if any(active_app.scope == candidate.scope for active_app in active_apps):
         return False
+    if app_manager.listening_port_conflict(candidate, other_apps=active_apps) is not None:
+        return False
 
     capacity: NodeCapacityProfile = app_manager.node_capacity()
     active_cpu_points: int = sum(active_app.cfg.resource_points.running.cpu_points for active_app in active_apps)

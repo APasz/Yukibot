@@ -44,7 +44,9 @@ from apps._app import (
     App,
     AppActivityProvider,
     AppActivityProviderMetadata,
+    AppPortClaim,
     AppRuntimeFaultKind,
+    NetworkProtocol,
     RelayAdvancementTerms,
 )
 from apps._config import (
@@ -197,7 +199,9 @@ PLAYER_LIST_COUNT_RE = re.compile(
 )
 PLAYER_LIST_FALLBACK_RE = re.compile(r"(?P<online>\d+)\D+(?P<max>\d+)")
 _PLAYER_NAME_RE = re.compile(_PLAYER_NAME_PATTERN)
+DEFAULT_MINECRAFT_SERVER_PORT = 25565
 DEFAULT_MINECRAFT_RCON_PORT = 25575
+DEFAULT_SQUAREMAP_WEBSERVER_PORT = 8080
 GAMEMODE_CHOICES = ChoiceSpec(
     ChoiceOption("survival"),
     ChoiceOption("creative"),
@@ -437,7 +441,10 @@ _KUBEJS_EVENT_RE = re.compile(
 )
 _SQUAREMAP_MOD_BASE_NAME = "squaremap"
 _SQUAREMAP_PUBLIC_PATH = "/squaremap/"
-_SQUAREMAP_CONFIG_RELATIVE_PATH = Path("squaremap/config.yml")
+_SQUAREMAP_CONFIG_RELATIVE_PATHS: tuple[Path, ...] = (
+    Path("squaremap/config.yml"),
+    Path("config/squaremap/config.yml"),
+)
 _SQUAREMAP_WEB_ROOT_RELATIVE_PATH = Path("squaremap/web")
 _SQUAREMAP_WEB_ADDRESS_RE: re.Pattern[str] = re.compile(r"^\s*web-address\s*:\s*(?P<url>.+?)\s*$")
 _SQUAREMAP_WORLD_NAME = "minecraft_overworld"
@@ -1931,15 +1938,31 @@ class MinecraftServerPropertiesSnapshot:
     rcon_port: int | None
     rcon_password: str | None
     max_players: int | None
+    server_port: int | None = None
+    enable_query: bool | None = None
+    query_port: int | None = None
+    management_server_enabled: bool | None = None
+    management_server_port: int | None = None
 
     @classmethod
     def load(cls, pointer: Path) -> "MinecraftServerPropertiesSnapshot":
         properties = _load_server_properties_map(pointer)
         return cls(
+            server_port=_parse_optional_server_int(properties.get("server-port"), key="server-port"),
             enable_rcon=_parse_optional_server_bool(properties.get("enable-rcon"), key="enable-rcon"),
             rcon_port=_parse_optional_server_int(properties.get("rcon.port"), key="rcon.port"),
             rcon_password=properties.get("rcon.password"),
             max_players=_parse_optional_server_int(properties.get("max-players"), key="max-players"),
+            enable_query=_parse_optional_server_bool(properties.get("enable-query"), key="enable-query"),
+            query_port=_parse_optional_server_int(properties.get("query.port"), key="query.port"),
+            management_server_enabled=_parse_optional_server_bool(
+                properties.get("management-server-enabled"),
+                key="management-server-enabled",
+            ),
+            management_server_port=_parse_optional_server_int(
+                properties.get("management-server-port"),
+                key="management-server-port",
+            ),
         )
 
 
@@ -1951,6 +1974,16 @@ def _load_server_properties_snapshot(pointer: Path) -> MinecraftServerProperties
     except (OSError, ValueError) as xcp:
         log.warning("Failed to parse Minecraft server properties at %s: %s", pointer, xcp)
         return None
+
+
+def _load_server_properties_for_port_claims(pointer: Path) -> MinecraftServerPropertiesSnapshot | None:
+    """Load the current server properties, rejecting an unreadable live configuration."""
+
+    if not pointer.exists():
+        return None
+    if not pointer.is_file():
+        raise ValueError(f"Minecraft server properties path is not a file: {pointer}")
+    return MinecraftServerPropertiesSnapshot.load(pointer)
 
 
 def _normalise_minecraft_mod_version_token(raw: str) -> tuple[str, bool] | None:
@@ -2385,6 +2418,68 @@ def _build_squaremap_public_url(*, public_base_url: str, world: str) -> str:
     if not parsed.scheme or parsed.hostname is None:
         raise ValueError("PUBLIC_BASE_URL must include a scheme and host.")
     return urlunsplit((parsed.scheme, parsed.netloc, _SQUAREMAP_PUBLIC_PATH, urlencode({"world": world}), ""))
+
+
+def _squaremap_config_path(directory: Path) -> Path:
+    for relative_path in _SQUAREMAP_CONFIG_RELATIVE_PATHS:
+        pointer = directory / relative_path
+        if pointer.is_file():
+            return pointer
+    return directory / _SQUAREMAP_CONFIG_RELATIVE_PATHS[0]
+
+
+def _squaremap_internal_webserver_port(pointer: Path) -> int | None:
+    """Return Squaremap's enabled internal HTTP listener, if any."""
+
+    if not pointer.exists():
+        return DEFAULT_SQUAREMAP_WEBSERVER_PORT
+    if not pointer.is_file():
+        raise ValueError(f"Squaremap config is not a file: {pointer}")
+    lines = pointer.read_text(encoding="utf-8").splitlines()
+
+    settings_indent: int | None = None
+    webserver_indent: int | None = None
+    webserver_enabled = True
+    webserver_port = DEFAULT_SQUAREMAP_WEBSERVER_PORT
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indentation = len(line) - len(line.lstrip())
+
+        if settings_indent is None:
+            if re.fullmatch(r"settings\s*:\s*(?:#.*)?", stripped):
+                settings_indent = indentation
+            continue
+
+        if webserver_indent is None:
+            if indentation <= settings_indent:
+                settings_indent = None
+                continue
+            if re.fullmatch(r"internal-webserver\s*:\s*(?:#.*)?", stripped):
+                webserver_indent = indentation
+            continue
+
+        if indentation <= webserver_indent:
+            webserver_indent = None
+            continue
+        if scalar_match := re.fullmatch(r"(?P<key>enabled|port)\s*:\s*(?P<value>.*?)\s*(?:#.*)?", stripped):
+            raw_value = scalar_match.group("value").strip().strip("\"'")
+            if scalar_match.group("key") == "enabled":
+                normalised = raw_value.casefold()
+                if normalised not in {"true", "false"}:
+                    raise ValueError(f"Squaremap internal webserver enabled value is invalid: {raw_value!r}")
+                webserver_enabled = normalised == "true"
+            else:
+                if not raw_value.isdecimal():
+                    raise ValueError(f"Squaremap internal webserver port is invalid: {raw_value!r}")
+                webserver_port = int(raw_value)
+
+    if not webserver_enabled:
+        return None
+    if not 1 <= webserver_port <= 65535:
+        raise ValueError(f"Squaremap internal webserver port must be between 1 and 65535, got {webserver_port}")
+    return webserver_port
 
 
 def _load_squaremap_web_address(pointer: Path) -> str | None:
@@ -3367,6 +3462,46 @@ class Minecraft(App[Minecraft_Config]):
 
         log.debug(f"{__name__}.Created")
 
+    @property
+    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+        server_properties = _load_server_properties_for_port_claims(self.directory / "server.properties")
+        game_port = (
+            server_properties.server_port
+            if server_properties is not None and server_properties.server_port is not None
+            else DEFAULT_MINECRAFT_SERVER_PORT
+        )
+        claims = [AppPortClaim(protocol=NetworkProtocol.TCP, port=game_port, purpose="game server")]
+        if server_properties is not None and server_properties.enable_query is True:
+            query_port = (
+                game_port if server_properties.query_port is None else server_properties.query_port
+            )
+            claims.append(AppPortClaim(protocol=NetworkProtocol.UDP, port=query_port, purpose="server query"))
+        if server_properties is not None and server_properties.enable_rcon is True:
+            rcon_port = (
+                DEFAULT_MINECRAFT_RCON_PORT if server_properties.rcon_port is None else server_properties.rcon_port
+            )
+            claims.append(AppPortClaim(protocol=NetworkProtocol.TCP, port=rcon_port, purpose="RCON"))
+        if server_properties is not None and server_properties.management_server_enabled is True:
+            management_port = server_properties.management_server_port
+            if management_port is None or management_port == 0:
+                raise ValueError(
+                    "Minecraft Server Management Protocol requires a fixed management-server-port so YukiBot can reserve it."
+                )
+            claims.append(
+                AppPortClaim(
+                    protocol=NetworkProtocol.TCP,
+                    port=management_port,
+                    purpose="Minecraft Server Management Protocol",
+                )
+            )
+        if self._has_squaremap_mod():
+            squaremap_port = _squaremap_internal_webserver_port(_squaremap_config_path(self.directory))
+            if squaremap_port is not None:
+                claims.append(
+                    AppPortClaim(protocol=NetworkProtocol.TCP, port=squaremap_port, purpose="Squaremap web server")
+                )
+        return tuple(claims)
+
     async def post_init(self):
         await super().post_init()
         self._migrate_legacy_yukibot_data()
@@ -3547,7 +3682,7 @@ class Minecraft(App[Minecraft_Config]):
     def _squaremap_proxy_url(self) -> str | None:
         if not self._has_squaremap_mod():
             return None
-        local_web_address = _load_squaremap_web_address(self.directory / _SQUAREMAP_CONFIG_RELATIVE_PATH)
+        local_web_address = _load_squaremap_web_address(_squaremap_config_path(self.directory))
         if local_web_address is not None:
             return local_web_address
         return self._squaremap_public_url()

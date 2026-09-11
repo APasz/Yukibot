@@ -111,6 +111,53 @@ class AppVersionSource(enum.StrEnum):
     INSTALLED_FILES = "installed_files"
 
 
+class NetworkProtocol(enum.StrEnum):
+    """A transport protocol used by an app listener."""
+
+    TCP = "tcp"
+    UDP = "udp"
+
+
+@dataclass(frozen=True, slots=True)
+class AppPortClaim:
+    """One host-wide network port reserved by a running app."""
+
+    protocol: NetworkProtocol
+    port: int
+    purpose: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.protocol, NetworkProtocol):
+            raise TypeError("App port claim protocol must be a NetworkProtocol.")
+        if type(self.port) is not int:
+            raise TypeError("App port claim port must be an integer.")
+        if not 1 <= self.port <= 65535:
+            raise ValueError("App port claim port must be between 1 and 65535.")
+        if not isinstance(self.purpose, str):
+            raise TypeError("App port claim purpose must be a string.")
+        purpose = self.purpose.strip()
+        if not purpose:
+            raise ValueError("App port claim purpose must not be blank.")
+        object.__setattr__(self, "purpose", purpose)
+
+    @property
+    def endpoint(self) -> tuple[NetworkProtocol, int]:
+        return (self.protocol, self.port)
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.protocol.value.upper()} port {self.port}"
+
+
+def tcp_udp_port_claims(*, port: int, purpose: str) -> tuple[AppPortClaim, AppPortClaim]:
+    """Build paired TCP and UDP claims for one listener port."""
+
+    return (
+        AppPortClaim(protocol=NetworkProtocol.TCP, port=port, purpose=purpose),
+        AppPortClaim(protocol=NetworkProtocol.UDP, port=port, purpose=purpose),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RelayAdvancementTerms:
     singular: str = "Advancement"
@@ -1260,6 +1307,12 @@ class App(Generic[ConfigT], ABC):
             lines=tuple(decoded_lines),
             truncated=position > 0 or newline_count > max_lines,
         )
+
+    @property
+    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+        """Return the host-wide listener ports reserved while this app is active."""
+
+        return ()
 
     @property
     def is_started(self) -> bool:

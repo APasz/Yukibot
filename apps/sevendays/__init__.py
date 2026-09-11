@@ -31,7 +31,14 @@ from _discord import (
 )
 from _file import File_Utils
 from _security import Power_Level
-from apps._app import AM_Receiver, App, AppActivityProvider, AppActivityProviderMetadata
+from apps._app import (
+    AM_Receiver,
+    App,
+    AppActivityProvider,
+    AppActivityProviderMetadata,
+    AppPortClaim,
+    NetworkProtocol,
+)
 from apps._config import (
     App_Config,
     AppVersion,
@@ -204,6 +211,9 @@ _SEVENDAYS_SANDBOX_OPTIONS_SCHEMA_VERSION: int = 1
 _SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION: AppVersion = AppVersion(main="3.0", build=259)
 _SEVENDAYS_STARTUP_SANDBOX_OPTIONS_DELAY_SECONDS: float = 5.0
 _SEVENDAYS_STARTUP_SANDBOX_OPTIONS_MAX_ATTEMPTS = 6
+_SEVENDAYS_DEFAULT_SERVER_PORT: int = 26900
+_SEVENDAYS_GAME_UDP_PORT_OFFSETS: Final[tuple[int, ...]] = (1, 2, 3)
+_SEVENDAYS_DEFAULT_WEB_DASHBOARD_PORT: int = 8080
 _SEVENDAYS_DEFAULT_TELNET_PORT: int = 8081
 STEAM_APP_ID: Final[int] = 294420
 STEAM_UPDATE_PRESET: Final[SteamUpdatePreset] = SteamUpdatePreset(
@@ -451,22 +461,91 @@ def _candidate_sevendays_logs(*, directory: Path, server_log: Path | None) -> tu
     return tuple(existing)
 
 
-def _sevendays_telnet_port(pointer: Path) -> int:
-    enabled_value = _read_serverconfig_value(pointer, "TelnetEnabled")
-    if enabled_value is not None and enabled_value.casefold() not in {"true", "false"}:
-        raise ValueError(f"Invalid 7D2D TelnetEnabled value: {enabled_value!r}")
-    if enabled_value is not None and enabled_value.casefold() == "false":
-        raise ValueError("7D2D Telnet must be enabled for server management")
-
-    raw_port = _read_serverconfig_value(pointer, "TelnetPort")
+def _sevendays_serverconfig_port(
+    pointer: Path,
+    *,
+    property_name: str,
+    default_port: int,
+) -> int:
+    raw_port = _read_serverconfig_value(pointer, property_name)
     if raw_port is None:
-        return _SEVENDAYS_DEFAULT_TELNET_PORT
+        return default_port
     if not raw_port.isdigit():
-        raise ValueError(f"Invalid 7D2D TelnetPort value: {raw_port!r}")
+        raise ValueError(f"Invalid 7D2D {property_name} value: {raw_port!r}")
     port = int(raw_port)
     if not 1 <= port <= 65535:
-        raise ValueError(f"7D2D TelnetPort must be between 1 and 65535, got {port}")
+        raise ValueError(f"7D2D {property_name} must be between 1 and 65535, got {port}")
     return port
+
+
+def _sevendays_serverconfig_bool(pointer: Path, *, property_name: str) -> bool | None:
+    raw_value = _read_serverconfig_value(pointer, property_name)
+    if raw_value is None:
+        return None
+    normalised = raw_value.casefold()
+    if normalised == "true":
+        return True
+    if normalised == "false":
+        return False
+    raise ValueError(f"Invalid 7D2D {property_name} value: {raw_value!r}")
+
+
+def _sevendays_game_port_claims(server_port: int) -> tuple[AppPortClaim, ...]:
+    maximum_port = 65535 - max(_SEVENDAYS_GAME_UDP_PORT_OFFSETS)
+    if server_port > maximum_port:
+        raise ValueError(
+            f"7D2D ServerPort must be at most {maximum_port} because game networking also uses UDP ports "
+            f"through {max(_SEVENDAYS_GAME_UDP_PORT_OFFSETS)} above it."
+        )
+    return (
+        AppPortClaim(protocol=NetworkProtocol.TCP, port=server_port, purpose="game server"),
+        AppPortClaim(protocol=NetworkProtocol.UDP, port=server_port, purpose="game server"),
+        *(
+            AppPortClaim(
+                protocol=NetworkProtocol.UDP,
+                port=server_port + offset,
+                purpose="game networking",
+            )
+            for offset in _SEVENDAYS_GAME_UDP_PORT_OFFSETS
+        ),
+    )
+
+
+def _sevendays_admin_web_ports(pointer: Path) -> tuple[int, ...]:
+    port_property_by_enabled_property = (
+        ("WebDashboardEnabled", "WebDashboardPort"),
+        ("ControlPanelEnabled", "ControlPanelPort"),
+    )
+    ports: list[int] = []
+    for enabled_property, port_property in port_property_by_enabled_property:
+        if _sevendays_serverconfig_bool(pointer, property_name=enabled_property) is not True:
+            continue
+        port = _sevendays_serverconfig_port(
+            pointer,
+            property_name=port_property,
+            default_port=_SEVENDAYS_DEFAULT_WEB_DASHBOARD_PORT,
+        )
+        if port not in ports:
+            ports.append(port)
+    return tuple(ports)
+
+
+def _sevendays_server_port(pointer: Path) -> int:
+    return _sevendays_serverconfig_port(
+        pointer,
+        property_name="ServerPort",
+        default_port=_SEVENDAYS_DEFAULT_SERVER_PORT,
+    )
+
+
+def _sevendays_telnet_port(pointer: Path) -> int:
+    if _sevendays_serverconfig_bool(pointer, property_name="TelnetEnabled") is False:
+        raise ValueError("7D2D Telnet must be enabled for server management")
+    return _sevendays_serverconfig_port(
+        pointer,
+        property_name="TelnetPort",
+        default_port=_SEVENDAYS_DEFAULT_TELNET_PORT,
+    )
 
 
 def _app_version_from_sevendays_text(raw_version: str) -> AppVersion:
@@ -592,6 +671,7 @@ def _ensure_serverconfig_userdata_redirect(pointer: Path) -> None:
 def _ensure_serverconfig_join_port(pointer: Path, port: int | None) -> None:
     if port is None:
         return
+    _sevendays_game_port_claims(port)
     _ensure_serverconfig_property(pointer, property_name="ServerPort", value=str(port))
 
 
@@ -2367,6 +2447,22 @@ class SevenDays(App[App_Config]):
 
     def detect_installed_version(self) -> AppVersion | None:
         return detect_sevendays_version(directory=self.cfg.directory, server_log=self.cfg.server_log_file)
+
+    @property
+    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+        serverconfig_path = self.directory / "serverconfig.xml"
+        server_port = self.cfg.join_port
+        if server_port is None:
+            server_port = _sevendays_server_port(serverconfig_path)
+        telnet_port = _sevendays_telnet_port(serverconfig_path)
+        return (
+            *_sevendays_game_port_claims(server_port),
+            AppPortClaim(protocol=NetworkProtocol.TCP, port=telnet_port, purpose="Telnet"),
+            *(
+                AppPortClaim(protocol=NetworkProtocol.TCP, port=port, purpose="web dashboard")
+                for port in _sevendays_admin_web_ports(serverconfig_path)
+            ),
+        )
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:

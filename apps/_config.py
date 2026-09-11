@@ -161,6 +161,27 @@ def normalise_optional_channel_ids(raw: object) -> tuple[str, ...]:
     return tuple(channel_ids)
 
 
+def normalise_optional_port(raw: object) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise TypeError("port must be an integer")
+    if isinstance(raw, int):
+        port = raw
+    elif isinstance(raw, str):
+        value = raw.strip()
+        if not value:
+            return None
+        if not value.isdecimal():
+            raise TypeError("port must be an integer")
+        port = int(value)
+    else:
+        raise TypeError("port must be an integer")
+    if port <= 0 or port > 65535:
+        raise ValueError("port must be between 1 and 65535")
+    return port
+
+
 def normalise_optional_text(raw: object) -> str | None:
     if raw is None:
         return None
@@ -2197,24 +2218,7 @@ class App_Config(BaseModel):
 
     @field_validator("join_port", "api_port", mode="before")
     def validate_port(cls, raw: object) -> int | None:
-        if raw is None:
-            return None
-        if isinstance(raw, bool):
-            raise TypeError("port must be an integer")
-        if isinstance(raw, int):
-            port: int = raw
-        elif isinstance(raw, str):
-            value: str = raw.strip()
-            if not value:
-                return None
-            if not value.isdecimal():
-                raise TypeError("port must be an integer")
-            port = int(value)
-        else:
-            raise TypeError("port must be an integer")
-        if port <= 0 or port > 65535:
-            raise ValueError("port must be between 1 and 65535")
-        return port
+        return normalise_optional_port(raw)
 
 
 def _format_host_port(*, host: str, port: int | None) -> str:

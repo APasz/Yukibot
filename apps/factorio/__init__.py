@@ -46,7 +46,9 @@ from apps._app import (
     App,
     AppActivityProvider,
     AppActivityProviderMetadata,
+    AppPortClaim,
     AppVersionSource,
+    NetworkProtocol,
     RelayAdvancementTerms,
 )
 from apps._config import (
@@ -109,6 +111,8 @@ from relay_notices import (
 
 log = logging.getLogger(__name__)
 
+_FACTORIO_DEFAULT_GAME_PORT = 34197
+_FACTORIO_RCON_PORT = 27015
 _FACTORIO_VERSION_RE: Pattern[str] = re.compile(r"Factorio (?P<version>\d+\.\d+\.\d+)")
 _FACTORIO_INFO_JSON_NAME = "info.json"
 _FACTORIO_IGNORED_MOD_FILES: frozenset[str] = frozenset({"mod-list.json", "mod-settings.dat"})
@@ -116,6 +120,12 @@ _FACTORIO_MOD_VERSION_RE: Pattern[str] = re.compile(
     r"_(?P<version>v?\d+(?:\.\d+)+(?:[-+._][A-Za-z0-9]+)*)$",
     re.IGNORECASE,
 )
+
+
+def _factorio_game_port(join_port: int | None) -> int:
+    return _FACTORIO_DEFAULT_GAME_PORT if join_port is None else join_port
+
+
 _FACTORIO_MOD_PORTAL_HOST = "mods.factorio.com"
 _FACTORIO_MOD_PORTAL_BASE_URL = f"https://{_FACTORIO_MOD_PORTAL_HOST}"
 _FACTORIO_MOD_PORTAL_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
@@ -1914,6 +1924,7 @@ class Factorio(App[App_Config]):
         self.cmd_start = self._factorio_start_command(
             file_settings,
             save_file=cfg.factorio_save_file,
+            game_port=_factorio_game_port(cfg.join_port),
         )
 
         self.process = None
@@ -1939,7 +1950,7 @@ class Factorio(App[App_Config]):
         self.updater = Factorio_Updater(self, base=True)
         self.apply_version(detect_factorio_version(directory=cfg.directory), persist=False)
 
-        self._relay: RconClient = RconClient(self.check_running, 27015)
+        self._relay: RconClient = RconClient(self.check_running, _FACTORIO_RCON_PORT)
         self._tail: Tailer | None = None
         self._tail_machers: set[_FACTORIO_LINE_MATCHER] = set()
         self._bridge_events_tail: Tailer | None = None
@@ -1968,7 +1979,21 @@ class Factorio(App[App_Config]):
 
         log.debug(f"{__name__}.Created")
 
-    def _factorio_start_command(self, file_settings: Path, *, save_file: str | None) -> list[str]:
+    @property
+    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+        game_port = _factorio_game_port(self.cfg.join_port)
+        return (
+            AppPortClaim(protocol=NetworkProtocol.UDP, port=game_port, purpose="game server"),
+            AppPortClaim(protocol=NetworkProtocol.TCP, port=_FACTORIO_RCON_PORT, purpose="RCON"),
+        )
+
+    def _factorio_start_command(
+        self,
+        file_settings: Path,
+        *,
+        save_file: str | None,
+        game_port: int,
+    ) -> list[str]:
         load_argument = (
             ["--start-server-load-latest"]
             if save_file is None
@@ -1979,8 +2004,10 @@ class Factorio(App[App_Config]):
             *load_argument,
             "--server-settings",
             f"{file_settings}",
+            "--port",
+            str(game_port),
             "--rcon-port",
-            "27015",
+            str(_FACTORIO_RCON_PORT),
             "--rcon-password",
             f"{config.env_req('APP_COMM_PASS')}",
         ]
@@ -2285,6 +2312,7 @@ class Factorio(App[App_Config]):
         self.cmd_start = self._factorio_start_command(
             factorio_server_settings_path(self.directory),
             save_file=selected_save_file,
+            game_port=_factorio_game_port(self.cfg.join_port),
         )
 
         for item in (self.directory / "saves").iterdir():

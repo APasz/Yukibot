@@ -18,7 +18,7 @@ import config
 from _async_utils import run_blocking
 from _discord import App_Bound, DC_Bound, DC_Relay, RelayEmbedPayload
 from _utils import format_player_capacity
-from apps._app import App, AppRuntimeFaultKind
+from apps._app import App, AppPortClaim, AppRuntimeFaultKind, NetworkProtocol
 from apps._config import (
     App_Config,
     AppVersion,
@@ -67,6 +67,7 @@ type ManagedAppType = type[ManagedApp]
 class AppStartBlockerKind(enum.StrEnum):
     ALREADY_RUNNING = "already_running"
     SAME_SCOPE = "same_scope"
+    NETWORK_PORT = "network_port"
     CPU_POINTS = "cpu_points"
     RAM_POINTS = "ram_points"
 
@@ -77,8 +78,17 @@ class AppStartBlocker:
     message: str
     blocking_app_name: str | None = None
     blocking_app_friendly: str | None = None
+    requested_port_claim: AppPortClaim | None = None
+    blocking_port_claim: AppPortClaim | None = None
     required_points: int | None = None
     available_points: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AppPortConflict:
+    blocking_app: ManagedApp
+    requested_claim: AppPortClaim
+    blocking_claim: AppPortClaim
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,6 +343,7 @@ class App_Manager(metaclass=config.Singleton):
         self._lookup: dict[str, str] = {}
         self._managed_shutdown_names: set[str] = set()
         self._pending_start_names: set[str] = set()
+        self._reserved_port_claims_by_app_name: dict[str, tuple[AppPortClaim, ...]] = {}
         self.default_chat_channels: tuple[hikari.Snowflake, ...] = ()
         self.default_chat_channel: hikari.Snowflake | None = None
         self.default_chat_channel_source = RelayChannelSource.NONE
@@ -353,6 +364,13 @@ class App_Manager(metaclass=config.Singleton):
         except AttributeError:
             self._pending_start_names = set()
             return self._pending_start_names
+
+    def _reserved_port_claims_by_name(self) -> dict[str, tuple[AppPortClaim, ...]]:
+        try:
+            return self._reserved_port_claims_by_app_name
+        except AttributeError:
+            self._reserved_port_claims_by_app_name = {}
+            return self._reserved_port_claims_by_app_name
 
     async def post_init(self, bot: hikari.GatewayBot, activity_manager: "Activity_Manager"):
         self.bot = bot
@@ -425,6 +443,93 @@ class App_Manager(metaclass=config.Singleton):
             if active_app.scope == app.scope:
                 return active_app
         return None
+
+    @staticmethod
+    def _listening_port_claims(app: ManagedApp) -> tuple[AppPortClaim, ...]:
+        claims = app.listening_port_claims
+        if not isinstance(claims, tuple):
+            raise TypeError(f"{app.name} listening port claims must be a tuple.")
+
+        claims_by_endpoint: dict[tuple[NetworkProtocol, int], AppPortClaim] = {}
+        for claim in claims:
+            if not isinstance(claim, AppPortClaim):
+                raise TypeError(f"{app.name} listening port claims must contain AppPortClaim values.")
+            existing_claim = claims_by_endpoint.get(claim.endpoint)
+            if existing_claim is not None:
+                raise ValueError(
+                    f"{app.name} declares {claim.display_name} more than once "
+                    f"({existing_claim.purpose}, {claim.purpose})."
+                )
+            claims_by_endpoint[claim.endpoint] = claim
+        return claims
+
+    def _claim_listening_ports(self, app: ManagedApp) -> None:
+        claims = self._listening_port_claims(app)
+        if port_conflict := self._listening_port_conflict_for_claims(app, claims):
+            raise RuntimeError(self._network_port_start_blocker(app, port_conflict).message)
+        self._reserved_port_claims_by_name()[app.name.casefold()] = claims
+
+    def _release_listening_ports(self, app: ManagedApp) -> None:
+        self._reserved_port_claims_by_name().pop(app.name.casefold(), None)
+
+    def _active_listening_port_claims(self, app: ManagedApp) -> tuple[AppPortClaim, ...]:
+        claims = self._reserved_port_claims_by_name().get(app.name.casefold())
+        return self._listening_port_claims(app) if claims is None else claims
+
+    @staticmethod
+    def _network_port_start_blocker(app: ManagedApp, port_conflict: AppPortConflict) -> AppStartBlocker:
+        return AppStartBlocker(
+            kind=AppStartBlockerKind.NETWORK_PORT,
+            message=(
+                f"Cannot start {app.friendly}; {port_conflict.requested_claim.display_name} is already reserved "
+                f"by {port_conflict.blocking_app.friendly} for {port_conflict.blocking_claim.purpose}."
+            ),
+            blocking_app_name=port_conflict.blocking_app.name,
+            blocking_app_friendly=port_conflict.blocking_app.friendly,
+            requested_port_claim=port_conflict.requested_claim,
+            blocking_port_claim=port_conflict.blocking_claim,
+        )
+
+    def _listening_port_conflict_for_claims(
+        self,
+        app: ManagedApp,
+        requested_claims: tuple[AppPortClaim, ...],
+        *,
+        other_apps: Sequence[ManagedApp] | None = None,
+    ) -> AppPortConflict | None:
+        if not requested_claims:
+            return None
+
+        active_apps = (
+            self._start_admission_apps(exclude_name=app.name)
+            if other_apps is None
+            else tuple(other_app for other_app in other_apps if other_app.name.casefold() != app.name.casefold())
+        )
+        for active_app in active_apps:
+            active_claims_by_endpoint = {
+                claim.endpoint: claim for claim in self._active_listening_port_claims(active_app)
+            }
+            for requested_claim in requested_claims:
+                blocking_claim = active_claims_by_endpoint.get(requested_claim.endpoint)
+                if blocking_claim is not None:
+                    return AppPortConflict(
+                        blocking_app=active_app,
+                        requested_claim=requested_claim,
+                        blocking_claim=blocking_claim,
+                    )
+        return None
+
+    def listening_port_conflict(
+        self,
+        app: ManagedApp,
+        *,
+        other_apps: Sequence[ManagedApp] | None = None,
+    ) -> AppPortConflict | None:
+        return self._listening_port_conflict_for_claims(
+            app,
+            self._listening_port_claims(app),
+            other_apps=other_apps,
+        )
 
     @staticmethod
     def _app_running_points(app: ManagedApp) -> config.ResourcePointSet:
@@ -505,6 +610,8 @@ class App_Manager(metaclass=config.Singleton):
                 blocking_app_name=blocked_by.name,
                 blocking_app_friendly=blocked_by.friendly,
             )
+        if port_conflict := self.listening_port_conflict(app):
+            return self._network_port_start_blocker(app, port_conflict)
         return self.capacity_conflict(app)
 
     @staticmethod
@@ -534,6 +641,7 @@ class App_Manager(metaclass=config.Singleton):
         elif started_at is not None and not was_manager_initiated_shutdown:
             self._notify_app_lifecycle(app, started=False, uptime=uptime)
         app.lifecycle_started_at = None
+        self._release_listening_ports(app)
 
     def dump_enabled(self) -> int:
         config.ENABLED_DUMP_FILE.parent.mkdir(exist_ok=True, parents=True)
@@ -546,6 +654,7 @@ class App_Manager(metaclass=config.Singleton):
         apps: dict[str, ManagedApp] = {}
         base_path = Path("apps")
         self.startup_disabled_instances = []
+        self._reserved_port_claims_by_name().clear()
         for app in self.apps.values():
             DC_Relay.unregister_app(app)
         self._lookup = {}
@@ -635,20 +744,26 @@ class App_Manager(metaclass=config.Singleton):
             raise RuntimeError(blocker.message)
         if app.settings:
             app.settings.app.save()
+            if blocker := self.start_blocker(app):
+                raise RuntimeError(blocker.message)
         pending_names = self._pending_start_name_keys()
         pending_names.add(app.name.casefold())
+        start_attempted = False
         try:
+            self._claim_listening_ports(app)
+            start_attempted = True
             await app.start()
             app.lifecycle_started_at = datetime.now(timezone.utc)
             app.verify_published_client_pack()
             self._notify_app_lifecycle(app, started=True)
         except Exception:
-            runtime_fault = app.runtime_fault
-            if not app.check_running() or runtime_fault is not None:
+            if start_attempted and not app.check_running():
                 await self._handle_inactive_app(app)
             raise
         finally:
             pending_names.discard(app.name.casefold())
+            if not app.check_running():
+                self._release_listening_ports(app)
 
     async def _shutdown_apps(
         self,
@@ -661,6 +776,7 @@ class App_Manager(metaclass=config.Singleton):
     ) -> set[str]:
         async def timed_shutdown(app: ManagedApp, *, allow_inactive_target: bool = False):
             if not app.check_running():
+                self._release_listening_ports(app)
                 if not allow_inactive_target:
                     log.info(f"{app.name} not running; skipping.")
                     return (app.name, 0.0, "Skipped", "Not running", None)
@@ -682,6 +798,8 @@ class App_Manager(metaclass=config.Singleton):
                 return (app.name, elapsed, "Error", str(xcp), None)
             finally:
                 managed_shutdown_names.discard(app.name.casefold())
+                if not app.check_running():
+                    self._release_listening_ports(app)
 
         if name:
             try:
@@ -1537,6 +1655,7 @@ class App_Manager(metaclass=config.Singleton):
         self._unregister_lookup_aliases(app)
         self._managed_shutdown_name_keys().discard(app.name.casefold())
         self._pending_start_name_keys().discard(app.name.casefold())
+        self._release_listening_ports(app)
         self._remove_restart_auto_start_app(app.name)
         self.dump_enabled()
         log.info("Deleted app instance: %s", app.name)

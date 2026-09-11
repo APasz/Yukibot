@@ -34,9 +34,11 @@ from apps._app import (
     App,
     AppActivityProvider,
     AppActivityProviderMetadata,
+    AppPortClaim,
     AppRuntimeFault,
     AppRuntimeFaultKind,
     ChatRelaySupport,
+    NetworkProtocol,
     RelayAdvancementTerms,
 )
 from apps._config import (
@@ -114,6 +116,12 @@ class _RecordingReceiver(AM_Receiver):
 
 
 class _DummyApp(App[App_Config]):
+    _test_port_claims: tuple[AppPortClaim, ...] = ()
+
+    @property
+    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+        return self._test_port_claims
+
     async def start(self) -> bool:
         return True
 
@@ -2514,6 +2522,118 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(blocker.blocking_app_name, "minecraft_alpha")
         self.assertIn("Minecraft Alpha", blocker.message)
 
+    def test_start_blocker_blocks_matching_listening_port_claim(self) -> None:
+        manager = object.__new__(App_Manager)
+        running_app = _build_dummy_app()
+        running_app.name = "minecraft_alpha"
+        running_app.friendly = "Minecraft Alpha"
+        running_app.scope = "minecraft"
+        running_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.TCP, port=25565, purpose="game server"),
+        )
+        running_app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        target_app = _build_dummy_app()
+        target_app.name = "factorio_lab"
+        target_app.friendly = "Factorio Lab"
+        target_app.scope = "factorio"
+        target_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.TCP, port=25565, purpose="RCON"),
+        )
+        target_app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        manager.apps = {running_app.name: running_app, target_app.name: target_app}
+
+        blocker = manager.start_blocker(target_app)
+
+        self.assertIsNotNone(blocker)
+        assert blocker is not None
+        self.assertEqual(blocker.kind, AppStartBlockerKind.NETWORK_PORT)
+        self.assertEqual(blocker.blocking_app_name, running_app.name)
+        self.assertEqual(blocker.requested_port_claim, target_app.listening_port_claims[0])
+        self.assertEqual(blocker.blocking_port_claim, running_app.listening_port_claims[0])
+        self.assertIn("TCP port 25565", blocker.message)
+
+    def test_listening_port_claims_do_not_conflict_across_protocols(self) -> None:
+        manager = object.__new__(App_Manager)
+        running_app = _build_dummy_app()
+        running_app.name = "factorio_lab"
+        running_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.UDP, port=34197, purpose="game server"),
+        )
+        target_app = _build_dummy_app()
+        target_app.name = "minecraft_alpha"
+        target_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.TCP, port=34197, purpose="game server"),
+        )
+
+        conflict = manager.listening_port_conflict(target_app, other_apps=(running_app,))
+
+        self.assertIsNone(conflict)
+
+    def test_claim_listening_ports_rechecks_the_final_claim_snapshot(self) -> None:
+        manager = object.__new__(App_Manager)
+        running_app = _build_dummy_app()
+        running_app.name = "factorio_lab"
+        running_app.friendly = "Factorio Lab"
+        running_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.UDP, port=34197, purpose="game server"),
+        )
+        running_app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        target_app = _build_dummy_app()
+        target_app.name = "satisfactory_alpha"
+        target_app.friendly = "Satisfactory Alpha"
+        target_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.UDP, port=34197, purpose="game server"),
+        )
+        target_app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        manager.apps = {running_app.name: running_app, target_app.name: target_app}
+
+        with self.assertRaisesRegex(RuntimeError, "UDP port 34197"):
+            manager._claim_listening_ports(target_app)
+
+        self.assertEqual(manager._reserved_port_claims_by_name(), {})
+
+    async def test_launch_does_not_clean_up_an_app_when_its_final_claim_is_rejected(self) -> None:
+        manager = object.__new__(App_Manager)
+        app = _build_dummy_app()
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        app.start = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager.apps = {app.name: app}
+        manager._claim_listening_ports = Mock(side_effect=RuntimeError("UDP port 34197 is already reserved"))  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "UDP port 34197"):
+            await manager.launch(app)
+
+        app.start.assert_not_awaited()
+        app.handle_unexpected_stop.assert_not_awaited()
+
+    def test_start_blocker_counts_pending_listening_port_claims(self) -> None:
+        manager = object.__new__(App_Manager)
+        pending_app = _build_dummy_app()
+        pending_app.name = "satisfactory_alpha"
+        pending_app.friendly = "Satisfactory"
+        pending_app.scope = "satisfactory"
+        pending_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.UDP, port=7777, purpose="game server"),
+        )
+        pending_app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        target_app = _build_dummy_app()
+        target_app.name = "beammp_alpha"
+        target_app.friendly = "BeamMP"
+        target_app.scope = "beammp"
+        target_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.UDP, port=7777, purpose="game server"),
+        )
+        target_app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        manager.apps = {pending_app.name: pending_app, target_app.name: target_app}
+        manager._pending_start_names = {pending_app.name.casefold()}
+
+        blocker = manager.start_blocker(target_app)
+
+        self.assertIsNotNone(blocker)
+        assert blocker is not None
+        self.assertEqual(blocker.kind, AppStartBlockerKind.NETWORK_PORT)
+        self.assertEqual(blocker.blocking_app_name, pending_app.name)
+
     def test_start_blocker_blocks_when_cpu_points_are_exhausted(self) -> None:
         manager = object.__new__(App_Manager)
         running_app = _build_dummy_app()
@@ -2992,6 +3112,85 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         app.release_start.set()
         await asyncio.wait_for(launch_task, timeout=1)
         self.assertIsNotNone(app.lifecycle_started_at)
+
+    async def test_failed_launch_releases_pending_listening_port_claim(self) -> None:
+        manager = object.__new__(App_Manager)
+        starting_app = _build_dummy_app()
+        starting_app.name = "factorio_lab"
+        starting_app.friendly = "Factorio Lab"
+        starting_app.scope = "factorio"
+        starting_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.UDP, port=34197, purpose="game server"),
+        )
+        target_app = _build_dummy_app()
+        target_app.name = "satisfactory_alpha"
+        target_app.friendly = "Satisfactory"
+        target_app.scope = "satisfactory"
+        target_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.UDP, port=34197, purpose="game server"),
+        )
+        start_entered = asyncio.Event()
+        release_start = asyncio.Event()
+
+        async def fail_start() -> bool:
+            start_entered.set()
+            await release_start.wait()
+            raise RuntimeError("startup failed")
+
+        starting_app.start = fail_start  # type: ignore[method-assign]
+        manager.apps = {starting_app.name: starting_app, target_app.name: target_app}
+
+        launch_task = asyncio.create_task(manager.launch(starting_app))
+        await asyncio.wait_for(start_entered.wait(), timeout=1)
+
+        starting_app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.UDP, port=34198, purpose="game server"),
+        )
+        blocker = manager.start_blocker(target_app)
+        self.assertIsNotNone(blocker)
+        assert blocker is not None
+        self.assertEqual(blocker.kind, AppStartBlockerKind.NETWORK_PORT)
+
+        release_start.set()
+        with self.assertRaisesRegex(RuntimeError, "startup failed"):
+            await asyncio.wait_for(launch_task, timeout=1)
+
+        self.assertIsNone(manager.listening_port_conflict(target_app))
+
+    async def test_failed_launch_keeps_claimed_ports_while_its_process_is_running(self) -> None:
+        manager = object.__new__(App_Manager)
+        app = _build_dummy_app()
+        app.name = "minecraft_alpha"
+        app.friendly = "Minecraft Alpha"
+        app.scope = "minecraft"
+        app._test_port_claims = (
+            AppPortClaim(protocol=NetworkProtocol.TCP, port=25565, purpose="game server"),
+        )
+        is_running = False
+
+        def check_running() -> bool:
+            return is_running
+
+        app.check_running = check_running  # type: ignore[method-assign]
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        async def fail_after_starting_process() -> bool:
+            nonlocal is_running
+            is_running = True
+            app.runtime_fault = AppRuntimeFault(kind=AppRuntimeFaultKind.CRASH, summary="startup failed")
+            raise RuntimeError("startup failed")
+
+        app.start = fail_after_starting_process  # type: ignore[method-assign]
+        manager.apps = {app.name: app}
+
+        with self.assertRaisesRegex(RuntimeError, "startup failed"):
+            await manager.launch(app)
+
+        self.assertEqual(
+            manager._reserved_port_claims_by_name(),
+            {app.name.casefold(): app.listening_port_claims},
+        )
+        app.handle_unexpected_stop.assert_not_awaited()
 
     async def test_force_invalidate_lock_closes_manager_when_response_is_still_live(self) -> None:
         service = AppManageService()

@@ -317,6 +317,7 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
                 "join_port": 7777,
                 "api_token": " token ",
                 "admin_password": " secret ",
+                "reliable_messaging_port": "8899",
                 "verify_ssl_chain_path": "{WD}/tls/chain.pem",
             }
         )
@@ -325,6 +326,7 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg.effective_api_port, 7777)
         self.assertEqual(cfg.api_token, "token")
         self.assertEqual(cfg.admin_password, "secret")
+        self.assertEqual(cfg.reliable_messaging_port, 8899)
         self.assertEqual(cfg.verify_ssl_chain_path, self.temp_path / "server" / "tls" / "chain.pem")
 
     def test_legacy_address_migrates_to_api_endpoint(self) -> None:
@@ -375,8 +377,14 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_parse_api_endpoint("[::1]:7778"), ("::1", 7778))
 
     def test_start_command_uses_the_configured_join_port(self) -> None:
-        self.assertEqual(_satisfactory_start_command(None), ["bash", "FactoryServer.sh", "-Port=7777"])
-        self.assertEqual(_satisfactory_start_command(7778), ["bash", "FactoryServer.sh", "-Port=7778"])
+        self.assertEqual(
+            _satisfactory_start_command(None),
+            ["bash", "FactoryServer.sh", "-Port=7777", "-ReliablePort=8888"],
+        )
+        self.assertEqual(
+            _satisfactory_start_command(7778, reliable_messaging_port=8899),
+            ["bash", "FactoryServer.sh", "-Port=7778", "-ReliablePort=8899"],
+        )
 
     def test_server_state_parses_progress_fields_from_api_payload(self) -> None:
         state = SatisfactoryServerState.from_api_payload(

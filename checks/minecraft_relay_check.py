@@ -226,6 +226,11 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
             pointer.write_text(
                 "\n".join(
                     (
+                        "server-port=25565",
+                        "enable-query=true",
+                        "query.port=25566",
+                        "management-server-enabled=true",
+                        "management-server-port=25577",
                         "enable-rcon=true",
                         "rcon.port=25575",
                         "rcon.password=supersecret",
@@ -237,6 +242,11 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
 
             snapshot = MinecraftServerPropertiesSnapshot.load(pointer)
 
+        self.assertEqual(snapshot.server_port, 25565)
+        self.assertEqual(snapshot.enable_query, True)
+        self.assertEqual(snapshot.query_port, 25566)
+        self.assertEqual(snapshot.management_server_enabled, True)
+        self.assertEqual(snapshot.management_server_port, 25577)
         self.assertEqual(snapshot.enable_rcon, True)
         self.assertEqual(snapshot.rcon_port, 25575)
         self.assertEqual(snapshot.rcon_password, "supersecret")

@@ -36,7 +36,14 @@ import config
 from _discord import DC_Bound, DC_Relay
 from _file import File_Utils
 from _security import Power_Level
-from apps._app import App, AppActivityProvider, AppActivityProviderMetadata
+from apps._app import (
+    App,
+    AppActivityProvider,
+    AppActivityProviderMetadata,
+    AppPortClaim,
+    NetworkProtocol,
+    tcp_udp_port_claims,
+)
 from apps._blueprint_files import (
     AppBlueprintEntry,
     AppBlueprintFileType,
@@ -53,7 +60,7 @@ from apps._blueprint_files import (
     validate_blueprint_session_name,
     validate_blueprint_upload_pair,
 )
-from apps._config import App_Config, AppVersion, SteamUpdatePreset, resolve_config_path
+from apps._config import App_Config, AppVersion, SteamUpdatePreset, normalise_optional_port, resolve_config_path
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._save_files import AppSaveEntry, AppSaveEntryKind, AppSaveRoot, AppSaveRootMode
 from apps._settings import (
@@ -74,6 +81,7 @@ from relay_notices import PlayerSessionAction, RelayNoticeSource, render_notice_
 log: Logger = logging.getLogger(__name__)
 
 _DEFAULT_API_PORT: int = 7777
+_DEFAULT_RELIABLE_MESSAGING_PORT: int = 8888
 _API_READY_RETRIES: int = 15
 _API_READY_SLEEP_SECONDS: float = 2.0
 _API_RETRY_AFTER_UNAVAILABLE_SECONDS: float = 10.0
@@ -172,9 +180,22 @@ STEAM_APP_ID: Final[int] = 1690800
 STEAM_UPDATE_PRESET: Final[SteamUpdatePreset] = SteamUpdatePreset(app_id=STEAM_APP_ID)
 
 
-def _satisfactory_start_command(join_port: int | None) -> list[str]:
-    port = _DEFAULT_API_PORT if join_port is None else join_port
-    return ["bash", "FactoryServer.sh", f"-Port={port}"]
+def _satisfactory_game_port(join_port: int | None) -> int:
+    return _DEFAULT_API_PORT if join_port is None else join_port
+
+
+def _satisfactory_start_command(
+    join_port: int | None,
+    *,
+    reliable_messaging_port: int = _DEFAULT_RELIABLE_MESSAGING_PORT,
+) -> list[str]:
+    port = _satisfactory_game_port(join_port)
+    return [
+        "bash",
+        "FactoryServer.sh",
+        f"-Port={port}",
+        f"-ReliablePort={reliable_messaging_port}",
+    ]
 
 
 class SatisfactoryNetworkQuality(enum.IntEnum):
@@ -481,6 +502,7 @@ class Satisfactory_Config(App_Config):
     api_token: str | None = None
     admin_password: str
     verify_ssl_chain_path: Path | None = None
+    reliable_messaging_port: int = _DEFAULT_RELIABLE_MESSAGING_PORT
 
     @model_validator(mode="before")
     @classmethod
@@ -515,6 +537,14 @@ class Satisfactory_Config(App_Config):
         if not text:
             raise ValueError("admin_password must not be empty")
         return text
+
+    @field_validator("reliable_messaging_port", mode="before")
+    @classmethod
+    def validate_reliable_messaging_port(cls, raw: object) -> int:
+        port = normalise_optional_port(raw)
+        if port is None:
+            raise ValueError("reliable_messaging_port must not be empty")
+        return port
 
     @field_validator("verify_ssl_chain_path", mode="before")
     def resolve_verify_ssl_chain_path(cls, raw: str | Path | None, info) -> Path | None:
@@ -1822,7 +1852,10 @@ class Satisfactory(App[Satisfactory_Config]):
         self.manage_embed_color = 0xF59E0B
         self.proc_name = "FactoryServer-Linux-Shipping"
         self.proc_cmd = [self.proc_name]
-        self.cmd_start = _satisfactory_start_command(cfg.join_port)
+        self.cmd_start = _satisfactory_start_command(
+            cfg.join_port,
+            reliable_messaging_port=cfg.reliable_messaging_port,
+        )
         self.process = None
 
         host: str | None = cfg.effective_api_host
@@ -1876,6 +1909,18 @@ class Satisfactory(App[Satisfactory_Config]):
 
     def detect_installed_version(self) -> AppVersion | None:
         return detect_satisfactory_version(directory=self.cfg.directory, server_log=self.cfg.server_log_file)
+
+    @property
+    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+        port = _satisfactory_game_port(self.cfg.join_port)
+        return (
+            *tcp_udp_port_claims(port=port, purpose="game server and HTTPS API"),
+            AppPortClaim(
+                protocol=NetworkProtocol.TCP,
+                port=self.cfg.reliable_messaging_port,
+                purpose="reliable messaging",
+            ),
+        )
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:

@@ -19,7 +19,7 @@ import hikari
 import config
 from _discord import DC_Bound, DC_Relay
 from _security import Power_Level
-from apps._app import App
+from apps._app import App, AppPortClaim, tcp_udp_port_claims
 from apps._config import App_Config, AppVersion, SteamUpdatePreset
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._mod import Mod
@@ -183,6 +183,14 @@ class _ScsServerConfigPortLine:
     prefix_end: int
     port_end: int
     line_ending: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScsServerNetworkPorts:
+    """The physical listener ports configured for one SCS dedicated server."""
+
+    connection_port: int
+    query_port: int
 
 
 def scs_data_home(directory: Path) -> Path:
@@ -693,6 +701,59 @@ def _read_scs_server_config_field(
     return matching_assignment.assignment.value_text
 
 
+def _scs_server_config_physical_port(
+    *,
+    config_path: Path,
+    field: str,
+    profile: ScsTruckSimulatorProfile,
+) -> int:
+    raw_port = _read_scs_server_config_field(
+        config_path=config_path,
+        key=field,
+        profile=profile,
+    )
+    if raw_port is None:
+        raise ValueError(f"{profile.abbreviation} server config is missing {field}: {config_path}")
+    port_text = raw_port.strip()
+    if not port_text.isdecimal():
+        raise ValueError(f"{profile.abbreviation} server config {field} must be an integer: {config_path}")
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{profile.abbreviation} server config {field} must be between 1 and 65535: {config_path}")
+    return port
+
+
+def scs_server_network_ports(
+    *,
+    directory: Path,
+    fallback_connection_port: int | None,
+    profile: ScsTruckSimulatorProfile,
+) -> ScsServerNetworkPorts:
+    """Read physical listener ports from an existing SCS config, with a new-install fallback."""
+
+    config_path = scs_server_config_path(directory, profile=profile)
+    if not config_path.exists():
+        connection_port = resolve_scs_connection_port(profile=profile, port=fallback_connection_port)
+        return ScsServerNetworkPorts(
+            connection_port=connection_port,
+            query_port=connection_port + 1,
+        )
+    if not config_path.is_file():
+        raise ValueError(f"{profile.abbreviation} server config is not a file: {config_path}")
+    return ScsServerNetworkPorts(
+        connection_port=_scs_server_config_physical_port(
+            config_path=config_path,
+            field="connection_dedicated_port",
+            profile=profile,
+        ),
+        query_port=_scs_server_config_physical_port(
+            config_path=config_path,
+            field="query_dedicated_port",
+            profile=profile,
+        ),
+    )
+
+
 def _write_scs_server_config_field(
     *,
     config_path: Path,
@@ -1162,6 +1223,18 @@ class ScsTruckSimulator(App[App_Config]):
 
     def detect_installed_version(self) -> AppVersion | None:
         return detect_scs_version(directory=self.cfg.directory, server_log=self.cfg.server_log_file, profile=self.profile)
+
+    @property
+    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+        ports = scs_server_network_ports(
+            directory=self.directory,
+            fallback_connection_port=self.cfg.join_port,
+            profile=self.profile,
+        )
+        return (
+            *tcp_udp_port_claims(port=ports.connection_port, purpose="game server"),
+            *tcp_udp_port_claims(port=ports.query_port, purpose="server query"),
+        )
 
     def launch_environment(self) -> Mapping[str, str]:
         return scs_launch_environment(self.directory)
