@@ -1671,6 +1671,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertIn("/api/node/node-disk-settings", handlers)
         self.assertIn("/api/node/node-font-sources", handlers)
         self.assertIn("/api/node/discord-settings", handlers)
+        self.assertIn("/api/node/operations", handlers)
+        self.assertIn("/api/node/operations/{operation_id}", handlers)
+        self.assertIn("/api/node/operations/{operation_id}/cancel", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
         self.assertIn("/api/node/apps/{app_name}/factorio/generation/running-world", handlers)
 

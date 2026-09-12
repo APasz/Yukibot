@@ -937,7 +937,7 @@ class NodeAppInstallerService:
             detail=operation.detail,
             progress_percent=operation.progress_percent,
             log_lines=operation.log_lines,
-            started_at_unix_ms=operation.created_at_unix_ms,
+            started_at_unix_ms=operation.started_at_unix_ms,
             finished_at_unix_ms=operation.finished_at_unix_ms,
         )
 

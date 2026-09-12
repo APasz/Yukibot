@@ -836,6 +836,30 @@ class AppInstallerCheck(unittest.TestCase):
         self.assertEqual(status.state, NodeAppInstallState.INTERRUPTED)
         self.assertEqual(status.summary, "Interrupted by a node restart.")
 
+    def test_install_status_uses_the_operation_start_time(self) -> None:
+        timestamps = iter((1_000, 2_000))
+        operations = NodeOperationService(now_unix_ms=lambda: next(timestamps))
+        operation = operations.create(
+            kind=NodeOperationKind.APP_INSTALL,
+            node_name="node-a",
+            subject="demo",
+            requested_by_user_id=42,
+            progress=NodeOperationProgress(summary="Queued."),
+        )
+        operations.begin(
+            operation_id=operation.operation_id,
+            progress=NodeOperationProgress(summary="Installing."),
+        )
+        service = NodeAppInstallerService(
+            node_name=lambda: "node-a",
+            invalidate_state_caches=Mock(),
+            operations=operations,
+        )
+
+        status = service.install_status(job_id=operation.operation_id)
+
+        self.assertEqual(status.started_at_unix_ms, 2_000)
+
     def test_concurrent_installs_allow_the_same_default_port(self) -> None:
         async def _run() -> None:
             with TemporaryDirectory() as temp_dir:

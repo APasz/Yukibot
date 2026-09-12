@@ -35,6 +35,7 @@ from . import (
     mod as mod_contracts,
     mod_service,
     node_service,
+    operation_service,
     operations,
     relay,
     storage_service,
@@ -94,6 +95,7 @@ from .core_routes import register_core_routes
 from .map_routes import register_map_routes
 from .mod_routes import register_mod_routes
 from .node_routes import register_node_management_routes
+from .operations_routes import register_operation_routes
 from .realtime_service import NodeRealtimeService
 from .request_auth import NodeRequestAuth
 from .route_contracts import (
@@ -314,6 +316,19 @@ class NodeApiService:
             require_available=self.node_management.require_app_installer_available,
             operations=self.operations,
         )
+        self.operation_api = operation_service.NodeOperationApiService(
+            operations=self.operations,
+            policies=(
+                operation_service.NodeOperationKindPolicy(
+                    kind=operations.NodeOperationKind.APP_INSTALL,
+                    kind_label="App install",
+                    read_scope=NodeApiScope.APP_MANAGE,
+                    cancel_scope=NodeApiScope.APP_MANAGE,
+                    required_level=Power_Level.sudo,
+                    cancellation_handler=self._cancel_app_install_operation,
+                ),
+            ),
+        )
         self.app_games = app_game_service.NodeAppGameService(
             node_name=lambda: self.node_name,
             require_acl=self._require_acl,
@@ -387,6 +402,18 @@ class NodeApiService:
         """The node-local app installation domain service."""
 
         return self._app_installer
+
+    async def _cancel_app_install_operation(
+        self,
+        operation_id: str,
+        actor_user_id: int,
+    ) -> None:
+        """Delegate generic operation cancellation to the installer service."""
+
+        await self._app_installer.cancel_install(
+            job_id=operation_id,
+            actor_user_id=actor_user_id,
+        )
 
     def set_manager(self, manager: App_Manager) -> None:
         self._manager = manager
@@ -557,6 +584,15 @@ class NodeApiService:
             nicegui_app,
             auth=self.request_auth,
             installer=self.app_installer,
+            api_prefix=_NODE_API_PREFIX,
+            http_exception=_http_exception,
+            traffic_log=traffic_log,
+        )
+
+        register_operation_routes(
+            nicegui_app,
+            auth=self.request_auth,
+            operation_api=self.operation_api,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,

@@ -109,6 +109,7 @@ On Yuki, the public authority endpoint also falls back to `PUBLIC_BASE_URL`, but
 - `app_installer.allowed_scopes` limits SteamCMD app installs on that node.
   Omit it or use `null` to allow every supported recipe; use `[]` to disable installs; otherwise list allowed scopes, such as `["satisfactory"]`. The node API enforces this policy.
 - App-install job IDs are durable node operation IDs. Their sanitised status and log history live in `.yukibot/operations-<node>.sqlite3`; an operation still active after a node restart is retained as `interrupted` rather than retried automatically.
+- Registered operations are also available through `/api/node/operations`. Listing uses the operation's read scope and omits log bodies; detail and cancellation dispatch through the registered operation kind so its executor retains control of safe cleanup.
 
 ### SteamCMD update targets
 

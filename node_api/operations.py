@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -224,6 +224,84 @@ class NodeOperationRecord:
     def active(self) -> bool:
         return self.state.active
 
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeOperationRecord":
+        """Decode one client-safe operation record from an API response."""
+
+        raw_kind = _mapping_required_text(payload, "kind", label="Operation kind")
+        raw_state = _mapping_required_text(payload, "state", label="Operation state")
+        try:
+            kind = NodeOperationKind(raw_kind)
+        except ValueError as xcp:
+            raise ValueError("Operation kind is invalid.") from xcp
+        try:
+            state = NodeOperationState(raw_state)
+        except ValueError as xcp:
+            raise ValueError("Operation state is invalid.") from xcp
+        return cls(
+            operation_id=_mapping_required_text(
+                payload, "operation_id", label="Operation ID"
+            ),
+            kind=kind,
+            node_name=_mapping_required_text(
+                payload, "node_name", label="Operation node"
+            ),
+            subject=_mapping_required_text(
+                payload, "subject", label="Operation subject"
+            ),
+            state=state,
+            summary=_mapping_required_text(
+                payload, "summary", label="Operation summary"
+            ),
+            requested_by_user_id=_mapping_optional_int(
+                payload.get("requested_by_user_id"),
+                label="Operation requester ID",
+            ),
+            phase=_mapping_optional_text(
+                payload.get("phase"), label="Operation phase"
+            ),
+            result_reference=_mapping_optional_text(
+                payload.get("result_reference"), label="Operation result reference"
+            ),
+            detail=_mapping_optional_text(
+                payload.get("detail"), label="Operation detail"
+            ),
+            progress_percent=_mapping_optional_progress(
+                payload.get("progress_percent")
+            ),
+            log_lines=_mapping_log_lines(payload.get("log_lines", ())),
+            created_at_unix_ms=_mapping_required_int(
+                payload, "created_at_unix_ms", label="Operation creation time"
+            ),
+            started_at_unix_ms=_mapping_optional_int(
+                payload.get("started_at_unix_ms"), label="Operation start time"
+            ),
+            finished_at_unix_ms=_mapping_optional_int(
+                payload.get("finished_at_unix_ms"), label="Operation finish time"
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        """Encode this record for the node operations API."""
+
+        return {
+            "operation_id": self.operation_id,
+            "kind": self.kind.value,
+            "node_name": self.node_name,
+            "subject": self.subject,
+            "state": self.state.value,
+            "summary": self.summary,
+            "requested_by_user_id": self.requested_by_user_id,
+            "phase": self.phase,
+            "result_reference": self.result_reference,
+            "detail": self.detail,
+            "progress_percent": self.progress_percent,
+            "log_lines": list(self.log_lines),
+            "created_at_unix_ms": self.created_at_unix_ms,
+            "started_at_unix_ms": self.started_at_unix_ms,
+            "finished_at_unix_ms": self.finished_at_unix_ms,
+        }
+
 
 class NodeOperationResourceConflict(RuntimeError):
     """Raised when an active operation already owns a required resource."""
@@ -308,37 +386,56 @@ class NodeOperationService:
                 self._create_database_locked(record, normalised_resource_keys)
         return record
 
-    def get(self, operation_id: str) -> NodeOperationRecord:
-        """Return an operation snapshot or raise ``LookupError``."""
+    def get(
+        self,
+        operation_id: str,
+        *,
+        include_log_lines: bool = True,
+    ) -> NodeOperationRecord:
+        """Return an operation snapshot, optionally without retained log lines."""
 
         with self._lock:
             self._ensure_database_locked()
-            return self._record_locked(operation_id)
+            return self._record_locked(
+                operation_id,
+                include_log_lines=include_log_lines,
+            )
 
     def list_records(
         self,
         *,
         kind: NodeOperationKind | None = None,
         limit: int | None = None,
+        include_log_lines: bool = True,
     ) -> tuple[NodeOperationRecord, ...]:
-        """List retained records newest first for a future operations surface."""
+        """List retained records newest first, optionally without retained log lines."""
 
         if limit is not None and limit < 1:
             raise ValueError("Operation list limit must be positive when provided.")
         with self._lock:
             self._ensure_database_locked()
             if self._database is None:
-                records = tuple(self._records.values())
-                filtered = tuple(
-                    record for record in records if kind is None or record.kind is kind
-                )
                 ordered = sorted(
-                    filtered,
+                    (
+                        record
+                        for record in self._records.values()
+                        if kind is None or record.kind is kind
+                    ),
                     key=lambda record: (record.created_at_unix_ms, record.operation_id),
                     reverse=True,
                 )
-                return tuple(ordered if limit is None else ordered[:limit])
-            return self._list_database_records_locked(kind=kind, limit=limit)
+                selected = ordered if limit is None else ordered[:limit]
+                if include_log_lines:
+                    return tuple(selected)
+                return tuple(
+                    _without_log_lines(record)
+                    for record in selected
+                )
+            return self._list_database_records_locked(
+                kind=kind,
+                limit=limit,
+                include_log_lines=include_log_lines,
+            )
 
     def begin(
         self, *, operation_id: str, progress: NodeOperationProgress
@@ -849,13 +946,19 @@ class NodeOperationService:
         ).fetchone()
         return None if row is None else cast(str, row["resource_key"])
 
-    def _record_locked(self, operation_id: str) -> NodeOperationRecord:
+    def _record_locked(
+        self,
+        operation_id: str,
+        *,
+        include_log_lines: bool = True,
+    ) -> NodeOperationRecord:
         normalised_id = _required_text(operation_id, label="Operation ID")
         if self._database is None:
             try:
-                return self._records[normalised_id]
+                record = self._records[normalised_id]
             except KeyError as xcp:
                 raise LookupError("Operation was not found.") from xcp
+            return record if include_log_lines else _without_log_lines(record)
         database = self._require_database_locked()
         row = database.execute(
             "SELECT * FROM node_operations WHERE operation_id = ?",
@@ -863,13 +966,17 @@ class NodeOperationService:
         ).fetchone()
         if row is None:
             raise LookupError("Operation was not found.")
-        return self._database_row_to_record_locked(row)
+        return self._database_row_to_record_locked(
+            row,
+            include_log_lines=include_log_lines,
+        )
 
     def _list_database_records_locked(
         self,
         *,
         kind: NodeOperationKind | None,
         limit: int | None,
+        include_log_lines: bool,
     ) -> tuple[NodeOperationRecord, ...]:
         database = self._require_database_locked()
         query = "SELECT * FROM node_operations"
@@ -882,19 +989,33 @@ class NodeOperationService:
             query += " LIMIT ?"
             arguments.append(limit)
         rows = database.execute(query, arguments).fetchall()
-        return tuple(self._database_row_to_record_locked(row) for row in rows)
+        return tuple(
+            self._database_row_to_record_locked(
+                row,
+                include_log_lines=include_log_lines,
+            )
+            for row in rows
+        )
 
-    def _database_row_to_record_locked(self, row: sqlite3.Row) -> NodeOperationRecord:
+    def _database_row_to_record_locked(
+        self,
+        row: sqlite3.Row,
+        *,
+        include_log_lines: bool = True,
+    ) -> NodeOperationRecord:
         database = self._require_database_locked()
         operation_id = cast(str, row["operation_id"])
-        log_rows = database.execute(
-            """
-            SELECT line FROM node_operation_logs
-            WHERE operation_id = ?
-            ORDER BY sequence ASC
-            """,
-            (operation_id,),
-        ).fetchall()
+        log_lines: tuple[str, ...] = ()
+        if include_log_lines:
+            log_rows = database.execute(
+                """
+                SELECT line FROM node_operation_logs
+                WHERE operation_id = ?
+                ORDER BY sequence ASC
+                """,
+                (operation_id,),
+            ).fetchall()
+            log_lines = tuple(cast(str, log_row["line"]) for log_row in log_rows)
         try:
             kind = NodeOperationKind(cast(str, row["kind"]))
             state = NodeOperationState(cast(str, row["state"]))
@@ -914,7 +1035,7 @@ class NodeOperationService:
             result_reference=_database_optional_text(row["result_reference"]),
             detail=_database_optional_text(row["detail"]),
             progress_percent=_database_optional_float(row["progress_percent"]),
-            log_lines=tuple(cast(str, log_row["line"]) for log_row in log_rows),
+            log_lines=log_lines,
             created_at_unix_ms=_database_required_int(row["created_at_unix_ms"]),
             started_at_unix_ms=_database_optional_int(row["started_at_unix_ms"]),
             finished_at_unix_ms=_database_optional_int(row["finished_at_unix_ms"]),
@@ -1117,6 +1238,12 @@ def _record_values(record: NodeOperationRecord) -> tuple[object, ...]:
     )
 
 
+def _without_log_lines(record: NodeOperationRecord) -> NodeOperationRecord:
+    if not record.log_lines:
+        return record
+    return replace(record, log_lines=())
+
+
 def _normalise_resource_keys(resource_keys: Sequence[str]) -> tuple[str, ...]:
     normalised: list[str] = []
     seen: set[str] = set()
@@ -1142,6 +1269,65 @@ def _optional_text(value: str | None, *, label: str) -> str | None:
     if not text:
         raise ValueError(f"{label} must not be blank when provided.")
     return text
+
+
+def _mapping_required_text(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    label: str,
+) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"{label} is invalid.")
+    return _required_text(value, label=label)
+
+
+def _mapping_optional_text(value: object, *, label: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{label} is invalid.")
+    return _optional_text(value, label=label)
+
+
+def _mapping_required_int(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    label: str,
+) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} is invalid.")
+    return value
+
+
+def _mapping_optional_int(value: object, *, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} is invalid.")
+    return value
+
+
+def _mapping_optional_progress(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("Operation progress is invalid.")
+    return float(value)
+
+
+def _mapping_log_lines(value: object) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        raise ValueError("Operation log lines are invalid.")
+    lines: list[str] = []
+    for line in value:
+        if not isinstance(line, str):
+            raise ValueError("Operation log lines are invalid.")
+        lines.append(line)
+    return tuple(lines)
 
 
 def _database_optional_text(value: object) -> str | None:
