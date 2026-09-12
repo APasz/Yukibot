@@ -121,7 +121,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         user: ModWebUser,
         on_update: Callable[[ModWebNodeOperationSnapshot], None],
     ) -> Callable[[], None]:
-        """Share one complete-record operation stream across active dashboard surfaces."""
+        """Share one complete-summary operation stream across dashboard surfaces."""
 
         key = RemoteOperationStreamKey(node=node)
         return self._remote_operation_stream_broker.subscribe(

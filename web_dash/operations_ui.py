@@ -13,11 +13,11 @@ from node_api.operation_service import (
     NodeOperationStreamEventKind,
     NodeOperationView,
 )
-from node_api.operations import NodeOperationKind, NodeOperationState
+from node_api.operations import NodeOperationKind, NodeOperationRecord, NodeOperationState
 from node_auth import NodeApiScope
 
 from .links import mod_web_node_system_path
-from .nicegui_protocols import ModWebUi, _value_as_text
+from .nicegui_protocols import ModWebUi, _value_as_bool, _value_as_text
 from .operation_stream import ModWebNodeOperationSnapshot
 from .remote_node_monitor import RemoteNodeAvailability, RemoteNodeMonitorSnapshot
 from .runtime_imports import (
@@ -54,6 +54,23 @@ class ModWebOperationActivityFilter(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class _ModWebOperationDetailKey:
+    """The node-local identity of an operation's separately loaded detail."""
+
+    node_key: str
+    operation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebOperationEndpointTarget:
+    """The authorisation target and query needed for one operation endpoint."""
+
+    app_name: str | None
+    scopes: tuple[NodeApiScope, ...]
+    query: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ModWebOperationRow:
     """One non-persistent operation rendered by the shared dashboard component."""
 
@@ -64,6 +81,13 @@ class ModWebOperationRow:
     @property
     def stale(self) -> bool:
         return self.availability is not RemoteNodeAvailability.ONLINE
+
+    @property
+    def detail_key(self) -> _ModWebOperationDetailKey:
+        return _ModWebOperationDetailKey(
+            node_key=self.node.node_name.casefold(),
+            operation_id=self.operation.record.operation_id,
+        )
 
 
 def operation_detail_path(*, node_name: str, operation_id: str) -> str:
@@ -243,6 +267,62 @@ class ModWebOperationsMixin(ModWebServiceSupport):
             )
         )
 
+    @staticmethod
+    def _operation_endpoint_target(
+        record: NodeOperationRecord,
+    ) -> _ModWebOperationEndpointTarget:
+        """Resolve the existing per-kind authorisation target for an operation."""
+
+        match record.kind:
+            case NodeOperationKind.APP_INSTALL:
+                return _ModWebOperationEndpointTarget(
+                    app_name=None,
+                    scopes=(NodeApiScope.APP_MANAGE,),
+                    query=(("kind", record.kind.value),),
+                )
+            case (
+                NodeOperationKind.MOD_METADATA_DISCOVERY
+                | NodeOperationKind.MOD_METADATA_APPLY
+            ):
+                if record.app_name is None:
+                    raise ValueError("App-scoped operation is missing its app name.")
+                return _ModWebOperationEndpointTarget(
+                    app_name=record.app_name,
+                    scopes=(NodeApiScope.MODS_WRITE,),
+                    query=(
+                        ("kind", record.kind.value),
+                        ("app_name", record.app_name),
+                    ),
+                )
+            case _:
+                assert_never(record.kind)
+
+    async def _operation_detail_from_operations_ui(
+        self,
+        *,
+        node: ModWebNodeLink,
+        operation: NodeOperationView,
+        user: ModWebUser,
+    ) -> NodeOperationView:
+        """Load one operation's retained detail from its authoritative node route."""
+
+        record = operation.record
+        target = self._operation_endpoint_target(record)
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=target.app_name,
+            path=(
+                f"/operations/{quote(record.operation_id, safe='')}?"
+                f"{urlencode(target.query)}"
+            ),
+            scopes=target.scopes,
+            user=user,
+        )
+        detail = NodeOperationView.from_mapping(payload)
+        if detail.record.operation_id != record.operation_id:
+            raise ValueError("Operation detail response has an unexpected operation ID.")
+        return detail
+
     async def _cancel_operation_from_operations_ui(
         self,
         *,
@@ -253,35 +333,31 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         """Use the existing per-kind cancellation route and its original scope policy."""
 
         record = operation.record
-        match record.kind:
-            case NodeOperationKind.APP_INSTALL:
-                app_name = None
-                scopes = (NodeApiScope.APP_MANAGE,)
-                query = {"kind": record.kind.value}
-            case (
-                NodeOperationKind.MOD_METADATA_DISCOVERY
-                | NodeOperationKind.MOD_METADATA_APPLY
-            ):
-                if record.app_name is None:
-                    raise ValueError("App-scoped operation is missing its app name.")
-                app_name = record.app_name
-                scopes = (NodeApiScope.MODS_WRITE,)
-                query = {"kind": record.kind.value, "app_name": record.app_name}
-            case _:
-                assert_never(record.kind)
+        target = self._operation_endpoint_target(record)
         payload = await self._remote_json_async(
             node=node,
-            app_name=app_name,
+            app_name=target.app_name,
             path=(
                 f"/operations/{quote(record.operation_id, safe='')}/cancel?"
-                f"{urlencode(query)}"
+                f"{urlencode(target.query)}"
             ),
-            scopes=scopes,
+            scopes=target.scopes,
             user=user,
             method="POST",
             json_payload={},
         )
         return NodeOperationView.from_mapping(payload)
+
+    @staticmethod
+    def _operation_stream_update_is_significant(
+        previous: NodeOperationView | None,
+        current: NodeOperationView,
+    ) -> bool:
+        """Ignore retained-log-only changes when deciding whether detail must reload."""
+
+        if previous is None:
+            return True
+        return previous.without_log_lines() != current.without_log_lines()
 
     def _render_operations_ui(
         self,
@@ -307,6 +383,9 @@ class ModWebOperationsMixin(ModWebServiceSupport):
             )
             return
 
+        source_nodes_by_key = {
+            candidate.node_name.casefold(): candidate for candidate in source_nodes
+        }
         snapshots_by_node: dict[str, ModWebNodeOperationSnapshot] = {}
         availability_by_node: dict[str, RemoteNodeAvailability] = {
             candidate.node_name.casefold(): (
@@ -321,6 +400,13 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         selected_app_name = ""
         selected_state = ""
         selected_activity = ModWebOperationActivityFilter.ALL
+        expanded_detail_keys: set[_ModWebOperationDetailKey] = set()
+        detail_by_key: dict[_ModWebOperationDetailKey, NodeOperationView] = {}
+        detail_errors_by_key: dict[_ModWebOperationDetailKey, str] = {}
+        detail_refresh_generations: dict[_ModWebOperationDetailKey, int] = {}
+        detail_loads_in_progress: set[_ModWebOperationDetailKey] = set()
+        detail_load_tasks: set[asyncio.Task[None]] = set()
+        initial_operation_expanded = False
         page_closed = False
         loop: AbstractEventLoop = asyncio.get_running_loop()
         unsubscribers: list[Callable[[], None]] = []
@@ -444,6 +530,7 @@ class ModWebOperationsMixin(ModWebServiceSupport):
 
                     @ui.refreshable
                     def _render_operation_rows() -> None:
+                        nonlocal initial_operation_expanded
                         rows = self._filtered_operation_rows(
                             rows=self._operation_rows(
                                 nodes=source_nodes,
@@ -462,15 +549,39 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                             ).classes("mod-subtitle text-sm py-3")
                             return
                         for row in rows:
+                            detail_key = row.detail_key
+                            if (
+                                not initial_operation_expanded
+                                and initial_operation_id is not None
+                                and row.operation.record.operation_id
+                                == initial_operation_id
+                            ):
+                                initial_operation_expanded = True
+                                expanded_detail_keys.add(detail_key)
+                            if (
+                                detail_key in expanded_detail_keys
+                                and detail_key not in detail_by_key
+                                and detail_key not in detail_errors_by_key
+                            ):
+                                _start_operation_detail_load(detail_key)
                             self._render_operation_row(
                                 ui=ui,
                                 row=row,
                                 user=user,
                                 show_node=portal,
-                                initially_expanded=(
-                                    initial_operation_id is not None
-                                    and row.operation.record.operation_id
-                                    == initial_operation_id
+                                detail_operation=detail_by_key.get(detail_key),
+                                details_open=detail_key in expanded_detail_keys,
+                                details_loading=(
+                                    detail_key in detail_loads_in_progress
+                                ),
+                                detail_error=detail_errors_by_key.get(detail_key),
+                                on_details_open_changed=(
+                                    lambda is_open, current_row=row: (
+                                        _set_operation_details_open(
+                                            row=current_row,
+                                            is_open=is_open,
+                                        )
+                                    )
                                 ),
                                 on_cancelled=lambda operation, row_node=row.node: (
                                     _apply_cancelled_operation(
@@ -516,6 +627,156 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                         _render_node_availability.refresh()
                         _render_operation_rows.refresh()
 
+                    def _operation_row_for_detail_key(
+                        detail_key: _ModWebOperationDetailKey,
+                    ) -> ModWebOperationRow | None:
+                        detail_node = source_nodes_by_key.get(detail_key.node_key)
+                        snapshot = snapshots_by_node.get(detail_key.node_key)
+                        if detail_node is None or snapshot is None:
+                            return None
+                        for operation in snapshot.operations:
+                            if operation.record.operation_id == detail_key.operation_id:
+                                return ModWebOperationRow(
+                                    node=detail_node,
+                                    operation=operation,
+                                    availability=availability_by_node.get(
+                                        detail_key.node_key,
+                                        RemoteNodeAvailability.CONNECTING,
+                                    ),
+                                )
+                        return None
+
+                    def _discard_operation_detail(
+                        detail_key: _ModWebOperationDetailKey,
+                    ) -> None:
+                        expanded_detail_keys.discard(detail_key)
+                        detail_by_key.pop(detail_key, None)
+                        detail_errors_by_key.pop(detail_key, None)
+                        if detail_key in detail_loads_in_progress:
+                            detail_refresh_generations[detail_key] = (
+                                detail_refresh_generations.get(detail_key, 0) + 1
+                            )
+                        else:
+                            detail_refresh_generations.pop(detail_key, None)
+
+                    def _invalidate_operation_detail(
+                        detail_key: _ModWebOperationDetailKey,
+                    ) -> None:
+                        if (
+                            detail_key not in expanded_detail_keys
+                            and detail_key not in detail_by_key
+                            and detail_key not in detail_errors_by_key
+                            and detail_key not in detail_loads_in_progress
+                        ):
+                            return
+                        detail_by_key.pop(detail_key, None)
+                        detail_errors_by_key.pop(detail_key, None)
+                        detail_refresh_generations[detail_key] = (
+                            detail_refresh_generations.get(detail_key, 0) + 1
+                        )
+                        if detail_key in expanded_detail_keys:
+                            _start_operation_detail_load(detail_key)
+
+                    async def _load_operation_detail(
+                        detail_key: _ModWebOperationDetailKey,
+                    ) -> None:
+                        try:
+                            while (
+                                not page_closed
+                                and detail_key in expanded_detail_keys
+                            ):
+                                row = _operation_row_for_detail_key(detail_key)
+                                if row is None:
+                                    return
+                                generation = detail_refresh_generations.get(
+                                    detail_key,
+                                    0,
+                                )
+                                try:
+                                    detail = (
+                                        await self._operation_detail_from_operations_ui(
+                                            node=row.node,
+                                            operation=row.operation,
+                                            user=user,
+                                        )
+                                    )
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception as xcp:
+                                    if generation != detail_refresh_generations.get(
+                                        detail_key,
+                                        0,
+                                    ):
+                                        continue
+                                    detail_errors_by_key[detail_key] = (
+                                        str(xcp) or type(xcp).__name__
+                                    )
+                                    return
+                                if generation != detail_refresh_generations.get(
+                                    detail_key,
+                                    0,
+                                ):
+                                    continue
+                                if (
+                                    page_closed
+                                    or detail_key not in expanded_detail_keys
+                                ):
+                                    return
+                                detail_by_key[detail_key] = detail
+                                detail_errors_by_key.pop(detail_key, None)
+                                return
+                        finally:
+                            detail_loads_in_progress.discard(detail_key)
+                            if (
+                                detail_key not in expanded_detail_keys
+                                and detail_key not in detail_by_key
+                            ):
+                                detail_refresh_generations.pop(detail_key, None)
+                            if not page_closed:
+                                _refresh_rows()
+
+                    def _forget_operation_detail_task(
+                        task: asyncio.Task[None],
+                    ) -> None:
+                        detail_load_tasks.discard(task)
+
+                    def _start_operation_detail_load(
+                        detail_key: _ModWebOperationDetailKey,
+                    ) -> None:
+                        if (
+                            page_closed
+                            or detail_key not in expanded_detail_keys
+                            or detail_key in detail_loads_in_progress
+                        ):
+                            return
+                        detail_loads_in_progress.add(detail_key)
+                        task = asyncio.create_task(
+                            _load_operation_detail(detail_key),
+                            name=(
+                                "mod-web-operation-detail:"
+                                f"{detail_key.node_key}:{detail_key.operation_id}"
+                            ),
+                        )
+                        detail_load_tasks.add(task)
+                        task.add_done_callback(_forget_operation_detail_task)
+
+                    def _set_operation_details_open(
+                        *,
+                        row: ModWebOperationRow,
+                        is_open: bool,
+                    ) -> None:
+                        if page_closed:
+                            return
+                        detail_key = row.detail_key
+                        if is_open == (detail_key in expanded_detail_keys):
+                            return
+                        if is_open:
+                            expanded_detail_keys.add(detail_key)
+                            _invalidate_operation_detail(detail_key)
+                        else:
+                            _discard_operation_detail(detail_key)
+                        _refresh_rows()
+
                     def _set_node_filter(event: object) -> None:
                         nonlocal selected_node_name
                         selected_node_name = _value_as_text(event).strip()
@@ -556,10 +817,43 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                     def _apply_snapshot(snapshot: ModWebNodeOperationSnapshot) -> None:
                         if page_closed:
                             return
-                        snapshots_by_node[snapshot.node_name.casefold()] = snapshot
-                        availability_by_node[snapshot.node_name.casefold()] = (
+                        node_key = snapshot.node_name.casefold()
+                        previous_snapshot = snapshots_by_node.get(node_key)
+                        previous_operations_by_id = (
+                            {}
+                            if previous_snapshot is None
+                            else {
+                                operation.record.operation_id: operation
+                                for operation in previous_snapshot.operations
+                            }
+                        )
+                        current_operation_ids = {
+                            operation.record.operation_id
+                            for operation in snapshot.operations
+                        }
+                        snapshots_by_node[node_key] = snapshot
+                        availability_by_node[node_key] = (
                             RemoteNodeAvailability.ONLINE
                         )
+                        for operation in snapshot.operations:
+                            detail_key = _ModWebOperationDetailKey(
+                                node_key=node_key,
+                                operation_id=operation.record.operation_id,
+                            )
+                            if self._operation_stream_update_is_significant(
+                                previous_operations_by_id.get(
+                                    operation.record.operation_id
+                                ),
+                                operation,
+                            ):
+                                _invalidate_operation_detail(detail_key)
+                        for operation_id in previous_operations_by_id.keys() - current_operation_ids:
+                            _discard_operation_detail(
+                                _ModWebOperationDetailKey(
+                                    node_key=node_key,
+                                    operation_id=operation_id,
+                                )
+                            )
                         _refresh_rows()
 
                     def _handle_snapshot(snapshot: ModWebNodeOperationSnapshot) -> None:
@@ -594,13 +888,12 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                             node_name=node.node_name,
                             operation=operation,
                         )
-                        snapshots_by_node[node_key] = (
+                        _apply_snapshot(
                             ModWebNodeOperationSnapshot.apply_event(
                                 current_snapshot,
                                 event,
                             )
                         )
-                        _refresh_rows()
 
                     for source_node in source_nodes:
                         unsubscribers.append(
@@ -624,6 +917,8 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         def _cleanup() -> None:
             nonlocal page_closed
             page_closed = True
+            for task in tuple(detail_load_tasks):
+                task.cancel()
             for unsubscribe in unsubscribers:
                 unsubscribe()
 
@@ -636,10 +931,14 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         row: ModWebOperationRow,
         user: ModWebUser,
         show_node: bool,
-        initially_expanded: bool,
+        detail_operation: NodeOperationView | None,
+        details_open: bool,
+        details_loading: bool,
+        detail_error: str | None,
+        on_details_open_changed: Callable[[bool], None],
         on_cancelled: Callable[[NodeOperationView], None],
     ) -> None:
-        """Render one complete operation view, including its retained detail and logs."""
+        """Render one live summary with detail and logs loaded only on expansion."""
 
         operation = row.operation
         record = operation.record
@@ -730,28 +1029,58 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                         ui.label(
                             f"Finished: {self._operation_timestamp(record.finished_at_unix_ms)}"
                         )
-                if record.detail is not None or record.log_lines:
-                    details: Element = ui.element("details").classes(
-                        "w-full mod-operation-details"
-                    )
-                    if initially_expanded:
-                        details.props("open")
-                    with details:
-                        with ui.element("summary").classes(
-                            "cursor-pointer text-sm font-medium"
-                        ):
-                            ui.label("Details and logs")
-                        with ui.column().classes("w-full gap-2 pt-2"):
-                            if record.detail is not None:
-                                ui.label(record.detail).classes(
+                details: Element = ui.element("details").classes(
+                    "w-full mod-operation-details"
+                )
+                if details_open:
+                    details.props("open")
+
+                def _details_toggled(event: object) -> None:
+                    on_details_open_changed(_value_as_bool(event))
+
+                details.on(
+                    "toggle",
+                    _details_toggled,
+                    js_handler="(event) => emit(event.target.open)",
+                )
+                with details:
+                    with ui.element("summary").classes(
+                        "cursor-pointer text-sm font-medium"
+                    ):
+                        ui.label("Details and logs")
+                    with ui.column().classes("w-full gap-2 pt-2"):
+                        if details_loading:
+                            ui.label("Loading details and retained logs…").classes(
+                                "mod-subtitle text-sm"
+                            )
+                        elif detail_error is not None:
+                            ui.label(
+                                f"Could not load details and retained logs: {detail_error}"
+                            ).classes("text-negative text-sm")
+                        elif detail_operation is None:
+                            ui.label("Loading details and retained logs…").classes(
+                                "mod-subtitle text-sm"
+                            )
+                        else:
+                            detail_record = detail_operation.record
+                            if detail_record.detail is not None:
+                                ui.label(detail_record.detail).classes(
                                     "text-sm whitespace-pre-wrap"
                                 )
-                            if record.log_lines:
+                            if detail_record.log_lines:
                                 ui.html(
                                     '<pre class="mod-operation-log">'
-                                    f"{escape(chr(10).join(record.log_lines))}"
+                                    f"{escape(chr(10).join(detail_record.log_lines))}"
                                     "</pre>"
                                 ).classes("w-full")
+                            elif detail_record.detail is None:
+                                ui.label("No additional detail or retained logs.").classes(
+                                    "mod-subtitle text-sm"
+                                )
+                            else:
+                                ui.label("No retained log lines.").classes(
+                                    "mod-subtitle text-sm"
+                                )
 
     def _render_app_active_operation_summary(
         self,

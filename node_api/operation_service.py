@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TypeAlias, cast
 
@@ -108,8 +108,16 @@ class NodeOperationView:
             cancellable=raw_cancellable,
         )
 
-    def to_mapping(self) -> dict[str, object]:
-        payload = self.record.to_mapping()
+    def without_log_lines(self) -> "NodeOperationView":
+        """Return the complete operation summary without its retained log body."""
+
+        record = self.record.without_log_lines()
+        if record is self.record:
+            return self
+        return replace(self, record=record)
+
+    def to_mapping(self, *, include_log_lines: bool = True) -> dict[str, object]:
+        payload = self.record.to_mapping(include_log_lines=include_log_lines)
         payload["kind_label"] = self.kind_label
         payload["cancellable"] = self.cancellable
         return payload
@@ -117,7 +125,7 @@ class NodeOperationView:
 
 @dataclass(frozen=True, slots=True)
 class NodeOperationStreamEvent:
-    """A complete operation-stream message; updates deliberately have no patch form."""
+    """A complete operation-summary stream message with no patch form."""
 
     kind: NodeOperationStreamEventKind
     node_name: str
@@ -131,11 +139,23 @@ class NodeOperationStreamEvent:
         if self.kind is NodeOperationStreamEventKind.SNAPSHOT:
             if self.operation is not None:
                 raise ValueError("Operation stream snapshots cannot include a singular operation.")
+            if any(operation.record.log_lines for operation in self.operations):
+                object.__setattr__(
+                    self,
+                    "operations",
+                    tuple(
+                        operation.without_log_lines()
+                        for operation in self.operations
+                    ),
+                )
             return
         if self.operation is None:
             raise ValueError("Operation stream updates require a complete operation.")
         if self.operations:
             raise ValueError("Operation stream updates cannot include a snapshot collection.")
+        operation = self.operation.without_log_lines()
+        if operation is not self.operation:
+            object.__setattr__(self, "operation", operation)
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeOperationStreamEvent":
@@ -180,9 +200,12 @@ class NodeOperationStreamEvent:
             "node_name": self.node_name,
         }
         if self.kind is NodeOperationStreamEventKind.SNAPSHOT:
-            payload["operations"] = [operation.to_mapping() for operation in self.operations]
+            payload["operations"] = [
+                operation.to_mapping(include_log_lines=False)
+                for operation in self.operations
+            ]
         elif self.operation is not None:
-            payload["operation"] = self.operation.to_mapping()
+            payload["operation"] = self.operation.to_mapping(include_log_lines=False)
         else:
             raise RuntimeError("Operation stream update unexpectedly has no operation.")
         return payload
@@ -244,7 +267,7 @@ class NodeOperationApiService:
         node_name: str,
         callback: Callable[[NodeOperationStreamEvent], None],
     ) -> tuple[NodeOperationStreamEvent, Callable[[], None]]:
-        """Atomically subscribe and return a complete snapshot for a reconnecting client."""
+        """Atomically subscribe and return a complete summary snapshot for reconnects."""
 
         if not node_name.strip():
             raise ValueError("Operation stream node name must not be blank.")
@@ -262,7 +285,10 @@ class NodeOperationApiService:
                 )
             )
 
-        records, unsubscribe = self._operations.subscribe_changes_with_snapshot(_on_change)
+        records, unsubscribe = self._operations.subscribe_changes_with_snapshot(
+            _on_change,
+            include_log_lines=False,
+        )
         snapshot = NodeOperationStreamEvent(
             kind=NodeOperationStreamEventKind.SNAPSHOT,
             node_name=node_name,
@@ -292,7 +318,7 @@ class NodeOperationApiService:
             include_log_lines=False,
         )
         return tuple(
-            self._view_for(record)
+            self._summary_view_for(record)
             for record in records
             if self._matches_target(
                 record=record,
@@ -333,7 +359,7 @@ class NodeOperationApiService:
 
         policy = self.policy_for_request(kind=kind, app_name=app_name)
         target_app_name = policy.app_name_for_request(app_name)
-        record = self._operations.get(operation_id)
+        record = self._operations.get(operation_id, include_log_lines=False)
         self._require_matching_kind(record=record, kind=policy.kind)
         self._require_matching_target(
             record=record,
@@ -350,8 +376,8 @@ class NodeOperationApiService:
         if record.state not in _CANCELLABLE_OPERATION_STATES:
             raise ValueError("Operation is not in a cancellable state.")
         await handler(record.operation_id, actor_user_id)
-        record = self._operations.get(record.operation_id)
-        return self._view_for(record)
+        record = self._operations.get(record.operation_id, include_log_lines=False)
+        return self._summary_view_for(record)
 
     def policy_for(self, kind: NodeOperationKind) -> NodeOperationKindPolicy:
         """Return the registered API policy for one operation kind."""
@@ -398,7 +424,12 @@ class NodeOperationApiService:
 
         if record.kind not in self._policies_by_kind:
             return None
-        return self._view_for(record)
+        return self._summary_view_for(record)
+
+    def _summary_view_for(self, record: NodeOperationRecord) -> NodeOperationView:
+        """Project a complete operation summary without retained log lines."""
+
+        return self._view_for(record).without_log_lines()
 
     @staticmethod
     def _require_matching_kind(

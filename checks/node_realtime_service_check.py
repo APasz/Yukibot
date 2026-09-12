@@ -454,7 +454,7 @@ class NodeRealtimeServiceTests(unittest.TestCase):
                     {
                         "kind": "snapshot",
                         "node_name": "erin",
-                        "operations": [queued.to_mapping()],
+                        "operations": [queued.to_mapping(include_log_lines=False)],
                     }
                 ],
             )
@@ -484,7 +484,7 @@ class NodeRealtimeServiceTests(unittest.TestCase):
                 {
                     "kind": "finished",
                     "node_name": "erin",
-                    "operation": finished.to_mapping(),
+                    "operation": finished.to_mapping(include_log_lines=False),
                 },
             )
 
@@ -523,7 +523,7 @@ class NodeRealtimeServiceTests(unittest.TestCase):
                     {
                         "kind": "snapshot",
                         "node_name": "erin",
-                        "operations": [expected.to_mapping()],
+                        "operations": [expected.to_mapping(include_log_lines=False)],
                     },
                 )
                 websocket.disconnect_requested.set()
@@ -586,12 +586,12 @@ class NodeRealtimeServiceTests(unittest.TestCase):
                     {
                         "kind": "snapshot",
                         "node_name": "erin",
-                        "operations": [queued.to_mapping()],
+                        "operations": [queued.to_mapping(include_log_lines=False)],
                     },
                     {
                         "kind": "updated",
                         "node_name": "erin",
-                        "operation": latest.to_mapping(),
+                        "operation": latest.to_mapping(include_log_lines=False),
                     },
                 ],
             )

@@ -103,6 +103,12 @@ class NodeOperationsCheck(unittest.TestCase):
         )
 
         self.assertEqual(NodeOperationRecord.from_mapping(record.to_mapping()), record)
+        summary_mapping = record.to_mapping(include_log_lines=False)
+        self.assertNotIn("log_lines", summary_mapping)
+        self.assertEqual(
+            NodeOperationRecord.from_mapping(summary_mapping),
+            record.without_log_lines(),
+        )
 
     def test_persisted_operation_retains_sanitised_progress_and_history(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -393,6 +399,18 @@ class NodeOperationsCheck(unittest.TestCase):
         self.assertFalse(updates[1].immediate)
         self.assertEqual(
             updates[1].operation.record.log_lines if updates[1].operation is not None else (),
+            (),
+        )
+        update_mapping = updates[1].to_mapping()
+        update_operation = update_mapping["operation"]
+        self.assertIsInstance(update_operation, dict)
+        assert isinstance(update_operation, dict)
+        self.assertNotIn("log_lines", update_operation)
+        self.assertEqual(
+            operation_api.get_operation(
+                operation_id=first.operation_id,
+                kind=NodeOperationKind.APP_INSTALL,
+            ).record.log_lines,
             ("stdout: Downloading.",),
         )
         self.assertEqual(
@@ -624,6 +642,9 @@ class NodeOperationsCheck(unittest.TestCase):
         list_view = NodeOperationView.from_mapping(list_response.json()["operations"][0])
         detail_view = NodeOperationView.from_mapping(detail_response.json())
         cancelled_view = NodeOperationView.from_mapping(cancel_response.json())
+        self.assertNotIn("log_lines", list_response.json()["operations"][0])
+        self.assertNotIn("log_lines", cancel_response.json())
+        self.assertIn("log_lines", detail_response.json())
         self.assertEqual(list_view.record.log_lines, ())
         self.assertEqual(
             detail_view.record.log_lines,

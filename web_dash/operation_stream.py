@@ -13,7 +13,7 @@ from node_api.operation_service import (
 
 @dataclass(frozen=True, slots=True)
 class ModWebNodeOperationSnapshot:
-    """The live, non-persistent operation view currently reported by one node."""
+    """The live, non-persistent operation summaries currently reported by one node."""
 
     node_name: str
     operations: tuple[NodeOperationView, ...]
@@ -21,6 +21,14 @@ class ModWebNodeOperationSnapshot:
     def __post_init__(self) -> None:
         if not self.node_name.strip():
             raise ValueError("Operation snapshot node name must not be blank.")
+        if any(operation.record.log_lines for operation in self.operations):
+            object.__setattr__(
+                self,
+                "operations",
+                tuple(
+                    operation.without_log_lines() for operation in self.operations
+                ),
+            )
 
     @classmethod
     def apply_event(

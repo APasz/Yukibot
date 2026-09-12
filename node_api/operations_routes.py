@@ -118,7 +118,11 @@ def register_operation_routes(
             )
         except ValueError as xcp:
             raise http_exception(400, str(xcp)) from xcp
-        return {"operations": [record.to_mapping() for record in records]}
+        return {
+            "operations": [
+                record.to_mapping(include_log_lines=False) for record in records
+            ]
+        }
 
     @nicegui_app.get(f"{api_prefix}/operations/{{operation_id}}")
     async def _operation_detail(
@@ -205,7 +209,7 @@ def register_operation_routes(
             operation_kind=view.record.kind.value,
             required_level=policy.required_level.name,
         )
-        return view.to_mapping()
+        return view.to_mapping(include_log_lines=False)
 
 
 def _policy_for_request(

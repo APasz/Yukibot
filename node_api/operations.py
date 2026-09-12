@@ -274,6 +274,13 @@ class NodeOperationRecord:
     def active(self) -> bool:
         return self.state.active
 
+    def without_log_lines(self) -> "NodeOperationRecord":
+        """Return this record's complete summary without its retained log body."""
+
+        if not self.log_lines:
+            return self
+        return replace(self, log_lines=())
+
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeOperationRecord":
         """Decode one client-safe operation record from an API response."""
@@ -334,10 +341,10 @@ class NodeOperationRecord:
             ),
         )
 
-    def to_mapping(self) -> dict[str, object]:
-        """Encode this record for the node operations API."""
+    def to_mapping(self, *, include_log_lines: bool = True) -> dict[str, object]:
+        """Encode this record, optionally omitting its retained log body."""
 
-        return {
+        payload: dict[str, object] = {
             "operation_id": self.operation_id,
             "kind": self.kind.value,
             "node_name": self.node_name,
@@ -350,11 +357,13 @@ class NodeOperationRecord:
             "result_reference": self.result_reference,
             "detail": self.detail,
             "progress_percent": self.progress_percent,
-            "log_lines": list(self.log_lines),
             "created_at_unix_ms": self.created_at_unix_ms,
             "started_at_unix_ms": self.started_at_unix_ms,
             "finished_at_unix_ms": self.finished_at_unix_ms,
         }
+        if include_log_lines:
+            payload["log_lines"] = list(self.log_lines)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,12 +466,16 @@ class NodeOperationService:
     def subscribe_changes_with_snapshot(
         self,
         callback: Callable[[NodeOperationChange], None],
+        *,
+        include_log_lines: bool = True,
     ) -> tuple[tuple[NodeOperationRecord, ...], Callable[[], None]]:
-        """Atomically subscribe and return the authoritative retained-record snapshot."""
+        """Atomically subscribe and return a record snapshot with optional log bodies."""
 
         with self._lock:
             self._ensure_database_locked()
-            snapshot = self._list_all_records_locked(include_log_lines=True)
+            snapshot = self._list_all_records_locked(
+                include_log_lines=include_log_lines
+            )
             unsubscribe = self._subscribe_changes_locked(callback)
         return snapshot, unsubscribe
 
@@ -561,10 +574,7 @@ class NodeOperationService:
                 selected = ordered if limit is None else ordered[:limit]
                 if include_log_lines:
                     return tuple(selected)
-                return tuple(
-                    _without_log_lines(record)
-                    for record in selected
-                )
+                return tuple(record.without_log_lines() for record in selected)
             return self._list_database_records_locked(
                 kind=kind,
                 app_name=normalised_app_name,
@@ -587,7 +597,7 @@ class NodeOperationService:
             )
             if include_log_lines:
                 return records
-            return tuple(_without_log_lines(record) for record in records)
+            return tuple(record.without_log_lines() for record in records)
         return self._list_database_records_locked(
             kind=None,
             app_name=None,
@@ -1300,7 +1310,7 @@ class NodeOperationService:
                 record = self._records[normalised_id]
             except KeyError as xcp:
                 raise LookupError("Operation was not found.") from xcp
-            return record if include_log_lines else _without_log_lines(record)
+            return record if include_log_lines else record.without_log_lines()
         database = self._require_database_locked()
         row = database.execute(
             "SELECT * FROM node_operations WHERE operation_id = ?",
@@ -1706,12 +1716,6 @@ def _record_values(record: NodeOperationRecord) -> tuple[object, ...]:
         record.finished_at_unix_ms,
         record.app_name,
     )
-
-
-def _without_log_lines(record: NodeOperationRecord) -> NodeOperationRecord:
-    if not record.log_lines:
-        return record
-    return replace(record, log_lines=())
 
 
 def _normalise_resource_keys(resource_keys: Sequence[str]) -> tuple[str, ...]:

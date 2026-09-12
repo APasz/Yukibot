@@ -296,7 +296,7 @@ class NodeRealtimeService:
             await self._close_websocket_quietly(websocket)
 
     async def serve_operation_stream(self, websocket: WebSocket) -> None:
-        """Stream complete durable operation views with an authoritative reconnect snapshot."""
+        """Stream complete operation summaries with an authoritative reconnect snapshot."""
 
         operation_stream = self._operation_stream
         if operation_stream is None:

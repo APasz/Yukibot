@@ -802,27 +802,25 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
         user: ModWebUser,
     ) -> NodeAppInstallStatus:
         if node.is_current:
-            operation = await self._node_api.operation_api.cancel_operation(
+            await self._node_api.operation_api.cancel_operation(
                 operation_id=job_id,
                 actor_user_id=user.discord_id,
                 kind=NodeOperationKind.APP_INSTALL,
             )
-            return NodeAppInstallStatus.from_operation(operation.record)
-        payload = await self._remote_json_async(
-            node=node,
-            app_name=None,
-            path=(
-                f"/operations/{quote(job_id, safe='')}/cancel?"
-                f"kind={NodeOperationKind.APP_INSTALL.value}"
-            ),
-            scopes=(NodeApiScope.APP_MANAGE,),
-            user=user,
-            method="POST",
-            json_payload={},
-        )
-        return NodeAppInstallStatus.from_operation(
-            NodeOperationView.from_mapping(payload).record
-        )
+        else:
+            await self._remote_json_async(
+                node=node,
+                app_name=None,
+                path=(
+                    f"/operations/{quote(job_id, safe='')}/cancel?"
+                    f"kind={NodeOperationKind.APP_INSTALL.value}"
+                ),
+                scopes=(NodeApiScope.APP_MANAGE,),
+                user=user,
+                method="POST",
+                json_payload={},
+            )
+        return await self._app_install_status(node=node, job_id=job_id, user=user)
 
 
 __all__: tuple[str, ...] = ("ModWebAppInstallerMixin",)
