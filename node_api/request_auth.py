@@ -399,6 +399,7 @@ class NodeRequestAuth:
 
 _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
     NodeApiScope.APPS_READ: Power_Level.visitor,
+    NodeApiScope.OPERATIONS_READ: Power_Level.sudo,
     NodeApiScope.MAP_READ: Power_Level.visitor,
     NodeApiScope.MAP_WRITE: Power_Level.user,
     NodeApiScope.CHAT_READ: Power_Level.visitor,

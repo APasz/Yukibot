@@ -288,7 +288,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                 token = self._remote_token(
                     node=node,
                     app_name=None,
-                    scopes=(NodeApiScope.APP_MANAGE, NodeApiScope.MODS_WRITE),
+                    scopes=(NodeApiScope.OPERATIONS_READ,),
                     user=user,
                 )
                 session = await self._remote_http_client()

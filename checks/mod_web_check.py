@@ -12513,15 +12513,17 @@ class ModWebTests(unittest.TestCase):
             ),
             kind_label="Mod metadata discovery",
             cancellable=True,
+            cancellation_scope=NodeApiScope.MODS_WRITE,
+            cancellation_app_name="minecraft_alpha",
         )
-        cancelled_metadata_operation = NodeOperationView(
+        cancelled_metadata_operation = replace(
+            metadata_operation,
             record=replace(
                 metadata_operation.record,
                 state=NodeOperationState.CANCELLED,
                 summary="Metadata discovery cancelled.",
                 finished_at_unix_ms=3,
             ),
-            kind_label=metadata_operation.kind_label,
             cancellable=False,
         )
         cancellation_requested = asyncio.Event()
@@ -12532,13 +12534,13 @@ class ModWebTests(unittest.TestCase):
 
         async def cancel_metadata_operation(**_kwargs: object) -> NodeOperationView:
             cancellation_requested.set()
-            return NodeOperationView(
+            return replace(
+                metadata_operation,
                 record=replace(
                     metadata_operation.record,
                     state=NodeOperationState.CANCEL_REQUESTED,
                     summary="Cancellation requested.",
                 ),
-                kind_label=metadata_operation.kind_label,
                 cancellable=False,
             )
 
@@ -13876,6 +13878,8 @@ class ModWebTests(unittest.TestCase):
             ),
             kind_label="Mod metadata discovery",
             cancellable=True,
+            cancellation_scope=NodeApiScope.MODS_WRITE,
+            cancellation_app_name="minecraft_alpha",
         )
         model = cast(
             ModWebPageModel,
@@ -13938,6 +13942,8 @@ class ModWebTests(unittest.TestCase):
             ),
             kind_label="Mod metadata apply",
             cancellable=True,
+            cancellation_scope=NodeApiScope.MODS_WRITE,
+            cancellation_app_name="minecraft_alpha",
         )
         model = cast(
             ModWebPageModel,
@@ -14025,6 +14031,8 @@ class ModWebTests(unittest.TestCase):
                         ),
                         kind_label="Mod metadata discovery",
                         cancellable=False,
+                        cancellation_scope=NodeApiScope.MODS_WRITE,
+                        cancellation_app_name="minecraft_alpha",
                     ).to_mapping()
                 ),
             ) as remote_json,
@@ -14070,6 +14078,8 @@ class ModWebTests(unittest.TestCase):
             ),
             kind_label="Mod metadata discovery",
             cancellable=True,
+            cancellation_scope=NodeApiScope.MODS_WRITE,
+            cancellation_app_name="minecraft_alpha",
         )
         model = cast(
             ModWebPageModel,

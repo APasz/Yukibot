@@ -89,23 +89,71 @@ class NodeOperationView:
     record: NodeOperationRecord
     kind_label: str
     cancellable: bool
+    cancellation_scope: NodeApiScope | None = None
+    cancellation_app_name: str | None = None
 
     def __post_init__(self) -> None:
         if not self.kind_label.strip():
             raise ValueError("Operation kind label must not be blank.")
+        cancellation_scope = self.cancellation_scope
+        if cancellation_scope is not None:
+            try:
+                cancellation_scope = NodeApiScope(cancellation_scope)
+            except (TypeError, ValueError) as xcp:
+                raise ValueError("Operation cancellation scope is invalid.") from xcp
+            object.__setattr__(self, "cancellation_scope", cancellation_scope)
+        cancellation_app_name = self.cancellation_app_name
+        if cancellation_app_name is not None:
+            if not isinstance(cancellation_app_name, str) or not (
+                normalised_app_name := cancellation_app_name.strip()
+            ):
+                raise ValueError("Operation cancellation app name is invalid.")
+            object.__setattr__(
+                self,
+                "cancellation_app_name",
+                normalised_app_name,
+            )
+        if cancellation_scope is None and cancellation_app_name is not None:
+            raise ValueError(
+                "Operation cancellation app name requires a cancellation scope."
+            )
+        if self.cancellable and cancellation_scope is None:
+            raise ValueError(
+                "Cancellable operations require cancellation authorisation metadata."
+            )
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeOperationView":
         raw_kind_label = payload.get("kind_label")
         raw_cancellable = payload.get("cancellable")
+        raw_cancellation_scope = payload.get("cancellation_scope")
+        raw_cancellation_app_name = payload.get("cancellation_app_name")
         if not isinstance(raw_kind_label, str) or not raw_kind_label.strip():
             raise ValueError("Operation kind label is invalid.")
         if not isinstance(raw_cancellable, bool):
             raise ValueError("Operation cancellable state is invalid.")
+        if raw_cancellation_scope is not None and not isinstance(
+            raw_cancellation_scope, str
+        ):
+            raise ValueError("Operation cancellation scope is invalid.")
+        if raw_cancellation_app_name is not None and not isinstance(
+            raw_cancellation_app_name, str
+        ):
+            raise ValueError("Operation cancellation app name is invalid.")
+        try:
+            cancellation_scope = (
+                None
+                if raw_cancellation_scope is None
+                else NodeApiScope(raw_cancellation_scope)
+            )
+        except ValueError as xcp:
+            raise ValueError("Operation cancellation scope is invalid.") from xcp
         return cls(
             record=NodeOperationRecord.from_mapping(payload),
             kind_label=raw_kind_label.strip(),
             cancellable=raw_cancellable,
+            cancellation_scope=cancellation_scope,
+            cancellation_app_name=raw_cancellation_app_name,
         )
 
     def without_log_lines(self) -> "NodeOperationView":
@@ -120,6 +168,12 @@ class NodeOperationView:
         payload = self.record.to_mapping(include_log_lines=include_log_lines)
         payload["kind_label"] = self.kind_label
         payload["cancellable"] = self.cancellable
+        payload["cancellation_scope"] = (
+            None
+            if self.cancellation_scope is None
+            else self.cancellation_scope.value
+        )
+        payload["cancellation_app_name"] = self.cancellation_app_name
         return payload
 
 
@@ -240,6 +294,9 @@ class NodeOperationApiService:
     ) -> NodeApiScope:
         """Return the access scope needed before reading the requested records."""
 
+        if kind is None:
+            self._require_unfiltered_app_name(app_name)
+            return NodeApiScope.OPERATIONS_READ
         return self.policy_for_request(kind=kind, app_name=app_name).read_scope
 
     def cancel_scope_for(
@@ -253,13 +310,9 @@ class NodeOperationApiService:
         return self.policy_for_request(kind=kind, app_name=app_name).cancel_scope
 
     def stream_read_scopes(self) -> tuple[NodeApiScope, ...]:
-        """Return every read scope required for the unfiltered operation stream."""
+        """Return the dedicated scope for the unfiltered operation stream."""
 
-        scopes: list[NodeApiScope] = []
-        for policy in self._policies_by_kind.values():
-            if policy.read_scope not in scopes:
-                scopes.append(policy.read_scope)
-        return tuple(scopes)
+        return (NodeApiScope.OPERATIONS_READ,)
 
     def subscribe_stream_with_snapshot(
         self,
@@ -292,11 +345,7 @@ class NodeOperationApiService:
         snapshot = NodeOperationStreamEvent(
             kind=NodeOperationStreamEventKind.SNAPSHOT,
             node_name=node_name,
-            operations=tuple(
-                view
-                for record in records
-                if (view := self._stream_view_for(record)) is not None
-            ),
+            operations=self._registered_summary_views(records),
         )
         return snapshot, unsubscribe
 
@@ -308,6 +357,21 @@ class NodeOperationApiService:
         limit: int | None = None,
     ) -> tuple[NodeOperationView, ...]:
         """List registered operations newest first without their log bodies."""
+
+        if kind is None:
+            self._require_unfiltered_app_name(app_name)
+            records = self._operations.list_records(
+                limit=limit,
+                include_log_lines=False,
+            )
+            views = self._registered_summary_views(records)
+            if limit is None:
+                return views
+            if len(views) >= limit or len(records) < limit:
+                return views[:limit]
+            return self._registered_summary_views(
+                self._operations.list_records(include_log_lines=False)
+            )[:limit]
 
         policy = self.policy_for_request(kind=kind, app_name=app_name)
         target_app_name = policy.app_name_for_request(app_name)
@@ -335,6 +399,10 @@ class NodeOperationApiService:
         app_name: str | None = None,
     ) -> NodeOperationView:
         """Return one registered operation with its retained log lines."""
+
+        if kind is None:
+            self._require_unfiltered_app_name(app_name)
+            return self._view_for(self._operations.get(operation_id))
 
         policy = self.policy_for_request(kind=kind, app_name=app_name)
         target_app_name = policy.app_name_for_request(app_name)
@@ -410,12 +478,24 @@ class NodeOperationApiService:
 
     def _view_for(self, record: NodeOperationRecord) -> NodeOperationView:
         policy = self.policy_for(record.kind)
+        cancellation_app_name = policy.app_name_for_request(record.app_name)
+        cancellation_scope = (
+            policy.cancel_scope
+            if policy.cancellation_handler is not None
+            else None
+        )
         return NodeOperationView(
             record=record,
             kind_label=policy.kind_label,
             cancellable=(
                 policy.cancellation_handler is not None
                 and record.state in _CANCELLABLE_OPERATION_STATES
+            ),
+            cancellation_scope=cancellation_scope,
+            cancellation_app_name=(
+                cancellation_app_name
+                if cancellation_scope is not None
+                else None
             ),
         )
 
@@ -426,10 +506,27 @@ class NodeOperationApiService:
             return None
         return self._summary_view_for(record)
 
+    def _registered_summary_views(
+        self,
+        records: Iterable[NodeOperationRecord],
+    ) -> tuple[NodeOperationView, ...]:
+        """Project only the records exposed by this API instance as summaries."""
+
+        return tuple(
+            view
+            for record in records
+            if (view := self._stream_view_for(record)) is not None
+        )
+
     def _summary_view_for(self, record: NodeOperationRecord) -> NodeOperationView:
         """Project a complete operation summary without retained log lines."""
 
         return self._view_for(record).without_log_lines()
+
+    @staticmethod
+    def _require_unfiltered_app_name(app_name: str | None) -> None:
+        if app_name is not None:
+            raise ValueError("Unfiltered operations do not accept an app name.")
 
     @staticmethod
     def _require_matching_kind(

@@ -91,7 +91,7 @@ def register_operation_routes(
         app_name: str | None = None,
         limit: int | None = None,
     ) -> dict[str, object]:
-        policy, target_app_name = _policy_for_request(
+        read_scope, target_app_name = _read_access_for_request(
             operation_api=operation_api,
             kind=kind,
             app_name=app_name,
@@ -108,7 +108,7 @@ def register_operation_routes(
             request,
             access_token,
             app_name=target_app_name,
-            scopes=(policy.read_scope,),
+            scopes=(read_scope,),
         )
         try:
             records = operation_api.list_operations(
@@ -132,7 +132,7 @@ def register_operation_routes(
         kind: NodeOperationKind | None = None,
         app_name: str | None = None,
     ) -> dict[str, object]:
-        policy, target_app_name = _policy_for_request(
+        read_scope, target_app_name = _read_access_for_request(
             operation_api=operation_api,
             kind=kind,
             app_name=app_name,
@@ -149,7 +149,7 @@ def register_operation_routes(
             request,
             access_token,
             app_name=target_app_name,
-            scopes=(policy.read_scope,),
+            scopes=(read_scope,),
         )
         try:
             return operation_api.get_operation(
@@ -224,6 +224,30 @@ def _policy_for_request(
         return policy, policy.app_name_for_request(app_name)
     except LookupError as xcp:
         raise http_exception(404, "Operation type was not found.") from xcp
+    except ValueError as xcp:
+        raise http_exception(400, str(xcp)) from xcp
+
+
+def _read_access_for_request(
+    *,
+    operation_api: NodeOperationApiService,
+    kind: NodeOperationKind | None,
+    app_name: str | None,
+    http_exception: HttpExceptionFactory,
+) -> tuple[NodeApiScope, str | None]:
+    """Resolve the scope and target for generic or kind-filtered reads."""
+
+    if kind is not None:
+        policy, target_app_name = _policy_for_request(
+            operation_api=operation_api,
+            kind=kind,
+            app_name=app_name,
+            http_exception=http_exception,
+        )
+        return policy.read_scope, target_app_name
+    try:
+        read_scope = operation_api.read_scope_for(kind=kind, app_name=app_name)
+        return read_scope, None
     except ValueError as xcp:
         raise http_exception(400, str(xcp)) from xcp
 

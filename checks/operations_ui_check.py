@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from dataclasses import replace
 
 from mod_web_auth import ModWebUser
 from node_api.operation_service import (
@@ -23,6 +24,7 @@ from web_dash.operations_ui import (
     operation_detail_path,
 )
 from web_dash.remote_node_monitor import RemoteNodeAvailability
+from web_dash.streams import ModWebStreamsMixin
 from web_dash.types import ModWebNodeLink
 
 
@@ -69,6 +71,14 @@ def _operation(
             "App install" if kind is NodeOperationKind.APP_INSTALL else "Mod metadata"
         ),
         cancellable=state in {NodeOperationState.QUEUED, NodeOperationState.RUNNING},
+        cancellation_scope=(
+            NodeApiScope.APP_MANAGE
+            if kind is NodeOperationKind.APP_INSTALL
+            else NodeApiScope.MODS_WRITE
+        ),
+        cancellation_app_name=(
+            app_name if kind is not NodeOperationKind.APP_INSTALL else None
+        ),
     )
 
 
@@ -461,23 +471,65 @@ class OperationsUiCheck(unittest.TestCase):
             },
             {
                 "node": node,
-                "app_name": "minecraft_alpha",
-                "path": (
-                    "/operations/metadata?"
-                    "kind=mod_metadata_apply&app_name=minecraft_alpha"
-                ),
-                "scopes": (NodeApiScope.MODS_WRITE,),
+                "app_name": None,
+                "path": "/operations/metadata",
+                "scopes": (NodeApiScope.OPERATIONS_READ,),
             },
         )
         self.assertIs(harness.calls[0]["user"], user)
 
-    def test_cancellation_uses_existing_kind_specific_scope_and_target(self) -> None:
+    def test_operation_stream_uses_only_the_dedicated_read_scope(self) -> None:
+        class _StreamTokenHarness(ModWebStreamsMixin):
+            def __init__(self) -> None:
+                self.token_requests: list[dict[str, object]] = []
+
+            def _remote_token(self, **kwargs: object) -> str:
+                self.token_requests.append(kwargs)
+                raise asyncio.CancelledError
+
+        node = _node("alpha")
+        user = ModWebUser(
+            discord_id=42,
+            username="operator",
+            global_name=None,
+            avatar_hash=None,
+        )
+        harness = _StreamTokenHarness()
+
+        async def _request_stream() -> None:
+            with self.assertRaises(asyncio.CancelledError):
+                await harness._remote_operation_stream_listener(
+                    node=node,
+                    user=user,
+                    on_update=lambda _: None,
+                )
+
+        asyncio.run(_request_stream())
+
+        self.assertEqual(
+            harness.token_requests,
+            [
+                {
+                    "node": node,
+                    "app_name": None,
+                    "scopes": (NodeApiScope.OPERATIONS_READ,),
+                    "user": user,
+                }
+            ],
+        )
+
+    def test_cancellation_uses_view_supplied_scope_and_target(self) -> None:
         node = _node("alpha")
         install = _operation(
             operation_id="install",
             node_name="alpha",
             state=NodeOperationState.RUNNING,
             created_at_unix_ms=10,
+        )
+        install = replace(
+            install,
+            cancellation_scope=NodeApiScope.MODS_WRITE,
+            cancellation_app_name="minecraft_alpha",
         )
         metadata = _operation(
             operation_id="metadata",
@@ -486,6 +538,11 @@ class OperationsUiCheck(unittest.TestCase):
             created_at_unix_ms=20,
             kind=NodeOperationKind.MOD_METADATA_APPLY,
             app_name="minecraft_alpha",
+        )
+        metadata = replace(
+            metadata,
+            cancellation_scope=NodeApiScope.APP_MANAGE,
+            cancellation_app_name=None,
         )
         user = ModWebUser(
             discord_id=42,
@@ -524,9 +581,12 @@ class OperationsUiCheck(unittest.TestCase):
             },
             {
                 "node": node,
-                "app_name": None,
-                "path": "/operations/install/cancel?kind=app_install",
-                "scopes": (NodeApiScope.APP_MANAGE,),
+                "app_name": "minecraft_alpha",
+                "path": (
+                    "/operations/install/cancel?"
+                    "kind=app_install&app_name=minecraft_alpha"
+                ),
+                "scopes": (NodeApiScope.MODS_WRITE,),
                 "method": "POST",
                 "json_payload": {},
             },
@@ -541,9 +601,9 @@ class OperationsUiCheck(unittest.TestCase):
             },
             {
                 "node": node,
-                "app_name": "minecraft_alpha",
-                "path": "/operations/metadata/cancel?kind=mod_metadata_apply&app_name=minecraft_alpha",
-                "scopes": (NodeApiScope.MODS_WRITE,),
+                "app_name": None,
+                "path": "/operations/metadata/cancel?kind=mod_metadata_apply",
+                "scopes": (NodeApiScope.APP_MANAGE,),
                 "method": "POST",
                 "json_payload": {},
             },

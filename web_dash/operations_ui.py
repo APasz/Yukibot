@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, assert_never
+from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 from node_api.operation_service import (
@@ -13,7 +13,7 @@ from node_api.operation_service import (
     NodeOperationStreamEventKind,
     NodeOperationView,
 )
-from node_api.operations import NodeOperationKind, NodeOperationRecord, NodeOperationState
+from node_api.operations import NodeOperationState
 from node_auth import NodeApiScope
 
 from .links import mod_web_node_system_path
@@ -59,15 +59,6 @@ class _ModWebOperationDetailKey:
 
     node_key: str
     operation_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class _ModWebOperationEndpointTarget:
-    """The authorisation target and query needed for one operation endpoint."""
-
-    app_name: str | None
-    scopes: tuple[NodeApiScope, ...]
-    query: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,36 +258,6 @@ class ModWebOperationsMixin(ModWebServiceSupport):
             )
         )
 
-    @staticmethod
-    def _operation_endpoint_target(
-        record: NodeOperationRecord,
-    ) -> _ModWebOperationEndpointTarget:
-        """Resolve the existing per-kind authorisation target for an operation."""
-
-        match record.kind:
-            case NodeOperationKind.APP_INSTALL:
-                return _ModWebOperationEndpointTarget(
-                    app_name=None,
-                    scopes=(NodeApiScope.APP_MANAGE,),
-                    query=(("kind", record.kind.value),),
-                )
-            case (
-                NodeOperationKind.MOD_METADATA_DISCOVERY
-                | NodeOperationKind.MOD_METADATA_APPLY
-            ):
-                if record.app_name is None:
-                    raise ValueError("App-scoped operation is missing its app name.")
-                return _ModWebOperationEndpointTarget(
-                    app_name=record.app_name,
-                    scopes=(NodeApiScope.MODS_WRITE,),
-                    query=(
-                        ("kind", record.kind.value),
-                        ("app_name", record.app_name),
-                    ),
-                )
-            case _:
-                assert_never(record.kind)
-
     async def _operation_detail_from_operations_ui(
         self,
         *,
@@ -307,15 +268,11 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         """Load one operation's retained detail from its authoritative node route."""
 
         record = operation.record
-        target = self._operation_endpoint_target(record)
         payload = await self._remote_json_async(
             node=node,
-            app_name=target.app_name,
-            path=(
-                f"/operations/{quote(record.operation_id, safe='')}?"
-                f"{urlencode(target.query)}"
-            ),
-            scopes=target.scopes,
+            app_name=None,
+            path=f"/operations/{quote(record.operation_id, safe='')}",
+            scopes=(NodeApiScope.OPERATIONS_READ,),
             user=user,
         )
         detail = NodeOperationView.from_mapping(payload)
@@ -330,18 +287,24 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         operation: NodeOperationView,
         user: ModWebUser,
     ) -> NodeOperationView:
-        """Use the existing per-kind cancellation route and its original scope policy."""
+        """Use the operation's policy-derived cancellation authorisation metadata."""
 
         record = operation.record
-        target = self._operation_endpoint_target(record)
+        cancellation_scope = operation.cancellation_scope
+        if cancellation_scope is None:
+            raise ValueError("Operation does not expose cancellation authorisation.")
+        query: list[tuple[str, str]] = [("kind", record.kind.value)]
+        cancellation_app_name = operation.cancellation_app_name
+        if cancellation_app_name is not None:
+            query.append(("app_name", cancellation_app_name))
         payload = await self._remote_json_async(
             node=node,
-            app_name=target.app_name,
+            app_name=cancellation_app_name,
             path=(
                 f"/operations/{quote(record.operation_id, safe='')}/cancel?"
-                f"{urlencode(target.query)}"
+                f"{urlencode(query)}"
             ),
-            scopes=target.scopes,
+            scopes=(cancellation_scope,),
             user=user,
             method="POST",
             json_payload={},

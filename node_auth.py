@@ -12,6 +12,7 @@ from enum import StrEnum
 
 class NodeApiScope(StrEnum):
     APPS_READ = "apps:read"
+    OPERATIONS_READ = "operations:read"
     MAP_READ = "map:read"
     MAP_WRITE = "map:write"
     CHAT_READ = "chat:read"

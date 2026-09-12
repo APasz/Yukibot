@@ -287,11 +287,11 @@ class NodeOperationsCheck(unittest.TestCase):
                 operation_id=operation.operation_id,
                 kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
             )
-        with self.assertRaisesRegex(ValueError, "Operation kind is required"):
-            operation_api.list_operations()
+        self.assertEqual(operation_api.list_operations(), (view,))
 
     def test_single_policy_only_returns_its_registered_operation_kind(self) -> None:
-        operations = NodeOperationService()
+        clock = [1]
+        operations = NodeOperationService(now_unix_ms=lambda: clock[0])
         install = operations.create(
             kind=NodeOperationKind.APP_INSTALL,
             node_name="node-a",
@@ -299,6 +299,7 @@ class NodeOperationsCheck(unittest.TestCase):
             requested_by_user_id=42,
             progress=NodeOperationProgress(summary="Queued."),
         )
+        clock[0] = 2
         metadata = operations.create(
             kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
             node_name="node-a",
@@ -323,6 +324,7 @@ class NodeOperationsCheck(unittest.TestCase):
         listed = operation_api.list_operations()
 
         self.assertEqual(tuple(view.record.operation_id for view in listed), (install.operation_id,))
+        self.assertEqual(operation_api.list_operations(limit=1), listed)
         with self.assertRaises(LookupError):
             operation_api.get_operation(operation_id=metadata.operation_id)
 
@@ -362,7 +364,10 @@ class NodeOperationsCheck(unittest.TestCase):
             tuple(view.record.operation_id for view in snapshot.operations),
             (first.operation_id,),
         )
-        self.assertEqual(operation_api.stream_read_scopes(), (NodeApiScope.APP_MANAGE,))
+        self.assertEqual(
+            operation_api.stream_read_scopes(),
+            (NodeApiScope.OPERATIONS_READ,),
+        )
 
         clock[0] = 200
         operations.begin(
@@ -588,7 +593,7 @@ class NodeOperationsCheck(unittest.TestCase):
                 transport=transport,
                 base_url="http://testserver",
             ) as client:
-                list_response = await client.get("/api/operations?kind=app_install")
+                list_response = await client.get("/api/operations")
                 detail_response = await client.get(
                     f"/api/operations/{operation.operation_id}"
                 )
@@ -651,12 +656,23 @@ class NodeOperationsCheck(unittest.TestCase):
             ("stdout: Downloading content.",),
         )
         self.assertTrue(list_view.cancellable)
+        self.assertEqual(
+            list_view.cancellation_scope,
+            NodeApiScope.APP_MANAGE,
+        )
+        self.assertIsNone(list_view.cancellation_app_name)
         self.assertFalse(cancelled_view.cancellable)
         self.assertEqual(cancelled_view.record.state, NodeOperationState.CANCEL_REQUESTED)
         self.assertEqual(cancel_requests, [(operation.operation_id, 42)])
         self.assertEqual(
             auth.access_requests,
-            [(None, (NodeApiScope.APP_MANAGE,))] * 5,
+            [
+                (None, (NodeApiScope.OPERATIONS_READ,)),
+                (None, (NodeApiScope.OPERATIONS_READ,)),
+                (None, (NodeApiScope.APP_MANAGE,)),
+                (None, (NodeApiScope.APP_MANAGE,)),
+                (None, (NodeApiScope.APP_MANAGE,)),
+            ],
         )
         self.assertEqual(auth.level_requests, [Power_Level.sudo] * 3)
         audit.assert_called_once_with(
@@ -750,6 +766,13 @@ class NodeOperationsCheck(unittest.TestCase):
         self.assertEqual(detail_response.status_code, 200)
         self.assertEqual(wrong_target_response.status_code, 404)
         self.assertEqual(cancel_response.status_code, 200)
+        list_payload = list_response.json()["operations"]
+        self.assertIsInstance(list_payload, list)
+        assert isinstance(list_payload, list)
+        self.assertTrue(list_payload)
+        list_view = NodeOperationView.from_mapping(list_payload[0])
+        self.assertEqual(list_view.cancellation_scope, NodeApiScope.MODS_WRITE)
+        self.assertEqual(list_view.cancellation_app_name, "minecraft_alpha")
         self.assertEqual(cancellation_requests, [(operation.operation_id, 42)])
         self.assertEqual(
             auth.access_requests,
@@ -761,6 +784,118 @@ class NodeOperationsCheck(unittest.TestCase):
             ],
         )
         self.assertEqual(auth.level_requests, [Power_Level.sudo])
+
+    def test_unfiltered_operation_routes_support_multiple_policies_with_one_read_scope(
+        self,
+    ) -> None:
+        operations = NodeOperationService()
+
+        async def _cancel(_: str, __: int) -> None:
+            return None
+
+        install = operations.create(
+            kind=NodeOperationKind.APP_INSTALL,
+            node_name="node-a",
+            subject="Demo",
+            requested_by_user_id=42,
+            progress=NodeOperationProgress(summary="Queued."),
+        )
+        metadata = operations.create(
+            kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+            node_name="node-a",
+            subject="Minecraft Alpha",
+            requested_by_user_id=42,
+            app_name="minecraft_alpha",
+            progress=NodeOperationProgress(summary="Queued."),
+        )
+        operation_api = NodeOperationApiService(
+            operations=operations,
+            policies=(
+                NodeOperationKindPolicy(
+                    kind=NodeOperationKind.APP_INSTALL,
+                    kind_label="App install",
+                    read_scope=NodeApiScope.APP_MANAGE,
+                    cancel_scope=NodeApiScope.APP_MANAGE,
+                    required_level=Power_Level.sudo,
+                    cancellation_handler=_cancel,
+                ),
+                NodeOperationKindPolicy(
+                    kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+                    kind_label="Mod metadata discovery",
+                    read_scope=NodeApiScope.MODS_WRITE,
+                    cancel_scope=NodeApiScope.MODS_WRITE,
+                    required_level=Power_Level.sudo,
+                    target_scope=NodeOperationTargetScope.APP,
+                    cancellation_handler=_cancel,
+                ),
+            ),
+        )
+        app = FastAPI()
+        auth = _RouteAuth()
+        register_operation_routes(
+            app,
+            auth=auth,
+            operation_api=operation_api,
+            api_prefix="/api",
+            http_exception=lambda status_code, detail: HTTPException(
+                status_code=status_code,
+                detail=detail,
+            ),
+            traffic_log=logging.getLogger(__name__),
+        )
+
+        async def _request_routes() -> tuple[Response, Response]:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return (
+                    await client.get("/api/operations"),
+                    await client.get(f"/api/operations/{metadata.operation_id}"),
+                )
+
+        list_response, detail_response = asyncio.run(_request_routes())
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(detail_response.status_code, 200)
+        operations_payload = list_response.json()["operations"]
+        self.assertIsInstance(operations_payload, list)
+        assert isinstance(operations_payload, list)
+        self.assertEqual(
+            {payload["operation_id"] for payload in operations_payload},
+            {install.operation_id, metadata.operation_id},
+        )
+        views_by_operation_id = {
+            view.record.operation_id: view
+            for view in (
+                NodeOperationView.from_mapping(payload)
+                for payload in operations_payload
+            )
+        }
+        self.assertEqual(
+            views_by_operation_id[install.operation_id].cancellation_scope,
+            NodeApiScope.APP_MANAGE,
+        )
+        self.assertIsNone(
+            views_by_operation_id[install.operation_id].cancellation_app_name
+        )
+        self.assertEqual(
+            views_by_operation_id[metadata.operation_id].cancellation_scope,
+            NodeApiScope.MODS_WRITE,
+        )
+        self.assertEqual(
+            views_by_operation_id[metadata.operation_id].cancellation_app_name,
+            "minecraft_alpha",
+        )
+        detail_view = NodeOperationView.from_mapping(detail_response.json())
+        self.assertEqual(detail_view.record.operation_id, metadata.operation_id)
+        self.assertEqual(detail_view.cancellation_scope, NodeApiScope.MODS_WRITE)
+        self.assertEqual(detail_view.cancellation_app_name, "minecraft_alpha")
+        self.assertEqual(
+            auth.access_requests,
+            [(None, (NodeApiScope.OPERATIONS_READ,))] * 2,
+        )
 
     def test_reopening_marks_active_operations_interrupted_and_releases_resources(
         self,

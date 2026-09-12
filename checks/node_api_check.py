@@ -834,13 +834,20 @@ class NodeApiTests(unittest.TestCase):
             Power_Level.visitor,
         )
 
-    def test_node_operation_scope_requires_sudo_while_management_requires_root(
+    def test_node_operation_scopes_require_sudo_while_management_requires_root(
         self,
     ) -> None:
         service = NodeApiService()
 
         self.assertEqual(
             service.request_auth.required_web_level(app_name=None, scopes=(NodeApiScope.NODE_OPERATE,)),
+            Power_Level.sudo,
+        )
+        self.assertEqual(
+            service.request_auth.required_web_level(
+                app_name=None,
+                scopes=(NodeApiScope.OPERATIONS_READ,),
+            ),
             Power_Level.sudo,
         )
         self.assertEqual(

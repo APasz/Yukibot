@@ -24,6 +24,7 @@ from node_api.operation_service import (
     NodeOperationView,
 )
 from node_api.operations import NodeOperationKind, NodeOperationRecord, NodeOperationState
+from node_auth import NodeApiScope
 from node_api.realtime_service import NodeRealtimeService
 from node_api.system import NodeSystemSummary
 
@@ -205,6 +206,7 @@ def _operation_view(*, state: NodeOperationState, summary: str) -> NodeOperation
         ),
         kind_label="App install",
         cancellable=state in {NodeOperationState.QUEUED, NodeOperationState.RUNNING},
+        cancellation_scope=NodeApiScope.APP_MANAGE,
     )
 
 
