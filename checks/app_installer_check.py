@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -64,6 +65,7 @@ class _InstallerManager:
             instances_path=root / "apps" / "demo" / "instances.json",
         )
         self.create_requests: list[AppInstanceCreateRequest] = []
+        self.on_create_instance: Callable[[AppInstanceCreateRequest], None] | None = None
         self.loaded_instances: list[tuple[str, str]] = []
         self.discarded_instances: list[tuple[str, str]] = []
 
@@ -79,6 +81,8 @@ class _InstallerManager:
 
     def create_instance(self, request: AppInstanceCreateRequest) -> str:
         self.create_requests.append(request)
+        if self.on_create_instance is not None:
+            self.on_create_instance(request)
         return "demo_alpha"
 
     async def load_instance(self, *, scope: str, instance_key: str) -> None:
@@ -659,10 +663,81 @@ class AppInstallerCheck(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_hard_cancellation_during_registration_keeps_the_promoted_install(self) -> None:
+        async def _run() -> None:
+            with TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                manager = _InstallerManager(root=root)
+                acl = Mock()
+                acl.perm_check = AsyncMock()
+                invalidated = Mock()
+                operations = NodeOperationService()
+                service = NodeAppInstallerService(
+                    node_name=lambda: "node-a",
+                    invalidate_state_caches=invalidated,
+                    operations=operations,
+                )
+                request = NodeAppInstallRequest(
+                    scope="demo",
+                    instance_key="alpha",
+                    friendly_name="Demo Alpha",
+                    subfolder="demo-alpha",
+                    steam_branch_id="public",
+                    inputs={AppInstallInput.ADMIN_PASSWORD: "secret"},
+                )
+                steamcmd_started = asyncio.Event()
+                allow_steamcmd_to_finish = asyncio.Event()
+                operation_id: str | None = None
+
+                def _request_hard_cancellation(
+                    create_request: AppInstanceCreateRequest,
+                ) -> None:
+                    del create_request
+                    assert operation_id is not None
+                    operations.hard_cancel(operation_id=operation_id)
+
+                async def _fake_steamcmd(
+                    *, command: list[str], cwd: Path, on_output: object = None
+                ) -> bool:
+                    del command, on_output
+                    steamcmd_started.set()
+                    await allow_steamcmd_to_finish.wait()
+                    (cwd / "installed.txt").write_text("ok", encoding="utf-8")
+                    return True
+
+                manager.on_create_instance = _request_hard_cancellation
+                with patch("node_api.app_installer.run_steamcmd_command", new=_fake_steamcmd):
+                    queued = await service.start_install(
+                        manager=manager,
+                        acl=acl,
+                        actor_user_id=42,
+                        request=request,
+                    )
+                    operation_id = queued.job_id
+                    await steamcmd_started.wait()
+                    allow_steamcmd_to_finish.set()
+                    for _ in range(20):
+                        status = service.install_status(job_id=queued.job_id)
+                        if not status.running:
+                            break
+                        await asyncio.sleep(0)
+                    else:
+                        self.fail("Cancelled install task did not finish.")
+
+                status = service.install_status(job_id=queued.job_id)
+                self.assertEqual(status.state, NodeAppInstallState.READY)
+                self.assertEqual(status.summary, "Installed. Restart to load it.")
+                self.assertTrue((root / "demo-alpha" / "installed.txt").is_file())
+                self.assertEqual(manager.discarded_instances, [])
+                invalidated.assert_called_once_with()
+
+        asyncio.run(_run())
+
     def test_cancel_install_records_a_cancellable_operation(self) -> None:
         async def _run() -> None:
             with TemporaryDirectory() as temp_dir:
-                manager = _InstallerManager(root=Path(temp_dir))
+                root = Path(temp_dir)
+                manager = _InstallerManager(root=root)
                 acl = Mock()
                 acl.perm_check = AsyncMock()
                 service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
@@ -675,6 +750,7 @@ class AppInstallerCheck(unittest.TestCase):
                     inputs={AppInstallInput.ADMIN_PASSWORD: "secret"},
                 )
                 steamcmd_started = asyncio.Event()
+                staging_cleanup_finished = asyncio.Event()
 
                 async def _blocked_steamcmd(
                     *, command: list[str], cwd: Path, on_output: object = None
@@ -684,7 +760,23 @@ class AppInstallerCheck(unittest.TestCase):
                     await asyncio.Event().wait()
                     return False
 
-                with patch("node_api.app_installer.run_steamcmd_command", new=_blocked_steamcmd):
+                async def _remove_staging_directory(
+                    function: Callable[..., object],
+                    *args: object,
+                    **kwargs: object,
+                ) -> object:
+                    try:
+                        return function(*args, **kwargs)
+                    finally:
+                        staging_cleanup_finished.set()
+
+                with (
+                    patch("node_api.app_installer.run_steamcmd_command", new=_blocked_steamcmd),
+                    patch(
+                        "node_api.app_installer.run_blocking",
+                        new=_remove_staging_directory,
+                    ),
+                ):
                     queued = await service.start_install(
                         manager=manager,
                         acl=acl,
@@ -705,9 +797,13 @@ class AppInstallerCheck(unittest.TestCase):
                         await asyncio.sleep(0)
                     else:
                         self.fail("Cancelled install task did not finish.")
+                    await asyncio.wait_for(staging_cleanup_finished.wait(), timeout=1)
 
                 status = service.install_status(job_id=queued.job_id)
                 self.assertEqual(status.state, NodeAppInstallState.CANCELLED)
+                self.assertFalse(
+                    (root / f".demo-alpha.install-{queued.job_id}").exists()
+                )
                 self.assertEqual(acl.perm_check.await_count, 2)
 
         asyncio.run(_run())

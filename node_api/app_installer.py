@@ -46,6 +46,10 @@ log = logging.getLogger(__name__)
 _INSTALL_LOG_LINE_MAX_LENGTH = 1_000
 
 
+class _InstallCancellationRequested(Exception):
+    """Raised when an install reaches a cooperative cancellation boundary."""
+
+
 class NodeAppInstallState(enum.StrEnum):
     QUEUED = "queued"
     INSTALLING = "installing"
@@ -537,7 +541,7 @@ class NodeAppInstallerService:
         actor_user_id: int,
         acl: Access_Control | None = None,
     ) -> NodeAppInstallStatus:
-        """Request cancellation of an active install operation."""
+        """Cancel an active install using its cancellation-safe executor path."""
         self._ensure_available()
         await self._resolve_acl(acl).perm_check(actor_user_id, Power_Level.sudo)
         try:
@@ -546,7 +550,7 @@ class NodeAppInstallerService:
             raise LookupError("Install job was not found.") from xcp
         self._require_install_operation(operation)
         return self._status_from_operation(
-            self._operations.request_cancellation(operation_id=operation.operation_id)
+            self._operations.hard_cancel(operation_id=operation.operation_id)
         )
 
     def _ensure_available(self) -> None:
@@ -570,7 +574,7 @@ class NodeAppInstallerService:
         return self._require_acl()
 
     def cancel_pending(self) -> None:
-        self._operations.cancel_pending(kind=NodeOperationKind.APP_INSTALL)
+        self._operations.hard_cancel_pending(kind=NodeOperationKind.APP_INSTALL)
 
     async def _run_install(
         self,
@@ -596,7 +600,7 @@ class NodeAppInstallerService:
                     progress_percent=0.0,
                 ),
             )
-            self._raise_if_install_cancellation_requested(operation)
+            self._raise_if_install_cancellation_requested(operation_id=operation_id)
             if operation.state is not NodeOperationState.RUNNING:
                 return
             staging_directory.parent.mkdir(parents=True, exist_ok=True)
@@ -626,9 +630,7 @@ class NodeAppInstallerService:
                     secret_values=secret_values,
                 ),
             )
-            self._raise_if_install_cancellation_requested(
-                self._operations.get(operation_id)
-            )
+            self._raise_if_install_cancellation_requested(operation_id=operation_id)
             if not completed:
                 raise RuntimeError("SteamCMD did not confirm the install.")
             if not any(staging_directory.iterdir()):
@@ -644,9 +646,7 @@ class NodeAppInstallerService:
                 )
                 await post_steam_install(staging_directory, create_request)
 
-            self._raise_if_install_cancellation_requested(
-                self._operations.get(operation_id)
-            )
+            self._raise_if_install_cancellation_requested(operation_id=operation_id)
             self._operations.update_active(
                 operation_id=operation_id,
                 progress=NodeOperationProgress(
@@ -655,12 +655,22 @@ class NodeAppInstallerService:
                     progress_percent=100.0,
                 ),
             )
+            self._raise_if_install_cancellation_requested(operation_id=operation_id)
+            # This registration-and-rename sequence has no await point, so a
+            # hard cancellation can only be observed before or after promotion.
             if plan.directory.exists():
                 raise RuntimeError("Install folder was created while the job was running.")
             app_name = manager.create_instance(create_request)
             instance_created = True
             staging_directory.replace(plan.directory)
             promoted = True
+            if self._operations.cancellation_requested(operation_id=operation_id):
+                self._finish_promoted_install(
+                    operation_id=operation_id,
+                    app_name=app_name,
+                    detail="The installer stopped before the app could be loaded.",
+                )
+                return
             try:
                 await manager.load_instance(scope=plan.scope, instance_key=plan.instance_key)
             except Exception as xcp:
@@ -670,52 +680,35 @@ class NodeAppInstallerService:
                     secret_values=secret_values,
                 )
                 log.warning("Installed app could not be loaded immediately: app=%s error=%s", app_name, detail)
-                self._operations.finish(
+                self._finish_promoted_install(
                     operation_id=operation_id,
-                    state=NodeOperationState.SUCCEEDED,
-                    summary="Installed. Restart to load it.",
+                    app_name=app_name,
                     detail=detail,
-                    result_reference=app_name,
-                    progress_percent=100.0,
                 )
             else:
-                self._operations.finish(
+                self._finish_promoted_install(
                     operation_id=operation_id,
-                    state=NodeOperationState.SUCCEEDED,
-                    summary="Installed.",
+                    app_name=app_name,
                     detail=None,
-                    result_reference=app_name,
-                    progress_percent=100.0,
                 )
-        except asyncio.CancelledError:
-            incomplete_instance_discarded = (
-                not instance_created
-                or promoted
-                or self._discard_incomplete_instance(manager=manager, plan=plan)
+        except _InstallCancellationRequested:
+            self._finish_cancelled_install(
+                operation_id=operation_id,
+                app_name=app_name,
+                instance_created=instance_created,
+                manager=manager,
+                plan=plan,
+                promoted=promoted,
             )
-            if promoted:
-                self._operations.finish(
-                    operation_id=operation_id,
-                    state=NodeOperationState.SUCCEEDED,
-                    summary="Installed. Restart to load it.",
-                    detail="The installer stopped before the app could be loaded.",
-                    result_reference=app_name,
-                    progress_percent=100.0,
-                )
-            elif not incomplete_instance_discarded:
-                self._operations.finish(
-                    operation_id=operation_id,
-                    state=NodeOperationState.FAILED,
-                    summary="Install cleanup failed.",
-                    detail="The incomplete app instance could not be discarded.",
-                )
-            else:
-                self._operations.finish(
-                    operation_id=operation_id,
-                    state=NodeOperationState.CANCELLED,
-                    summary="Install stopped.",
-                    detail=None,
-                )
+        except asyncio.CancelledError:
+            self._finish_cancelled_install(
+                operation_id=operation_id,
+                app_name=app_name,
+                instance_created=instance_created,
+                manager=manager,
+                plan=plan,
+                promoted=promoted,
+            )
             raise
         except Exception as xcp:
             if instance_created and not promoted:
@@ -948,9 +941,63 @@ class NodeAppInstallerService:
             finished_at_unix_ms=operation.finished_at_unix_ms,
         )
 
-    def _raise_if_install_cancellation_requested(self, operation: NodeOperationRecord) -> None:
-        if operation.state is NodeOperationState.CANCEL_REQUESTED:
-            raise asyncio.CancelledError
+    def _finish_promoted_install(
+        self,
+        *,
+        operation_id: str,
+        app_name: str | None,
+        detail: str | None,
+    ) -> None:
+        self._operations.finish(
+            operation_id=operation_id,
+            state=NodeOperationState.SUCCEEDED,
+            summary=(
+                "Installed."
+                if detail is None
+                else "Installed. Restart to load it."
+            ),
+            detail=detail,
+            result_reference=app_name,
+            progress_percent=100.0,
+        )
+
+    def _finish_cancelled_install(
+        self,
+        *,
+        operation_id: str,
+        app_name: str | None,
+        instance_created: bool,
+        manager: NodeAppInstallerManager,
+        plan: AppInstanceCreationPlan,
+        promoted: bool,
+    ) -> None:
+        if promoted:
+            self._finish_promoted_install(
+                operation_id=operation_id,
+                app_name=app_name,
+                detail="The installer stopped before the app could be loaded.",
+            )
+            return
+        if instance_created and not self._discard_incomplete_instance(
+            manager=manager, plan=plan
+        ):
+            self._operations.finish(
+                operation_id=operation_id,
+                state=NodeOperationState.FAILED,
+                summary="Install cleanup failed.",
+                detail="The incomplete app instance could not be discarded.",
+            )
+            return
+        self._operations.finish(
+            operation_id=operation_id,
+            state=NodeOperationState.CANCELLED,
+            summary="Install stopped.",
+            detail=None,
+        )
+
+    def _raise_if_install_cancellation_requested(self, *, operation_id: str) -> None:
+        if self._operations.cancellation_requested(operation_id=operation_id):
+            raise _InstallCancellationRequested
 
     @staticmethod
     def _discard_incomplete_instance(

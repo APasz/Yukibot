@@ -27,6 +27,74 @@ _CANCEL_REQUESTED_SUMMARY = "Cancellation requested."
 _CANCELLED_SUMMARY = "Operation cancelled."
 _UNREPORTED_COMPLETION_SUMMARY = "Operation ended without reporting a result."
 _UNEXPECTED_FAILURE_SUMMARY = "Operation task failed unexpectedly."
+_DATABASE_SCHEMA_VERSION = 1
+
+_SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS node_operations (
+        operation_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        node_name TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        requested_by_user_id INTEGER,
+        state TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        phase TEXT,
+        result_reference TEXT,
+        detail TEXT,
+        progress_percent REAL,
+        created_at_unix_ms INTEGER NOT NULL,
+        started_at_unix_ms INTEGER,
+        finished_at_unix_ms INTEGER
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS node_operation_logs (
+        operation_id TEXT NOT NULL REFERENCES node_operations(operation_id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL,
+        line TEXT NOT NULL,
+        PRIMARY KEY (operation_id, sequence)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS node_operation_resources (
+        resource_key TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL REFERENCES node_operations(operation_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS node_operations_created_index
+        ON node_operations (created_at_unix_ms DESC, operation_id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS node_operations_kind_index
+        ON node_operations (kind, created_at_unix_ms DESC, operation_id DESC)
+    """,
+)
+
+_SCHEMA_V1_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "node_operations",
+        (
+            "operation_id",
+            "kind",
+            "node_name",
+            "subject",
+            "requested_by_user_id",
+            "state",
+            "summary",
+            "phase",
+            "result_reference",
+            "detail",
+            "progress_percent",
+            "created_at_unix_ms",
+            "started_at_unix_ms",
+            "finished_at_unix_ms",
+        ),
+    ),
+    ("node_operation_logs", ("operation_id", "sequence", "line")),
+    ("node_operation_resources", ("resource_key", "operation_id")),
+)
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +233,18 @@ class NodeOperationResourceConflict(RuntimeError):
         super().__init__(f"Operation resource is already busy: {resource_key}")
 
 
+class NodeOperationSchemaVersionError(RuntimeError):
+    """Raised when an operation database was created by a newer application."""
+
+    def __init__(self, *, database_version: int, supported_version: int) -> None:
+        self.database_version = database_version
+        self.supported_version = supported_version
+        super().__init__(
+            "Operation database schema version "
+            f"{database_version} is newer than supported version {supported_version}."
+        )
+
+
 class NodeOperationService:
     """Owns durable operation state, resource reservations, and active tasks.
 
@@ -190,6 +270,7 @@ class NodeOperationService:
         self._records: dict[str, NodeOperationRecord] = {}
         self._resource_owners: dict[str, str] = {}
         self._tasks: dict[str, asyncio.Task[object]] = {}
+        self._hard_cancelled_tasks: dict[str, asyncio.Task[object]] = {}
 
     def create(
         self,
@@ -365,25 +446,39 @@ class NodeOperationService:
             return updated
 
     def request_cancellation(self, *, operation_id: str) -> NodeOperationRecord:
-        """Request cooperative cancellation and signal a tracked task if present."""
+        """Record a cooperative cancellation request without interrupting a task."""
 
         with self._lock:
             self._ensure_database_locked()
-            current = self._record_locked(operation_id)
-            if (
-                current.state.terminal
-                or current.state is NodeOperationState.CANCEL_REQUESTED
-            ):
-                return current
-            updated = replace(
-                current,
-                state=NodeOperationState.CANCEL_REQUESTED,
-                summary=_CANCEL_REQUESTED_SUMMARY,
-            )
-            self._write_record_locked(updated)
+            return self._request_cancellation_locked(operation_id)
+
+    def hard_cancel(self, *, operation_id: str) -> NodeOperationRecord:
+        """Request cancellation and interrupt the tracked task once when safe.
+
+        Callers must only use this for executors whose cancellation handler can
+        safely restore or preserve their externally visible state.
+        """
+
+        task_to_cancel: asyncio.Task[object] | None = None
+        with self._lock:
+            self._ensure_database_locked()
+            updated = self._request_cancellation_locked(operation_id)
             task = self._tasks.get(operation_id)
-        if task is not None:
-            self._cancel_task(task)
+            if (
+                not updated.state.terminal
+                and task is not None
+                and not task.done()
+                and self._hard_cancelled_tasks.get(operation_id) is not task
+            ):
+                self._hard_cancelled_tasks[operation_id] = task
+                task_to_cancel = task
+        if task_to_cancel is not None and not self._schedule_hard_cancellation(
+            operation_id=operation_id,
+            task=task_to_cancel,
+        ):
+            with self._lock:
+                if self._hard_cancelled_tasks.get(operation_id) is task_to_cancel:
+                    self._hard_cancelled_tasks.pop(operation_id, None)
         return updated
 
     def cancellation_requested(self, *, operation_id: str) -> bool:
@@ -415,6 +510,14 @@ class NodeOperationService:
     def cancel_pending(self, *, kind: NodeOperationKind | None = None) -> None:
         """Request cancellation for locally tracked active operations of one kind."""
 
+        self._cancel_pending(kind=kind, hard=False)
+
+    def hard_cancel_pending(self, *, kind: NodeOperationKind | None = None) -> None:
+        """Hard-cancel locally tracked operations when their executor permits it."""
+
+        self._cancel_pending(kind=kind, hard=True)
+
+    def _cancel_pending(self, *, kind: NodeOperationKind | None, hard: bool) -> None:
         with self._lock:
             self._ensure_database_locked()
             operation_ids: list[str] = []
@@ -427,7 +530,10 @@ class NodeOperationService:
                     operation_ids.append(operation_id)
         for operation_id in operation_ids:
             try:
-                self.request_cancellation(operation_id=operation_id)
+                if hard:
+                    self.hard_cancel(operation_id=operation_id)
+                else:
+                    self.request_cancellation(operation_id=operation_id)
             except LookupError:
                 continue
 
@@ -437,6 +543,8 @@ class NodeOperationService:
         with self._lock:
             if self._tasks.get(operation_id) is task:
                 self._tasks.pop(operation_id, None)
+            if self._hard_cancelled_tasks.get(operation_id) is task:
+                self._hard_cancelled_tasks.pop(operation_id, None)
             try:
                 record = self._record_locked(operation_id)
             except LookupError:
@@ -447,15 +555,7 @@ class NodeOperationService:
                 return
 
             if task.cancelled():
-                self._finish_record_locked(
-                    replace(
-                        record,
-                        state=NodeOperationState.CANCELLED,
-                        summary=_CANCELLED_SUMMARY,
-                        phase=None,
-                        finished_at_unix_ms=self._now_unix_ms(),
-                    )
-                )
+                self._finish_cancelled_record_locked(record)
                 return
 
             try:
@@ -463,6 +563,9 @@ class NodeOperationService:
             except asyncio.CancelledError:
                 error = None
             if error is None:
+                if record.state is NodeOperationState.CANCEL_REQUESTED:
+                    self._finish_cancelled_record_locked(record)
+                    return
                 self._finish_record_locked(
                     replace(
                         record,
@@ -490,14 +593,71 @@ class NodeOperationService:
                 )
             )
 
-    @staticmethod
-    def _cancel_task(task: asyncio.Task[object]) -> None:
+    def _finish_cancelled_record_locked(self, record: NodeOperationRecord) -> None:
+        self._finish_record_locked(
+            replace(
+                record,
+                state=NodeOperationState.CANCELLED,
+                summary=_CANCELLED_SUMMARY,
+                phase=None,
+                finished_at_unix_ms=self._now_unix_ms(),
+            )
+        )
+
+    def _schedule_hard_cancellation(
+        self,
+        *,
+        operation_id: str,
+        task: asyncio.Task[object],
+    ) -> bool:
         if task.done():
-            return
+            return False
         try:
-            task.get_loop().call_soon_threadsafe(task.cancel)
+            task.get_loop().call_soon_threadsafe(
+                self._cancel_tracked_task_if_active,
+                operation_id,
+                task,
+            )
         except RuntimeError:
-            return
+            return False
+        return True
+
+    def _cancel_tracked_task_if_active(
+        self,
+        operation_id: str,
+        task: asyncio.Task[object],
+    ) -> None:
+        with self._lock:
+            if self._hard_cancelled_tasks.get(operation_id) is not task:
+                return
+            try:
+                record = self._record_locked(operation_id)
+            except LookupError:
+                self._hard_cancelled_tasks.pop(operation_id, None)
+                return
+            if (
+                self._tasks.get(operation_id) is not task
+                or task.done()
+                or record.state.terminal
+            ):
+                self._hard_cancelled_tasks.pop(operation_id, None)
+                return
+            task.cancel()
+
+    def _request_cancellation_locked(self, operation_id: str) -> NodeOperationRecord:
+        current = self._record_locked(operation_id)
+        if (
+            current.state.terminal
+            or current.state is NodeOperationState.CANCEL_REQUESTED
+        ):
+            return current
+        updated = replace(
+            current,
+            state=NodeOperationState.CANCEL_REQUESTED,
+            summary=_CANCEL_REQUESTED_SUMMARY,
+        )
+        self._write_record_locked(updated)
+        return updated
 
     def _ensure_database_locked(self) -> None:
         if self._database_path is None or self._database is not None:
@@ -509,11 +669,16 @@ class NodeOperationService:
             isolation_level=None,
         )
         database.row_factory = sqlite3.Row
-        database.execute("PRAGMA foreign_keys = ON")
-        database.execute("PRAGMA busy_timeout = 5000")
-        self._database = database
-        self._create_schema_locked()
-        recovered = self._recover_active_database_records_locked()
+        try:
+            database.execute("PRAGMA foreign_keys = ON")
+            database.execute("PRAGMA busy_timeout = 5000")
+            self._database = database
+            self._migrate_database_locked()
+            recovered = self._recover_active_database_records_locked()
+        except BaseException:
+            self._database = None
+            database.close()
+            raise
         if recovered:
             log.warning(
                 "Recovered interrupted node operations: path=%s count=%s",
@@ -521,45 +686,68 @@ class NodeOperationService:
                 recovered,
             )
 
-    def _create_schema_locked(self) -> None:
+    def _migrate_database_locked(self) -> None:
         database = self._require_database_locked()
-        database.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS node_operations (
-                operation_id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                node_name TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                requested_by_user_id INTEGER,
-                state TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                phase TEXT,
-                result_reference TEXT,
-                detail TEXT,
-                progress_percent REAL,
-                created_at_unix_ms INTEGER NOT NULL,
-                started_at_unix_ms INTEGER,
-                finished_at_unix_ms INTEGER
-            );
+        version = self._database_schema_version_locked()
+        if version > _DATABASE_SCHEMA_VERSION:
+            raise NodeOperationSchemaVersionError(
+                database_version=version,
+                supported_version=_DATABASE_SCHEMA_VERSION,
+            )
+        while version < _DATABASE_SCHEMA_VERSION:
+            next_version = version + 1
+            with self._database_transaction_locked():
+                self._apply_database_migration_locked(
+                    from_version=version,
+                    to_version=next_version,
+                )
+                database.execute(f"PRAGMA user_version = {next_version}")
+            version = next_version
+        self._validate_database_schema_locked(version=version)
 
-            CREATE TABLE IF NOT EXISTS node_operation_logs (
-                operation_id TEXT NOT NULL REFERENCES node_operations(operation_id) ON DELETE CASCADE,
-                sequence INTEGER NOT NULL,
-                line TEXT NOT NULL,
-                PRIMARY KEY (operation_id, sequence)
-            );
+    def _database_schema_version_locked(self) -> int:
+        database = self._require_database_locked()
+        row = database.execute("PRAGMA user_version").fetchone()
+        if row is None:
+            raise RuntimeError("Operation database schema version is unavailable.")
+        version = cast(object, row[0])
+        if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+            raise RuntimeError("Operation database schema version is invalid.")
+        return version
 
-            CREATE TABLE IF NOT EXISTS node_operation_resources (
-                resource_key TEXT PRIMARY KEY,
-                operation_id TEXT NOT NULL REFERENCES node_operations(operation_id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS node_operations_created_index
-                ON node_operations (created_at_unix_ms DESC, operation_id DESC);
-            CREATE INDEX IF NOT EXISTS node_operations_kind_index
-                ON node_operations (kind, created_at_unix_ms DESC, operation_id DESC);
-            """
+    def _apply_database_migration_locked(
+        self,
+        *,
+        from_version: int,
+        to_version: int,
+    ) -> None:
+        if from_version == 0 and to_version == 1:
+            self._create_schema_v1_locked()
+            self._validate_database_schema_locked(version=to_version)
+            return
+        raise RuntimeError(
+            "Operation database migration path is unsupported: "
+            f"{from_version} to {to_version}."
         )
+
+    def _create_schema_v1_locked(self) -> None:
+        database = self._require_database_locked()
+        for statement in _SCHEMA_V1_STATEMENTS:
+            database.execute(statement)
+
+    def _validate_database_schema_locked(self, *, version: int) -> None:
+        if version != _DATABASE_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Operation database schema version {version} is unsupported."
+            )
+        database = self._require_database_locked()
+        for table_name, expected_columns in _SCHEMA_V1_COLUMNS:
+            rows = database.execute(f"PRAGMA table_info({table_name})").fetchall()
+            actual_columns = tuple(cast(str, row["name"]) for row in rows)
+            if actual_columns != expected_columns:
+                raise RuntimeError(
+                    f"Operation database table {table_name} does not match schema version {version}."
+                )
 
     def _recover_active_database_records_locked(self) -> int:
         database = self._require_database_locked()
@@ -993,6 +1181,7 @@ __all__: tuple[str, ...] = (
     "NodeOperationProgress",
     "NodeOperationRecord",
     "NodeOperationResourceConflict",
+    "NodeOperationSchemaVersionError",
     "NodeOperationService",
     "NodeOperationState",
 )
