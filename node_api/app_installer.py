@@ -6,9 +6,6 @@ import asyncio
 import enum
 import logging
 import shutil
-import threading
-import time
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -35,21 +32,29 @@ from apps._updater import (
     run_steamcmd_command,
     steamcmd_progress,
 )
+from .operations import (
+    NodeOperationKind,
+    NodeOperationProgress,
+    NodeOperationRecord,
+    NodeOperationResourceConflict,
+    NodeOperationService,
+    NodeOperationState,
+)
 
 log = logging.getLogger(__name__)
 
-_INSTALL_LOG_LINE_LIMIT = 100
 _INSTALL_LOG_LINE_MAX_LENGTH = 1_000
-_INSTALL_COMPLETED_JOB_LIMIT = 100
 
 
 class NodeAppInstallState(enum.StrEnum):
     QUEUED = "queued"
     INSTALLING = "installing"
     REGISTERING = "registering"
+    CANCEL_REQUESTED = "cancel_requested"
     READY = "ready"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
     @property
     def running(self) -> bool:
@@ -57,6 +62,7 @@ class NodeAppInstallState(enum.StrEnum):
             NodeAppInstallState.QUEUED,
             NodeAppInstallState.INSTALLING,
             NodeAppInstallState.REGISTERING,
+            NodeAppInstallState.CANCEL_REQUESTED,
         }
 
 
@@ -381,13 +387,6 @@ class NodeAppInstallRequest(BaseModel):
         return inputs
 
 
-@dataclass(slots=True)
-class _NodeAppInstallJob:
-    status: NodeAppInstallStatus
-    staging_directory: Path
-    task: asyncio.Task[None] | None = None
-
-
 class NodeAppInstallerManager(Protocol):
     """The narrow manager interface needed by the installer service."""
 
@@ -409,7 +408,7 @@ class NodeAppInstallScopePolicy(Protocol):
 
 
 class NodeAppInstallerService:
-    """Coordinates one-off SteamCMD installs and safely registers their app instances."""
+    """Executes app-install operations and safely registers their app instances."""
 
     def __init__(
         self,
@@ -420,6 +419,7 @@ class NodeAppInstallerService:
         require_manager: Callable[[], NodeAppInstallerManager] | None = None,
         require_acl: Callable[[], Access_Control] | None = None,
         require_available: Callable[[], None] | None = None,
+        operations: NodeOperationService | None = None,
     ) -> None:
         self._node_name = node_name
         self._invalidate_state_caches = invalidate_state_caches
@@ -427,10 +427,7 @@ class NodeAppInstallerService:
         self._require_manager = require_manager
         self._require_acl = require_acl
         self._require_available = require_available
-        self._lock = threading.RLock()
-        self._jobs: dict[str, _NodeAppInstallJob] = {}
-        self._active_targets: set[Path] = set()
-        self._active_instance_keys: set[tuple[str, str]] = set()
+        self._operations = operations or NodeOperationService()
 
     async def build_catalog(
         self,
@@ -475,33 +472,31 @@ class NodeAppInstallerService:
         if plan.directory.exists():
             raise ValueError("Install folder already exists.")
 
-        job_id = uuid.uuid4().hex
+        directory_resource_key, instance_resource_key = self._install_resource_keys(plan)
+        try:
+            operation = self._operations.create(
+                kind=NodeOperationKind.APP_INSTALL,
+                node_name=self._node_name(),
+                subject=plan.scope,
+                requested_by_user_id=actor_user_id,
+                progress=NodeOperationProgress(summary="Queued."),
+                resource_keys=(directory_resource_key, instance_resource_key),
+            )
+        except NodeOperationResourceConflict as xcp:
+            if xcp.resource_key == directory_resource_key:
+                raise RuntimeError("An install is already using that folder.") from xcp
+            if xcp.resource_key == instance_resource_key:
+                raise RuntimeError("An install is already using that instance key.") from xcp
+            raise RuntimeError("An install resource is already in use.") from xcp
+
+        job_id = operation.operation_id
         staging_directory = plan.directory.with_name(f".{plan.directory.name}.install-{job_id}")
-        key = (plan.scope.casefold(), plan.instance_key.casefold())
-        started_at = _unix_ms_now()
-        status = NodeAppInstallStatus(
-            job_id=job_id,
-            node=self._node_name(),
-            scope=plan.scope,
-            state=NodeAppInstallState.QUEUED,
-            summary="Queued.",
-            started_at_unix_ms=started_at,
-        )
-        job = _NodeAppInstallJob(
-            status=status,
-            staging_directory=staging_directory,
-        )
-        with self._lock:
-            if plan.directory in self._active_targets:
-                raise RuntimeError("An install is already using that folder.")
-            if key in self._active_instance_keys:
-                raise RuntimeError("An install is already using that instance key.")
-            self._active_targets.add(plan.directory)
-            self._active_instance_keys.add(key)
-            self._jobs[job_id] = job
+        task: asyncio.Task[None] | None = None
+        try:
             task = asyncio.create_task(
                 self._run_install(
-                    job_id=job_id,
+                    operation_id=job_id,
+                    staging_directory=staging_directory,
                     manager=resolved_manager,
                     plan=plan,
                     create_request=create_request,
@@ -511,16 +506,48 @@ class NodeAppInstallerService:
                 ),
                 name=f"app-install-{job_id}",
             )
-            job.task = task
-        return status
+            self._operations.track_task(
+                operation_id=job_id,
+                task=cast(asyncio.Task[object], task),
+            )
+        except Exception as xcp:
+            if task is not None:
+                task.cancel()
+            self._operations.finish(
+                operation_id=job_id,
+                state=NodeOperationState.FAILED,
+                summary="Install could not be started.",
+                detail=type(xcp).__name__,
+            )
+            raise
+        return self._status_from_operation(operation)
 
     def install_status(self, *, job_id: str) -> NodeAppInstallStatus:
         self._ensure_available()
-        with self._lock:
-            job = self._jobs.get(job_id.strip())
-            if job is None:
-                raise LookupError("Install job was not found.")
-            return job.status
+        try:
+            operation = self._operations.get(job_id)
+        except LookupError as xcp:
+            raise LookupError("Install job was not found.") from xcp
+        return self._status_from_operation(operation)
+
+    async def cancel_install(
+        self,
+        *,
+        job_id: str,
+        actor_user_id: int,
+        acl: Access_Control | None = None,
+    ) -> NodeAppInstallStatus:
+        """Request cancellation of an active install operation."""
+        self._ensure_available()
+        await self._resolve_acl(acl).perm_check(actor_user_id, Power_Level.sudo)
+        try:
+            operation = self._operations.get(job_id)
+        except LookupError as xcp:
+            raise LookupError("Install job was not found.") from xcp
+        self._require_install_operation(operation)
+        return self._status_from_operation(
+            self._operations.request_cancellation(operation_id=operation.operation_id)
+        )
 
     def _ensure_available(self) -> None:
         if self._require_available is not None:
@@ -543,15 +570,13 @@ class NodeAppInstallerService:
         return self._require_acl()
 
     def cancel_pending(self) -> None:
-        with self._lock:
-            tasks = tuple(job.task for job in self._jobs.values() if job.status.running and job.task is not None)
-        for task in tasks:
-            task.cancel()
+        self._operations.cancel_pending(kind=NodeOperationKind.APP_INSTALL)
 
     async def _run_install(
         self,
         *,
-        job_id: str,
+        operation_id: str,
+        staging_directory: Path,
         manager: NodeAppInstallerManager,
         plan: AppInstanceCreationPlan,
         create_request: AppInstanceCreateRequest,
@@ -563,13 +588,17 @@ class NodeAppInstallerService:
         instance_created = False
         promoted = False
         try:
-            self._set_status(
-                job_id=job_id,
-                state=NodeAppInstallState.INSTALLING,
-                summary="Installing.",
-                progress_percent=0.0,
+            operation = self._operations.begin(
+                operation_id=operation_id,
+                progress=NodeOperationProgress(
+                    summary="Installing.",
+                    phase=NodeAppInstallState.INSTALLING.value,
+                    progress_percent=0.0,
+                ),
             )
-            staging_directory = self._job_staging_directory(job_id)
+            self._raise_if_install_cancellation_requested(operation)
+            if operation.state is not NodeOperationState.RUNNING:
+                return
             staging_directory.parent.mkdir(parents=True, exist_ok=True)
             staging_directory.mkdir()
             branch = steam_update.selected_branch_config
@@ -582,7 +611,7 @@ class NodeAppInstallerService:
             log.info(
                 "Starting app install: node=%s job=%s scope=%s branch=%s",
                 self._node_name(),
-                job_id,
+                operation_id,
                 plan.scope,
                 branch.branch_id,
             )
@@ -590,31 +619,41 @@ class NodeAppInstallerService:
                 command=command,
                 cwd=staging_directory,
                 on_output=lambda source, line: self._record_output(
-                    job_id=job_id,
+                    operation_id=operation_id,
                     source=source,
                     line=line,
                     steam_update=steam_update,
                     secret_values=secret_values,
                 ),
             )
+            self._raise_if_install_cancellation_requested(
+                self._operations.get(operation_id)
+            )
             if not completed:
                 raise RuntimeError("SteamCMD did not confirm the install.")
             if not any(staging_directory.iterdir()):
                 raise RuntimeError("SteamCMD completed without installing files.")
             if post_steam_install is not None:
-                self._set_status(
-                    job_id=job_id,
-                    state=NodeAppInstallState.INSTALLING,
-                    summary="Preparing app.",
-                    progress_percent=99.0,
+                self._operations.update_active(
+                    operation_id=operation_id,
+                    progress=NodeOperationProgress(
+                        summary="Preparing app.",
+                        phase=NodeAppInstallState.INSTALLING.value,
+                        progress_percent=99.0,
+                    ),
                 )
                 await post_steam_install(staging_directory, create_request)
 
-            self._set_status(
-                job_id=job_id,
-                state=NodeAppInstallState.REGISTERING,
-                summary="Registering app.",
-                progress_percent=100.0,
+            self._raise_if_install_cancellation_requested(
+                self._operations.get(operation_id)
+            )
+            self._operations.update_active(
+                operation_id=operation_id,
+                progress=NodeOperationProgress(
+                    summary="Registering app.",
+                    phase=NodeAppInstallState.REGISTERING.value,
+                    progress_percent=100.0,
+                ),
             )
             if plan.directory.exists():
                 raise RuntimeError("Install folder was created while the job was running.")
@@ -631,75 +670,80 @@ class NodeAppInstallerService:
                     secret_values=secret_values,
                 )
                 log.warning("Installed app could not be loaded immediately: app=%s error=%s", app_name, detail)
-                self._set_status(
-                    job_id=job_id,
-                    state=NodeAppInstallState.READY,
+                self._operations.finish(
+                    operation_id=operation_id,
+                    state=NodeOperationState.SUCCEEDED,
                     summary="Installed. Restart to load it.",
-                    app_name=app_name,
                     detail=detail,
+                    result_reference=app_name,
                     progress_percent=100.0,
-                    finished_at_unix_ms=_unix_ms_now(),
                 )
             else:
-                self._set_status(
-                    job_id=job_id,
-                    state=NodeAppInstallState.READY,
+                self._operations.finish(
+                    operation_id=operation_id,
+                    state=NodeOperationState.SUCCEEDED,
                     summary="Installed.",
-                    app_name=app_name,
                     detail=None,
+                    result_reference=app_name,
                     progress_percent=100.0,
-                    finished_at_unix_ms=_unix_ms_now(),
                 )
         except asyncio.CancelledError:
-            if instance_created and not promoted:
-                manager.discard_unloaded_instance(scope=plan.scope, instance_key=plan.instance_key)
+            incomplete_instance_discarded = (
+                not instance_created
+                or promoted
+                or self._discard_incomplete_instance(manager=manager, plan=plan)
+            )
             if promoted:
-                self._set_status(
-                    job_id=job_id,
-                    state=NodeAppInstallState.READY,
+                self._operations.finish(
+                    operation_id=operation_id,
+                    state=NodeOperationState.SUCCEEDED,
                     summary="Installed. Restart to load it.",
-                    app_name=app_name,
                     detail="The installer stopped before the app could be loaded.",
+                    result_reference=app_name,
                     progress_percent=100.0,
-                    finished_at_unix_ms=_unix_ms_now(),
+                )
+            elif not incomplete_instance_discarded:
+                self._operations.finish(
+                    operation_id=operation_id,
+                    state=NodeOperationState.FAILED,
+                    summary="Install cleanup failed.",
+                    detail="The incomplete app instance could not be discarded.",
                 )
             else:
-                self._set_status(
-                    job_id=job_id,
-                    state=NodeAppInstallState.CANCELLED,
+                self._operations.finish(
+                    operation_id=operation_id,
+                    state=NodeOperationState.CANCELLED,
                     summary="Install stopped.",
                     detail=None,
-                    finished_at_unix_ms=_unix_ms_now(),
                 )
             raise
         except Exception as xcp:
             if instance_created and not promoted:
-                try:
-                    manager.discard_unloaded_instance(scope=plan.scope, instance_key=plan.instance_key)
-                except Exception:
-                    log.exception("Failed to discard incomplete app instance: scope=%s key=%s", plan.scope, plan.instance_key)
+                self._discard_incomplete_instance(manager=manager, plan=plan)
             detail = self._redact_install_detail(
                 detail=str(xcp),
                 steam_update=steam_update,
                 secret_values=secret_values,
             )
-            log.warning("App install failed: node=%s job=%s error=%s", self._node_name(), job_id, detail)
-            self._set_status(
-                job_id=job_id,
-                state=NodeAppInstallState.FAILED,
+            log.warning("App install failed: node=%s job=%s error=%s", self._node_name(), operation_id, detail)
+            self._operations.finish(
+                operation_id=operation_id,
+                state=NodeOperationState.FAILED,
                 summary="Install failed.",
                 detail=detail,
-                finished_at_unix_ms=_unix_ms_now(),
             )
         finally:
             if promoted:
                 self._invalidate_install_state_caches()
             try:
-                staging_directory = self._job_staging_directory(job_id)
                 if staging_directory.exists():
                     await run_blocking(shutil.rmtree, staging_directory, ignore_errors=True)
-            finally:
-                self._release_job_reservation(job_id=job_id, plan=plan)
+            except Exception:
+                log.exception(
+                    "Failed to remove app install staging directory: job=%s path=%s",
+                    operation_id,
+                    staging_directory,
+                )
 
     @staticmethod
     def _catalog_recipe(recipe: AppSteamInstallRecipe) -> NodeAppInstallRecipe:
@@ -800,7 +844,7 @@ class NodeAppInstallerService:
     def _record_output(
         self,
         *,
-        job_id: str,
+        operation_id: str,
         source: str,
         line: str,
         steam_update: SteamUpdateConfig,
@@ -815,24 +859,30 @@ class NodeAppInstallerService:
             return
         log_line = f"{source}: {redacted_line[:_INSTALL_LOG_LINE_MAX_LENGTH]}"
         progress = steamcmd_progress(redacted_line)
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None or not job.status.running:
-                return
-            log_lines = (*job.status.log_lines, log_line)[-_INSTALL_LOG_LINE_LIMIT:]
-            next_status = replace(
-                job.status,
+        try:
+            operation = self._operations.get(operation_id)
+        except LookupError:
+            return
+        if not operation.active:
+            return
+        if operation.state is NodeOperationState.CANCEL_REQUESTED:
+            self._operations.append_log(operation_id=operation_id, log_line=log_line)
+            return
+        summary = operation.summary
+        progress_percent = operation.progress_percent
+        if progress is not None:
+            phase, progress_percent = progress
+            summary = phase[:1].upper() + phase[1:] if phase else redacted_line
+        self._operations.update_active(
+            operation_id=operation_id,
+            progress=NodeOperationProgress(
+                summary=summary,
+                phase=operation.phase,
                 detail=redacted_line,
-                log_lines=log_lines,
-            )
-            if progress is not None:
-                phase, percent = progress
-                next_status = replace(
-                    next_status,
-                    summary=phase[:1].upper() + phase[1:] if phase else redacted_line,
-                    progress_percent=percent,
-                )
-            job.status = next_status
+                progress_percent=progress_percent,
+            ),
+            log_line=log_line,
+        )
 
     @staticmethod
     def _redact_install_detail(
@@ -847,62 +897,86 @@ class NodeAppInstallerService:
             additional_secrets=secret_values,
         )
 
-    def _set_status(
-        self,
-        *,
-        job_id: str,
-        state: NodeAppInstallState,
-        summary: str,
-        app_name: str | None = None,
-        detail: str | None = None,
-        progress_percent: float | None = None,
-        finished_at_unix_ms: int | None = None,
-    ) -> None:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            job.status = replace(
-                job.status,
-                state=state,
-                summary=summary,
-                app_name=app_name,
-                detail=detail,
-                progress_percent=progress_percent,
-                finished_at_unix_ms=finished_at_unix_ms,
-            )
+    @staticmethod
+    def _install_resource_keys(plan: AppInstanceCreationPlan) -> tuple[str, str]:
+        directory = plan.directory.resolve(strict=False)
+        directory_resource_key = f"app-install-directory:{directory}"
+        instance_resource_key = (
+            f"app-install-instance:{plan.scope.casefold()}:{plan.instance_key.casefold()}"
+        )
+        return directory_resource_key, instance_resource_key
 
-    def _job_staging_directory(self, job_id: str) -> Path:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                raise LookupError("Install job was not found.")
-            return job.staging_directory
+    @staticmethod
+    def _require_install_operation(operation: NodeOperationRecord) -> None:
+        if operation.kind is not NodeOperationKind.APP_INSTALL:
+            raise LookupError("Install job was not found.")
+
+    @classmethod
+    def _status_from_operation(cls, operation: NodeOperationRecord) -> NodeAppInstallStatus:
+        cls._require_install_operation(operation)
+        if operation.state is NodeOperationState.QUEUED:
+            state = NodeAppInstallState.QUEUED
+        elif operation.state is NodeOperationState.RUNNING:
+            state = (
+                NodeAppInstallState.REGISTERING
+                if operation.phase == NodeAppInstallState.REGISTERING.value
+                else NodeAppInstallState.INSTALLING
+            )
+        elif operation.state is NodeOperationState.CANCEL_REQUESTED:
+            state = NodeAppInstallState.CANCEL_REQUESTED
+        elif operation.state is NodeOperationState.SUCCEEDED:
+            state = NodeAppInstallState.READY
+        elif operation.state is NodeOperationState.FAILED:
+            state = NodeAppInstallState.FAILED
+        elif operation.state is NodeOperationState.CANCELLED:
+            state = NodeAppInstallState.CANCELLED
+        elif operation.state is NodeOperationState.INTERRUPTED:
+            state = NodeAppInstallState.INTERRUPTED
+        else:
+            raise ValueError(f"Unsupported operation state: {operation.state.value}")
+        return NodeAppInstallStatus(
+            job_id=operation.operation_id,
+            node=operation.node_name,
+            scope=operation.subject,
+            state=state,
+            summary=operation.summary,
+            app_name=operation.result_reference,
+            detail=operation.detail,
+            progress_percent=operation.progress_percent,
+            log_lines=operation.log_lines,
+            started_at_unix_ms=operation.created_at_unix_ms,
+            finished_at_unix_ms=operation.finished_at_unix_ms,
+        )
+
+    def _raise_if_install_cancellation_requested(self, operation: NodeOperationRecord) -> None:
+        if operation.state is NodeOperationState.CANCEL_REQUESTED:
+            raise asyncio.CancelledError
+
+    @staticmethod
+    def _discard_incomplete_instance(
+        *,
+        manager: NodeAppInstallerManager,
+        plan: AppInstanceCreationPlan,
+    ) -> bool:
+        try:
+            manager.discard_unloaded_instance(
+                scope=plan.scope,
+                instance_key=plan.instance_key,
+            )
+        except Exception:
+            log.exception(
+                "Failed to discard incomplete app instance: scope=%s key=%s",
+                plan.scope,
+                plan.instance_key,
+            )
+            return False
+        return True
 
     def _invalidate_install_state_caches(self) -> None:
         try:
             self._invalidate_state_caches()
         except Exception:
             log.exception("Failed to invalidate state caches after app install: node=%s", self._node_name())
-
-    def _release_job_reservation(self, *, job_id: str, plan: AppInstanceCreationPlan) -> None:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is not None:
-                job.task = None
-            self._active_targets.discard(plan.directory)
-            self._active_instance_keys.discard((plan.scope.casefold(), plan.instance_key.casefold()))
-            self._prune_completed_jobs_locked()
-
-    def _prune_completed_jobs_locked(self) -> None:
-        completed_job_ids = tuple(
-            job_id
-            for job_id, job in self._jobs.items()
-            if not job.status.running and job.task is None
-        )
-        excess_job_count = len(completed_job_ids) - _INSTALL_COMPLETED_JOB_LIMIT
-        for job_id in completed_job_ids[:max(0, excess_job_count)]:
-            self._jobs.pop(job_id, None)
 
 
 def _required_text(payload: Mapping[str, object], key: str, *, label: str) -> str:
@@ -960,10 +1034,6 @@ def _mapping_sequence(raw: object, *, label: str) -> tuple[Mapping[str, object],
             raise ValueError(f"{label.title()} are invalid.")
         items.append(cast(Mapping[str, object], mapping))
     return tuple(items)
-
-
-def _unix_ms_now() -> int:
-    return int(time.time() * 1000)
 
 
 class _AllowAllInstallScopePolicy:

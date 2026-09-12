@@ -25,10 +25,15 @@ from node_api.app_installer import (
     NodeAppInstallerSettingsState,
     NodeAppInstallState,
     NodeAppInstallStatus,
-    _NodeAppInstallJob,
 )
 from node_api.app_installer_routes import register_app_installer_routes
 from node_api.node_routes import register_node_management_routes
+from node_api.operations import (
+    NodeOperationKind,
+    NodeOperationProgress,
+    NodeOperationService,
+    NodeOperationState,
+)
 from node_api.request_auth import NodeRequestContext
 from node_auth import NodeApiScope
 
@@ -97,6 +102,7 @@ class _RouteService:
 
     def __init__(self) -> None:
         self.start_requests: list[tuple[NodeAppInstallRequest, int]] = []
+        self.cancel_requests: list[tuple[str, int]] = []
         self.start_error: Exception | None = None
 
     async def build_catalog(self) -> NodeAppInstallCatalog:
@@ -123,6 +129,18 @@ class _RouteService:
             scope="demo",
             state=NodeAppInstallState.READY,
             summary="Installed.",
+        )
+
+    async def cancel_install(self, *, job_id: str, actor_user_id: int) -> NodeAppInstallStatus:
+        if job_id != "job-1":
+            raise LookupError
+        self.cancel_requests.append((job_id, actor_user_id))
+        return NodeAppInstallStatus(
+            job_id=job_id,
+            node=self.node_name,
+            scope="demo",
+            state=NodeAppInstallState.CANCEL_REQUESTED,
+            summary="Cancellation requested.",
         )
 
 
@@ -177,27 +195,37 @@ class _NodeSettingsRouteService(_RouteService):
 
 
 class AppInstallerCheck(unittest.TestCase):
-    def test_completed_install_jobs_have_bounded_history(self) -> None:
-        service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
-        service._jobs = {
-            f"job-{index}": _NodeAppInstallJob(
-                status=NodeAppInstallStatus(
-                    job_id=f"job-{index}",
-                    node="node-a",
-                    scope="demo",
-                    state=NodeAppInstallState.FAILED,
-                    summary="Install failed.",
-                ),
-                staging_directory=Path(f"/tmp/staging-{index}"),
+    def test_completed_install_operations_have_bounded_history(self) -> None:
+        next_timestamp = 1
+
+        def _now() -> int:
+            nonlocal next_timestamp
+            current_timestamp = next_timestamp
+            next_timestamp += 1
+            return current_timestamp
+
+        operations = NodeOperationService(completed_history_limit=2, now_unix_ms=_now)
+        operation_ids: list[str] = []
+        for index in range(3):
+            operation = operations.create(
+                kind=NodeOperationKind.APP_INSTALL,
+                node_name="node-a",
+                subject="demo",
+                requested_by_user_id=42,
+                progress=NodeOperationProgress(summary="Queued."),
+                resource_keys=(f"install-{index}",),
             )
-            for index in range(3)
-        }
+            operation_ids.append(operation.operation_id)
+            operations.finish(
+                operation_id=operation.operation_id,
+                state=NodeOperationState.FAILED,
+                summary="Install failed.",
+            )
 
-        with patch("node_api.app_installer._INSTALL_COMPLETED_JOB_LIMIT", 2):
-            with service._lock:
-                service._prune_completed_jobs_locked()
-
-        self.assertEqual(tuple(service._jobs), ("job-1", "job-2"))
+        self.assertEqual(
+            tuple(record.operation_id for record in operations.list_records(kind=NodeOperationKind.APP_INSTALL)),
+            tuple(reversed(operation_ids[1:])),
+        )
 
     def test_catalog_exposes_recipe_fields_without_steam_credentials(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -392,6 +420,65 @@ class AppInstallerCheck(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_task_tracking_failure_does_not_start_an_install(self) -> None:
+        async def _run() -> None:
+            with TemporaryDirectory() as temp_dir:
+                manager = _InstallerManager(root=Path(temp_dir))
+                acl = Mock()
+                acl.perm_check = AsyncMock()
+                operations = NodeOperationService()
+                service = NodeAppInstallerService(
+                    node_name=lambda: "node-a",
+                    invalidate_state_caches=Mock(),
+                    operations=operations,
+                )
+                request = NodeAppInstallRequest(
+                    scope="demo",
+                    instance_key="alpha",
+                    friendly_name="Demo Alpha",
+                    subfolder="demo-alpha",
+                    steam_branch_id="public",
+                    inputs={AppInstallInput.ADMIN_PASSWORD: "secret"},
+                )
+                steamcmd_started = False
+
+                async def _fake_steamcmd(
+                    *, command: list[str], cwd: Path, on_output: object = None
+                ) -> bool:
+                    nonlocal steamcmd_started
+                    del command, cwd, on_output
+                    steamcmd_started = True
+                    return True
+
+                with (
+                    patch.object(
+                        operations,
+                        "track_task",
+                        side_effect=RuntimeError("tracking failed"),
+                    ),
+                    patch(
+                        "node_api.app_installer.run_steamcmd_command",
+                        new=_fake_steamcmd,
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "tracking failed"),
+                ):
+                    await service.start_install(
+                        manager=manager,
+                        acl=acl,
+                        actor_user_id=42,
+                        request=request,
+                    )
+
+                await asyncio.sleep(0)
+                records = operations.list_records(kind=NodeOperationKind.APP_INSTALL)
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0].state, NodeOperationState.FAILED)
+                self.assertFalse(steamcmd_started)
+                self.assertEqual(manager.create_requests, [])
+                self.assertFalse(manager.plan.directory.exists())
+
+        asyncio.run(_run())
+
     def test_failed_install_redacts_steam_and_recipe_secrets(self) -> None:
         async def _run() -> None:
             with TemporaryDirectory() as temp_dir:
@@ -413,7 +500,12 @@ class AppInstallerCheck(unittest.TestCase):
                 )
                 acl = Mock()
                 acl.perm_check = AsyncMock()
-                service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
+                database_path = Path(temp_dir) / "operations.sqlite3"
+                service = NodeAppInstallerService(
+                    node_name=lambda: "node-a",
+                    invalidate_state_caches=Mock(),
+                    operations=NodeOperationService(database_path=database_path),
+                )
                 request = NodeAppInstallRequest(
                     scope="demo",
                     instance_key="alpha",
@@ -424,7 +516,9 @@ class AppInstallerCheck(unittest.TestCase):
                 )
 
                 async def _failed_steamcmd(*, command: list[str], cwd: Path, on_output: object = None) -> bool:
-                    del command, cwd, on_output
+                    del command, cwd
+                    if callable(on_output):
+                        on_output("stdout", "steam-secret beta-secret admin-secret")
                     raise RuntimeError("steam-secret beta-secret admin-secret")
 
                 with patch("node_api.app_installer.run_steamcmd_command", new=_failed_steamcmd):
@@ -445,6 +539,14 @@ class AppInstallerCheck(unittest.TestCase):
                 status = service.install_status(job_id=queued.job_id)
                 self.assertEqual(status.state, NodeAppInstallState.FAILED)
                 self.assertEqual(status.detail, "****** ****** ******")
+                persisted = NodeOperationService(database_path=database_path).get(
+                    queued.job_id
+                )
+                persisted_text = "\n".join(
+                    (persisted.detail or "", *persisted.log_lines)
+                )
+                for secret in ("steam-secret", "beta-secret", "admin-secret"):
+                    self.assertNotIn(secret, persisted_text)
 
         asyncio.run(_run())
 
@@ -481,25 +583,25 @@ class AppInstallerCheck(unittest.TestCase):
                         actor_user_id=42,
                         request=request,
                     )
-                    first_task = service._jobs[first.job_id].task
-                    self.assertIsNotNone(first_task)
-                    assert first_task is not None
-                    with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
-                        await first_task
+                    for _ in range(20):
+                        if not service.install_status(job_id=first.job_id).running:
+                            break
+                        await asyncio.sleep(0)
+                    else:
+                        self.fail("Install task did not finish.")
 
-                    self.assertFalse(service._active_targets)
-                    self.assertFalse(service._active_instance_keys)
                     second = await service.start_install(
                         manager=manager,
                         acl=acl,
                         actor_user_id=42,
                         request=request,
                     )
-                    second_task = service._jobs[second.job_id].task
-                    self.assertIsNotNone(second_task)
-                    assert second_task is not None
-                    with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
-                        await second_task
+                    for _ in range(20):
+                        if not service.install_status(job_id=second.job_id).running:
+                            break
+                        await asyncio.sleep(0)
+                    else:
+                        self.fail("Second install task did not finish.")
 
         asyncio.run(_run())
 
@@ -556,6 +658,87 @@ class AppInstallerCheck(unittest.TestCase):
                 invalidated.assert_called_once_with()
 
         asyncio.run(_run())
+
+    def test_cancel_install_records_a_cancellable_operation(self) -> None:
+        async def _run() -> None:
+            with TemporaryDirectory() as temp_dir:
+                manager = _InstallerManager(root=Path(temp_dir))
+                acl = Mock()
+                acl.perm_check = AsyncMock()
+                service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
+                request = NodeAppInstallRequest(
+                    scope="demo",
+                    instance_key="alpha",
+                    friendly_name="Demo Alpha",
+                    subfolder="demo-alpha",
+                    steam_branch_id="public",
+                    inputs={AppInstallInput.ADMIN_PASSWORD: "secret"},
+                )
+                steamcmd_started = asyncio.Event()
+
+                async def _blocked_steamcmd(
+                    *, command: list[str], cwd: Path, on_output: object = None
+                ) -> bool:
+                    del command, cwd, on_output
+                    steamcmd_started.set()
+                    await asyncio.Event().wait()
+                    return False
+
+                with patch("node_api.app_installer.run_steamcmd_command", new=_blocked_steamcmd):
+                    queued = await service.start_install(
+                        manager=manager,
+                        acl=acl,
+                        actor_user_id=42,
+                        request=request,
+                    )
+                    await steamcmd_started.wait()
+                    cancelling = await service.cancel_install(
+                        job_id=queued.job_id,
+                        actor_user_id=42,
+                        acl=acl,
+                    )
+                    self.assertEqual(cancelling.state, NodeAppInstallState.CANCEL_REQUESTED)
+                    for _ in range(20):
+                        status = service.install_status(job_id=queued.job_id)
+                        if not status.running:
+                            break
+                        await asyncio.sleep(0)
+                    else:
+                        self.fail("Cancelled install task did not finish.")
+
+                status = service.install_status(job_id=queued.job_id)
+                self.assertEqual(status.state, NodeAppInstallState.CANCELLED)
+                self.assertEqual(acl.perm_check.await_count, 2)
+
+        asyncio.run(_run())
+
+    def test_durable_operation_recovery_is_exposed_as_an_interrupted_install(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "operations.sqlite3"
+            first_operations = NodeOperationService(database_path=database_path)
+            operation = first_operations.create(
+                kind=NodeOperationKind.APP_INSTALL,
+                node_name="node-a",
+                subject="demo",
+                requested_by_user_id=42,
+                progress=NodeOperationProgress(summary="Queued."),
+                resource_keys=("app-install-directory:/apps/demo",),
+            )
+            first_operations.begin(
+                operation_id=operation.operation_id,
+                progress=NodeOperationProgress(summary="Installing.", phase="installing"),
+            )
+            recovered_operations = NodeOperationService(database_path=database_path)
+            service = NodeAppInstallerService(
+                node_name=lambda: "node-a",
+                invalidate_state_caches=Mock(),
+                operations=recovered_operations,
+            )
+
+            status = service.install_status(job_id=operation.operation_id)
+
+        self.assertEqual(status.state, NodeAppInstallState.INTERRUPTED)
+        self.assertEqual(status.summary, "Interrupted by a node restart.")
 
     def test_concurrent_installs_allow_the_same_default_port(self) -> None:
         async def _run() -> None:
@@ -681,6 +864,39 @@ class AppInstallerCheck(unittest.TestCase):
             app_scope="demo",
             instance_key="alpha",
             steam_branch_id="public",
+            job_id="job-1",
+            required_level=Power_Level.sudo.name,
+        )
+
+    def test_cancel_route_uses_sudo_app_manage_scope(self) -> None:
+        app = FastAPI()
+        service = _RouteService()
+        auth = _RouteAuth()
+        register_app_installer_routes(
+            app,
+            auth=auth,
+            installer=service,
+            api_prefix="/api",
+            http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
+            traffic_log=logging.getLogger(__name__),
+        )
+
+        async def _request_route() -> Response:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+                return await client.post("/api/app-installer/jobs/job-1/cancel", json={})
+
+        with patch("node_api.app_installer_routes.audit_log") as audit:
+            response = asyncio.run(_request_route())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["state"], NodeAppInstallState.CANCEL_REQUESTED.value)
+        self.assertEqual(service.cancel_requests, [("job-1", 42)])
+        self.assertEqual(auth.access_requests, [(None, (NodeApiScope.APP_MANAGE,))])
+        audit.assert_called_once_with(
+            "app.install_cancel_requested",
+            actor_user_id=42,
+            node_name="node-a",
             job_id="job-1",
             required_level=Power_Level.sudo.name,
         )

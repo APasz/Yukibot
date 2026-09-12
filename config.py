@@ -2635,6 +2635,7 @@ DATA_AUTHORITY_SERVER_ENABLED: bool = (
 DIR_LOG: Path = Path("logs")
 DIR_LOG_USER: Path = DIR_LOG / "_user"
 DIR_LOG_MACHINE: Path = DIR_LOG / "_machine"
+NODE_OPERATION_STATE_DIRECTORY: Path = Path(".yukibot")
 DIR_TMP: Path = Path(_require_loaded_setting(_env_settings.dir_tmp, var_name="DIR_TMP"))
 "/tmp/yukibot"
 DIR_OPT: Path = Path(_require_loaded_setting(_env_settings.dir_opt, var_name="DIR_OPT"))  # nginx setup only opt/bot
@@ -2658,13 +2659,34 @@ DIR_ZIPS.mkdir(parents=True, exist_ok=True)
 STR_ENCODE = "utf-8"
 
 
+def _require_node_file_component(node_name: str, *, label: str) -> str:
+    """Validate a node name used as part of a local file name."""
+    if (
+        node_name != node_name.strip()
+        or not node_name
+        or node_name in {".", ".."}
+        or "/" in node_name
+        or "\\" in node_name
+    ):
+        raise ValueError(f"{label} must be a single path component.")
+    return node_name
+
+
+def node_operation_database_path(node_name: str) -> Path:
+    """Return the node-specific durable operation database path."""
+    file_component = _require_node_file_component(
+        node_name,
+        label="Node operation database node name",
+    )
+    return NODE_OPERATION_STATE_DIRECTORY / f"operations-{file_component}.sqlite3"
+
+
 def _log_file_name(filename: str) -> str:
     """Return a node-specific log filename for concurrent development profiles."""
     if not INDEV:
         return filename
-    if Path(NODE_NAME).name != NODE_NAME or NODE_NAME in {"", ".", ".."}:
-        raise ValueError("NODE_NAME must be a single path component when INDEV is enabled.")
-    return f"{NODE_NAME}-{filename}"
+    node_name = _require_node_file_component(NODE_NAME, label="NODE_NAME")
+    return f"{node_name}-{filename}"
 
 
 is_debug: bool = "-debug" in sys.argv

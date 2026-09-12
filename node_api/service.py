@@ -35,6 +35,7 @@ from . import (
     mod as mod_contracts,
     mod_service,
     node_service,
+    operations,
     relay,
     storage_service,
     system,
@@ -283,6 +284,11 @@ class NodeApiService:
             runtime_http_exception=self._runtime_http_exception,
             traffic_log=traffic_log,
         )
+        self.operations = operations.NodeOperationService(
+            database_path=config.node_operation_database_path(
+                config.MOD_WEB_SERVER.node_name
+            )
+        )
         self.realtime = NodeRealtimeService(
             node_name=lambda: self.node_name,
             discord_service_state=lambda: self._discord_service_health()[0],
@@ -306,6 +312,7 @@ class NodeApiService:
             require_manager=self._require_manager,
             require_acl=self._require_acl,
             require_available=self.node_management.require_app_installer_available,
+            operations=self.operations,
         )
         self.app_games = app_game_service.NodeAppGameService(
             node_name=lambda: self.node_name,

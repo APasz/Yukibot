@@ -15,6 +15,7 @@ from node_api.app_installer import (
     NodeAppInstallInputKind,
     NodeAppInstallRecipe,
     NodeAppInstallRequest,
+    NodeAppInstallState,
     NodeAppInstallStatus,
 )
 from node_auth import NodeApiScope
@@ -93,6 +94,7 @@ class _AppInstallerPageState:
     status_error: str | None = None
     status_polling: bool = False
     install_starting: bool = False
+    install_cancelling: bool = False
 
     def apply_catalog(self, catalog: NodeAppInstallCatalog) -> None:
         self.catalog = catalog
@@ -125,6 +127,7 @@ class _AppInstallerPageState:
         self.status_error = None
         self.status_polling = False
         self.install_starting = False
+        self.install_cancelling = False
 
 
 @dataclass(slots=True)
@@ -136,6 +139,7 @@ class _AppInstallerStatusControls:
     detail_label: Label
     app_link: Link
     log_textarea: Textarea
+    cancel_button: Button
     app_path: str = "#"
 
 
@@ -312,6 +316,40 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 return
             state.apply_catalog(catalog)
 
+        async def cancel_install() -> None:
+            status = state.status
+            if (
+                status is None
+                or not status.running
+                or status.state is NodeAppInstallState.CANCEL_REQUESTED
+                or state.install_cancelling
+            ):
+                return
+            state.install_cancelling = True
+            update_status_view()
+            try:
+                cancelled_status = await self._cancel_app_install(
+                    node=selected_node(),
+                    job_id=status.job_id,
+                    user=user,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as xcp:
+                notify(f"Could not cancel install: {xcp}", tone="negative", multi_line=True)
+            else:
+                state.status = cancelled_status
+                state.status_error = None
+                if cancelled_status.state is NodeAppInstallState.CANCEL_REQUESTED:
+                    notify("Install cancellation requested.", tone="warning")
+                elif cancelled_status.state is NodeAppInstallState.CANCELLED:
+                    notify("Install cancelled.", tone="warning")
+                else:
+                    notify("Install had already finished.", tone="info")
+            finally:
+                state.install_cancelling = False
+                update_status_view()
+
         def create_status_controls() -> _AppInstallerStatusControls:
             with ui.card().classes("mod-card w-full") as status_card:
                 with ui.column().classes("w-full gap-3"):
@@ -328,11 +366,15 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                     log_textarea = ui.textarea(value="").props(
                         "readonly filled square dense hide-bottom-space rows=8"
                     ).classes("w-full font-mono text-xs mod-config-input")
+                    cancel_button = ui.button("Cancel install", icon="cancel", on_click=cancel_install).classes(
+                        "mod-list-button secondary self-start"
+                    )
             status_card.set_visibility(False)
             progress_label.set_visibility(False)
             detail_label.set_visibility(False)
             app_link.set_visibility(False)
             log_textarea.set_visibility(False)
+            cancel_button.set_visibility(False)
             return _AppInstallerStatusControls(
                 card=status_card,
                 state_label=state_label,
@@ -341,6 +383,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 detail_label=detail_label,
                 app_link=app_link,
                 log_textarea=log_textarea,
+                cancel_button=cancel_button,
             )
 
         def update_status_view() -> None:
@@ -376,6 +419,14 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             controls.log_textarea.set_visibility(bool(log_text))
             if controls.log_textarea.value != log_text:
                 controls.log_textarea.set_value(log_text)
+
+            can_cancel = (
+                status.running
+                and status.state is not NodeAppInstallState.CANCEL_REQUESTED
+                and not state.install_cancelling
+            )
+            controls.cancel_button.set_visibility(status.running)
+            controls.cancel_button.set_enabled(can_cancel)
 
         async def refresh_page_lock() -> bool:
             lease = self._app_installer_page_lock.current()
@@ -731,6 +782,29 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             path=f"/app-installer/jobs/{job_id}",
             scopes=(NodeApiScope.APP_MANAGE,),
             user=user,
+        )
+        return NodeAppInstallStatus.from_mapping(payload)
+
+    async def _cancel_app_install(
+        self,
+        *,
+        node: ModWebNodeLink,
+        job_id: str,
+        user: ModWebUser,
+    ) -> NodeAppInstallStatus:
+        if node.is_current:
+            return await self._node_api.app_installer.cancel_install(
+                job_id=job_id,
+                actor_user_id=user.discord_id,
+            )
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path=f"/app-installer/jobs/{job_id}/cancel",
+            scopes=(NodeApiScope.APP_MANAGE,),
+            user=user,
+            method="POST",
+            json_payload={},
         )
         return NodeAppInstallStatus.from_mapping(payload)
 

@@ -119,13 +119,15 @@ class AppModCapabilitiesTests(unittest.TestCase):
 
     def test_app_config_rejects_removed_custom_start_command(self) -> None:
         with self.assertRaisesRegex(ValueError, "cmd_start"):
-            App_Config(
-                name="minecraft_test",
-                instance_key="test",
-                directory=Path("/tmp/minecraft-test"),
-                apps_dir=Path("/tmp"),
-                scope="minecraft",
-                cmd_start=["bash", "run.sh"],
+            App_Config.model_validate(
+                {
+                    "name": "minecraft_test",
+                    "instance_key": "test",
+                    "directory": Path("/tmp/minecraft-test"),
+                    "apps_dir": Path("/tmp"),
+                    "scope": "minecraft",
+                    "cmd_start": ["bash", "run.sh"],
+                }
             )
 
     def test_app_config_reports_duplicate_client_pack_published_mod_names(self) -> None:
@@ -188,6 +190,21 @@ class AppModCapabilitiesTests(unittest.TestCase):
             with self.subTest(scope=scope):
                 self.assertEqual(mod_capabilities_for_scope(scope).mode, expected_mode)
                 self.assertFalse(mod_capabilities_for_scope(scope).supports_client_pack)
+
+
+class ConfigNodeStateTests(unittest.TestCase):
+    def test_node_operation_database_path_uses_a_safe_node_component(self) -> None:
+        with patch.object(config, "NODE_OPERATION_STATE_DIRECTORY", Path("state")):
+            self.assertEqual(
+                config.node_operation_database_path("portal"),
+                Path("state") / "operations-portal.sqlite3",
+            )
+            for node_name in ("", " portal", "portal ", "../portal", "a/b", "a\\b"):
+                with self.subTest(node_name=node_name), self.assertRaisesRegex(
+                    ValueError,
+                    "single path component",
+                ):
+                    config.node_operation_database_path(node_name)
 
 
 class ConfigLoggingTests(unittest.TestCase):
