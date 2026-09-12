@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
-from fastapi import Request
+from fastapi import Request, WebSocket
 
 from _audit import audit_log
 from _security import Power_Level
 from .operation_service import NodeOperationApiService, NodeOperationKindPolicy
 from .operations import NodeOperationKind
+from .realtime_service import NodeRealtimeService
 from .request_auth import NodeRequestContext
 from .route_contracts import HttpExceptionFactory
 from node_auth import NodeApiScope
@@ -27,6 +28,15 @@ class NodeOperationRouteAuth(Protocol):
         request: Request,
         access_token: str | None,
         *,
+        app_name: str | None,
+        scopes: tuple[NodeApiScope, ...],
+    ) -> NodeRequestContext: ...
+
+    def require_websocket_token_access(
+        self,
+        *,
+        websocket: WebSocket,
+        access_token: str | None,
         app_name: str | None,
         scopes: tuple[NodeApiScope, ...],
     ) -> NodeRequestContext: ...
@@ -48,8 +58,30 @@ def register_operation_routes(
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
+    realtime: NodeRealtimeService | None = None,
 ) -> None:
     """Register the shared operation list, detail, and cancellation endpoints."""
+
+    if realtime is not None:
+
+        @nicegui_app.websocket(f"{api_prefix}/operations/stream")
+        async def _operation_stream(
+            websocket: WebSocket,
+            access_token: str | None = None,
+        ) -> None:
+            stream_scopes = operation_api.stream_read_scopes()
+            traffic_log.info(
+                "Node API operation stream request: node=%s scopes=%s",
+                auth.node_name,
+                ",".join(scope.value for scope in stream_scopes),
+            )
+            auth.require_websocket_token_access(
+                websocket=websocket,
+                access_token=access_token,
+                app_name=None,
+                scopes=stream_scopes,
+            )
+            await realtime.serve_operation_stream(websocket)
 
     @nicegui_app.get(f"{api_prefix}/operations")
     async def _list_operations(

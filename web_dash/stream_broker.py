@@ -32,6 +32,13 @@ class RemoteAppStreamKey:
 
 
 @dataclass(frozen=True, slots=True)
+class RemoteOperationStreamKey:
+    """A per-node durable-operation stream shared by dashboard surfaces."""
+
+    node: ModWebNodeLink
+
+
+@dataclass(frozen=True, slots=True)
 class RemoteChatStreamKey:
     node: ModWebNodeLink
     app_name: str

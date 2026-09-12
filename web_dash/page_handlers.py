@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 from node_api.route_contracts import NODE_DISCORD_SERVICE_STATE_HEADER, DiscordServiceState
 
 from .constants import (
@@ -204,6 +206,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             *(monitor.close() for monitor in monitors),
             self._remote_node_state_broker.close(),
             self._remote_app_state_broker.close(),
+            self._remote_operation_stream_broker.close(),
             self._remote_chat_broker.close(),
             self._console_stdout_broker.close(),
         )
@@ -457,6 +460,21 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
         if user is None:
             return
+        query_params = getattr(request, "query_params", None)
+        query_get = getattr(query_params, "get", None)
+        requested_tab = query_get("tab") if callable(query_get) else None
+        requested_operation_id = query_get("operation_id") if callable(query_get) else None
+        initial_tab_id = requested_tab.strip() if isinstance(requested_tab, str) else None
+        initial_operation_id = (
+            requested_operation_id.strip()
+            if isinstance(requested_operation_id, str) and requested_operation_id.strip()
+            else None
+        )
+        retry_query: dict[str, str] = {}
+        if initial_tab_id is not None:
+            retry_query["tab"] = initial_tab_id
+        if initial_operation_id is not None:
+            retry_query["operation_id"] = initial_operation_id
 
         async def _load_system_history(node: ModWebNodeLink) -> NodeSystemHistory:
             try:
@@ -505,6 +523,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 return
             log.info("Remote mod web node temporarily unavailable: node=%s error=%s", node_name, xcp)
             retry_url = mod_web_node_system_path(node_name)
+            if retry_query:
+                retry_url = f"{retry_url}?{urlencode(retry_query)}"
             self._render_remote_node_unavailable_page(
                 ui=ui,
                 node_name=node_name,
@@ -642,6 +662,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             load_system_tab=_load_system_tab,
             refresh_node_status=lambda: self._probe_node_status_async(node, log_failures=False),
             subscribe_node_state_updates=subscribe_node_state_updates,
+            initial_tab_id=initial_tab_id,
+            initial_operation_id=initial_operation_id,
         )
 
     async def _render_node_mods_page(self, *, ui: ModWebUi, node_name: str, app_name: str, request: Request) -> None:

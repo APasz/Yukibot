@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -165,6 +166,15 @@ class NodeOperationState(StrEnum):
     @property
     def terminal(self) -> bool:
         return not self.active
+
+
+class NodeOperationChangeKind(StrEnum):
+    """The durable-record change that a live operation consumer should apply."""
+
+    CREATED = "created"
+    UPDATED = "updated"
+    FINISHED = "finished"
+    REMOVED = "removed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +358,15 @@ class NodeOperationRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeOperationChange:
+    """A complete durable operation snapshot following one lifecycle mutation."""
+
+    kind: NodeOperationChangeKind
+    record: NodeOperationRecord
+    immediate: bool
+
+
+@dataclass(frozen=True, slots=True)
 class NodeOperationResult:
     """A type-owned, client-safe JSON artifact retained for an operation."""
 
@@ -422,6 +441,30 @@ class NodeOperationService:
         self._resource_owners: dict[str, str] = {}
         self._tasks: dict[str, asyncio.Task[object]] = {}
         self._hard_cancelled_tasks: dict[str, asyncio.Task[object]] = {}
+        self._change_subscribers: dict[str, Callable[[NodeOperationChange], None]] = {}
+        self._pending_changes: deque[tuple[NodeOperationChange, tuple[str, ...]]] = deque()
+        self._dispatching_changes = False
+
+    def subscribe_changes(
+        self,
+        callback: Callable[[NodeOperationChange], None],
+    ) -> Callable[[], None]:
+        """Subscribe to complete operation records as their durable state changes."""
+
+        with self._lock:
+            return self._subscribe_changes_locked(callback)
+
+    def subscribe_changes_with_snapshot(
+        self,
+        callback: Callable[[NodeOperationChange], None],
+    ) -> tuple[tuple[NodeOperationRecord, ...], Callable[[], None]]:
+        """Atomically subscribe and return the authoritative retained-record snapshot."""
+
+        with self._lock:
+            self._ensure_database_locked()
+            snapshot = self._list_all_records_locked(include_log_lines=True)
+            unsubscribe = self._subscribe_changes_locked(callback)
+        return snapshot, unsubscribe
 
     def create(
         self,
@@ -459,6 +502,14 @@ class NodeOperationService:
                 self._create_memory_locked(record, normalised_resource_keys)
             else:
                 self._create_database_locked(record, normalised_resource_keys)
+            self._queue_change_locked(
+                NodeOperationChange(
+                    kind=NodeOperationChangeKind.CREATED,
+                    record=record,
+                    immediate=True,
+                )
+            )
+        self._dispatch_changes()
         return record
 
     def get(
@@ -521,6 +572,29 @@ class NodeOperationService:
                 include_log_lines=include_log_lines,
             )
 
+    def _list_all_records_locked(
+        self,
+        *,
+        include_log_lines: bool,
+    ) -> tuple[NodeOperationRecord, ...]:
+        if self._database is None:
+            records = tuple(
+                sorted(
+                    self._records.values(),
+                    key=lambda record: (record.created_at_unix_ms, record.operation_id),
+                    reverse=True,
+                )
+            )
+            if include_log_lines:
+                return records
+            return tuple(_without_log_lines(record) for record in records)
+        return self._list_database_records_locked(
+            kind=None,
+            app_name=None,
+            limit=None,
+            include_log_lines=include_log_lines,
+        )
+
     def begin(
         self, *, operation_id: str, progress: NodeOperationProgress
     ) -> NodeOperationRecord:
@@ -548,7 +622,15 @@ class NodeOperationService:
                 started_at_unix_ms=self._now_unix_ms(),
             )
             self._write_record_locked(updated)
-            return updated
+            self._queue_change_locked(
+                NodeOperationChange(
+                    kind=NodeOperationChangeKind.UPDATED,
+                    record=updated,
+                    immediate=True,
+                )
+            )
+        self._dispatch_changes()
+        return updated
 
     def update_active(
         self,
@@ -574,7 +656,16 @@ class NodeOperationService:
                 progress_percent=progress.progress_percent,
             )
             self._write_record_locked(updated, log_line=log_line)
-            return self._record_locked(operation_id)
+            updated = self._record_locked(operation_id)
+            self._queue_change_locked(
+                NodeOperationChange(
+                    kind=NodeOperationChangeKind.UPDATED,
+                    record=updated,
+                    immediate=False,
+                )
+            )
+        self._dispatch_changes()
+        return updated
 
     def append_log(self, *, operation_id: str, log_line: str) -> NodeOperationRecord:
         """Append a sanitised log line without changing the operation state."""
@@ -585,7 +676,16 @@ class NodeOperationService:
             if current.state.terminal:
                 return current
             self._write_record_locked(current, log_line=log_line)
-            return self._record_locked(operation_id)
+            updated = self._record_locked(operation_id)
+            self._queue_change_locked(
+                NodeOperationChange(
+                    kind=NodeOperationChangeKind.UPDATED,
+                    record=updated,
+                    immediate=False,
+                )
+            )
+        self._dispatch_changes()
+        return updated
 
     def finish(
         self,
@@ -630,8 +730,10 @@ class NodeOperationService:
                 progress_percent=progress.progress_percent,
                 finished_at_unix_ms=self._now_unix_ms(),
             )
-            self._finish_record_locked(updated, operation_result=result)
-            return updated
+            removed_records = self._finish_record_locked(updated, operation_result=result)
+            self._queue_finished_changes_locked(updated, removed_records)
+        self._dispatch_changes()
+        return updated
 
     def get_result(self, *, operation_id: str) -> NodeOperationResult:
         """Return a non-expired type-owned artifact for a retained operation."""
@@ -656,7 +758,18 @@ class NodeOperationService:
 
         with self._lock:
             self._ensure_database_locked()
-            return self._request_cancellation_locked(operation_id)
+            updated, changed = self._request_cancellation_locked(operation_id)
+            if changed:
+                self._queue_change_locked(
+                    NodeOperationChange(
+                        kind=NodeOperationChangeKind.UPDATED,
+                        record=updated,
+                        immediate=True,
+                    )
+                )
+        if changed:
+            self._dispatch_changes()
+        return updated
 
     def hard_cancel(self, *, operation_id: str) -> NodeOperationRecord:
         """Request cancellation and interrupt the tracked task once when safe.
@@ -668,7 +781,15 @@ class NodeOperationService:
         task_to_cancel: asyncio.Task[object] | None = None
         with self._lock:
             self._ensure_database_locked()
-            updated = self._request_cancellation_locked(operation_id)
+            updated, changed = self._request_cancellation_locked(operation_id)
+            if changed:
+                self._queue_change_locked(
+                    NodeOperationChange(
+                        kind=NodeOperationChangeKind.UPDATED,
+                        record=updated,
+                        immediate=True,
+                    )
+                )
             task = self._tasks.get(operation_id)
             if (
                 not updated.state.terminal
@@ -685,6 +806,8 @@ class NodeOperationService:
             with self._lock:
                 if self._hard_cancelled_tasks.get(operation_id) is task_to_cancel:
                     self._hard_cancelled_tasks.pop(operation_id, None)
+        if changed:
+            self._dispatch_changes()
         return updated
 
     def cancellation_requested(self, *, operation_id: str) -> bool:
@@ -746,6 +869,8 @@ class NodeOperationService:
     def _finish_tracked_task(
         self, operation_id: str, task: asyncio.Task[object]
     ) -> None:
+        finished_record: NodeOperationRecord
+        removed_records: tuple[NodeOperationRecord, ...] = ()
         with self._lock:
             if self._tasks.get(operation_id) is task:
                 self._tasks.pop(operation_id, None)
@@ -761,54 +886,54 @@ class NodeOperationService:
                 return
 
             if task.cancelled():
-                self._finish_cancelled_record_locked(record)
-                return
-
-            try:
-                error = task.exception()
-            except asyncio.CancelledError:
-                error = None
-            if error is None:
-                if record.state is NodeOperationState.CANCEL_REQUESTED:
-                    self._finish_cancelled_record_locked(record)
-                    return
-                self._finish_record_locked(
-                    replace(
+                finished_record, removed_records = self._finish_cancelled_record_locked(record)
+            else:
+                try:
+                    error = task.exception()
+                except asyncio.CancelledError:
+                    error = None
+                if error is None:
+                    if record.state is NodeOperationState.CANCEL_REQUESTED:
+                        finished_record, removed_records = self._finish_cancelled_record_locked(record)
+                    else:
+                        finished_record = replace(
+                            record,
+                            state=NodeOperationState.FAILED,
+                            summary=_UNREPORTED_COMPLETION_SUMMARY,
+                            phase=None,
+                            finished_at_unix_ms=self._now_unix_ms(),
+                        )
+                        removed_records = self._finish_record_locked(finished_record)
+                else:
+                    log.exception(
+                        "Node operation task failed without reporting its result: operation=%s kind=%s",
+                        operation_id,
+                        record.kind.value,
+                        exc_info=error,
+                    )
+                    finished_record = replace(
                         record,
                         state=NodeOperationState.FAILED,
-                        summary=_UNREPORTED_COMPLETION_SUMMARY,
+                        summary=_UNEXPECTED_FAILURE_SUMMARY,
                         phase=None,
                         finished_at_unix_ms=self._now_unix_ms(),
                     )
-                )
-                return
+                    removed_records = self._finish_record_locked(finished_record)
+            self._queue_finished_changes_locked(finished_record, removed_records)
+        self._dispatch_changes()
 
-            log.exception(
-                "Node operation task failed without reporting its result: operation=%s kind=%s",
-                operation_id,
-                record.kind.value,
-                exc_info=error,
-            )
-            self._finish_record_locked(
-                replace(
-                    record,
-                    state=NodeOperationState.FAILED,
-                    summary=_UNEXPECTED_FAILURE_SUMMARY,
-                    phase=None,
-                    finished_at_unix_ms=self._now_unix_ms(),
-                )
-            )
-
-    def _finish_cancelled_record_locked(self, record: NodeOperationRecord) -> None:
-        self._finish_record_locked(
-            replace(
-                record,
-                state=NodeOperationState.CANCELLED,
-                summary=_CANCELLED_SUMMARY,
-                phase=None,
-                finished_at_unix_ms=self._now_unix_ms(),
-            )
+    def _finish_cancelled_record_locked(
+        self,
+        record: NodeOperationRecord,
+    ) -> tuple[NodeOperationRecord, tuple[NodeOperationRecord, ...]]:
+        updated = replace(
+            record,
+            state=NodeOperationState.CANCELLED,
+            summary=_CANCELLED_SUMMARY,
+            phase=None,
+            finished_at_unix_ms=self._now_unix_ms(),
         )
+        return updated, self._finish_record_locked(updated)
 
     def _schedule_hard_cancellation(
         self,
@@ -850,20 +975,103 @@ class NodeOperationService:
                 return
             task.cancel()
 
-    def _request_cancellation_locked(self, operation_id: str) -> NodeOperationRecord:
+    def _request_cancellation_locked(
+        self,
+        operation_id: str,
+    ) -> tuple[NodeOperationRecord, bool]:
         current = self._record_locked(operation_id)
         if (
             current.state.terminal
             or current.state is NodeOperationState.CANCEL_REQUESTED
         ):
-            return current
+            return current, False
         updated = replace(
             current,
             state=NodeOperationState.CANCEL_REQUESTED,
             summary=_CANCEL_REQUESTED_SUMMARY,
         )
         self._write_record_locked(updated)
-        return updated
+        return updated, True
+
+    def _subscribe_changes_locked(
+        self,
+        callback: Callable[[NodeOperationChange], None],
+    ) -> Callable[[], None]:
+        if not callable(callback):
+            raise TypeError("Operation change callback must be callable.")
+        subscription_id = uuid.uuid4().hex
+        self._change_subscribers[subscription_id] = callback
+
+        def _unsubscribe() -> None:
+            with self._lock:
+                self._change_subscribers.pop(subscription_id, None)
+
+        return _unsubscribe
+
+    def _queue_change_locked(self, change: NodeOperationChange) -> None:
+        """Queue one complete record change in durable mutation order."""
+
+        self._pending_changes.append((change, tuple(self._change_subscribers)))
+
+    def _queue_finished_changes_locked(
+        self,
+        record: NodeOperationRecord,
+        removed_records: tuple[NodeOperationRecord, ...],
+    ) -> None:
+        self._queue_change_locked(
+            NodeOperationChange(
+                kind=NodeOperationChangeKind.FINISHED,
+                record=record,
+                immediate=True,
+            )
+        )
+        for removed_record in removed_records:
+            self._queue_change_locked(
+                NodeOperationChange(
+                    kind=NodeOperationChangeKind.REMOVED,
+                    record=removed_record,
+                    immediate=True,
+                )
+            )
+
+    def _dispatch_changes(self) -> None:
+        """Deliver queued changes serially without holding the durable-state lock."""
+
+        with self._lock:
+            if self._dispatching_changes:
+                return
+            self._dispatching_changes = True
+
+        try:
+            while True:
+                with self._lock:
+                    if not self._pending_changes:
+                        self._dispatching_changes = False
+                        return
+                    change, subscription_ids = self._pending_changes.popleft()
+                    callbacks = tuple(
+                        callback
+                        for subscription_id in subscription_ids
+                        if (
+                            callback := self._change_subscribers.get(subscription_id)
+                        ) is not None
+                    )
+                for callback in callbacks:
+                    try:
+                        callback(change)
+                    except Exception:
+                        log.exception(
+                            "Node operation change subscriber failed: operation=%s kind=%s",
+                            change.record.operation_id,
+                            change.kind.value,
+                        )
+        except BaseException:
+            with self._lock:
+                self._dispatching_changes = False
+                retry_dispatch = bool(self._pending_changes)
+            if retry_dispatch:
+                self._dispatch_changes()
+            raise
 
     def _ensure_database_locked(self) -> None:
         if self._database_path is None or self._database is not None:
@@ -1237,7 +1445,7 @@ class NodeOperationService:
         record: NodeOperationRecord,
         *,
         operation_result: NodeOperationResult | None = None,
-    ) -> None:
+    ) -> tuple[NodeOperationRecord, ...]:
         if not record.state.terminal:
             raise ValueError("Only terminal records can be finished.")
         if self._database is None:
@@ -1245,8 +1453,7 @@ class NodeOperationService:
             if operation_result is not None:
                 self._results[record.operation_id] = operation_result
             self._release_memory_resources_locked(record.operation_id)
-            self._prune_memory_completed_locked()
-            return
+            return self._prune_memory_completed_locked()
 
         database = self._require_database_locked()
         with self._database_transaction_locked():
@@ -1291,7 +1498,8 @@ class NodeOperationService:
                 "DELETE FROM node_operation_resources WHERE operation_id = ?",
                 (record.operation_id,),
             )
-            self._prune_database_completed_locked()
+            removed_records = self._prune_database_completed_locked()
+        return removed_records
 
     def _append_database_log_locked(self, operation_id: str, line: str) -> None:
         database = self._require_database_locked()
@@ -1391,7 +1599,7 @@ class NodeOperationService:
         for resource_key in released_keys:
             self._resource_owners.pop(resource_key, None)
 
-    def _prune_memory_completed_locked(self) -> None:
+    def _prune_memory_completed_locked(self) -> tuple[NodeOperationRecord, ...]:
         now_unix_ms = self._now_unix_ms()
         expired_result_ids = tuple(
             operation_id
@@ -1416,13 +1624,16 @@ class NodeOperationService:
                 item[0],
             ),
         )
+        removed_records: list[NodeOperationRecord] = []
         for _position, record in completed[
             : max(0, len(completed) - self._completed_history_limit)
         ]:
             self._records.pop(record.operation_id, None)
             self._results.pop(record.operation_id, None)
+            removed_records.append(record)
+        return tuple(removed_records)
 
-    def _prune_database_completed_locked(self) -> None:
+    def _prune_database_completed_locked(self) -> tuple[NodeOperationRecord, ...]:
         database = self._require_database_locked()
         database.execute(
             """
@@ -1445,13 +1656,18 @@ class NodeOperationService:
         ).fetchall()
         excess = len(rows) - self._completed_history_limit
         if excess <= 0:
-            return
+            return ()
         operation_ids = tuple(cast(str, row["operation_id"]) for row in rows[:excess])
+        removed_records = tuple(
+            self._record_locked(operation_id, include_log_lines=True)
+            for operation_id in operation_ids
+        )
         delete_placeholders = ", ".join("?" for _ in operation_ids)
         database.execute(
             f"DELETE FROM node_operations WHERE operation_id IN ({delete_placeholders})",
             operation_ids,
         )
+        return removed_records
 
     @contextmanager
     def _database_transaction_locked(self) -> Generator[None, None, None]:
@@ -1623,6 +1839,8 @@ def _unix_ms_now() -> int:
 
 
 __all__: tuple[str, ...] = (
+    "NodeOperationChange",
+    "NodeOperationChangeKind",
     "NodeOperationKind",
     "NodeOperationProgress",
     "NodeOperationRecord",

@@ -3,23 +3,28 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 import unittest
 from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from httpx import ASGITransport, AsyncClient, Response
 
 from _security import Power_Level
 from node_api.operation_service import (
     NodeOperationApiService,
     NodeOperationKindPolicy,
+    NodeOperationStreamEvent,
+    NodeOperationStreamEventKind,
     NodeOperationTargetScope,
     NodeOperationView,
 )
 from node_api.operations import (
+    NodeOperationChange,
+    NodeOperationChangeKind,
     NodeOperationKind,
     NodeOperationProgress,
     NodeOperationRecord,
@@ -49,6 +54,18 @@ class _RouteAuth:
         scopes: tuple[NodeApiScope, ...],
     ) -> NodeRequestContext:
         del request, access_token
+        self.access_requests.append((app_name, scopes))
+        return NodeRequestContext(grant=None, actor_user_id=42)
+
+    def require_websocket_token_access(
+        self,
+        *,
+        websocket: WebSocket,
+        access_token: str | None,
+        app_name: str | None,
+        scopes: tuple[NodeApiScope, ...],
+    ) -> NodeRequestContext:
+        del websocket, access_token
         self.access_requests.append((app_name, scopes))
         return NodeRequestContext(grant=None, actor_user_id=42)
 
@@ -302,6 +319,199 @@ class NodeOperationsCheck(unittest.TestCase):
         self.assertEqual(tuple(view.record.operation_id for view in listed), (install.operation_id,))
         with self.assertRaises(LookupError):
             operation_api.get_operation(operation_id=metadata.operation_id)
+
+    def test_operation_stream_projects_complete_lifecycle_records_and_fresh_snapshots(self) -> None:
+        clock = [100]
+        operations = NodeOperationService(
+            completed_history_limit=1,
+            now_unix_ms=lambda: clock[0],
+        )
+        first = operations.create(
+            kind=NodeOperationKind.APP_INSTALL,
+            node_name="node-a",
+            subject="Demo",
+            requested_by_user_id=42,
+            progress=NodeOperationProgress(summary="Queued."),
+        )
+        operation_api = NodeOperationApiService(
+            operations=operations,
+            policies=(
+                NodeOperationKindPolicy(
+                    kind=NodeOperationKind.APP_INSTALL,
+                    kind_label="App install",
+                    read_scope=NodeApiScope.APP_MANAGE,
+                    cancel_scope=NodeApiScope.APP_MANAGE,
+                    required_level=Power_Level.sudo,
+                ),
+            ),
+        )
+        updates: list[NodeOperationStreamEvent] = []
+        snapshot, unsubscribe = operation_api.subscribe_stream_with_snapshot(
+            node_name="node-a",
+            callback=updates.append,
+        )
+
+        self.assertEqual(snapshot.kind, NodeOperationStreamEventKind.SNAPSHOT)
+        self.assertEqual(
+            tuple(view.record.operation_id for view in snapshot.operations),
+            (first.operation_id,),
+        )
+        self.assertEqual(operation_api.stream_read_scopes(), (NodeApiScope.APP_MANAGE,))
+
+        clock[0] = 200
+        operations.begin(
+            operation_id=first.operation_id,
+            progress=NodeOperationProgress(summary="Installing."),
+        )
+        operations.update_active(
+            operation_id=first.operation_id,
+            progress=NodeOperationProgress(
+                summary="Downloading.",
+                phase="download",
+                detail="Fetching release archive.",
+                progress_percent=50,
+            ),
+            log_line="stdout: Downloading.",
+        )
+        clock[0] = 300
+        operations.finish(
+            operation_id=first.operation_id,
+            state=NodeOperationState.SUCCEEDED,
+            summary="Installed.",
+            progress_percent=100,
+        )
+
+        self.assertEqual(
+            tuple(update.kind for update in updates),
+            (
+                NodeOperationStreamEventKind.UPDATED,
+                NodeOperationStreamEventKind.UPDATED,
+                NodeOperationStreamEventKind.FINISHED,
+            ),
+        )
+        self.assertTrue(updates[0].immediate)
+        self.assertFalse(updates[1].immediate)
+        self.assertEqual(
+            updates[1].operation.record.log_lines if updates[1].operation is not None else (),
+            ("stdout: Downloading.",),
+        )
+        self.assertEqual(
+            updates[2].operation.record.state if updates[2].operation is not None else None,
+            NodeOperationState.SUCCEEDED,
+        )
+
+        clock[0] = 400
+        second = operations.create(
+            kind=NodeOperationKind.APP_INSTALL,
+            node_name="node-a",
+            subject="Demo two",
+            requested_by_user_id=42,
+            progress=NodeOperationProgress(summary="Queued."),
+        )
+        clock[0] = 500
+        operations.finish(
+            operation_id=second.operation_id,
+            state=NodeOperationState.FAILED,
+            summary="Install failed.",
+        )
+        unsubscribe()
+
+        self.assertEqual(
+            tuple(update.kind for update in updates[-3:]),
+            (
+                NodeOperationStreamEventKind.CREATED,
+                NodeOperationStreamEventKind.FINISHED,
+                NodeOperationStreamEventKind.REMOVED,
+            ),
+        )
+        removed = updates[-1].operation
+        self.assertIsNotNone(removed)
+        self.assertEqual(removed.record.operation_id if removed is not None else None, first.operation_id)
+        self.assertEqual(removed.record.state if removed is not None else None, NodeOperationState.SUCCEEDED)
+
+        reconnected_snapshot, reconnected_unsubscribe = operation_api.subscribe_stream_with_snapshot(
+            node_name="node-a",
+            callback=lambda _: None,
+        )
+        reconnected_unsubscribe()
+        self.assertEqual(reconnected_snapshot.kind, NodeOperationStreamEventKind.SNAPSHOT)
+        self.assertEqual(
+            tuple(view.record.operation_id for view in reconnected_snapshot.operations),
+            (second.operation_id,),
+        )
+
+    def test_operation_change_notifications_preserve_reentrant_lifecycle_order(
+        self,
+    ) -> None:
+        operations = NodeOperationService()
+        changes: list[NodeOperationChange] = []
+
+        def begin_created_operation(change: NodeOperationChange) -> None:
+            if change.kind is not NodeOperationChangeKind.CREATED:
+                return
+            operations.begin(
+                operation_id=change.record.operation_id,
+                progress=NodeOperationProgress(summary="Installing."),
+            )
+
+        operations.subscribe_changes(begin_created_operation)
+        operations.subscribe_changes(changes.append)
+        operation = operations.create(
+            kind=NodeOperationKind.APP_INSTALL,
+            node_name="node-a",
+            subject="demo",
+            requested_by_user_id=42,
+            progress=NodeOperationProgress(summary="Queued."),
+        )
+
+        self.assertEqual(
+            tuple(change.kind for change in changes),
+            (NodeOperationChangeKind.CREATED, NodeOperationChangeKind.UPDATED),
+        )
+        self.assertEqual(
+            tuple(change.record.state for change in changes),
+            (NodeOperationState.QUEUED, NodeOperationState.RUNNING),
+        )
+        self.assertEqual(changes[-1].record.operation_id, operation.operation_id)
+
+    def test_snapshot_subscription_excludes_changes_that_precede_it(self) -> None:
+        operations = NodeOperationService()
+        original_dispatch = operations._dispatch_changes
+        dispatch_started = threading.Event()
+        allow_dispatch = threading.Event()
+        created: list[NodeOperationRecord] = []
+        subscriber_changes: list[NodeOperationChange] = []
+
+        def delayed_dispatch() -> None:
+            dispatch_started.set()
+            if not allow_dispatch.wait(timeout=1):
+                raise TimeoutError("Timed out waiting to release operation dispatch.")
+            original_dispatch()
+
+        with patch.object(operations, "_dispatch_changes", delayed_dispatch):
+            creator = threading.Thread(
+                target=lambda: created.append(
+                    operations.create(
+                        kind=NodeOperationKind.APP_INSTALL,
+                        node_name="node-a",
+                        subject="demo",
+                        requested_by_user_id=42,
+                        progress=NodeOperationProgress(summary="Queued."),
+                    )
+                )
+            )
+            creator.start()
+            self.assertTrue(dispatch_started.wait(timeout=1))
+            snapshot, unsubscribe = operations.subscribe_changes_with_snapshot(
+                subscriber_changes.append
+            )
+            allow_dispatch.set()
+            creator.join(timeout=1)
+            self.assertFalse(creator.is_alive())
+        unsubscribe()
+
+        self.assertEqual(tuple(record.operation_id for record in snapshot), (created[0].operation_id,))
+        self.assertEqual(subscriber_changes, [])
 
     def test_operation_routes_expose_registered_records_and_safe_cancellation(self) -> None:
         operations = NodeOperationService()

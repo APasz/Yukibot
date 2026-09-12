@@ -18,6 +18,12 @@ from node_api.app_state import (
     NodeStateTopic,
 )
 from node_api.console import NodeConsoleStdoutSnapshot
+from node_api.operation_service import (
+    NodeOperationStreamEvent,
+    NodeOperationStreamEventKind,
+    NodeOperationView,
+)
+from node_api.operations import NodeOperationKind, NodeOperationRecord, NodeOperationState
 from node_api.realtime_service import NodeRealtimeService
 from node_api.system import NodeSystemSummary
 
@@ -58,6 +64,27 @@ class _SubscriptionSource:
 
         return _unsubscribe
 
+
+class _OperationStreamSource:
+    def __init__(self, snapshots: Sequence[NodeOperationStreamEvent]) -> None:
+        self._snapshots = iter(snapshots)
+        self.callbacks: list[Callable[[NodeOperationStreamEvent], None]] = []
+        self.unsubscribe_count = 0
+
+    def subscribe_stream_with_snapshot(
+        self,
+        *,
+        node_name: str,
+        callback: Callable[[NodeOperationStreamEvent], None],
+    ) -> tuple[NodeOperationStreamEvent, Callable[[], None]]:
+        snapshot = next(self._snapshots)
+        assert snapshot.node_name == node_name
+        self.callbacks.append(callback)
+
+        def _unsubscribe() -> None:
+            self.unsubscribe_count += 1
+
+        return snapshot, _unsubscribe
 
 class _BlockingWebSocket:
     def __init__(self) -> None:
@@ -163,6 +190,24 @@ def _stdout_snapshot(lines: tuple[str, ...]) -> NodeConsoleStdoutSnapshot:
     )
 
 
+def _operation_view(*, state: NodeOperationState, summary: str) -> NodeOperationView:
+    return NodeOperationView(
+        record=NodeOperationRecord(
+            operation_id="operation-1",
+            kind=NodeOperationKind.APP_INSTALL,
+            node_name="erin",
+            subject="Demo",
+            state=state,
+            summary=summary,
+            requested_by_user_id=42,
+            created_at_unix_ms=1,
+            finished_at_unix_ms=2 if state.terminal else None,
+        ),
+        kind_label="App install",
+        cancellable=state in {NodeOperationState.QUEUED, NodeOperationState.RUNNING},
+    )
+
+
 def _realtime_service(
     subscriptions: _SubscriptionSource,
     *,
@@ -170,6 +215,8 @@ def _realtime_service(
     presence_connection_limit: int = 64,
     presence_message_limit_per_minute: int = 24,
     console_stdout_stream_interval_seconds: float = 0.5,
+    operation_stream: _OperationStreamSource | None = None,
+    operation_stream_interval_seconds: float = 0.01,
 ) -> NodeRealtimeService:
     async def _list_apps() -> tuple[NodeAppEntry, ...]:
         return ()
@@ -191,6 +238,8 @@ def _realtime_service(
         presence_connection_limit=presence_connection_limit,
         presence_message_limit_per_minute=presence_message_limit_per_minute,
         console_stdout_stream_interval_seconds=console_stdout_stream_interval_seconds,
+        operation_stream=operation_stream,
+        operation_stream_interval_seconds=operation_stream_interval_seconds,
     )
 
 
@@ -376,6 +425,238 @@ class NodeRealtimeServiceTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(websocket.close_calls, [(None, None)])
+
+        asyncio.run(exercise())
+
+    def test_operation_stream_sends_authoritative_snapshot_and_immediate_lifecycle(self) -> None:
+        async def exercise() -> None:
+            queued = _operation_view(state=NodeOperationState.QUEUED, summary="Queued.")
+            source = _OperationStreamSource(
+                (
+                    NodeOperationStreamEvent(
+                        kind=NodeOperationStreamEventKind.SNAPSHOT,
+                        node_name="erin",
+                        operations=(queued,),
+                    ),
+                )
+            )
+            realtime = _realtime_service(
+                _SubscriptionSource(),
+                operation_stream=source,
+                operation_stream_interval_seconds=0.05,
+            )
+            websocket = _BlockingWebSocket()
+            task = asyncio.create_task(realtime.serve_operation_stream(_as_websocket(websocket)))
+            await asyncio.wait_for(websocket.initial_sent.wait(), timeout=0.2)
+            self.assertEqual(
+                websocket.sent_payloads,
+                [
+                    {
+                        "kind": "snapshot",
+                        "node_name": "erin",
+                        "operations": [queued.to_mapping()],
+                    }
+                ],
+            )
+
+            source.callbacks[0](
+                NodeOperationStreamEvent(
+                    kind=NodeOperationStreamEventKind.UPDATED,
+                    node_name="erin",
+                    operation=_operation_view(state=NodeOperationState.RUNNING, summary="Downloading."),
+                    immediate=False,
+                )
+            )
+            finished = _operation_view(state=NodeOperationState.FAILED, summary="Download failed.")
+            source.callbacks[0](
+                NodeOperationStreamEvent(
+                    kind=NodeOperationStreamEventKind.FINISHED,
+                    node_name="erin",
+                    operation=finished,
+                )
+            )
+            for _ in range(20):
+                if len(websocket.sent_payloads) == 2:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(
+                websocket.sent_payloads[1],
+                {
+                    "kind": "finished",
+                    "node_name": "erin",
+                    "operation": finished.to_mapping(),
+                },
+            )
+
+            websocket.disconnect_requested.set()
+            await task
+            self.assertEqual(source.unsubscribe_count, 1)
+
+        asyncio.run(exercise())
+
+    def test_operation_stream_reconnect_receives_a_fresh_snapshot(self) -> None:
+        async def exercise() -> None:
+            first = _operation_view(state=NodeOperationState.QUEUED, summary="Queued.")
+            second = _operation_view(state=NodeOperationState.RUNNING, summary="Installing.")
+            source = _OperationStreamSource(
+                (
+                    NodeOperationStreamEvent(
+                        kind=NodeOperationStreamEventKind.SNAPSHOT,
+                        node_name="erin",
+                        operations=(first,),
+                    ),
+                    NodeOperationStreamEvent(
+                        kind=NodeOperationStreamEventKind.SNAPSHOT,
+                        node_name="erin",
+                        operations=(second,),
+                    ),
+                )
+            )
+            realtime = _realtime_service(_SubscriptionSource(), operation_stream=source)
+
+            for expected in (first, second):
+                websocket = _BlockingWebSocket()
+                task = asyncio.create_task(realtime.serve_operation_stream(_as_websocket(websocket)))
+                await asyncio.wait_for(websocket.initial_sent.wait(), timeout=0.2)
+                self.assertEqual(
+                    websocket.sent_payloads[0],
+                    {
+                        "kind": "snapshot",
+                        "node_name": "erin",
+                        "operations": [expected.to_mapping()],
+                    },
+                )
+                websocket.disconnect_requested.set()
+                await task
+            self.assertEqual(source.unsubscribe_count, 2)
+
+        asyncio.run(exercise())
+
+    def test_operation_stream_coalesces_noisy_complete_updates(self) -> None:
+        async def exercise() -> None:
+            queued = _operation_view(state=NodeOperationState.QUEUED, summary="Queued.")
+            source = _OperationStreamSource(
+                (
+                    NodeOperationStreamEvent(
+                        kind=NodeOperationStreamEventKind.SNAPSHOT,
+                        node_name="erin",
+                        operations=(queued,),
+                    ),
+                )
+            )
+            realtime = _realtime_service(
+                _SubscriptionSource(),
+                operation_stream=source,
+                operation_stream_interval_seconds=0.02,
+            )
+            websocket = _BlockingWebSocket()
+            task = asyncio.create_task(realtime.serve_operation_stream(_as_websocket(websocket)))
+            await asyncio.wait_for(websocket.initial_sent.wait(), timeout=0.2)
+
+            source.callbacks[0](
+                NodeOperationStreamEvent(
+                    kind=NodeOperationStreamEventKind.UPDATED,
+                    node_name="erin",
+                    operation=_operation_view(
+                        state=NodeOperationState.RUNNING,
+                        summary="Downloading.",
+                    ),
+                    immediate=False,
+                )
+            )
+            latest = _operation_view(
+                state=NodeOperationState.RUNNING,
+                summary="Extracting.",
+            )
+            source.callbacks[0](
+                NodeOperationStreamEvent(
+                    kind=NodeOperationStreamEventKind.UPDATED,
+                    node_name="erin",
+                    operation=latest,
+                    immediate=False,
+                )
+            )
+            for _ in range(20):
+                if len(websocket.sent_payloads) == 2:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(
+                websocket.sent_payloads,
+                [
+                    {
+                        "kind": "snapshot",
+                        "node_name": "erin",
+                        "operations": [queued.to_mapping()],
+                    },
+                    {
+                        "kind": "updated",
+                        "node_name": "erin",
+                        "operation": latest.to_mapping(),
+                    },
+                ],
+            )
+
+            websocket.disconnect_requested.set()
+            await task
+
+        asyncio.run(exercise())
+
+    def test_operation_stream_flushes_sustained_noisy_updates(self) -> None:
+        async def exercise() -> None:
+            queued = _operation_view(state=NodeOperationState.QUEUED, summary="Queued.")
+            source = _OperationStreamSource(
+                (
+                    NodeOperationStreamEvent(
+                        kind=NodeOperationStreamEventKind.SNAPSHOT,
+                        node_name="erin",
+                        operations=(queued,),
+                    ),
+                )
+            )
+            realtime = _realtime_service(
+                _SubscriptionSource(),
+                operation_stream=source,
+                operation_stream_interval_seconds=0.04,
+            )
+            websocket = _BlockingWebSocket()
+            stream_task = asyncio.create_task(
+                realtime.serve_operation_stream(_as_websocket(websocket))
+            )
+            await asyncio.wait_for(websocket.initial_sent.wait(), timeout=0.2)
+            stop_updates = asyncio.Event()
+
+            async def publish_noisy_updates() -> None:
+                update_index = 0
+                while not stop_updates.is_set():
+                    source.callbacks[0](
+                        NodeOperationStreamEvent(
+                            kind=NodeOperationStreamEventKind.UPDATED,
+                            node_name="erin",
+                            operation=_operation_view(
+                                state=NodeOperationState.RUNNING,
+                                summary=f"Progress {update_index}.",
+                            ),
+                            immediate=False,
+                        )
+                    )
+                    update_index += 1
+                    await asyncio.sleep(0.005)
+
+            producer = asyncio.create_task(publish_noisy_updates())
+            try:
+                for _ in range(75):
+                    if len(websocket.sent_payloads) >= 2:
+                        break
+                    await asyncio.sleep(0.002)
+                self.assertGreaterEqual(len(websocket.sent_payloads), 2)
+                second_payload = cast(dict[str, object], websocket.sent_payloads[1])
+                self.assertEqual(second_payload["kind"], "updated")
+                self.assertFalse(producer.done())
+            finally:
+                stop_updates.set()
+                await producer
+                websocket.disconnect_requested.set()
+                await stream_task
 
         asyncio.run(exercise())
 

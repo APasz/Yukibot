@@ -3289,11 +3289,11 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(_ModWebNodeSystemTab.OVERVIEW.required_level, Power_Level.visitor)
         self.assertEqual(
             tuple(tab.label for tab in _ModWebNodeSystemTab),
-            ("Overview", "System", "Properties", "Discord", "Logs"),
+            ("Overview", "System", "Operations", "Properties", "Discord", "Logs"),
         )
         self.assertEqual(
             tuple(tab.icon for tab in _ModWebNodeSystemTab),
-            ("dashboard", "autorenew", "tune", "settings", "article"),
+            ("dashboard", "autorenew", "pending_actions", "tune", "settings", "article"),
         )
         self.assertTrue(
             all(
@@ -3556,7 +3556,12 @@ class ModWebTests(unittest.TestCase):
             request = cast(
                 Any,
                 SimpleNamespace(
-                    query_params=SimpleNamespace(getlist=Mock(return_value=[])),
+                    query_params=_FakeQueryParams(
+                        {
+                            "tab": (" operations ",),
+                            "operation_id": (" operation 1 ",),
+                        }
+                    ),
                     url=SimpleNamespace(path="/mod-web/nodes/erin/system", query=""),
                 ),
             )
@@ -3652,6 +3657,11 @@ class ModWebTests(unittest.TestCase):
                 ModWebNodeStatus(node=node, alive=True, detail="HTTP 204"),
             )
             self.assertEqual(render_dashboard.call_args.kwargs["initial_app_entries"], ())
+            self.assertEqual(render_dashboard.call_args.kwargs["initial_tab_id"], "operations")
+            self.assertEqual(
+                render_dashboard.call_args.kwargs["initial_operation_id"],
+                "operation 1",
+            )
             self.assertEqual(system_tab.restart_schedules, restart_schedules)
             self.assertEqual(system_tab.restart_state, restart_state)
             self.assertEqual(system_tab.system_capabilities, system_capabilities)
@@ -3851,7 +3861,17 @@ class ModWebTests(unittest.TestCase):
                     SimpleNamespace(timer=timer_factory, navigate=SimpleNamespace(to=navigate_to)),
                 ),
             )
-            request = cast(Any, SimpleNamespace())
+            request = cast(
+                Any,
+                SimpleNamespace(
+                    query_params=_FakeQueryParams(
+                        {
+                            "tab": ("operations",),
+                            "operation_id": ("operation 1",),
+                        }
+                    )
+                ),
+            )
             render_unavailable = Mock()
             register_timer_cleanup = Mock()
             with (
@@ -3903,10 +3923,12 @@ class ModWebTests(unittest.TestCase):
                 ui=ui,
                 node_name="erin",
                 exception=connection_error,
-                retry_url="/mod-web/nodes/erin/system",
+                retry_url="/mod-web/nodes/erin/system?tab=operations&operation_id=operation+1",
             )
             self.assertEqual(probe.await_args_list, [call(node), call(node, log_failures=False)])
-            navigate_to.assert_called_once_with("/mod-web/nodes/erin/system")
+            navigate_to.assert_called_once_with(
+                "/mod-web/nodes/erin/system?tab=operations&operation_id=operation+1"
+            )
             register_timer_cleanup.assert_called_once_with(ui=ui, timer=timer)
 
         asyncio.run(exercise())

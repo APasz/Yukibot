@@ -19,6 +19,7 @@ from .runtime_imports import (
     NodeAppStateStreamEvent,
     NodeConsoleStdoutSnapshot,
     NodeConsoleStdoutStreamEvent,
+    NodeOperationStreamEvent,
     NodeStateStreamEvent,
     NodeStateTopic,
     NodeSystemSummary,
@@ -31,8 +32,14 @@ from .runtime_imports import (
     urlunsplit,
 )
 from .service_base import ModWebServiceSupport
-from .stream_broker import ConsoleStreamKey, RemoteAppStreamKey, RemoteNodeStreamKey
+from .stream_broker import (
+    ConsoleStreamKey,
+    RemoteAppStreamKey,
+    RemoteNodeStreamKey,
+    RemoteOperationStreamKey,
+)
 from .remote_node_monitor import RemoteNodeMonitor, RemoteNodeMonitorSnapshot
+from .operation_stream import ModWebNodeOperationSnapshot
 from .types import ModWebNodeLink
 
 _LOCAL_CONSOLE_STDOUT_SUBSCRIPTION_INTERVAL_SECONDS = 0.5
@@ -105,6 +112,27 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                 user=user,
                 on_update=publish,
             ),
+        )
+
+    def _create_remote_operation_subscription(
+        self,
+        *,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        on_update: Callable[[ModWebNodeOperationSnapshot], None],
+    ) -> Callable[[], None]:
+        """Share one complete-record operation stream across active dashboard surfaces."""
+
+        key = RemoteOperationStreamKey(node=node)
+        return self._remote_operation_stream_broker.subscribe(
+            key=key,
+            callback=on_update,
+            listener_factory=lambda publish: self._remote_operation_stream_listener(
+                node=node,
+                user=user,
+                on_update=publish,
+            ),
+            replay_latest=True,
         )
 
     def _subscribe_remote_node_monitor(
@@ -242,6 +270,71 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     "Remote app state stream failed: node=%s app=%s error=%s",
                     node.node_name,
                     app_name,
+                    xcp,
+                )
+            await asyncio.sleep(_REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS)
+
+    async def _remote_operation_stream_listener(
+        self,
+        *,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        on_update: Callable[[ModWebNodeOperationSnapshot], None],
+    ) -> None:
+        """Reconnect to a node's authoritative operation stream without retaining it locally."""
+
+        while True:
+            try:
+                token = self._remote_token(
+                    node=node,
+                    app_name=None,
+                    scopes=(NodeApiScope.APP_MANAGE, NodeApiScope.MODS_WRITE),
+                    user=user,
+                )
+                session = await self._remote_http_client()
+                async with session.ws_connect(
+                    self._remote_operation_stream_url(node=node),
+                    headers={"Authorization": f"Bearer {token}"},
+                    heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
+                ) as websocket:
+                    current_snapshot: ModWebNodeOperationSnapshot | None = None
+                    async for message in websocket:
+                        if message.type == aiohttp.WSMsgType.TEXT:
+                            payload_text: object = cast(object, message.data)
+                            payload = _json_object_from_text(
+                                payload_text,
+                                context="Remote operation stream message",
+                            )
+                            event = NodeOperationStreamEvent.from_mapping(payload)
+                            if event.node_name.casefold() != node.node_name.casefold():
+                                raise RuntimeError(
+                                    "Remote operation stream node mismatch: "
+                                    f"expected={node.node_name!r} got={event.node_name!r}"
+                                )
+                            current_snapshot = ModWebNodeOperationSnapshot.apply_event(
+                                current_snapshot,
+                                event,
+                            )
+                            on_update(current_snapshot)
+                            continue
+                        if message.type in {
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.CLOSING,
+                        }:
+                            break
+                        if message.type == aiohttp.WSMsgType.ERROR:
+                            raise RuntimeError(
+                                f"Remote operation websocket error: {websocket.exception()}"
+                            )
+                    raise ConnectionError("Remote operation stream closed.")
+            except asyncio.CancelledError:
+                raise
+            except Exception as xcp:
+                log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
+                log_method(
+                    "Remote operation stream disconnected; retrying: node=%s error=%s",
+                    node.node_name,
                     xcp,
                 )
             await asyncio.sleep(_REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS)
@@ -628,6 +721,10 @@ class ModWebStreamsMixin(ModWebServiceSupport):
     @staticmethod
     def _remote_node_state_stream_url(*, node: ModWebNodeLink) -> str:
         return ModWebStreamsMixin._remote_websocket_url(node=node, path="/state/stream")
+
+    @staticmethod
+    def _remote_operation_stream_url(*, node: ModWebNodeLink) -> str:
+        return ModWebStreamsMixin._remote_websocket_url(node=node, path="/operations/stream")
 
     @staticmethod
     def _remote_app_state_stream_url(*, node: ModWebNodeLink, app_name: str) -> str:

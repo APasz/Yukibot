@@ -27,6 +27,7 @@ from .console import (
     NodeConsoleStdoutStreamEvent,
     NodeConsoleStdoutStreamEventKind,
 )
+from .operation_service import NodeOperationStreamEvent
 from .route_contracts import DiscordHealthSnapshot, DiscordServiceState
 from .system import NodeSystemSummary
 
@@ -34,6 +35,7 @@ from .system import NodeSystemSummary
 _MAX_PRESENCE_STREAM_CONNECTIONS = 64
 _MAX_PRESENCE_STREAM_MESSAGES_PER_MINUTE = 24
 _CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
+_OPERATION_STREAM_INTERVAL_SECONDS = 0.25
 _TaskResult = TypeVar("_TaskResult")
 
 
@@ -65,6 +67,17 @@ class NodeStateSubscriptionSource(Protocol):
     ) -> Callable[[], None]: ...
 
 
+class NodeOperationStreamSource(Protocol):
+    """The operation projection surface needed by websocket transport."""
+
+    def subscribe_stream_with_snapshot(
+        self,
+        *,
+        node_name: str,
+        callback: Callable[[NodeOperationStreamEvent], None],
+    ) -> tuple[NodeOperationStreamEvent, Callable[[], None]]: ...
+
+
 class NodeRealtimeService:
     """Coordinates websocket transport around existing node state providers."""
 
@@ -80,9 +93,11 @@ class NodeRealtimeService:
         build_system_summary: Callable[[], NodeSystemSummary],
         discord_health: Callable[[], DiscordHealthSnapshot | None],
         build_console_stdout_snapshot: Callable[[App, int], NodeConsoleStdoutSnapshot],
+        operation_stream: NodeOperationStreamSource | None = None,
         presence_connection_limit: int = _MAX_PRESENCE_STREAM_CONNECTIONS,
         presence_message_limit_per_minute: int = _MAX_PRESENCE_STREAM_MESSAGES_PER_MINUTE,
         console_stdout_stream_interval_seconds: float = _CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS,
+        operation_stream_interval_seconds: float = _OPERATION_STREAM_INTERVAL_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if presence_connection_limit < 1:
@@ -91,6 +106,8 @@ class NodeRealtimeService:
             raise ValueError("Presence stream message limit must be positive.")
         if console_stdout_stream_interval_seconds <= 0:
             raise ValueError("Console stdout stream interval must be positive.")
+        if operation_stream_interval_seconds <= 0:
+            raise ValueError("Operation stream interval must be positive.")
         self._node_name = node_name
         self._discord_service_state = discord_service_state
         self._discord_heartbeat_latency_ms = discord_heartbeat_latency_ms
@@ -100,12 +117,19 @@ class NodeRealtimeService:
         self._build_system_summary = build_system_summary
         self._discord_health = discord_health
         self._build_console_stdout_snapshot = build_console_stdout_snapshot
+        self._operation_stream = operation_stream
         self._presence_connection_limit = presence_connection_limit
         self._presence_message_limit_per_minute = presence_message_limit_per_minute
         self._console_stdout_stream_interval_seconds = console_stdout_stream_interval_seconds
+        self._operation_stream_interval_seconds = operation_stream_interval_seconds
         self._monotonic = monotonic
         self._presence_stream_connection_count = 0
         self._presence_stream_connection_lock = threading.Lock()
+
+    def set_operation_stream(self, operation_stream: NodeOperationStreamSource) -> None:
+        """Attach the operation projection once its policy service has been composed."""
+
+        self._operation_stream = operation_stream
 
     async def serve_presence_stream(self, websocket: WebSocket) -> None:
         """Respond to lightweight presence probes without exposing diagnostics."""
@@ -269,6 +293,42 @@ class NodeRealtimeService:
             await self._cancel_task(disconnect_task)
             unsubscribe_runtime()
             unsubscribe_node()
+            await self._close_websocket_quietly(websocket)
+
+    async def serve_operation_stream(self, websocket: WebSocket) -> None:
+        """Stream complete durable operation views with an authoritative reconnect snapshot."""
+
+        operation_stream = self._operation_stream
+        if operation_stream is None:
+            raise RuntimeError("Operation stream is not configured.")
+        await websocket.accept()
+        update_queue: asyncio.Queue[NodeOperationStreamEvent] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        unsubscribe: Callable[[], None] | None = None
+        disconnect_task: asyncio.Task[None] | None = None
+
+        def _enqueue_update(event: NodeOperationStreamEvent) -> None:
+            self._enqueue_stream_event(loop, update_queue, event)
+
+        try:
+            initial_event, unsubscribe = operation_stream.subscribe_stream_with_snapshot(
+                node_name=self._node_name(),
+                callback=_enqueue_update,
+            )
+            disconnect_task = asyncio.create_task(self._wait_for_disconnect(websocket))
+            await self._serve_operation_stream_updates(
+                websocket=websocket,
+                update_queue=update_queue,
+                disconnect_task=disconnect_task,
+                initial_event=initial_event,
+            )
+        except WebSocketDisconnect:
+            return
+        finally:
+            if disconnect_task is not None:
+                await self._cancel_task(disconnect_task)
+            if unsubscribe is not None:
+                unsubscribe()
             await self._close_websocket_quietly(websocket)
 
     async def serve_console_stdout_stream(
@@ -465,6 +525,113 @@ class NodeRealtimeService:
             while not update_queue.empty():
                 merged_event = merge_events(merged_event, update_queue.get_nowait())
             await websocket.send_json(merged_event.to_mapping())
+
+    async def _serve_operation_stream_updates(
+        self,
+        *,
+        websocket: WebSocket,
+        update_queue: asyncio.Queue[NodeOperationStreamEvent],
+        disconnect_task: asyncio.Task[None],
+        initial_event: NodeOperationStreamEvent,
+    ) -> None:
+        """Send lifecycle events immediately and collapse noisy full-record updates."""
+
+        await websocket.send_json(initial_event.to_mapping())
+        pending_updates: dict[str, NodeOperationStreamEvent] = {}
+        loop = asyncio.get_running_loop()
+        while True:
+            event = await self._next_queued_event(update_queue, disconnect_task)
+            if event is None:
+                return
+            if event.immediate:
+                self._discard_pending_operation_update(pending_updates, event)
+                await websocket.send_json(event.to_mapping())
+                continue
+            self._replace_pending_operation_update(pending_updates, event)
+            flush_deadline = loop.time() + self._operation_stream_interval_seconds
+
+            while pending_updates:
+                next_event, timed_out = await self._next_operation_event_or_timeout(
+                    update_queue=update_queue,
+                    disconnect_task=disconnect_task,
+                    timeout_seconds=max(0.0, flush_deadline - loop.time()),
+                )
+                if timed_out:
+                    queued_events: list[NodeOperationStreamEvent] = []
+                    if next_event is not None:
+                        queued_events.append(next_event)
+                    while not update_queue.empty():
+                        queued_events.append(update_queue.get_nowait())
+                    for queued_event in queued_events:
+                        if queued_event.immediate:
+                            self._discard_pending_operation_update(
+                                pending_updates,
+                                queued_event,
+                            )
+                            await websocket.send_json(queued_event.to_mapping())
+                            continue
+                        self._replace_pending_operation_update(
+                            pending_updates,
+                            queued_event,
+                        )
+                    updates = tuple(pending_updates.values())
+                    pending_updates.clear()
+                    for pending_event in updates:
+                        await websocket.send_json(pending_event.to_mapping())
+                    break
+                if next_event is None:
+                    return
+                if next_event.immediate:
+                    self._discard_pending_operation_update(pending_updates, next_event)
+                    await websocket.send_json(next_event.to_mapping())
+                    continue
+                self._replace_pending_operation_update(pending_updates, next_event)
+
+    @staticmethod
+    def _replace_pending_operation_update(
+        pending_updates: dict[str, NodeOperationStreamEvent],
+        event: NodeOperationStreamEvent,
+    ) -> None:
+        operation = event.operation
+        if operation is None:
+            raise ValueError("Operation stream snapshots cannot be queued as updates.")
+        pending_updates[operation.record.operation_id] = event
+
+    @staticmethod
+    def _discard_pending_operation_update(
+        pending_updates: dict[str, NodeOperationStreamEvent],
+        event: NodeOperationStreamEvent,
+    ) -> None:
+        operation = event.operation
+        if operation is None:
+            raise ValueError("Operation stream snapshots cannot be queued as updates.")
+        pending_updates.pop(operation.record.operation_id, None)
+
+    @staticmethod
+    async def _next_operation_event_or_timeout(
+        *,
+        update_queue: asyncio.Queue[NodeOperationStreamEvent],
+        disconnect_task: asyncio.Task[None],
+        timeout_seconds: float,
+    ) -> tuple[NodeOperationStreamEvent | None, bool]:
+        queue_task = asyncio.create_task(update_queue.get())
+        timeout_task = asyncio.create_task(asyncio.sleep(timeout_seconds))
+        try:
+            done, _pending = await asyncio.wait(
+                {queue_task, timeout_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done:
+                return None, False
+            queued_event = queue_task.result() if queue_task in done else None
+            if timeout_task in done:
+                return queued_event, True
+            if queued_event is not None:
+                return queued_event, False
+            raise RuntimeError("Operation stream wait completed without an event.")
+        finally:
+            await NodeRealtimeService._cancel_task(queue_task)
+            await NodeRealtimeService._cancel_task(timeout_task)
 
     @staticmethod
     def _enqueue_stream_event(

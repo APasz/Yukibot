@@ -21,6 +21,7 @@ from .links import (
 )
 from .models import ModWebModelsMixin
 from .mirrors import ModWebMirrorsMixin
+from .operations_ui import ModWebOperationsMixin
 from .nicegui_protocols import (
     ModWebFastApiApp,
     ModWebRouteUi,
@@ -58,8 +59,10 @@ from .stream_broker import (
     RemoteAppStreamKey,
     RemoteChatStreamKey,
     RemoteNodeStreamKey,
+    RemoteOperationStreamKey,
     SharedAsyncStreamBroker,
 )
+from .operation_stream import ModWebNodeOperationSnapshot
 from .streams import ModWebStreamsMixin
 from .tabs import ModWebTabsMixin
 from .types import (
@@ -80,6 +83,7 @@ class ModWebService(
     ModWebTabsMixin,
     ModWebModelsMixin,
     ModWebAppInstallerMixin,
+    ModWebOperationsMixin,
     ModWebHomeMixin,
     ModWebStatusMixin,
     ModWebAppPageMixin,
@@ -114,6 +118,9 @@ class ModWebService(
         )
         self._remote_app_state_broker: SharedAsyncStreamBroker[
             RemoteAppStreamKey, NodeAppStateStreamEvent
+        ] = SharedAsyncStreamBroker()
+        self._remote_operation_stream_broker: SharedAsyncStreamBroker[
+            RemoteOperationStreamKey, ModWebNodeOperationSnapshot
         ] = SharedAsyncStreamBroker()
         self._remote_chat_broker: SharedAsyncStreamBroker[
             RemoteChatStreamKey, RemoteChatBrokerEvent

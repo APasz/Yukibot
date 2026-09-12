@@ -401,6 +401,7 @@ class NodeApiService:
                 ),
             ),
         )
+        self.realtime.set_operation_stream(self.operation_api)
         self._routes_registered = False
         self._shutting_down = False
 
@@ -621,6 +622,7 @@ class NodeApiService:
             nicegui_app,
             auth=self.request_auth,
             operation_api=self.operation_api,
+            realtime=self.realtime,
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,

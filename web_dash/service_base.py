@@ -89,8 +89,10 @@ from .stream_broker import (
     RemoteAppStreamKey,
     RemoteChatStreamKey,
     RemoteNodeStreamKey,
+    RemoteOperationStreamKey,
     SharedAsyncStreamBroker,
 )
+from .operation_stream import ModWebNodeOperationSnapshot
 from .remote_node_monitor import RemoteNodeMonitor, RemoteNodeMonitorSnapshot
 from .types import (
     ModWebAppLink,
@@ -155,6 +157,12 @@ class ModWebServiceSupport:
     _remote_app_state_broker: SharedAsyncStreamBroker[
         RemoteAppStreamKey, NodeAppStateStreamEvent
     ] = cast(SharedAsyncStreamBroker[RemoteAppStreamKey, NodeAppStateStreamEvent], cast(object, None))
+    _remote_operation_stream_broker: SharedAsyncStreamBroker[
+        RemoteOperationStreamKey, ModWebNodeOperationSnapshot
+    ] = cast(
+        SharedAsyncStreamBroker[RemoteOperationStreamKey, ModWebNodeOperationSnapshot],
+        cast(object, None),
+    )
     _remote_chat_broker: SharedAsyncStreamBroker[
         RemoteChatStreamKey, RemoteChatBrokerEvent
     ] = cast(SharedAsyncStreamBroker[RemoteChatStreamKey, RemoteChatBrokerEvent], cast(object, None))
@@ -369,6 +377,19 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_create_remote_node_state_subscription"]) -> Callable[..., Callable[[], None]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_create_remote_operation_subscription"]
+    ) -> Callable[..., Callable[[], None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_operations_ui"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_render_app_active_operation_summary"]
+    ) -> Callable[..., None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_download_base_url"]) -> Callable[..., str]: ...

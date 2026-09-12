@@ -1675,6 +1675,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertIn("/api/node/operations", handlers)
         self.assertIn("/api/node/operations/{operation_id}", handlers)
         self.assertIn("/api/node/operations/{operation_id}/cancel", handlers)
+        self.assertIn("/api/node/operations/stream", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
         self.assertIn("/api/node/apps/{app_name}/factorio/generation/running-world", handlers)
 
@@ -1695,11 +1696,13 @@ class NodeApiTests(unittest.TestCase):
         node_state = AsyncMock()
         app_state = AsyncMock()
         stdout = AsyncMock()
+        operations = AsyncMock()
         with (
             patch.object(service.realtime, "serve_presence_stream", new=presence),
             patch.object(service.realtime, "serve_node_state_stream", new=node_state),
             patch.object(service.realtime, "serve_app_state_stream", new=app_state),
             patch.object(service.realtime, "serve_console_stdout_stream", new=stdout),
+            patch.object(service.realtime, "serve_operation_stream", new=operations),
             patch.object(service.request_auth, "require_websocket_token_access") as require_access,
             patch.object(service, "_resolve_app", return_value=app_instance),
         ):
@@ -1722,6 +1725,10 @@ class NodeApiTests(unittest.TestCase):
                     access_token="token",
                     max_lines=200,
                 )
+                await endpoint_for("/api/node/operations/stream")(
+                    websocket=websocket,
+                    access_token="token",
+                )
 
             asyncio.run(exercise())
 
@@ -1733,7 +1740,14 @@ class NodeApiTests(unittest.TestCase):
             app=app_instance,
             max_lines=200,
         )
-        self.assertEqual(require_access.call_count, 3)
+        operations.assert_awaited_once_with(websocket)
+        self.assertEqual(require_access.call_count, 4)
+        require_access.assert_any_call(
+            websocket=websocket,
+            access_token="token",
+            app_name=None,
+            scopes=service.operation_api.stream_read_scopes(),
+        )
 
     def test_shutdown_closes_state_subscriptions_after_realtime_extraction(self) -> None:
         service = NodeApiService()

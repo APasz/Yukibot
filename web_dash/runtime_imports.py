@@ -238,7 +238,11 @@ from node_api.mod import (
     NodeModUploadResult,
     required_mod_mutation_level,
 )
-from node_api.operation_service import NodeOperationView
+from node_api.operation_service import (
+    NodeOperationStreamEvent,
+    NodeOperationStreamEventKind,
+    NodeOperationView,
+)
 from node_api.operations import NodeOperationKind, NodeOperationState
 from node_api.relay import RelayTTSQueue
 from node_api.settings import (
@@ -415,6 +419,8 @@ __all__: tuple[str, ...] = (
     "NodeModUploadResult",
     "NodeOperationKind",
     "NodeOperationState",
+    "NodeOperationStreamEvent",
+    "NodeOperationStreamEventKind",
     "NodeOperationView",
     "NodeModUploadSource",
     "NodeSaveBatchMutationResult",

@@ -124,6 +124,7 @@ class _ModWebMachineLogEntry:
 class _ModWebNodeSystemTab(Enum):
     OVERVIEW = "overview"
     SYSTEM = "system"
+    OPERATIONS = "operations"
     PROPERTIES = "properties"
     DISCORD = "discord"
     LOGS = "logs"
@@ -135,6 +136,8 @@ class _ModWebNodeSystemTab(Enum):
                 return "Overview"
             case _ModWebNodeSystemTab.SYSTEM:
                 return "System"
+            case _ModWebNodeSystemTab.OPERATIONS:
+                return "Operations"
             case _ModWebNodeSystemTab.PROPERTIES:
                 return "Properties"
             case _ModWebNodeSystemTab.DISCORD:
@@ -149,6 +152,8 @@ class _ModWebNodeSystemTab(Enum):
                 return "dashboard"
             case _ModWebNodeSystemTab.SYSTEM:
                 return "autorenew"
+            case _ModWebNodeSystemTab.OPERATIONS:
+                return "pending_actions"
             case _ModWebNodeSystemTab.PROPERTIES:
                 return "tune"
             case _ModWebNodeSystemTab.DISCORD:
@@ -1523,6 +1528,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
             [Callable[[NodeStateStreamEvent], None]],
             Callable[[], None],
         ],
+        initial_tab_id: str | None = None,
+        initial_operation_id: str | None = None,
     ) -> None:
         self._apply_theme_for_user(ui=ui, user=user)
         current_app_entries = initial_app_entries
@@ -1699,7 +1706,14 @@ class ModWebHomeMixin(ModWebServiceSupport):
             )
             if not system_tabs or system_tabs[0] is not _ModWebNodeSystemTab.OVERVIEW:
                 raise RuntimeError("Node system pages must always provide the Visitor Overview tab.")
-            selected_system_tab = _ModWebNodeSystemTab.OVERVIEW
+            selected_system_tab = next(
+                (
+                    tab
+                    for tab in system_tabs
+                    if tab.value == (initial_tab_id or "").strip().casefold()
+                ),
+                _ModWebNodeSystemTab.OVERVIEW,
+            )
             loaded_system_tabs: set[_ModWebNodeSystemTab] = {_ModWebNodeSystemTab.OVERVIEW}
             loading_system_tabs: set[_ModWebNodeSystemTab] = set()
             system_tab_buttons: dict[_ModWebNodeSystemTab, Element] = {}
@@ -1791,6 +1805,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 initial_restart_state=loaded.restart_state,
                                 initial_system_capabilities=loaded.system_capabilities,
                             )
+                        case _ModWebNodeSystemTab.OPERATIONS:
+                            self._render_operations_ui(
+                                ui=ui,
+                                user=user,
+                                node=node,
+                                initial_operation_id=initial_operation_id,
+                            )
                         case _ModWebNodeSystemTab.PROPERTIES:
                             self._render_node_system_properties(
                                 ui=ui,
@@ -1841,6 +1862,14 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 if tab in loaded_system_tabs or tab in loading_system_tabs:
                     return
                 target_panel = system_tab_panels[tab]
+                if tab is _ModWebNodeSystemTab.OPERATIONS:
+                    _render_privileged_tab(
+                        tab=tab,
+                        panel=target_panel,
+                        loaded=ModWebNodeSystemTabLoadResult(),
+                    )
+                    loaded_system_tabs.add(tab)
+                    return
                 loading_system_tabs.add(tab)
                 target_panel.clear()
                 with target_panel:
@@ -1904,6 +1933,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
                         )
                     _render_overview(system_tab_panels[_ModWebNodeSystemTab.OVERVIEW])
+                    if selected_system_tab is _ModWebNodeSystemTab.OPERATIONS:
+                        _render_privileged_tab(
+                            tab=selected_system_tab,
+                            panel=system_tab_panels[selected_system_tab],
+                            loaded=ModWebNodeSystemTabLoadResult(),
+                        )
+                        loaded_system_tabs.add(selected_system_tab)
                     for tab, panel in system_tab_panels.items():
                         panel.set_visibility(tab is selected_system_tab)
 

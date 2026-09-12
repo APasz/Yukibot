@@ -428,6 +428,12 @@ class ModWebAppPageMixin(
                         refresh_async_runtime_model=refresh_async_runtime_model,
                         poll_runtime_model=subscribe_app_state_updates is None,
                     )
+            self._render_app_active_operation_summary(
+                ui=ui,
+                user=user,
+                node_name=model.node_name,
+                app_name=model.app_name,
+            )
             self._render_page_load_warnings(
                 ui=ui,
                 load_warnings=getattr(model, "load_warnings", ()),
@@ -538,6 +544,12 @@ class ModWebAppPageMixin(
                         refresh_async_runtime_model=refresh_async_runtime_model,
                         poll_runtime_model=subscribe_app_state_updates is None,
                     )
+            self._render_app_active_operation_summary(
+                ui=ui,
+                user=user,
+                node_name=model.node_name,
+                app_name=model.app_name,
+            )
             self._render_page_load_warnings(
                 ui=ui,
                 load_warnings=getattr(model, "load_warnings", ()),

@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 from _security import Power_Level
 from node_auth import NodeApiScope
-from .operations import NodeOperationKind, NodeOperationRecord, NodeOperationService, NodeOperationState
+from .operations import (
+    NodeOperationChange,
+    NodeOperationChangeKind,
+    NodeOperationKind,
+    NodeOperationRecord,
+    NodeOperationService,
+    NodeOperationState,
+)
 
 
 NodeOperationCancellationHandler: TypeAlias = Callable[[str, int], Awaitable[None]]
@@ -26,6 +33,16 @@ class NodeOperationTargetScope(StrEnum):
 
     NODE = "node"
     APP = "app"
+
+
+class NodeOperationStreamEventKind(StrEnum):
+    """The complete-message variants sent by the operation websocket."""
+
+    SNAPSHOT = "snapshot"
+    CREATED = NodeOperationChangeKind.CREATED.value
+    UPDATED = NodeOperationChangeKind.UPDATED.value
+    FINISHED = NodeOperationChangeKind.FINISHED.value
+    REMOVED = NodeOperationChangeKind.REMOVED.value
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +115,79 @@ class NodeOperationView:
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class NodeOperationStreamEvent:
+    """A complete operation-stream message; updates deliberately have no patch form."""
+
+    kind: NodeOperationStreamEventKind
+    node_name: str
+    operations: tuple[NodeOperationView, ...] = ()
+    operation: NodeOperationView | None = None
+    immediate: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.node_name.strip():
+            raise ValueError("Operation stream node name must not be blank.")
+        if self.kind is NodeOperationStreamEventKind.SNAPSHOT:
+            if self.operation is not None:
+                raise ValueError("Operation stream snapshots cannot include a singular operation.")
+            return
+        if self.operation is None:
+            raise ValueError("Operation stream updates require a complete operation.")
+        if self.operations:
+            raise ValueError("Operation stream updates cannot include a snapshot collection.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeOperationStreamEvent":
+        raw_kind = payload.get("kind")
+        raw_node_name = payload.get("node_name")
+        if not isinstance(raw_kind, str):
+            raise ValueError("Operation stream event kind is invalid.")
+        if not isinstance(raw_node_name, str) or not raw_node_name.strip():
+            raise ValueError("Operation stream node name is invalid.")
+        try:
+            kind = NodeOperationStreamEventKind(raw_kind)
+        except ValueError as xcp:
+            raise ValueError("Operation stream event kind is invalid.") from xcp
+        if kind is NodeOperationStreamEventKind.SNAPSHOT:
+            raw_operations = payload.get("operations")
+            if not isinstance(raw_operations, Sequence) or isinstance(raw_operations, str | bytes):
+                raise ValueError("Operation stream snapshot is invalid.")
+            operations: list[NodeOperationView] = []
+            for raw_operation in raw_operations:
+                if not isinstance(raw_operation, Mapping):
+                    raise ValueError("Operation stream snapshot contains an invalid operation.")
+                operations.append(
+                    NodeOperationView.from_mapping(
+                        cast(Mapping[str, object], raw_operation)
+                    )
+                )
+            return cls(kind=kind, node_name=raw_node_name, operations=tuple(operations))
+        raw_operation = payload.get("operation")
+        if not isinstance(raw_operation, Mapping):
+            raise ValueError("Operation stream update is invalid.")
+        return cls(
+            kind=kind,
+            node_name=raw_node_name,
+            operation=NodeOperationView.from_mapping(
+                cast(Mapping[str, object], raw_operation)
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "kind": self.kind.value,
+            "node_name": self.node_name,
+        }
+        if self.kind is NodeOperationStreamEventKind.SNAPSHOT:
+            payload["operations"] = [operation.to_mapping() for operation in self.operations]
+        elif self.operation is not None:
+            payload["operation"] = self.operation.to_mapping()
+        else:
+            raise RuntimeError("Operation stream update unexpectedly has no operation.")
+        return payload
+
+
 class NodeOperationApiService:
     """Projects registered durable operation kinds through one shared API."""
 
@@ -138,6 +228,51 @@ class NodeOperationApiService:
         """Return the access scope needed before requesting cancellation."""
 
         return self.policy_for_request(kind=kind, app_name=app_name).cancel_scope
+
+    def stream_read_scopes(self) -> tuple[NodeApiScope, ...]:
+        """Return every read scope required for the unfiltered operation stream."""
+
+        scopes: list[NodeApiScope] = []
+        for policy in self._policies_by_kind.values():
+            if policy.read_scope not in scopes:
+                scopes.append(policy.read_scope)
+        return tuple(scopes)
+
+    def subscribe_stream_with_snapshot(
+        self,
+        *,
+        node_name: str,
+        callback: Callable[[NodeOperationStreamEvent], None],
+    ) -> tuple[NodeOperationStreamEvent, Callable[[], None]]:
+        """Atomically subscribe and return a complete snapshot for a reconnecting client."""
+
+        if not node_name.strip():
+            raise ValueError("Operation stream node name must not be blank.")
+
+        def _on_change(change: NodeOperationChange) -> None:
+            view = self._stream_view_for(change.record)
+            if view is None:
+                return
+            callback(
+                NodeOperationStreamEvent(
+                    kind=NodeOperationStreamEventKind(change.kind.value),
+                    node_name=node_name,
+                    operation=view,
+                    immediate=change.immediate,
+                )
+            )
+
+        records, unsubscribe = self._operations.subscribe_changes_with_snapshot(_on_change)
+        snapshot = NodeOperationStreamEvent(
+            kind=NodeOperationStreamEventKind.SNAPSHOT,
+            node_name=node_name,
+            operations=tuple(
+                view
+                for record in records
+                if (view := self._stream_view_for(record)) is not None
+            ),
+        )
+        return snapshot, unsubscribe
 
     def list_operations(
         self,
@@ -258,6 +393,13 @@ class NodeOperationApiService:
             ),
         )
 
+    def _stream_view_for(self, record: NodeOperationRecord) -> NodeOperationView | None:
+        """Project only operation kinds registered for this node API instance."""
+
+        if record.kind not in self._policies_by_kind:
+            return None
+        return self._view_for(record)
+
     @staticmethod
     def _require_matching_kind(
         *,
@@ -307,6 +449,8 @@ __all__: tuple[str, ...] = (
     "NodeOperationApiService",
     "NodeOperationCancellationHandler",
     "NodeOperationKindPolicy",
+    "NodeOperationStreamEvent",
+    "NodeOperationStreamEventKind",
     "NodeOperationTargetScope",
     "NodeOperationView",
 )
