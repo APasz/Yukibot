@@ -5,7 +5,6 @@ from io import BytesIO
 import json
 import struct
 import unittest
-import uuid
 import zipfile
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -228,6 +227,7 @@ from node_api.app_state import (
 from node_api.client_pack import NodeClientPackService
 from node_api.realtime_service import NodeRealtimeService
 from node_api.mod import (
+    NodeBulkLauncherMetadataApplyResult,
     NodeBulkLauncherMetadataApplyRequest,
     NodeBulkLauncherMetadataRequest,
     NodeClientPackConfigUpdateRequest,
@@ -247,6 +247,7 @@ from node_api.mod import (
     required_mod_mutation_level,
 )
 from node_api.mod_service import NodeModService
+from node_api.operations import NodeOperationKind, NodeOperationState
 from node_api.relay import NodeRelayTTSRequest, RemoteRelayTTSForwarder
 from node_api.request_auth import NodeRequestAuth, NodeRequestContext
 from node_api.route_contracts import DiscordHealthComponentState, DiscordHealthSnapshot, DiscordServiceState
@@ -6065,16 +6066,29 @@ class NodeApiTests(unittest.TestCase):
                 "node_api.mod_service.discover_bulk_launcher_metadata",
                 new=AsyncMock(return_value=expected),
             ) as discover_metadata:
-                result = asyncio.run(
-                    service.discover_bulk_mod_metadata(
+                async def exercise() -> BulkLauncherMetadataDiscovery:
+                    operation = await service.start_bulk_metadata_discovery(
                         app=app,
                         discovery_request=NodeBulkLauncherMetadataRequest(),
                         actor_user_id=42,
                     )
-                )
+                    for _ in range(10):
+                        if service.operations.get(operation.operation_id).state.terminal:
+                            break
+                        await asyncio.sleep(0)
+                    return await service.bulk_metadata_discovery_result(
+                        app=app,
+                        operation_id=operation.operation_id,
+                        actor_user_id=42,
+                    )
+
+                result = asyncio.run(exercise())
 
         self.assertEqual(result, expected)
-        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        self.assertEqual(
+            acl.perm_check.await_args_list,
+            [call(42, Power_Level.sudo), call(42, Power_Level.sudo)],
+        )
         targets = discover_metadata.await_args.kwargs["targets"]
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].mod_name, mod.name)
@@ -6123,8 +6137,6 @@ class NodeApiTests(unittest.TestCase):
                 status=BulkLauncherMetadataStatus.UNMATCHED,
             )
             discovery = BulkLauncherMetadataDiscovery(entries=(exact_entry, unmatched_entry))
-            discovery_operation_id = uuid.UUID("c50f39cb-acde-441f-ab92-3fd507c7b294")
-
             with (
                 patch(
                     "node_api.mod_service.discover_bulk_launcher_metadata",
@@ -6133,27 +6145,38 @@ class NodeApiTests(unittest.TestCase):
                 patch.object(service, "_invalidate_client_pack_content"),
                 patch.object(service, "_invalidate_mod_inventory"),
             ):
-                asyncio.run(
-                    service.discover_bulk_mod_metadata(
+                async def exercise() -> NodeBulkLauncherMetadataApplyResult:
+                    discovery_operation = await service.start_bulk_metadata_discovery(
                         app=app,
                         discovery_request=NodeBulkLauncherMetadataRequest(
-                            operation_id=discovery_operation_id,
                             mod_names=(exact_mod.name, unmatched_mod.name),
                         ),
                         actor_user_id=42,
                     )
-                )
-                result = asyncio.run(
-                    service.apply_bulk_mod_metadata(
+                    for _ in range(10):
+                        if service.operations.get(discovery_operation.operation_id).state.terminal:
+                            break
+                        await asyncio.sleep(0)
+                    apply_operation = await service.start_bulk_metadata_apply(
                         app=app,
                         apply_request=NodeBulkLauncherMetadataApplyRequest(
-                            discovery_operation_id=discovery_operation_id,
+                            discovery_operation_id=discovery_operation.operation_id,
                             mod_names=(exact_mod.name,),
                             apply_suggested_type_mod_names=(exact_mod.name,),
                         ),
                         actor_user_id=42,
                     )
-                )
+                    for _ in range(10):
+                        if service.operations.get(apply_operation.operation_id).state.terminal:
+                            break
+                        await asyncio.sleep(0)
+                    return await service.bulk_metadata_apply_result(
+                        app=app,
+                        operation_id=apply_operation.operation_id,
+                        actor_user_id=42,
+                    )
+
+                result = asyncio.run(exercise())
 
         self.assertEqual(result.applied_mod_names, (exact_mod.name,))
         self.assertEqual(result.applied_type_mod_names, (exact_mod.name,))
@@ -6165,48 +6188,68 @@ class NodeApiTests(unittest.TestCase):
         )
 
     def test_bulk_metadata_apply_type_selections_must_be_selected_mods(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires at least one selected mod"):
+            NodeBulkLauncherMetadataApplyRequest(
+                discovery_operation_id="c50f39cb-acde-441f-ab92-3fd507c7b295",
+            )
         with self.assertRaisesRegex(ValueError, "must be selected for apply"):
             NodeBulkLauncherMetadataApplyRequest(
-                discovery_operation_id=uuid.UUID("c50f39cb-acde-441f-ab92-3fd507c7b295"),
+                discovery_operation_id="c50f39cb-acde-441f-ab92-3fd507c7b295",
                 mod_names=("metadata-only.jar",),
                 apply_suggested_type_mod_names=("type-only.jar",),
             )
 
     def test_bulk_metadata_operation_can_be_cancelled_by_operation_id(self) -> None:
-        service = NodeApiService()
-        operation_id = uuid.UUID("c50f39cb-acde-441f-ab92-3fd507c7b293")
-
         async def exercise() -> None:
-            action_started = asyncio.Event()
+            with TemporaryDirectory() as temp_dir:
+                mod_path = Path(temp_dir) / "example.jar"
+                mod_path.write_bytes(b"mod-data")
+                mod = _TestMod(Mod_Config(name=mod_path.name, directory=Path(temp_dir)))
+                manager = Mock()
+                manager.reload_mods = AsyncMock()
+                manager.list_mods.return_value = [mod]
+                app = _build_app(manager)
+                acl = Mock()
+                acl.perm_check = AsyncMock()
+                service = NodeApiService()
+                service.set_acl(cast(Any, acl))
+                discovery_started = asyncio.Event()
+                allow_discovery_to_finish = asyncio.Event()
 
-            async def action() -> BulkLauncherMetadataDiscovery:
-                action_started.set()
-                await asyncio.Event().wait()
-                return BulkLauncherMetadataDiscovery()
+                async def discover(*, scope: str, targets: object) -> BulkLauncherMetadataDiscovery:
+                    del scope, targets
+                    discovery_started.set()
+                    await allow_discovery_to_finish.wait()
+                    return BulkLauncherMetadataDiscovery()
 
-            operation_task = asyncio.create_task(
-                service.run_bulk_metadata_operation(
-                    app_name="minecraft_alpha",
-                    operation_id=operation_id,
-                    action=action,
-                )
-            )
-            await action_started.wait()
-
-            self.assertTrue(
-                service.cancel_bulk_metadata_operation(
-                    app_name="minecraft_alpha",
-                    operation_id=operation_id,
-                )
-            )
-            with self.assertRaises(asyncio.CancelledError):
-                await operation_task
-            self.assertFalse(
-                service.cancel_bulk_metadata_operation(
-                    app_name="minecraft_alpha",
-                    operation_id=operation_id,
-                )
-            )
+                with patch(
+                    "node_api.mod_service.discover_bulk_launcher_metadata",
+                    new=discover,
+                ):
+                    operation = await service.start_bulk_metadata_discovery(
+                        app=app,
+                        discovery_request=NodeBulkLauncherMetadataRequest(),
+                        actor_user_id=42,
+                    )
+                    await discovery_started.wait()
+                    cancelled = await service.operation_api.cancel_operation(
+                        operation_id=operation.operation_id,
+                        actor_user_id=42,
+                        kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+                        app_name=app.name,
+                    )
+                    self.assertEqual(
+                        cancelled.record.state,
+                        NodeOperationState.CANCEL_REQUESTED,
+                    )
+                    for _ in range(10):
+                        if service.operations.get(operation.operation_id).state.terminal:
+                            break
+                        await asyncio.sleep(0)
+                    self.assertEqual(
+                        service.operations.get(operation.operation_id).state,
+                        NodeOperationState.CANCELLED,
+                    )
 
         asyncio.run(exercise())
 

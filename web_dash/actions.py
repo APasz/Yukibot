@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from modmux.models import Provider
 
@@ -22,7 +23,6 @@ from apps._launcher_metadata import has_curseforge_api_key, launcher_project_pag
 from apps.minecraft import MinecraftRecipeMutation
 
 from .constants import (
-    _BULK_METADATA_REQUEST_TIMEOUT_SECONDS,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
     _MOD_UPDATE_CHECK_CACHE_MAX_ENTRIES,
     _MOD_UPDATE_CHECK_CACHE_TTL_SECONDS,
@@ -76,6 +76,8 @@ from .runtime_imports import (
     NodeModUpdateDependencyAction,
     NodeModUpdateStatus,
     NodeModUploadBatchResult,
+    NodeOperationKind,
+    NodeOperationView,
     NodeRestartScheduleState,
     NodeRestartState,
     NodeSystemAction,
@@ -127,6 +129,23 @@ def _launcher_provider_selection_payload(
     if providers is None:
         return {}
     return {"providers": [provider.value for provider in providers]}
+
+
+def _operation_path(
+    *,
+    operation_id: str,
+    kind: NodeOperationKind,
+    app_name: str,
+    cancellation: bool = False,
+) -> str:
+    suffix = "/cancel" if cancellation else ""
+    query = urlencode({"kind": kind.value, "app_name": app_name})
+    return f"/operations/{quote(operation_id, safe='')}{suffix}?{query}"
+
+
+def _operations_path(*, kind: NodeOperationKind, app_name: str) -> str:
+    query = urlencode({"kind": kind.value, "app_name": app_name})
+    return f"/operations?{query}"
 
 
 class ModWebActionsMixin(ModWebServiceSupport):
@@ -1072,14 +1091,13 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return ModPageDiscovery.model_validate(payload)
 
-    async def _discover_bulk_mod_metadata(
+    async def _start_bulk_mod_metadata_discovery(
         self,
         *,
         model: ModWebPageModel,
-        operation_id: str,
         mod_names: tuple[str, ...] = (),
         user: ModWebUser,
-    ) -> BulkLauncherMetadataDiscovery:
+    ) -> NodeOperationView:
         required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
         if not self._user_has_level(user, required_level):
             raise PermissionError(f"{required_level.name.title()} access is required to resolve mod metadata.")
@@ -1090,21 +1108,41 @@ class ModWebActionsMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.MODS_WRITE,),
             user=user,
             method="POST",
-            json_payload={"operation_id": operation_id, "mod_names": list(mod_names)},
-            timeout=_BULK_METADATA_REQUEST_TIMEOUT_SECONDS,
+            json_payload={"mod_names": list(mod_names)},
         )
-        return BulkLauncherMetadataDiscovery.model_validate(payload)
+        return NodeOperationView.from_mapping(payload)
 
-    async def _apply_bulk_mod_metadata(
+    async def _bulk_mod_metadata_discovery_result(
         self,
         *,
         model: ModWebPageModel,
         operation_id: str,
+        user: ModWebUser,
+    ) -> BulkLauncherMetadataDiscovery:
+        required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required to view mod metadata.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=(
+                f"/apps/{quote(model.app_name, safe='')}/mods/metadata/discover/"
+                f"{quote(operation_id, safe='')}/result"
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+        )
+        return BulkLauncherMetadataDiscovery.model_validate(payload)
+
+    async def _start_bulk_mod_metadata_apply(
+        self,
+        *,
+        model: ModWebPageModel,
         discovery_operation_id: str,
         mod_names: tuple[str, ...],
         apply_suggested_type_mod_names: tuple[str, ...] = (),
         user: ModWebUser,
-    ) -> NodeBulkLauncherMetadataApplyResult:
+    ) -> NodeOperationView:
         if not mod_names:
             raise ValueError("Select at least one exact metadata match to apply.")
         required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
@@ -1118,41 +1156,110 @@ class ModWebActionsMixin(ModWebServiceSupport):
             user=user,
             method="POST",
             json_payload={
-                "operation_id": operation_id,
                 "discovery_operation_id": discovery_operation_id,
                 "mod_names": list(mod_names),
                 "apply_suggested_type_mod_names": list(apply_suggested_type_mod_names),
             },
-            timeout=_BULK_METADATA_REQUEST_TIMEOUT_SECONDS,
         )
-        return NodeBulkLauncherMetadataApplyResult.model_validate(payload)
+        return NodeOperationView.from_mapping(payload)
 
-    async def _cancel_bulk_mod_metadata(
+    async def _bulk_mod_metadata_apply_result(
         self,
         *,
         model: ModWebPageModel,
         operation_id: str,
         user: ModWebUser,
-    ) -> bool:
+    ) -> NodeBulkLauncherMetadataApplyResult:
+        required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required to view mod metadata.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=(
+                f"/apps/{quote(model.app_name, safe='')}/mods/metadata/apply/"
+                f"{quote(operation_id, safe='')}/result"
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+        )
+        return NodeBulkLauncherMetadataApplyResult.model_validate(payload)
+
+    async def _node_operation(
+        self,
+        *,
+        model: ModWebPageModel,
+        operation_id: str,
+        kind: NodeOperationKind,
+        user: ModWebUser,
+    ) -> NodeOperationView:
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=_operation_path(
+                operation_id=operation_id,
+                kind=kind,
+                app_name=model.app_name,
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+        )
+        return NodeOperationView.from_mapping(payload)
+
+    async def _node_operations(
+        self,
+        *,
+        model: ModWebPageModel,
+        kind: NodeOperationKind,
+        user: ModWebUser,
+    ) -> tuple[NodeOperationView, ...]:
+        """List app-scoped operations of one type without their retained logs."""
+
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=_operations_path(kind=kind, app_name=model.app_name),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+        )
+        raw_operations = payload.get("operations")
+        if not isinstance(raw_operations, list):
+            raise ValueError("Node operation list is invalid.")
+        views: list[NodeOperationView] = []
+        for raw_operation in cast(list[object], raw_operations):
+            if not isinstance(raw_operation, Mapping):
+                raise ValueError("Node operation list contains an invalid record.")
+            views.append(
+                NodeOperationView.from_mapping(cast(Mapping[str, object], raw_operation))
+            )
+        return tuple(views)
+
+    async def _cancel_node_operation(
+        self,
+        *,
+        model: ModWebPageModel,
+        operation_id: str,
+        kind: NodeOperationKind,
+        user: ModWebUser,
+    ) -> NodeOperationView:
         required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
         if not self._user_has_level(user, required_level):
             raise PermissionError(f"{required_level.name.title()} access is required to cancel mod metadata.")
         payload = await self._remote_json_async(
             node=self._remote_node_link(model.node_name),
             app_name=model.app_name,
-            path=(
-                f"/apps/{quote(model.app_name, safe='')}/mods/metadata/"
-                f"{quote(operation_id, safe='')}/cancel"
+            path=_operation_path(
+                operation_id=operation_id,
+                kind=kind,
+                app_name=model.app_name,
+                cancellation=True,
             ),
             scopes=(NodeApiScope.MODS_WRITE,),
             user=user,
             method="POST",
             json_payload={},
         )
-        raw_cancelled = payload.get("cancelled")
-        if not isinstance(raw_cancelled, bool):
-            raise ValueError("Bulk metadata cancellation returned an invalid response.")
-        return raw_cancelled
+        return NodeOperationView.from_mapping(payload)
 
     @staticmethod
     def _mod_action_label(action: NodeModMutationAction, entry: NodeModEntry) -> str:

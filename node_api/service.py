@@ -7,11 +7,10 @@ import logging
 import math
 import threading
 import time
-import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 import requests
@@ -190,9 +189,6 @@ def _validated_steam_game_server_login_token_status(
     return raw_status
 
 
-_BulkMetadataOperationResult = TypeVar("_BulkMetadataOperationResult")
-
-
 class NodeApiService:
     def __init__(self) -> None:
         self._manager: App_Manager | None = None
@@ -316,19 +312,6 @@ class NodeApiService:
             require_available=self.node_management.require_app_installer_available,
             operations=self.operations,
         )
-        self.operation_api = operation_service.NodeOperationApiService(
-            operations=self.operations,
-            policies=(
-                operation_service.NodeOperationKindPolicy(
-                    kind=operations.NodeOperationKind.APP_INSTALL,
-                    kind_label="App install",
-                    read_scope=NodeApiScope.APP_MANAGE,
-                    cancel_scope=NodeApiScope.APP_MANAGE,
-                    required_level=Power_Level.sudo,
-                    cancellation_handler=self._cancel_app_install_operation,
-                ),
-            ),
-        )
         self.app_games = app_game_service.NodeAppGameService(
             node_name=lambda: self.node_name,
             require_acl=self._require_acl,
@@ -385,6 +368,38 @@ class NodeApiService:
             invalidate_client_pack_content=self._invalidate_client_pack_content,
             invalidate_mod_inventory=self._invalidate_mod_inventory,
             upload_mod_paths=self._upload_mod_paths_for_mod_service,
+            operations=self.operations,
+        )
+        self.operation_api = operation_service.NodeOperationApiService(
+            operations=self.operations,
+            policies=(
+                operation_service.NodeOperationKindPolicy(
+                    kind=operations.NodeOperationKind.APP_INSTALL,
+                    kind_label="App install",
+                    read_scope=NodeApiScope.APP_MANAGE,
+                    cancel_scope=NodeApiScope.APP_MANAGE,
+                    required_level=Power_Level.sudo,
+                    cancellation_handler=self._cancel_app_install_operation,
+                ),
+                operation_service.NodeOperationKindPolicy(
+                    kind=operations.NodeOperationKind.MOD_METADATA_DISCOVERY,
+                    kind_label="Mod metadata discovery",
+                    read_scope=NodeApiScope.MODS_WRITE,
+                    cancel_scope=NodeApiScope.MODS_WRITE,
+                    required_level=Power_Level.sudo,
+                    target_scope=operation_service.NodeOperationTargetScope.APP,
+                    cancellation_handler=self._cancel_bulk_metadata_operation,
+                ),
+                operation_service.NodeOperationKindPolicy(
+                    kind=operations.NodeOperationKind.MOD_METADATA_APPLY,
+                    kind_label="Mod metadata apply",
+                    read_scope=NodeApiScope.MODS_WRITE,
+                    cancel_scope=NodeApiScope.MODS_WRITE,
+                    required_level=Power_Level.sudo,
+                    target_scope=operation_service.NodeOperationTargetScope.APP,
+                    cancellation_handler=self._cancel_bulk_metadata_operation,
+                ),
+            ),
         )
         self._routes_registered = False
         self._shutting_down = False
@@ -412,6 +427,18 @@ class NodeApiService:
 
         await self._app_installer.cancel_install(
             job_id=operation_id,
+            actor_user_id=actor_user_id,
+        )
+
+    async def _cancel_bulk_metadata_operation(
+        self,
+        operation_id: str,
+        actor_user_id: int,
+    ) -> None:
+        """Delegate generic cancellation to the mod metadata executor."""
+
+        await self._mod_service.cancel_bulk_metadata_operation(
+            operation_id=operation_id,
             actor_user_id=actor_user_id,
         )
 
@@ -478,6 +505,7 @@ class NodeApiService:
         self._system_history_task = None
         self._app_mutations.cancel_pending()
         self._app_installer.cancel_pending()
+        self._mod_service.cancel_pending()
         self._app_state_subscriptions.close()
         if history_task is not None:
             history_task.cancel()
@@ -613,6 +641,7 @@ class NodeApiService:
             auth=self.request_auth,
             resolve_app=self._resolve_app,
             mod_service=self._mod_service,
+            operation_api=self.operation_api,
             client_packs=self._client_packs,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
@@ -1307,25 +1336,56 @@ class NodeApiService:
             request=request,
         )
 
-    async def run_bulk_metadata_operation(
+    async def start_bulk_metadata_discovery(
         self,
         *,
-        app_name: str,
-        operation_id: uuid.UUID,
-        action: Callable[[], Awaitable[_BulkMetadataOperationResult]],
-    ) -> _BulkMetadataOperationResult:
-        return await self._mod_service.run_bulk_metadata_operation(
-            app_name=app_name,
-            operation_id=operation_id,
-            action=action,
+        app: App,
+        discovery_request: mod_contracts.NodeBulkLauncherMetadataRequest,
+        actor_user_id: int,
+    ) -> operations.NodeOperationRecord:
+        return await self._mod_service.start_bulk_metadata_discovery(
+            app=app,
+            discovery_request=discovery_request,
+            actor_user_id=actor_user_id,
         )
 
-    def cancel_bulk_metadata_operation(
-        self, *, app_name: str, operation_id: uuid.UUID
-    ) -> bool:
-        return self._mod_service.cancel_bulk_metadata_operation(
-            app_name=app_name,
+    async def start_bulk_metadata_apply(
+        self,
+        *,
+        app: App,
+        apply_request: mod_contracts.NodeBulkLauncherMetadataApplyRequest,
+        actor_user_id: int,
+    ) -> operations.NodeOperationRecord:
+        return await self._mod_service.start_bulk_metadata_apply(
+            app=app,
+            apply_request=apply_request,
+            actor_user_id=actor_user_id,
+        )
+
+    async def bulk_metadata_discovery_result(
+        self,
+        *,
+        app: App,
+        operation_id: str,
+        actor_user_id: int,
+    ) -> BulkLauncherMetadataDiscovery:
+        return await self._mod_service.bulk_metadata_discovery_result(
+            app=app,
             operation_id=operation_id,
+            actor_user_id=actor_user_id,
+        )
+
+    async def bulk_metadata_apply_result(
+        self,
+        *,
+        app: App,
+        operation_id: str,
+        actor_user_id: int,
+    ) -> mod_contracts.NodeBulkLauncherMetadataApplyResult:
+        return await self._mod_service.bulk_metadata_apply_result(
+            app=app,
+            operation_id=operation_id,
+            actor_user_id=actor_user_id,
         )
 
     async def build_mod_list(self, app: App) -> mod_contracts.NodeModList:
@@ -1475,32 +1535,6 @@ class NodeApiService:
             app=app,
             mod_name=mod_name,
             resolve_request=resolve_request,
-            actor_user_id=actor_user_id,
-        )
-
-    async def discover_bulk_mod_metadata(
-        self,
-        *,
-        app: App,
-        discovery_request: mod_contracts.NodeBulkLauncherMetadataRequest,
-        actor_user_id: int,
-    ) -> BulkLauncherMetadataDiscovery:
-        return await self._mod_service.discover_bulk_mod_metadata(
-            app=app,
-            discovery_request=discovery_request,
-            actor_user_id=actor_user_id,
-        )
-
-    async def apply_bulk_mod_metadata(
-        self,
-        *,
-        app: App,
-        apply_request: mod_contracts.NodeBulkLauncherMetadataApplyRequest,
-        actor_user_id: int,
-    ) -> mod_contracts.NodeBulkLauncherMetadataApplyResult:
-        return await self._mod_service.apply_bulk_mod_metadata(
-            app=app,
-            apply_request=apply_request,
             actor_user_id=actor_user_id,
         )
 

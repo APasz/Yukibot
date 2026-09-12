@@ -8,6 +8,7 @@ sanitised log output are safe and useful to retain for operators.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 import threading
@@ -22,12 +23,13 @@ from typing import cast
 
 
 _OPERATION_LOG_LINE_LIMIT = 100
+_OPERATION_RESULT_MAX_BYTES = 5 * 1024 * 1024
 _INTERRUPTED_SUMMARY = "Interrupted by a node restart."
 _CANCEL_REQUESTED_SUMMARY = "Cancellation requested."
 _CANCELLED_SUMMARY = "Operation cancelled."
 _UNREPORTED_COMPLETION_SUMMARY = "Operation ended without reporting a result."
 _UNEXPECTED_FAILURE_SUMMARY = "Operation task failed unexpectedly."
-_DATABASE_SCHEMA_VERSION = 1
+_DATABASE_SCHEMA_VERSION = 2
 
 _SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
     """
@@ -96,6 +98,40 @@ _SCHEMA_V1_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("node_operation_resources", ("resource_key", "operation_id")),
 )
 
+_SCHEMA_V2_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "node_operations",
+        (
+            "operation_id",
+            "kind",
+            "node_name",
+            "subject",
+            "requested_by_user_id",
+            "state",
+            "summary",
+            "phase",
+            "result_reference",
+            "detail",
+            "progress_percent",
+            "created_at_unix_ms",
+            "started_at_unix_ms",
+            "finished_at_unix_ms",
+            "app_name",
+        ),
+    ),
+    ("node_operation_logs", ("operation_id", "sequence", "line")),
+    ("node_operation_resources", ("resource_key", "operation_id")),
+    (
+        "node_operation_results",
+        ("operation_id", "payload_json", "expires_at_unix_ms"),
+    ),
+)
+
+_SCHEMA_COLUMNS_BY_VERSION: dict[int, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    1: _SCHEMA_V1_COLUMNS,
+    2: _SCHEMA_V2_COLUMNS,
+}
+
 log = logging.getLogger(__name__)
 
 
@@ -103,6 +139,8 @@ class NodeOperationKind(StrEnum):
     """A durable operation type understood by the local node."""
 
     APP_INSTALL = "app_install"
+    MOD_METADATA_DISCOVERY = "mod_metadata_discovery"
+    MOD_METADATA_APPLY = "mod_metadata_apply"
 
 
 class NodeOperationState(StrEnum):
@@ -167,6 +205,7 @@ class NodeOperationRecord:
     state: NodeOperationState
     summary: str
     requested_by_user_id: int | None
+    app_name: str | None = None
     phase: str | None = None
     result_reference: str | None = None
     detail: str | None = None
@@ -188,6 +227,7 @@ class NodeOperationRecord:
         if self.requested_by_user_id is not None and self.requested_by_user_id <= 0:
             raise ValueError("Operation requester ID must be positive when provided.")
         for label, value in (
+            ("Operation app name", self.app_name),
             ("Operation phase", self.phase),
             ("Operation result reference", self.result_reference),
             ("Operation detail", self.detail),
@@ -257,6 +297,9 @@ class NodeOperationRecord:
                 payload.get("requested_by_user_id"),
                 label="Operation requester ID",
             ),
+            app_name=_mapping_optional_text(
+                payload.get("app_name"), label="Operation app name"
+            ),
             phase=_mapping_optional_text(
                 payload.get("phase"), label="Operation phase"
             ),
@@ -292,6 +335,7 @@ class NodeOperationRecord:
             "state": self.state.value,
             "summary": self.summary,
             "requested_by_user_id": self.requested_by_user_id,
+            "app_name": self.app_name,
             "phase": self.phase,
             "result_reference": self.result_reference,
             "detail": self.detail,
@@ -301,6 +345,34 @@ class NodeOperationRecord:
             "started_at_unix_ms": self.started_at_unix_ms,
             "finished_at_unix_ms": self.finished_at_unix_ms,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeOperationResult:
+    """A type-owned, client-safe JSON artifact retained for an operation."""
+
+    payload_json: str
+    expires_at_unix_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        payload_json = _required_text(
+            self.payload_json, label="Operation result payload"
+        )
+        if len(payload_json.encode("utf-8")) > _OPERATION_RESULT_MAX_BYTES:
+            raise ValueError("Operation result payload exceeds its retention limit.")
+        try:
+            decoded = json.loads(payload_json)
+        except json.JSONDecodeError as xcp:
+            raise ValueError("Operation result payload must be valid JSON.") from xcp
+        if not isinstance(decoded, dict):
+            raise ValueError("Operation result payload must be a JSON object.")
+        if (
+            self.expires_at_unix_ms is not None
+            and self.expires_at_unix_ms <= 0
+        ):
+            raise ValueError(
+                "Operation result expiration must be positive Unix milliseconds when provided."
+            )
 
 
 class NodeOperationResourceConflict(RuntimeError):
@@ -346,6 +418,7 @@ class NodeOperationService:
         self._now_unix_ms = now_unix_ms or _unix_ms_now
         self._lock = threading.RLock()
         self._records: dict[str, NodeOperationRecord] = {}
+        self._results: dict[str, NodeOperationResult] = {}
         self._resource_owners: dict[str, str] = {}
         self._tasks: dict[str, asyncio.Task[object]] = {}
         self._hard_cancelled_tasks: dict[str, asyncio.Task[object]] = {}
@@ -358,6 +431,7 @@ class NodeOperationService:
         subject: str,
         requested_by_user_id: int | None,
         progress: NodeOperationProgress,
+        app_name: str | None = None,
         resource_keys: Sequence[str] = (),
     ) -> NodeOperationRecord:
         """Create and reserve the resources for a queued operation."""
@@ -372,6 +446,7 @@ class NodeOperationService:
             state=NodeOperationState.QUEUED,
             summary=progress.summary,
             requested_by_user_id=requested_by_user_id,
+            app_name=_optional_text(app_name, label="Operation app name"),
             phase=progress.phase,
             detail=progress.detail,
             progress_percent=progress.progress_percent,
@@ -405,6 +480,7 @@ class NodeOperationService:
         self,
         *,
         kind: NodeOperationKind | None = None,
+        app_name: str | None = None,
         limit: int | None = None,
         include_log_lines: bool = True,
     ) -> tuple[NodeOperationRecord, ...]:
@@ -412,6 +488,7 @@ class NodeOperationService:
 
         if limit is not None and limit < 1:
             raise ValueError("Operation list limit must be positive when provided.")
+        normalised_app_name = _optional_text(app_name, label="Operation app name")
         with self._lock:
             self._ensure_database_locked()
             if self._database is None:
@@ -420,6 +497,12 @@ class NodeOperationService:
                         record
                         for record in self._records.values()
                         if kind is None or record.kind is kind
+                        if normalised_app_name is None
+                        or (
+                            record.app_name is not None
+                            and record.app_name.casefold()
+                            == normalised_app_name.casefold()
+                        )
                     ),
                     key=lambda record: (record.created_at_unix_ms, record.operation_id),
                     reverse=True,
@@ -433,6 +516,7 @@ class NodeOperationService:
                 )
             return self._list_database_records_locked(
                 kind=kind,
+                app_name=normalised_app_name,
                 limit=limit,
                 include_log_lines=include_log_lines,
             )
@@ -512,6 +596,8 @@ class NodeOperationService:
         detail: str | None = None,
         result_reference: str | None = None,
         progress_percent: float | None = None,
+        result_payload_json: str | None = None,
+        result_ttl_seconds: int | None = None,
     ) -> NodeOperationRecord:
         """Finish an operation and release its reserved resources."""
 
@@ -527,6 +613,11 @@ class NodeOperationService:
             current = self._record_locked(operation_id)
             if current.state.terminal:
                 return current
+            result = self._result_for_finish(
+                state=state,
+                result_payload_json=result_payload_json,
+                result_ttl_seconds=result_ttl_seconds,
+            )
             updated = replace(
                 current,
                 state=state,
@@ -539,8 +630,26 @@ class NodeOperationService:
                 progress_percent=progress.progress_percent,
                 finished_at_unix_ms=self._now_unix_ms(),
             )
-            self._finish_record_locked(updated)
+            self._finish_record_locked(updated, operation_result=result)
             return updated
+
+    def get_result(self, *, operation_id: str) -> NodeOperationResult:
+        """Return a non-expired type-owned artifact for a retained operation."""
+
+        with self._lock:
+            self._ensure_database_locked()
+            normalised_id = _required_text(operation_id, label="Operation ID")
+            self._record_locked(normalised_id, include_log_lines=False)
+            result = self._result_locked(normalised_id)
+            if result is None:
+                raise LookupError("Operation result was not found.")
+            if (
+                result.expires_at_unix_ms is not None
+                and result.expires_at_unix_ms <= self._now_unix_ms()
+            ):
+                self._delete_result_locked(normalised_id)
+                raise LookupError("Operation result was not found.")
+            return result
 
     def request_cancellation(self, *, operation_id: str) -> NodeOperationRecord:
         """Record a cooperative cancellation request without interrupting a task."""
@@ -822,6 +931,10 @@ class NodeOperationService:
             self._create_schema_v1_locked()
             self._validate_database_schema_locked(version=to_version)
             return
+        if from_version == 1 and to_version == 2:
+            self._migrate_schema_v1_to_v2_locked()
+            self._validate_database_schema_locked(version=to_version)
+            return
         raise RuntimeError(
             "Operation database migration path is unsupported: "
             f"{from_version} to {to_version}."
@@ -832,13 +945,34 @@ class NodeOperationService:
         for statement in _SCHEMA_V1_STATEMENTS:
             database.execute(statement)
 
+    def _migrate_schema_v1_to_v2_locked(self) -> None:
+        database = self._require_database_locked()
+        database.execute("ALTER TABLE node_operations ADD COLUMN app_name TEXT")
+        database.execute(
+            """
+            CREATE TABLE node_operation_results (
+                operation_id TEXT PRIMARY KEY REFERENCES node_operations(operation_id) ON DELETE CASCADE,
+                payload_json TEXT NOT NULL,
+                expires_at_unix_ms INTEGER
+            )
+            """
+        )
+        database.execute(
+            """
+            CREATE INDEX node_operations_app_kind_index
+                ON node_operations (app_name, kind, created_at_unix_ms DESC, operation_id DESC)
+            """
+        )
+
     def _validate_database_schema_locked(self, *, version: int) -> None:
-        if version != _DATABASE_SCHEMA_VERSION:
+        try:
+            expected_schema = _SCHEMA_COLUMNS_BY_VERSION[version]
+        except KeyError as xcp:
             raise RuntimeError(
                 f"Operation database schema version {version} is unsupported."
-            )
+            ) from xcp
         database = self._require_database_locked()
-        for table_name, expected_columns in _SCHEMA_V1_COLUMNS:
+        for table_name, expected_columns in expected_schema:
             rows = database.execute(f"PRAGMA table_info({table_name})").fetchall()
             actual_columns = tuple(cast(str, row["name"]) for row in rows)
             if actual_columns != expected_columns:
@@ -916,8 +1050,8 @@ class NodeOperationService:
                 INSERT INTO node_operations (
                     operation_id, kind, node_name, subject, requested_by_user_id,
                     state, summary, phase, result_reference, detail, progress_percent,
-                    created_at_unix_ms, started_at_unix_ms, finished_at_unix_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at_unix_ms, started_at_unix_ms, finished_at_unix_ms, app_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 _record_values(record),
             )
@@ -975,15 +1109,22 @@ class NodeOperationService:
         self,
         *,
         kind: NodeOperationKind | None,
+        app_name: str | None,
         limit: int | None,
         include_log_lines: bool,
     ) -> tuple[NodeOperationRecord, ...]:
         database = self._require_database_locked()
         query = "SELECT * FROM node_operations"
         arguments: list[object] = []
+        conditions: list[str] = []
         if kind is not None:
-            query += " WHERE kind = ?"
+            conditions.append("kind = ?")
             arguments.append(kind.value)
+        if app_name is not None:
+            conditions.append("app_name COLLATE NOCASE = ?")
+            arguments.append(app_name)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY created_at_unix_ms DESC, operation_id DESC"
         if limit is not None:
             query += " LIMIT ?"
@@ -1031,6 +1172,7 @@ class NodeOperationService:
             state=state,
             summary=cast(str, row["summary"]),
             requested_by_user_id=_database_optional_int(row["requested_by_user_id"]),
+            app_name=_database_optional_text(row["app_name"]),
             phase=_database_optional_text(row["phase"]),
             result_reference=_database_optional_text(row["result_reference"]),
             detail=_database_optional_text(row["detail"]),
@@ -1090,18 +1232,25 @@ class NodeOperationService:
                     record.operation_id, validated_log_line
                 )
 
-    def _finish_record_locked(self, record: NodeOperationRecord) -> None:
+    def _finish_record_locked(
+        self,
+        record: NodeOperationRecord,
+        *,
+        operation_result: NodeOperationResult | None = None,
+    ) -> None:
         if not record.state.terminal:
             raise ValueError("Only terminal records can be finished.")
         if self._database is None:
             self._records[record.operation_id] = record
+            if operation_result is not None:
+                self._results[record.operation_id] = operation_result
             self._release_memory_resources_locked(record.operation_id)
             self._prune_memory_completed_locked()
             return
 
         database = self._require_database_locked()
         with self._database_transaction_locked():
-            result = database.execute(
+            write_result = database.execute(
                 """
                 UPDATE node_operations
                 SET state = ?, summary = ?, phase = ?, result_reference = ?, detail = ?,
@@ -1120,8 +1269,24 @@ class NodeOperationService:
                     record.operation_id,
                 ),
             )
-            if result.rowcount != 1:
+            if write_result.rowcount != 1:
                 raise LookupError("Operation was not found.")
+            if operation_result is not None:
+                database.execute(
+                    """
+                    INSERT INTO node_operation_results (
+                        operation_id, payload_json, expires_at_unix_ms
+                    ) VALUES (?, ?, ?)
+                    ON CONFLICT(operation_id) DO UPDATE SET
+                        payload_json = excluded.payload_json,
+                        expires_at_unix_ms = excluded.expires_at_unix_ms
+                    """,
+                    (
+                        record.operation_id,
+                        operation_result.payload_json,
+                        operation_result.expires_at_unix_ms,
+                    ),
+                )
             database.execute(
                 "DELETE FROM node_operation_resources WHERE operation_id = ?",
                 (record.operation_id,),
@@ -1148,6 +1313,75 @@ class NodeOperationService:
                 (operation_id, oldest_retained_sequence),
             )
 
+    def _result_for_finish(
+        self,
+        *,
+        state: NodeOperationState,
+        result_payload_json: str | None,
+        result_ttl_seconds: int | None,
+    ) -> NodeOperationResult | None:
+        if result_payload_json is None:
+            if result_ttl_seconds is not None:
+                raise ValueError(
+                    "Operation result retention requires an operation result payload."
+                )
+            return None
+        if state is not NodeOperationState.SUCCEEDED:
+            raise ValueError("Only successful operations can retain a result artifact.")
+        if result_ttl_seconds is not None:
+            if (
+                isinstance(result_ttl_seconds, bool)
+                or not isinstance(result_ttl_seconds, int)
+                or result_ttl_seconds < 1
+            ):
+                raise ValueError(
+                    "Operation result retention must be a positive number of seconds."
+                )
+        expires_at_unix_ms = (
+            None
+            if result_ttl_seconds is None
+            else self._now_unix_ms() + (result_ttl_seconds * 1000)
+        )
+        return NodeOperationResult(
+            payload_json=result_payload_json,
+            expires_at_unix_ms=expires_at_unix_ms,
+        )
+
+    def _result_locked(self, operation_id: str) -> NodeOperationResult | None:
+        if self._database is None:
+            return self._results.get(operation_id)
+        database = self._require_database_locked()
+        row = database.execute(
+            """
+            SELECT payload_json, expires_at_unix_ms
+            FROM node_operation_results
+            WHERE operation_id = ?
+            """,
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return NodeOperationResult(
+                payload_json=_database_required_text(row["payload_json"]),
+                expires_at_unix_ms=_database_optional_int(row["expires_at_unix_ms"]),
+            )
+        except ValueError as xcp:
+            raise RuntimeError(
+                f"Persisted operation {operation_id} has an invalid result artifact."
+            ) from xcp
+
+    def _delete_result_locked(self, operation_id: str) -> None:
+        if self._database is None:
+            self._results.pop(operation_id, None)
+            return
+        database = self._require_database_locked()
+        with self._database_transaction_locked():
+            database.execute(
+                "DELETE FROM node_operation_results WHERE operation_id = ?",
+                (operation_id,),
+            )
+
     def _release_memory_resources_locked(self, operation_id: str) -> None:
         released_keys = tuple(
             resource_key
@@ -1158,6 +1392,17 @@ class NodeOperationService:
             self._resource_owners.pop(resource_key, None)
 
     def _prune_memory_completed_locked(self) -> None:
+        now_unix_ms = self._now_unix_ms()
+        expired_result_ids = tuple(
+            operation_id
+            for operation_id, result in self._results.items()
+            if (
+                result.expires_at_unix_ms is not None
+                and result.expires_at_unix_ms <= now_unix_ms
+            )
+        )
+        for operation_id in expired_result_ids:
+            self._results.pop(operation_id, None)
         completed = sorted(
             (
                 (position, record)
@@ -1175,9 +1420,17 @@ class NodeOperationService:
             : max(0, len(completed) - self._completed_history_limit)
         ]:
             self._records.pop(record.operation_id, None)
+            self._results.pop(record.operation_id, None)
 
     def _prune_database_completed_locked(self) -> None:
         database = self._require_database_locked()
+        database.execute(
+            """
+            DELETE FROM node_operation_results
+            WHERE expires_at_unix_ms IS NOT NULL AND expires_at_unix_ms <= ?
+            """,
+            (self._now_unix_ms(),),
+        )
         terminal_values = tuple(
             state.value for state in NodeOperationState if state.terminal
         )
@@ -1235,6 +1488,7 @@ def _record_values(record: NodeOperationRecord) -> tuple[object, ...]:
         record.created_at_unix_ms,
         record.started_at_unix_ms,
         record.finished_at_unix_ms,
+        record.app_name,
     )
 
 
@@ -1338,6 +1592,12 @@ def _database_optional_text(value: object) -> str | None:
     return value
 
 
+def _database_required_text(value: object) -> str:
+    if not isinstance(value, str):
+        raise RuntimeError("Persisted operation text field is invalid.")
+    return value
+
+
 def _database_required_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise RuntimeError("Persisted operation integer field is invalid.")
@@ -1366,6 +1626,7 @@ __all__: tuple[str, ...] = (
     "NodeOperationKind",
     "NodeOperationProgress",
     "NodeOperationRecord",
+    "NodeOperationResult",
     "NodeOperationResourceConflict",
     "NodeOperationSchemaVersionError",
     "NodeOperationService",

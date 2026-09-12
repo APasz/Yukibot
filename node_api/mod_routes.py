@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from collections.abc import Callable
 from typing import Annotated, Any
 
@@ -36,6 +35,8 @@ from .mod import (
 )
 from .client_pack import NodeClientPackService
 from .mod_service import NodeModService
+from .operation_service import NodeOperationApiService
+from .operations import NodeOperationKind
 from .route_contracts import NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
@@ -46,6 +47,7 @@ def register_mod_routes(
     auth: NodeAuthenticatedRouteService,
     resolve_app: Callable[[str], App],
     mod_service: NodeModService,
+    operation_api: NodeOperationApiService,
     client_packs: NodeClientPackService,
     api_prefix: str,
     traffic_log: logging.Logger,
@@ -470,16 +472,17 @@ def register_mod_routes(
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
         discovery_request = NodeBulkLauncherMetadataRequest.model_validate(payload)
-        discovery = await mod_service.run_bulk_metadata_operation(
-            app_name=app_name,
-            operation_id=discovery_request.operation_id,
-            action=lambda: mod_service.discover_bulk_mod_metadata(
-                app=resolve_app(app_name),
-                discovery_request=discovery_request,
-                actor_user_id=actor_user_id,
-            ),
+        app = resolve_app(app_name)
+        operation = await mod_service.start_bulk_metadata_discovery(
+            app=app,
+            discovery_request=discovery_request,
+            actor_user_id=actor_user_id,
         )
-        return discovery.model_dump(mode="json")
+        return operation_api.get_operation(
+            operation_id=operation.operation_id,
+            kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+            app_name=app.name,
+        ).to_mapping()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/metadata/apply")
     async def _apply_bulk_mod_metadata(
@@ -496,23 +499,24 @@ def register_mod_routes(
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
         apply_request = NodeBulkLauncherMetadataApplyRequest.model_validate(payload)
-        result = await mod_service.run_bulk_metadata_operation(
-            app_name=app_name,
-            operation_id=apply_request.operation_id,
-            action=lambda: mod_service.apply_bulk_mod_metadata(
-                app=resolve_app(app_name),
-                apply_request=apply_request,
-                actor_user_id=actor_user_id,
-            ),
+        app = resolve_app(app_name)
+        operation = await mod_service.start_bulk_metadata_apply(
+            app=app,
+            apply_request=apply_request,
+            actor_user_id=actor_user_id,
         )
-        return result.model_dump(mode="json")
+        return operation_api.get_operation(
+            operation_id=operation.operation_id,
+            kind=NodeOperationKind.MOD_METADATA_APPLY,
+            app_name=app.name,
+        ).to_mapping()
 
-    @nicegui_app.post(
-        f"{api_prefix}/apps/{{app_name}}/mods/metadata/{{operation_id}}/cancel"
+    @nicegui_app.get(
+        f"{api_prefix}/apps/{{app_name}}/mods/metadata/discover/{{operation_id}}/result"
     )
-    async def _cancel_bulk_mod_metadata(
+    async def _bulk_mod_metadata_discovery_result(
         app_name: str,
-        operation_id: uuid.UUID,
+        operation_id: str,
         request: Request,
         access_token: str | None = None,
     ) -> dict[str, object]:
@@ -523,20 +527,35 @@ def register_mod_routes(
             scopes=(NodeApiScope.MODS_WRITE,),
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        cancelled = mod_service.cancel_bulk_metadata_operation(
-            app_name=app_name,
+        discovery = await mod_service.bulk_metadata_discovery_result(
+            app=resolve_app(app_name),
             operation_id=operation_id,
+            actor_user_id=actor_user_id,
         )
-        traffic_log.info(
-            "Node API bulk mod metadata cancellation: node=%s app=%s operation=%s "
-            "cancelled=%s actor=%s",
-            auth.node_name,
-            app_name,
-            operation_id,
-            cancelled,
-            actor_user_id,
+        return discovery.model_dump(mode="json")
+
+    @nicegui_app.get(
+        f"{api_prefix}/apps/{{app_name}}/mods/metadata/apply/{{operation_id}}/result"
+    )
+    async def _bulk_mod_metadata_apply_result(
+        app_name: str,
+        operation_id: str,
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
         )
-        return {"operation_id": str(operation_id), "cancelled": cancelled}
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = await mod_service.bulk_metadata_apply_result(
+            app=resolve_app(app_name),
+            operation_id=operation_id,
+            actor_user_id=actor_user_id,
+        )
+        return result.model_dump(mode="json")
 
     @nicegui_app.put(f"{api_prefix}/apps/{{app_name}}/mods/client-pack-config")
     async def _update_client_pack_config(

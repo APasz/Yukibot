@@ -55,6 +55,7 @@ from .runtime_imports import (
     NodeModPortalVersionList,
     NodeModUpdateCheckResult,
     NodeModUploadBatchResult,
+    NodeOperationView,
     NodeSaveBatchMutationResult,
     NodeRestartScheduleState,
     NodeRestartState,
@@ -487,18 +488,32 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(
-        self, name: Literal["_discover_bulk_mod_metadata"]
+        self, name: Literal["_start_bulk_mod_metadata_discovery"]
+    ) -> Callable[..., Awaitable[NodeOperationView]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_bulk_mod_metadata_discovery_result"]
     ) -> Callable[..., Awaitable[BulkLauncherMetadataDiscovery]]: ...
 
     @overload
     def __getattr__(
-        self, name: Literal["_apply_bulk_mod_metadata"]
-    ) -> Callable[..., Awaitable[NodeBulkLauncherMetadataApplyResult]]: ...
+        self, name: Literal["_start_bulk_mod_metadata_apply"]
+    ) -> Callable[..., Awaitable[NodeOperationView]]: ...
 
     @overload
     def __getattr__(
-        self, name: Literal["_cancel_bulk_mod_metadata"]
-    ) -> Callable[..., Awaitable[bool]]: ...
+        self, name: Literal["_bulk_mod_metadata_apply_result"]
+    ) -> Callable[..., Awaitable[NodeBulkLauncherMetadataApplyResult]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_node_operation"]) -> Callable[..., Awaitable[NodeOperationView]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_node_operations"]) -> Callable[..., Awaitable[tuple[NodeOperationView, ...]]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_cancel_node_operation"]) -> Callable[..., Awaitable[NodeOperationView]]: ...
 
     @overload
     def __getattr__(

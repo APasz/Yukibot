@@ -8,7 +8,8 @@ from typing import Any, Protocol
 from fastapi import Request
 
 from _audit import audit_log
-from .operation_service import NodeOperationApiService
+from _security import Power_Level
+from .operation_service import NodeOperationApiService, NodeOperationKindPolicy
 from .operations import NodeOperationKind
 from .request_auth import NodeRequestContext
 from .route_contracts import HttpExceptionFactory
@@ -32,6 +33,12 @@ class NodeOperationRouteAuth(Protocol):
 
     def require_actor(self, context: NodeRequestContext) -> NodeRequestContext: ...
 
+    async def require_actor_level(
+        self,
+        context: NodeRequestContext,
+        required_level: Power_Level,
+    ) -> NodeRequestContext: ...
+
 
 def register_operation_routes(
     nicegui_app: Any,
@@ -49,23 +56,34 @@ def register_operation_routes(
         request: Request,
         access_token: str | None = None,
         kind: NodeOperationKind | None = None,
+        app_name: str | None = None,
         limit: int | None = None,
     ) -> dict[str, object]:
-        scope = _scope_for_request(
+        policy, target_app_name = _policy_for_request(
             operation_api=operation_api,
             kind=kind,
-            cancellation=False,
+            app_name=app_name,
             http_exception=http_exception,
         )
         traffic_log.info(
-            "Node API operation list request: node=%s kind=%s limit=%s",
+            "Node API operation list request: node=%s kind=%s app=%s limit=%s",
             auth.node_name,
             None if kind is None else kind.value,
+            target_app_name,
             limit,
         )
-        auth.require_access(request, access_token, app_name=None, scopes=(scope,))
+        auth.require_access(
+            request,
+            access_token,
+            app_name=target_app_name,
+            scopes=(policy.read_scope,),
+        )
         try:
-            records = operation_api.list_operations(kind=kind, limit=limit)
+            records = operation_api.list_operations(
+                kind=kind,
+                app_name=target_app_name,
+                limit=limit,
+            )
         except ValueError as xcp:
             raise http_exception(400, str(xcp)) from xcp
         return {"operations": [record.to_mapping() for record in records]}
@@ -76,24 +94,32 @@ def register_operation_routes(
         request: Request,
         access_token: str | None = None,
         kind: NodeOperationKind | None = None,
+        app_name: str | None = None,
     ) -> dict[str, object]:
-        scope = _scope_for_request(
+        policy, target_app_name = _policy_for_request(
             operation_api=operation_api,
             kind=kind,
-            cancellation=False,
+            app_name=app_name,
             http_exception=http_exception,
         )
         traffic_log.info(
-            "Node API operation detail request: node=%s operation=%s kind=%s",
+            "Node API operation detail request: node=%s operation=%s kind=%s app=%s",
             auth.node_name,
             operation_id,
             None if kind is None else kind.value,
+            target_app_name,
         )
-        auth.require_access(request, access_token, app_name=None, scopes=(scope,))
+        auth.require_access(
+            request,
+            access_token,
+            app_name=target_app_name,
+            scopes=(policy.read_scope,),
+        )
         try:
             return operation_api.get_operation(
                 operation_id=operation_id,
                 kind=kind,
+                app_name=target_app_name,
             ).to_mapping()
         except LookupError as xcp:
             raise http_exception(404, "Operation was not found.") from xcp
@@ -104,26 +130,35 @@ def register_operation_routes(
         request: Request,
         access_token: str | None = None,
         kind: NodeOperationKind | None = None,
+        app_name: str | None = None,
     ) -> dict[str, object]:
-        scope = _scope_for_request(
+        policy, target_app_name = _policy_for_request(
             operation_api=operation_api,
             kind=kind,
-            cancellation=True,
+            app_name=app_name,
             http_exception=http_exception,
         )
         traffic_log.info(
-            "Node API operation cancellation request: node=%s operation=%s kind=%s",
+            "Node API operation cancellation request: node=%s operation=%s kind=%s app=%s",
             auth.node_name,
             operation_id,
             None if kind is None else kind.value,
+            target_app_name,
         )
-        context = auth.require_access(request, access_token, app_name=None, scopes=(scope,))
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=target_app_name,
+            scopes=(policy.cancel_scope,),
+        )
+        context = await auth.require_actor_level(context, policy.required_level)
         actor_user_id = auth.require_actor(context).require_actor_user_id()
         try:
             view = await operation_api.cancel_operation(
                 operation_id=operation_id,
                 actor_user_id=actor_user_id,
                 kind=kind,
+                app_name=target_app_name,
             )
         except LookupError as xcp:
             raise http_exception(404, "Operation was not found.") from xcp
@@ -141,17 +176,16 @@ def register_operation_routes(
         return view.to_mapping()
 
 
-def _scope_for_request(
+def _policy_for_request(
     *,
     operation_api: NodeOperationApiService,
     kind: NodeOperationKind | None,
-    cancellation: bool,
+    app_name: str | None,
     http_exception: HttpExceptionFactory,
-) -> NodeApiScope:
+) -> tuple[NodeOperationKindPolicy, str | None]:
     try:
-        if cancellation:
-            return operation_api.cancel_scope_for(kind=kind)
-        return operation_api.read_scope_for(kind=kind)
+        policy = operation_api.policy_for_request(kind=kind, app_name=app_name)
+        return policy, policy.app_name_for_request(app_name)
     except LookupError as xcp:
         raise http_exception(404, "Operation type was not found.") from xcp
     except ValueError as xcp:

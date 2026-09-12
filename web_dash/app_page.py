@@ -47,6 +47,7 @@ from .constants import (
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     _APP_SEARCH_QUERY_PARAM,
     _APP_SECTION_QUERY_PARAM,
+    _BULK_METADATA_OPERATION_POLL_SECONDS,
     _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
     _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
@@ -99,6 +100,9 @@ from .runtime_imports import (
     NodeModPortalVersionEntry,
     NodeModPortalVersionList,
     NodeModSummary,
+    NodeOperationKind,
+    NodeOperationState,
+    NodeOperationView,
     NodeSaveList,
     NodeSettingList,
     NodeSystemSummary,
@@ -124,7 +128,6 @@ from .runtime_imports import (
     required_mod_mutation_level,
     urlencode,
     urlsplit,
-    uuid,
 )
 from .service_base import ModWebServiceSupport
 from .types import (
@@ -4151,6 +4154,7 @@ class ModWebAppPageMixin(
         metadata_ui_container: Card | None = None
         metadata_operation_task: asyncio.Task[None] | None = None
         metadata_operation_id: str | None = None
+        metadata_operation_kind: NodeOperationKind | None = None
         metadata_cancel_requested = False
         metadata_active_status = ""
         available_update_mod_names: set[str] = (
@@ -4168,34 +4172,91 @@ class ModWebAppPageMixin(
                 metadata_status_button.set_visibility(not mod_selection_mode)
                 metadata_status_button.set_enabled(running)
 
-        def start_metadata_operation(
-            action: Callable[[str], Awaitable[None]],
+        def run_metadata_operation(
+            *,
+            kind: NodeOperationKind,
+            start: Callable[[], Awaitable[NodeOperationView]] | None,
+            initial_operation: NodeOperationView | None,
+            on_succeeded: Callable[[str], Awaitable[None]],
         ) -> None:
-            nonlocal metadata_operation_task, metadata_operation_id, metadata_cancel_requested
+            nonlocal metadata_operation_task, metadata_operation_id
+            nonlocal metadata_operation_kind, metadata_cancel_requested
+            if (start is None) is (initial_operation is None):
+                raise ValueError(
+                    "Metadata operation observation requires either a starter or an operation."
+                )
             if metadata_operation_task is not None and not metadata_operation_task.done():
                 ui.notify("A metadata operation is already running.", type="warning")
                 return
-            operation_id = str(uuid.uuid4())
-            metadata_operation_id = operation_id
             metadata_cancel_requested = False
             container = metadata_ui_container
             if container is None:
                 raise RuntimeError("Metadata UI container was not rendered.")
 
             async def run() -> None:
-                nonlocal metadata_operation_task, metadata_operation_id, metadata_cancel_requested
+                nonlocal metadata_operation_task, metadata_operation_id
+                nonlocal metadata_operation_kind, metadata_cancel_requested
+                operation_id: str | None = None
                 with container:
                     try:
-                        await action(operation_id)
+                        if start is None:
+                            operation = initial_operation
+                            if operation is None:
+                                raise RuntimeError("Metadata operation is unavailable.")
+                        else:
+                            set_metadata_status("Starting…", running=True)
+                            operation = await start()
+                        if operation.record.kind is not kind:
+                            raise RuntimeError("Metadata operation returned an unexpected type.")
+                        operation_id = operation.record.operation_id
+                        metadata_operation_id = operation_id
+                        metadata_operation_kind = kind
+                        metadata_cancel_requested = (
+                            metadata_cancel_requested
+                            or operation.record.state
+                            is NodeOperationState.CANCEL_REQUESTED
+                        )
+                        while operation.record.state.active:
+                            set_metadata_status(
+                                operation.record.summary,
+                                running=not metadata_cancel_requested,
+                            )
+                            await asyncio.sleep(_BULK_METADATA_OPERATION_POLL_SECONDS)
+                            operation = await self._node_operation(
+                                model=model,
+                                operation_id=operation_id,
+                                kind=kind,
+                                user=user,
+                            )
+                            metadata_cancel_requested = (
+                                metadata_cancel_requested
+                                or operation.record.state
+                                is NodeOperationState.CANCEL_REQUESTED
+                            )
+                        if operation.record.state is NodeOperationState.SUCCEEDED:
+                            await on_succeeded(operation_id)
+                        elif operation.record.state is NodeOperationState.CANCELLED:
+                            set_metadata_status("Cancelled", running=False)
+                            ui.notify("Metadata operation cancelled.", type="warning")
+                        elif operation.record.state is NodeOperationState.INTERRUPTED:
+                            set_metadata_status("Interrupted", running=False)
+                            ui.notify(
+                                "Metadata operation was interrupted by a node restart.",
+                                type="warning",
+                            )
+                        else:
+                            set_metadata_status("Failed", running=False)
+                            ui.notify(
+                                operation.record.detail or operation.record.summary,
+                                type="negative",
+                            )
                     except asyncio.CancelledError:
                         log.info(
-                            "Bulk mod metadata operation cancelled: node=%s app=%s operation=%s",
+                            "Stopped observing bulk mod metadata operation: node=%s app=%s operation=%s",
                             model.node_name,
                             model.app_name,
                             operation_id,
                         )
-                        set_metadata_status("Cancelled", running=False)
-                        ui.notify("Metadata operation cancelled.", type="warning")
                     except Exception as xcp:
                         log.exception(
                             "Bulk mod metadata background task failed: node=%s app=%s "
@@ -4207,18 +4268,42 @@ class ModWebAppPageMixin(
                         set_metadata_status("Failed", running=False)
                         ui.notify(f"Metadata operation failed: {xcp}", type="negative")
                     finally:
-                        if metadata_operation_id == operation_id:
+                        if operation_id is not None and metadata_operation_id == operation_id:
                             metadata_operation_task = None
                             metadata_operation_id = None
+                            metadata_operation_kind = None
+                            metadata_cancel_requested = False
+                        elif operation_id is None:
+                            metadata_operation_task = None
+                            metadata_operation_kind = None
                             metadata_cancel_requested = False
 
             metadata_operation_task = asyncio.create_task(run())
+
+        def start_metadata_operation(
+            *,
+            kind: NodeOperationKind,
+            start: Callable[[], Awaitable[NodeOperationView]],
+            on_succeeded: Callable[[str], Awaitable[None]],
+        ) -> None:
+            run_metadata_operation(
+                kind=kind,
+                start=start,
+                initial_operation=None,
+                on_succeeded=on_succeeded,
+            )
 
         def cancel_metadata_operation() -> None:
             nonlocal metadata_cancel_requested
             operation_task = metadata_operation_task
             operation_id = metadata_operation_id
-            if operation_task is None or operation_task.done() or operation_id is None:
+            operation_kind = metadata_operation_kind
+            if (
+                operation_task is None
+                or operation_task.done()
+                or operation_id is None
+                or operation_kind is None
+            ):
                 return
             if metadata_cancel_requested:
                 return
@@ -4239,17 +4324,12 @@ class ModWebAppPageMixin(
                     raise RuntimeError("Metadata UI container was not rendered.")
                 with container:
                     try:
-                        cancelled = False
-                        for attempt in range(3):
-                            cancelled = await self._cancel_bulk_mod_metadata(
-                                model=model,
-                                operation_id=operation_id,
-                                user=user,
-                            )
-                            if cancelled or operation_task.done():
-                                break
-                            if attempt < 2:
-                                await asyncio.sleep(0.25)
+                        await self._cancel_node_operation(
+                            model=model,
+                            operation_id=operation_id,
+                            kind=operation_kind,
+                            user=user,
+                        )
                     except Exception as xcp:
                         log.warning(
                             "Bulk mod metadata cancellation failed: node=%s app=%s operation=%s error=%s",
@@ -4263,13 +4343,6 @@ class ModWebAppPageMixin(
                             set_metadata_status(previous_status, running=True)
                         ui.notify(f"Metadata cancellation failed: {xcp}", type="negative")
                         return
-                    if cancelled:
-                        operation_task.cancel()
-                        return
-                    metadata_cancel_requested = False
-                    if not operation_task.done():
-                        set_metadata_status(previous_status, running=True)
-                        ui.notify("Metadata operation could not be cancelled yet.", type="warning")
 
             asyncio.create_task(cancel())
 
@@ -6010,34 +6083,56 @@ class ModWebAppPageMixin(
                         ui.button("Copy", on_click=copy_modlist).classes("mod-list-button")
                         ui.button("Close", on_click=modlist_dialog.close).classes("mod-list-button secondary")
 
-        async def find_bulk_mod_metadata(operation_id: str) -> None:
-            set_metadata_status("Scanning…", running=True)
+        async def start_bulk_mod_metadata_discovery() -> NodeOperationView:
+            ui.notify("Scanning local mod identities and provider metadata…", type="info")
+            operation = await self._start_bulk_mod_metadata_discovery(
+                model=model,
+                user=user,
+            )
             log.info(
                 "Bulk mod metadata discovery started from dashboard: node=%s app=%s operation=%s",
                 model.node_name,
                 model.app_name,
-                operation_id,
+                operation.record.operation_id,
             )
-            try:
-                ui.notify("Scanning local mod identities and provider metadata…", type="info")
-                discovery = await self._discover_bulk_mod_metadata(
-                    model=model,
-                    operation_id=operation_id,
-                    user=user,
-                )
-            except Exception as xcp:
-                if metadata_cancel_requested:
-                    raise asyncio.CancelledError() from xcp
-                log.warning(
-                    "Bulk mod metadata discovery failed: node=%s app=%s operation=%s error=%s",
-                    model.node_name,
-                    model.app_name,
-                    operation_id,
-                    xcp,
-                )
-                set_metadata_status("Failed", running=False)
-                ui.notify(f"Bulk metadata discovery failed: {xcp}", type="negative")
-                return
+            return operation
+
+        async def show_bulk_mod_metadata_apply_result(operation_id: str) -> None:
+            result = await self._bulk_mod_metadata_apply_result(
+                model=model,
+                operation_id=operation_id,
+                user=user,
+            )
+            applied_count = len(result.applied_mod_names)
+            applied_type_count = len(result.applied_type_mod_names)
+            set_metadata_status(
+                f"Applied {applied_count} / {applied_type_count} types",
+                running=False,
+            )
+            log.info(
+                "Bulk mod metadata apply completed in dashboard: node=%s app=%s "
+                "operation=%s applied=%s types_updated=%s",
+                model.node_name,
+                model.app_name,
+                operation_id,
+                applied_count,
+                applied_type_count,
+            )
+            ui.notify(
+                f"Applied exact metadata to {applied_count} mod"
+                f"{'s' if applied_count != 1 else ''}; updated "
+                f"{applied_type_count} type"
+                f"{'s' if applied_type_count != 1 else ''}.",
+                type="positive",
+            )
+            self._guarded_reload(ui=ui)
+
+        async def show_bulk_mod_metadata_discovery(operation_id: str) -> None:
+            discovery = await self._bulk_mod_metadata_discovery_result(
+                model=model,
+                operation_id=operation_id,
+                user=user,
+            )
 
             entry_by_name = {entry.mod_name: entry for entry in discovery.entries}
             rows: list[_BulkMetadataRow] = [
@@ -6169,71 +6264,34 @@ class ModWebAppPageMixin(
                     and row["name"] in apply_suggested_type_mod_names
                 )
 
-                async def apply(apply_operation_id: str) -> None:
-                    set_metadata_status("Applying…", running=True)
+                async def start_apply() -> NodeOperationView:
+                    operation = await self._start_bulk_mod_metadata_apply(
+                        model=model,
+                        discovery_operation_id=operation_id,
+                        mod_names=selected_names,
+                        apply_suggested_type_mod_names=selected_type_names,
+                        user=user,
+                    )
                     log.info(
                         "Bulk mod metadata apply started from dashboard: node=%s app=%s "
                         "operation=%s selected=%s type_selections=%s",
                         model.node_name,
                         model.app_name,
-                        apply_operation_id,
+                        operation.record.operation_id,
                         len(selected_names),
                         len(selected_type_names),
                     )
-                    try:
-                        result = await self._apply_bulk_mod_metadata(
-                            model=model,
-                            operation_id=apply_operation_id,
-                            discovery_operation_id=operation_id,
-                            mod_names=selected_names,
-                            apply_suggested_type_mod_names=selected_type_names,
-                            user=user,
-                        )
-                    except Exception as xcp:
-                        if metadata_cancel_requested:
-                            raise asyncio.CancelledError() from xcp
-                        log.warning(
-                            "Bulk mod metadata apply failed: node=%s app=%s operation=%s error=%s",
-                            model.node_name,
-                            model.app_name,
-                            apply_operation_id,
-                            xcp,
-                        )
-                        set_metadata_status("Apply failed", running=False)
-                        ui.notify(f"Bulk metadata update failed: {xcp}", type="negative")
-                        return
+                    return operation
+
+                async def show_apply_result(apply_operation_id: str) -> None:
                     review_dialog.close()
-                    applied_count = len(result.applied_mod_names)
-                    applied_type_count = len(result.applied_type_mod_names)
-                    set_metadata_status(
-                        f"Applied {applied_count} / {applied_type_count} types",
-                        running=False,
-                    )
-                    log.info(
-                        "Bulk mod metadata apply completed in dashboard: node=%s app=%s "
-                        "operation=%s applied=%s types_updated=%s",
-                        model.node_name,
-                        model.app_name,
-                        apply_operation_id,
-                        applied_count,
-                        applied_type_count,
-                    )
-                    ui.notify(
-                        f"Applied exact metadata to {applied_count} mod"
-                        f"{'s' if applied_count != 1 else ''}; updated "
-                        f"{applied_type_count} type"
-                        f"{'s' if applied_type_count != 1 else ''}.",
-                        type="positive",
-                    )
-                    self._guarded_reload(ui=ui)
+                    await show_bulk_mod_metadata_apply_result(apply_operation_id)
 
-                async def run_apply(operation_id: str) -> None:
-                    await self._run_with_loading_button(
-                        button=apply_button,
-                        action=lambda: apply(operation_id),
-                    )
-
-                start_metadata_operation(run_apply)
+                start_metadata_operation(
+                    kind=NodeOperationKind.MOD_METADATA_APPLY,
+                    start=start_apply,
+                    on_succeeded=show_apply_result,
+                )
 
             with review_dialog:
                 with ui.card().classes(
@@ -6339,6 +6397,94 @@ class ModWebAppPageMixin(
                             ).classes("mod-list-button")
                             apply_button.set_enabled(bool(exact_rows))
             review_dialog.open()
+
+        async def resume_metadata_operation() -> None:
+            """Reattach this page to a server-side metadata operation after navigation."""
+
+            if metadata_operation_task is not None and not metadata_operation_task.done():
+                return
+            try:
+                discovery_operations, apply_operations = await asyncio.gather(
+                    self._node_operations(
+                        model=model,
+                        kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+                        user=user,
+                    ),
+                    self._node_operations(
+                        model=model,
+                        kind=NodeOperationKind.MOD_METADATA_APPLY,
+                        user=user,
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as xcp:
+                log.warning(
+                    "Could not resume bulk mod metadata operation: node=%s app=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    xcp,
+                )
+                return
+            active_operations = tuple(
+                operation
+                for operation in (*discovery_operations, *apply_operations)
+                if operation.record.state.active
+            )
+            if not active_operations:
+                return
+            if metadata_operation_task is not None and not metadata_operation_task.done():
+                return
+            operation = max(
+                active_operations,
+                key=lambda candidate: (
+                    candidate.record.created_at_unix_ms,
+                    candidate.record.operation_id,
+                ),
+            )
+            if len(active_operations) > 1:
+                log.warning(
+                    "Multiple active bulk metadata operations found; observing the newest: "
+                    "node=%s app=%s operation=%s",
+                    model.node_name,
+                    model.app_name,
+                    operation.record.operation_id,
+                )
+            if operation.record.kind is NodeOperationKind.MOD_METADATA_DISCOVERY:
+                on_succeeded = show_bulk_mod_metadata_discovery
+            elif operation.record.kind is NodeOperationKind.MOD_METADATA_APPLY:
+                on_succeeded = show_bulk_mod_metadata_apply_result
+            else:
+                log.warning(
+                    "Unexpected bulk metadata operation type while resuming: node=%s app=%s "
+                    "operation=%s kind=%s",
+                    model.node_name,
+                    model.app_name,
+                    operation.record.operation_id,
+                    operation.record.kind.value,
+                )
+                return
+            run_metadata_operation(
+                kind=operation.record.kind,
+                start=None,
+                initial_operation=operation,
+                on_succeeded=on_succeeded,
+            )
+
+        def schedule_metadata_operation_resume() -> None:
+            if not (
+                is_minecraft_app
+                and self._user_has_level(
+                    user,
+                    required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+                )
+            ):
+                return
+            try:
+                event_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            event_loop.create_task(resume_metadata_operation())
 
         with ui.dialog() as delete_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -6657,7 +6803,13 @@ class ModWebAppPageMixin(
                         else None
                     ),
                     find_metadata=(
-                        (lambda: start_metadata_operation(find_bulk_mod_metadata))
+                        (
+                            lambda: start_metadata_operation(
+                                kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+                                start=start_bulk_mod_metadata_discovery,
+                                on_succeeded=show_bulk_mod_metadata_discovery,
+                            )
+                        )
                         if is_minecraft_app
                         and self._user_has_level(
                             user,
@@ -6693,6 +6845,7 @@ class ModWebAppPageMixin(
                 result_count_label = toolbar_bindings.result_count_label
                 metadata_status_button = toolbar_bindings.metadata_status_button
                 update_count()
+                schedule_metadata_operation_resume()
 
                 if can_upload_mod:
                     self._ensure_mod_list_dropzone_style(ui=ui)

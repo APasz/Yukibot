@@ -325,6 +325,46 @@ class NodeAppInstallStatus:
             finished_at_unix_ms=_optional_timestamp(payload.get("finished_at_unix_ms")),
         )
 
+    @classmethod
+    def from_operation(cls, operation: NodeOperationRecord) -> "NodeAppInstallStatus":
+        """Project a shared app-install operation into the legacy status view."""
+
+        if operation.kind is not NodeOperationKind.APP_INSTALL:
+            raise LookupError("Install job was not found.")
+        if operation.state is NodeOperationState.QUEUED:
+            state = NodeAppInstallState.QUEUED
+        elif operation.state is NodeOperationState.RUNNING:
+            state = (
+                NodeAppInstallState.REGISTERING
+                if operation.phase == NodeAppInstallState.REGISTERING.value
+                else NodeAppInstallState.INSTALLING
+            )
+        elif operation.state is NodeOperationState.CANCEL_REQUESTED:
+            state = NodeAppInstallState.CANCEL_REQUESTED
+        elif operation.state is NodeOperationState.SUCCEEDED:
+            state = NodeAppInstallState.READY
+        elif operation.state is NodeOperationState.FAILED:
+            state = NodeAppInstallState.FAILED
+        elif operation.state is NodeOperationState.CANCELLED:
+            state = NodeAppInstallState.CANCELLED
+        elif operation.state is NodeOperationState.INTERRUPTED:
+            state = NodeAppInstallState.INTERRUPTED
+        else:
+            raise ValueError(f"Unsupported operation state: {operation.state.value}")
+        return cls(
+            job_id=operation.operation_id,
+            node=operation.node_name,
+            scope=operation.subject,
+            state=state,
+            summary=operation.summary,
+            app_name=operation.result_reference,
+            detail=operation.detail,
+            progress_percent=operation.progress_percent,
+            log_lines=operation.log_lines,
+            started_at_unix_ms=operation.started_at_unix_ms,
+            finished_at_unix_ms=operation.finished_at_unix_ms,
+        )
+
     def to_mapping(self) -> dict[str, object]:
         return {
             "job_id": self.job_id,
@@ -906,40 +946,7 @@ class NodeAppInstallerService:
 
     @classmethod
     def _status_from_operation(cls, operation: NodeOperationRecord) -> NodeAppInstallStatus:
-        cls._require_install_operation(operation)
-        if operation.state is NodeOperationState.QUEUED:
-            state = NodeAppInstallState.QUEUED
-        elif operation.state is NodeOperationState.RUNNING:
-            state = (
-                NodeAppInstallState.REGISTERING
-                if operation.phase == NodeAppInstallState.REGISTERING.value
-                else NodeAppInstallState.INSTALLING
-            )
-        elif operation.state is NodeOperationState.CANCEL_REQUESTED:
-            state = NodeAppInstallState.CANCEL_REQUESTED
-        elif operation.state is NodeOperationState.SUCCEEDED:
-            state = NodeAppInstallState.READY
-        elif operation.state is NodeOperationState.FAILED:
-            state = NodeAppInstallState.FAILED
-        elif operation.state is NodeOperationState.CANCELLED:
-            state = NodeAppInstallState.CANCELLED
-        elif operation.state is NodeOperationState.INTERRUPTED:
-            state = NodeAppInstallState.INTERRUPTED
-        else:
-            raise ValueError(f"Unsupported operation state: {operation.state.value}")
-        return NodeAppInstallStatus(
-            job_id=operation.operation_id,
-            node=operation.node_name,
-            scope=operation.subject,
-            state=state,
-            summary=operation.summary,
-            app_name=operation.result_reference,
-            detail=operation.detail,
-            progress_percent=operation.progress_percent,
-            log_lines=operation.log_lines,
-            started_at_unix_ms=operation.started_at_unix_ms,
-            finished_at_unix_ms=operation.finished_at_unix_ms,
-        )
+        return NodeAppInstallStatus.from_operation(operation)
 
     def _finish_promoted_install(
         self,

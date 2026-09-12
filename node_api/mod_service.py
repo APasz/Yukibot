@@ -6,10 +6,9 @@ import asyncio
 import logging
 import tempfile
 import time
-import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Literal, Protocol, TypeVar, cast
+from typing import Literal, Protocol, cast
 
 from fastapi import HTTPException, UploadFile
 
@@ -54,17 +53,21 @@ from apps.factorio.node_api import (
     NodeModUpdateDependency,
 )
 from .app_state import NodeAppRuntimeSummary
+from .operations import (
+    NodeOperationKind,
+    NodeOperationProgress,
+    NodeOperationRecord,
+    NodeOperationResourceConflict,
+    NodeOperationService,
+    NodeOperationState,
+)
 from .upload import persist_upload_to_temp, validated_upload_filename
 
 _MOD_INVENTORY_CACHE_TTL_SECONDS = 5.0
-_BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS = 60.0 * 60.0
-_BULK_METADATA_DISCOVERY_CACHE_MAX_ENTRIES = 64
+_BULK_METADATA_RESULT_TTL_SECONDS = 60 * 60
 
 log = logging.getLogger(__name__)
 traffic_log = logging.getLogger(config.LOGGER_TRAFFIC)
-
-_BulkMetadataOperationResult = TypeVar("_BulkMetadataOperationResult")
-
 
 class ModUploadPaths(Protocol):
     async def __call__(
@@ -88,6 +91,10 @@ def _get_mod_or_404(manager: Mod_Manager, mod_name: str) -> Mod:
         raise _http_exception(404, str(xcp)) from xcp
 
 
+class _BulkMetadataCancellationRequested(Exception):
+    """Raised when a bulk metadata operation reaches a safe stop boundary."""
+
+
 class NodeModService:
     """Owns node-side mod inventory, mutations, uploads, and metadata workflows."""
 
@@ -100,6 +107,7 @@ class NodeModService:
         invalidate_client_pack_content: Callable[[App], None],
         invalidate_mod_inventory: Callable[[str], None],
         upload_mod_paths: ModUploadPaths,
+        operations: NodeOperationService,
     ) -> None:
         self._node_name = node_name
         self._require_acl = require_acl
@@ -107,111 +115,180 @@ class NodeModService:
         self._invalidate_client_pack_content = invalidate_client_pack_content
         self._invalidate_mod_inventory = invalidate_mod_inventory
         self._upload_mod_paths_callback = upload_mod_paths
+        self._operations = operations
         self._inventory_cache: dict[str, mod_contracts.TimedModInventory] = {}
         self._inventory_cache_locks: dict[str, asyncio.Lock] = {}
-        self._bulk_metadata_tasks: dict[tuple[str, uuid.UUID], asyncio.Task[object]] = {}
-        self._bulk_metadata_discoveries: dict[tuple[str, uuid.UUID], mod_contracts.CachedBulkMetadataDiscovery] = {}
 
     def invalidate_inventory(self, app_name: str) -> None:
         self._inventory_cache.pop(app_name.casefold(), None)
 
-    async def run_bulk_metadata_operation(
+    async def start_bulk_metadata_discovery(
         self,
         *,
-        app_name: str,
-        operation_id: uuid.UUID,
-        action: Callable[[], Awaitable[_BulkMetadataOperationResult]],
-    ) -> _BulkMetadataOperationResult:
-        task = asyncio.current_task()
-        if task is None:
-            raise RuntimeError("Bulk metadata operation is not running in an asyncio task.")
-        key = (app_name, operation_id)
-        existing = self._bulk_metadata_tasks.get(key)
-        if existing is not None and not existing.done():
-            raise _http_exception(409, f"Bulk metadata operation {operation_id} is already running.")
-        self._bulk_metadata_tasks[key] = cast(asyncio.Task[object], task)
-        log.info(
-            "Bulk mod metadata operation started: node=%s app=%s operation=%s",
-            self._node_name(),
-            app_name,
-            operation_id,
+        app: App,
+        discovery_request: mod_contracts.NodeBulkLauncherMetadataRequest,
+        actor_user_id: int,
+    ) -> NodeOperationRecord:
+        """Queue a durable discovery operation for the selected app's mods."""
+
+        await self._require_bulk_metadata_permission(actor_user_id)
+        operation = self._create_bulk_metadata_operation(
+            app=app,
+            actor_user_id=actor_user_id,
+            kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+            summary="Queued to scan mod metadata.",
         )
+        task: asyncio.Task[None] | None = None
         try:
-            return await action()
-        except asyncio.CancelledError:
-            log.info(
-                "Bulk mod metadata operation cancelled: node=%s app=%s operation=%s",
-                self._node_name(),
-                app_name,
-                operation_id,
+            task = asyncio.create_task(
+                self._run_bulk_metadata_discovery(
+                    operation_id=operation.operation_id,
+                    app=app,
+                    discovery_request=discovery_request,
+                ),
+                name=f"mod-metadata-discovery-{operation.operation_id}",
+            )
+            self._operations.track_task(
+                operation_id=operation.operation_id,
+                task=cast(asyncio.Task[object], task),
+            )
+        except Exception as xcp:
+            if task is not None:
+                task.cancel()
+            self._operations.finish(
+                operation_id=operation.operation_id,
+                state=NodeOperationState.FAILED,
+                summary="Metadata discovery could not be started.",
+                detail=type(xcp).__name__,
             )
             raise
-        finally:
-            if self._bulk_metadata_tasks.get(key) is task:
-                self._bulk_metadata_tasks.pop(key, None)
+        return operation
 
-    def cancel_bulk_metadata_operation(
+    async def start_bulk_metadata_apply(
         self,
         *,
-        app_name: str,
-        operation_id: uuid.UUID,
-    ) -> bool:
-        task = self._bulk_metadata_tasks.get((app_name, operation_id))
-        if task is None or task.done():
-            return False
-        task.cancel()
-        log.info(
-            "Bulk mod metadata cancellation requested: node=%s app=%s operation=%s",
-            self._node_name(),
-            app_name,
-            operation_id,
-        )
-        return True
+        app: App,
+        apply_request: mod_contracts.NodeBulkLauncherMetadataApplyRequest,
+        actor_user_id: int,
+    ) -> NodeOperationRecord:
+        """Queue a durable apply operation from a retained discovery artifact."""
 
-    def _cache_bulk_metadata_discovery(
-        self,
-        *,
-        app_name: str,
-        operation_id: uuid.UUID,
-        discovery: BulkLauncherMetadataDiscovery,
-    ) -> None:
-        now = time.monotonic()
-        expired_keys = tuple(
-            key
-            for key, cached in self._bulk_metadata_discoveries.items()
-            if now - cached.captured_at_seconds >= _BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS
+        await self._require_bulk_metadata_permission(actor_user_id)
+        discovery = self._bulk_metadata_discovery_for_operation(
+            app=app,
+            operation_id=apply_request.discovery_operation_id,
         )
-        for key in expired_keys:
-            self._bulk_metadata_discoveries.pop(key, None)
-        cache_key = (app_name, operation_id)
-        if (
-            cache_key not in self._bulk_metadata_discoveries
-            and len(self._bulk_metadata_discoveries) >= _BULK_METADATA_DISCOVERY_CACHE_MAX_ENTRIES
-        ):
-            oldest_key = min(
-                self._bulk_metadata_discoveries,
-                key=lambda key: self._bulk_metadata_discoveries[key].captured_at_seconds,
-            )
-            self._bulk_metadata_discoveries.pop(oldest_key, None)
-        self._bulk_metadata_discoveries[cache_key] = mod_contracts.CachedBulkMetadataDiscovery(
-            captured_at_seconds=now,
+        selected_entries = self._selected_bulk_metadata_entries(
             discovery=discovery,
+            apply_request=apply_request,
         )
+        operation = self._create_bulk_metadata_operation(
+            app=app,
+            actor_user_id=actor_user_id,
+            kind=NodeOperationKind.MOD_METADATA_APPLY,
+            summary="Queued to apply mod metadata.",
+        )
+        task: asyncio.Task[None] | None = None
+        try:
+            task = asyncio.create_task(
+                self._run_bulk_metadata_apply(
+                    operation_id=operation.operation_id,
+                    app=app,
+                    apply_request=apply_request,
+                    discovery=discovery,
+                    selected_entries=selected_entries,
+                ),
+                name=f"mod-metadata-apply-{operation.operation_id}",
+            )
+            self._operations.track_task(
+                operation_id=operation.operation_id,
+                task=cast(asyncio.Task[object], task),
+            )
+        except Exception as xcp:
+            if task is not None:
+                task.cancel()
+            self._operations.finish(
+                operation_id=operation.operation_id,
+                state=NodeOperationState.FAILED,
+                summary="Metadata apply could not be started.",
+                detail=type(xcp).__name__,
+            )
+            raise
+        return operation
 
-    def _cached_bulk_metadata_discovery(
+    async def bulk_metadata_discovery_result(
         self,
         *,
-        app_name: str,
-        operation_id: uuid.UUID,
+        app: App,
+        operation_id: str,
+        actor_user_id: int,
     ) -> BulkLauncherMetadataDiscovery:
-        key = (app_name, operation_id)
-        cached = self._bulk_metadata_discoveries.get(key)
-        if cached is None:
-            raise _http_exception(409, "Bulk metadata discovery is unavailable; run discovery again.")
-        if time.monotonic() - cached.captured_at_seconds >= _BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS:
-            self._bulk_metadata_discoveries.pop(key, None)
-            raise _http_exception(409, "Bulk metadata discovery expired; run discovery again.")
-        return cached.discovery
+        """Return the app-owned discovery result after authorization."""
+
+        await self._require_bulk_metadata_permission(actor_user_id)
+        return self._bulk_metadata_discovery_for_operation(
+            app=app,
+            operation_id=operation_id,
+        )
+
+    async def bulk_metadata_apply_result(
+        self,
+        *,
+        app: App,
+        operation_id: str,
+        actor_user_id: int,
+    ) -> mod_contracts.NodeBulkLauncherMetadataApplyResult:
+        """Return the app-owned apply result after authorization."""
+
+        await self._require_bulk_metadata_permission(actor_user_id)
+        operation = self._bulk_metadata_operation_for_app(
+            app=app,
+            operation_id=operation_id,
+            kind=NodeOperationKind.MOD_METADATA_APPLY,
+        )
+        if operation.state is not NodeOperationState.SUCCEEDED:
+            raise _http_exception(409, "Bulk metadata apply has not completed successfully.")
+        try:
+            result = self._operations.get_result(operation_id=operation.operation_id)
+        except LookupError as xcp:
+            raise _http_exception(
+                409,
+                "Bulk metadata apply result is unavailable; run the apply again.",
+            ) from xcp
+        try:
+            return mod_contracts.NodeBulkLauncherMetadataApplyResult.model_validate_json(
+                result.payload_json
+            )
+        except ValueError as xcp:
+            raise RuntimeError("Retained bulk metadata apply result is invalid.") from xcp
+
+    async def cancel_bulk_metadata_operation(
+        self,
+        *,
+        operation_id: str,
+        actor_user_id: int,
+    ) -> None:
+        """Request cancellation through the operation's safe executor path."""
+
+        await self._require_bulk_metadata_permission(actor_user_id)
+        try:
+            operation = self._operations.get(operation_id)
+        except LookupError as xcp:
+            raise LookupError("Bulk metadata operation was not found.") from xcp
+        if operation.kind is NodeOperationKind.MOD_METADATA_DISCOVERY:
+            self._operations.hard_cancel(operation_id=operation.operation_id)
+        elif operation.kind is NodeOperationKind.MOD_METADATA_APPLY:
+            self._operations.request_cancellation(operation_id=operation.operation_id)
+        else:
+            raise LookupError("Bulk metadata operation was not found.")
+
+    def cancel_pending(self) -> None:
+        """Stop local metadata work while preserving partial apply state safely."""
+
+        self._operations.hard_cancel_pending(
+            kind=NodeOperationKind.MOD_METADATA_DISCOVERY
+        )
+        self._operations.cancel_pending(kind=NodeOperationKind.MOD_METADATA_APPLY)
 
     async def build_mod_list(self, app: App) -> mod_contracts.NodeModList:
         inventory, app_stats = await asyncio.gather(
@@ -728,109 +805,135 @@ class NodeModService:
             )
         )
 
-    async def discover_bulk_mod_metadata(
+    async def _run_bulk_metadata_discovery(
         self,
         *,
+        operation_id: str,
         app: App,
         discovery_request: mod_contracts.NodeBulkLauncherMetadataRequest,
-        actor_user_id: int,
-    ) -> BulkLauncherMetadataDiscovery:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        await self._require_acl().perm_check(
-            actor_user_id,
-            mod_contracts.required_mod_mutation_level(mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES),
-        )
-        targets = self._bulk_launcher_metadata_targets(
-            manager=manager,
-            discovery_request=discovery_request,
-        )
+    ) -> None:
         started_at = time.monotonic()
-        log.info(
-            "Bulk mod metadata discovery scanning: node=%s app=%s operation=%s targets=%s",
-            self._node_name(),
-            app.name,
-            discovery_request.operation_id,
-            len(targets),
-        )
         try:
-            discovery = await discover_bulk_launcher_metadata(scope=app.scope, targets=targets)
+            self._operations.begin(
+                operation_id=operation_id,
+                progress=NodeOperationProgress(
+                    summary="Scanning mod metadata.",
+                    phase="discovering",
+                ),
+            )
+            self._raise_if_bulk_metadata_cancellation_requested(operation_id)
+            manager: Mod_Manager = app.has_mod_manager
+            await manager.reload_mods()
+            self._raise_if_bulk_metadata_cancellation_requested(operation_id)
+            targets = self._bulk_launcher_metadata_targets(
+                manager=manager,
+                discovery_request=discovery_request,
+            )
+            self._operations.update_active(
+                operation_id=operation_id,
+                progress=NodeOperationProgress(
+                    summary="Scanning mod metadata.",
+                    phase="discovering",
+                    detail=f"Looking up {len(targets)} mod candidates.",
+                    progress_percent=0.0,
+                ),
+            )
+            discovery = await discover_bulk_launcher_metadata(
+                scope=app.scope,
+                targets=targets,
+            )
+            self._raise_if_bulk_metadata_cancellation_requested(operation_id)
+            exact_count = len(discovery.exact_entries)
+            self._operations.finish(
+                operation_id=operation_id,
+                state=NodeOperationState.SUCCEEDED,
+                summary="Metadata discovery is ready for review.",
+                detail=(
+                    f"Found {exact_count} exact matches from {len(discovery.entries)} candidates."
+                ),
+                progress_percent=100.0,
+                result_payload_json=discovery.model_dump_json(),
+                result_ttl_seconds=_BULK_METADATA_RESULT_TTL_SECONDS,
+            )
+            log.info(
+                "Bulk mod metadata discovery completed: node=%s app=%s operation=%s exact=%s "
+                "unmatched=%s provider_errors=%s elapsed=%.2fs",
+                self._node_name(),
+                app.name,
+                operation_id,
+                exact_count,
+                len(discovery.entries) - exact_count,
+                len(discovery.provider_errors),
+                time.monotonic() - started_at,
+            )
+        except _BulkMetadataCancellationRequested:
+            self._finish_bulk_metadata_discovery_cancelled(operation_id=operation_id)
+            log.info(
+                "Bulk mod metadata discovery cancelled: node=%s app=%s operation=%s elapsed=%.2fs",
+                self._node_name(),
+                app.name,
+                operation_id,
+                time.monotonic() - started_at,
+            )
+        except asyncio.CancelledError:
+            self._finish_bulk_metadata_discovery_cancelled(operation_id=operation_id)
+            raise
+        except HTTPException as xcp:
+            self._finish_bulk_metadata_failure(
+                operation_id=operation_id,
+                summary="Metadata discovery failed.",
+                detail=str(xcp.detail),
+            )
         except (OSError, ValueError) as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
-        exact_count = len(discovery.exact_entries)
-        log.info(
-            "Bulk mod metadata discovery completed: node=%s app=%s operation=%s exact=%s "
-            "unmatched=%s provider_errors=%s elapsed=%.2fs",
-            self._node_name(),
-            app.name,
-            discovery_request.operation_id,
-            exact_count,
-            len(discovery.entries) - exact_count,
-            len(discovery.provider_errors),
-            time.monotonic() - started_at,
-        )
-        self._cache_bulk_metadata_discovery(
-            app_name=app.name,
-            operation_id=discovery_request.operation_id,
-            discovery=discovery,
-        )
-        return discovery
+            self._finish_bulk_metadata_failure(
+                operation_id=operation_id,
+                summary="Metadata discovery failed.",
+                detail=str(xcp),
+            )
+        except Exception as xcp:
+            log.exception(
+                "Bulk mod metadata discovery failed unexpectedly: node=%s app=%s operation=%s",
+                self._node_name(),
+                app.name,
+                operation_id,
+            )
+            self._finish_bulk_metadata_failure(
+                operation_id=operation_id,
+                summary="Metadata discovery failed.",
+                detail=type(xcp).__name__,
+            )
 
-    async def apply_bulk_mod_metadata(
+    async def _run_bulk_metadata_apply(
         self,
         *,
+        operation_id: str,
         app: App,
         apply_request: mod_contracts.NodeBulkLauncherMetadataApplyRequest,
-        actor_user_id: int,
-    ) -> mod_contracts.NodeBulkLauncherMetadataApplyResult:
-        manager: Mod_Manager = app.has_mod_manager
-        await manager.reload_mods()
-        await self._require_acl().perm_check(
-            actor_user_id,
-            mod_contracts.required_mod_mutation_level(mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES),
-        )
-        started_at = time.monotonic()
-        type_selection_names = frozenset(apply_request.apply_suggested_type_mod_names)
-        discovery = self._cached_bulk_metadata_discovery(
-            app_name=app.name,
-            operation_id=apply_request.discovery_operation_id,
-        )
-        entries_by_name = {entry.mod_name: entry for entry in discovery.entries}
-        selected_entries: list[BulkLauncherMetadataEntry] = []
-        for mod_name in apply_request.mod_names:
-            entry = entries_by_name.get(mod_name)
-            if entry is None or entry.status is not BulkLauncherMetadataStatus.EXACT:
-                raise _http_exception(
-                    409,
-                    "Bulk metadata apply selections must be exact matches from the cached discovery.",
-                )
-            selected_entries.append(entry)
-        invalid_type_selection_names = tuple(
-            entry.mod_name
-            for entry in selected_entries
-            if entry.mod_name in type_selection_names
-            and (entry.suggested_mod_type is None or entry.suggested_mod_type is ModType.REGULAR)
-        )
-        if invalid_type_selection_names:
-            raise _http_exception(
-                409,
-                "Bulk metadata type selections require cached non-Regular suggestions: "
-                + ", ".join(invalid_type_selection_names),
-            )
-        log.info(
-            "Bulk mod metadata apply using cached discovery: node=%s app=%s operation=%s "
-            "discovery_operation=%s targets=%s type_selections=%s",
-            self._node_name(),
-            app.name,
-            apply_request.operation_id,
-            apply_request.discovery_operation_id,
-            len(selected_entries),
-            len(type_selection_names),
-        )
+        discovery: BulkLauncherMetadataDiscovery,
+        selected_entries: tuple[BulkLauncherMetadataEntry, ...],
+    ) -> None:
         applied_mod_names: list[str] = []
         applied_type_mod_names: list[str] = []
+        started_at = time.monotonic()
         try:
-            for entry in selected_entries:
+            self._operations.begin(
+                operation_id=operation_id,
+                progress=NodeOperationProgress(
+                    summary="Applying mod metadata.",
+                    phase="applying",
+                    progress_percent=0.0,
+                ),
+            )
+            self._raise_if_bulk_metadata_cancellation_requested(operation_id)
+            manager: Mod_Manager = app.has_mod_manager
+            await manager.reload_mods()
+            self._raise_if_bulk_metadata_cancellation_requested(operation_id)
+            type_selection_names = frozenset(
+                apply_request.apply_suggested_type_mod_names
+            )
+            selected_count = len(selected_entries)
+            for position, entry in enumerate(selected_entries, start=1):
+                self._raise_if_bulk_metadata_cancellation_requested(operation_id)
                 apply_suggested_mod_type = entry.mod_name in type_selection_names
                 await manager.apply_discovered_launcher_metadata(
                     entry.mod_name,
@@ -840,46 +943,259 @@ class NodeModService:
                 applied_mod_names.append(entry.mod_name)
                 if apply_suggested_mod_type:
                     applied_type_mod_names.append(entry.mod_name)
-        except asyncio.CancelledError:
-            log.warning(
-                "Bulk mod metadata apply cancelled: node=%s app=%s operation=%s applied_before_cancel=%s elapsed=%.2fs",
+                self._operations.update_active(
+                    operation_id=operation_id,
+                    progress=NodeOperationProgress(
+                        summary=f"Applied metadata for {entry.friendly_name}.",
+                        phase="applying",
+                        detail=f"Applied {position} of {selected_count} selected mods.",
+                        progress_percent=(position * 100.0) / selected_count,
+                    ),
+                    log_line=f"Applied metadata for {entry.friendly_name}.",
+                )
+                self._raise_if_bulk_metadata_cancellation_requested(operation_id)
+            result = mod_contracts.NodeBulkLauncherMetadataApplyResult(
+                discovery=discovery,
+                applied_mod_names=tuple(applied_mod_names),
+                applied_type_mod_names=tuple(applied_type_mod_names),
+            )
+            self._operations.finish(
+                operation_id=operation_id,
+                state=NodeOperationState.SUCCEEDED,
+                summary="Metadata changes applied.",
+                detail=f"Applied metadata to {len(applied_mod_names)} selected mods.",
+                result_reference=apply_request.discovery_operation_id,
+                progress_percent=100.0,
+                result_payload_json=result.model_dump_json(),
+                result_ttl_seconds=_BULK_METADATA_RESULT_TTL_SECONDS,
+            )
+            traffic_log.info(
+                "Node API bulk mod metadata applied: node=%s app=%s count=%s",
                 self._node_name(),
                 app.name,
-                apply_request.operation_id,
+                len(applied_mod_names),
+            )
+            log.info(
+                "Bulk mod metadata apply completed: node=%s app=%s operation=%s applied=%s "
+                "types_updated=%s elapsed=%.2fs",
+                self._node_name(),
+                app.name,
+                operation_id,
+                len(applied_mod_names),
+                len(applied_type_mod_names),
+                time.monotonic() - started_at,
+            )
+        except _BulkMetadataCancellationRequested:
+            self._finish_bulk_metadata_apply_cancelled(
+                operation_id=operation_id,
+                applied_count=len(applied_mod_names),
+                selected_count=len(selected_entries),
+            )
+            log.info(
+                "Bulk mod metadata apply cancelled: node=%s app=%s operation=%s "
+                "applied_before_cancel=%s elapsed=%.2fs",
+                self._node_name(),
+                app.name,
+                operation_id,
                 len(applied_mod_names),
                 time.monotonic() - started_at,
             )
+        except asyncio.CancelledError:
+            self._finish_bulk_metadata_apply_cancelled(
+                operation_id=operation_id,
+                applied_count=len(applied_mod_names),
+                selected_count=len(selected_entries),
+            )
             raise
+        except HTTPException as xcp:
+            self._finish_bulk_metadata_failure(
+                operation_id=operation_id,
+                summary="Metadata apply failed.",
+                detail=str(xcp.detail),
+            )
         except (OSError, ValueError) as xcp:
-            raise _http_exception(409, str(xcp)) from xcp
+            self._finish_bulk_metadata_failure(
+                operation_id=operation_id,
+                summary="Metadata apply failed.",
+                detail=str(xcp),
+            )
+        except Exception as xcp:
+            log.exception(
+                "Bulk mod metadata apply failed unexpectedly: node=%s app=%s operation=%s",
+                self._node_name(),
+                app.name,
+                operation_id,
+            )
+            self._finish_bulk_metadata_failure(
+                operation_id=operation_id,
+                summary="Metadata apply failed.",
+                detail=type(xcp).__name__,
+            )
+        finally:
+            if applied_mod_names:
+                self._invalidate_client_pack_content(app)
+                self._invalidate_mod_inventory(app.name)
 
-        if applied_mod_names:
-            self._invalidate_client_pack_content(app)
-            self._invalidate_mod_inventory(app.name)
-        traffic_log.info(
-            "Node API bulk mod metadata applied: node=%s app=%s count=%s actor=%s",
-            self._node_name(),
-            app.name,
-            len(applied_mod_names),
+    async def _require_bulk_metadata_permission(self, actor_user_id: int) -> None:
+        await self._require_acl().perm_check(
             actor_user_id,
+            mod_contracts.required_mod_mutation_level(
+                mod_contracts.NodeModMutationAction.UPDATE_PROPERTIES
+            ),
         )
-        log.info(
-            "Bulk mod metadata apply completed: node=%s app=%s operation=%s applied=%s types_updated=%s elapsed=%.2fs",
-            self._node_name(),
-            app.name,
-            apply_request.operation_id,
-            len(applied_mod_names),
-            len(applied_type_mod_names),
-            time.monotonic() - started_at,
+
+    def _create_bulk_metadata_operation(
+        self,
+        *,
+        app: App,
+        actor_user_id: int,
+        kind: NodeOperationKind,
+        summary: str,
+    ) -> NodeOperationRecord:
+        try:
+            return self._operations.create(
+                kind=kind,
+                node_name=self._node_name(),
+                subject=app.friendly,
+                requested_by_user_id=actor_user_id,
+                app_name=app.name,
+                progress=NodeOperationProgress(summary=summary),
+                resource_keys=(f"mod-metadata:{app.name.casefold()}",),
+            )
+        except NodeOperationResourceConflict as xcp:
+            raise _http_exception(
+                409,
+                "Another bulk metadata operation is already running for this app.",
+            ) from xcp
+
+    def _bulk_metadata_operation_for_app(
+        self,
+        *,
+        app: App,
+        operation_id: str,
+        kind: NodeOperationKind,
+    ) -> NodeOperationRecord:
+        try:
+            operation = self._operations.get(operation_id)
+        except LookupError as xcp:
+            raise _http_exception(404, "Bulk metadata operation was not found.") from xcp
+        if (
+            operation.kind is not kind
+            or operation.app_name is None
+            or operation.app_name.casefold() != app.name.casefold()
+        ):
+            raise _http_exception(404, "Bulk metadata operation was not found.")
+        return operation
+
+    def _bulk_metadata_discovery_for_operation(
+        self,
+        *,
+        app: App,
+        operation_id: str,
+    ) -> BulkLauncherMetadataDiscovery:
+        operation = self._bulk_metadata_operation_for_app(
+            app=app,
+            operation_id=operation_id,
+            kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
         )
-        self._bulk_metadata_discoveries.pop(
-            (app.name, apply_request.discovery_operation_id),
-            None,
+        if operation.state is not NodeOperationState.SUCCEEDED:
+            raise _http_exception(
+                409,
+                "Bulk metadata discovery has not completed successfully.",
+            )
+        try:
+            result = self._operations.get_result(operation_id=operation.operation_id)
+        except LookupError as xcp:
+            raise _http_exception(
+                409,
+                "Bulk metadata discovery is unavailable; run discovery again.",
+            ) from xcp
+        try:
+            return BulkLauncherMetadataDiscovery.model_validate_json(result.payload_json)
+        except ValueError as xcp:
+            raise RuntimeError(
+                "Retained bulk metadata discovery result is invalid."
+            ) from xcp
+
+    @staticmethod
+    def _selected_bulk_metadata_entries(
+        *,
+        discovery: BulkLauncherMetadataDiscovery,
+        apply_request: mod_contracts.NodeBulkLauncherMetadataApplyRequest,
+    ) -> tuple[BulkLauncherMetadataEntry, ...]:
+        type_selection_names = frozenset(
+            apply_request.apply_suggested_type_mod_names
         )
-        return mod_contracts.NodeBulkLauncherMetadataApplyResult(
-            discovery=discovery,
-            applied_mod_names=tuple(applied_mod_names),
-            applied_type_mod_names=tuple(applied_type_mod_names),
+        entries_by_name = {entry.mod_name: entry for entry in discovery.entries}
+        selected_entries: list[BulkLauncherMetadataEntry] = []
+        for mod_name in apply_request.mod_names:
+            entry = entries_by_name.get(mod_name)
+            if entry is None or entry.status is not BulkLauncherMetadataStatus.EXACT:
+                raise _http_exception(
+                    409,
+                    "Bulk metadata apply selections must be exact matches from the discovery.",
+                )
+            selected_entries.append(entry)
+        invalid_type_selection_names = tuple(
+            entry.mod_name
+            for entry in selected_entries
+            if entry.mod_name in type_selection_names
+            and (
+                entry.suggested_mod_type is None
+                or entry.suggested_mod_type is ModType.REGULAR
+            )
+        )
+        if invalid_type_selection_names:
+            raise _http_exception(
+                409,
+                "Bulk metadata type selections require non-Regular suggestions: "
+                + ", ".join(invalid_type_selection_names),
+            )
+        return tuple(selected_entries)
+
+    def _raise_if_bulk_metadata_cancellation_requested(
+        self,
+        operation_id: str,
+    ) -> None:
+        if self._operations.cancellation_requested(operation_id=operation_id):
+            raise _BulkMetadataCancellationRequested
+
+    def _finish_bulk_metadata_discovery_cancelled(self, *, operation_id: str) -> None:
+        self._operations.finish(
+            operation_id=operation_id,
+            state=NodeOperationState.CANCELLED,
+            summary="Metadata discovery cancelled.",
+        )
+
+    def _finish_bulk_metadata_apply_cancelled(
+        self,
+        *,
+        operation_id: str,
+        applied_count: int,
+        selected_count: int,
+    ) -> None:
+        self._operations.finish(
+            operation_id=operation_id,
+            state=NodeOperationState.CANCELLED,
+            summary="Metadata apply cancelled.",
+            detail=(
+                f"Applied {applied_count} of {selected_count} selected metadata entries "
+                "before cancellation."
+            ),
+        )
+
+    def _finish_bulk_metadata_failure(
+        self,
+        *,
+        operation_id: str,
+        summary: str,
+        detail: str,
+    ) -> None:
+        self._operations.finish(
+            operation_id=operation_id,
+            state=NodeOperationState.FAILED,
+            summary=summary,
+            detail=detail,
         )
 
     async def resolve_mod_launcher_metadata(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TypeAlias
 
 from _security import Power_Level
@@ -20,6 +21,13 @@ _CANCELLABLE_OPERATION_STATES: frozenset[NodeOperationState] = frozenset(
 )
 
 
+class NodeOperationTargetScope(StrEnum):
+    """The resource boundary an operation kind is authorised against."""
+
+    NODE = "node"
+    APP = "app"
+
+
 @dataclass(frozen=True, slots=True)
 class NodeOperationKindPolicy:
     """The API visibility and cancellation behaviour for one operation kind."""
@@ -29,11 +37,32 @@ class NodeOperationKindPolicy:
     read_scope: NodeApiScope
     cancel_scope: NodeApiScope
     required_level: Power_Level
+    target_scope: NodeOperationTargetScope = NodeOperationTargetScope.NODE
     cancellation_handler: NodeOperationCancellationHandler | None = None
 
     def __post_init__(self) -> None:
         if not self.kind_label.strip():
             raise ValueError("Operation kind label must not be blank.")
+        try:
+            target_scope = NodeOperationTargetScope(self.target_scope)
+        except (TypeError, ValueError) as xcp:
+            raise ValueError("Operation target scope is invalid.") from xcp
+        object.__setattr__(self, "target_scope", target_scope)
+
+    def app_name_for_request(self, app_name: str | None) -> str | None:
+        """Validate and normalize the app boundary supplied by an API request."""
+
+        if self.target_scope is NodeOperationTargetScope.NODE:
+            if app_name is not None:
+                raise ValueError(
+                    f"{self.kind_label} operations are node-scoped and do not accept an app name."
+                )
+            return None
+        if app_name is None:
+            raise ValueError(f"{self.kind_label} operations require an app name.")
+        if not (normalised_app_name := app_name.strip()):
+            raise ValueError("Operation app name must not be blank.")
+        return normalised_app_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,43 +119,71 @@ class NodeOperationApiService:
         self._operations = operations
         self._policies_by_kind = policies_by_kind
 
-    def read_scope_for(self, *, kind: NodeOperationKind | None) -> NodeApiScope:
+    def read_scope_for(
+        self,
+        *,
+        kind: NodeOperationKind | None,
+        app_name: str | None = None,
+    ) -> NodeApiScope:
         """Return the access scope needed before reading the requested records."""
 
-        return self._scope_for(kind=kind, cancellation=False)
+        return self.policy_for_request(kind=kind, app_name=app_name).read_scope
 
-    def cancel_scope_for(self, *, kind: NodeOperationKind | None) -> NodeApiScope:
+    def cancel_scope_for(
+        self,
+        *,
+        kind: NodeOperationKind | None,
+        app_name: str | None = None,
+    ) -> NodeApiScope:
         """Return the access scope needed before requesting cancellation."""
 
-        return self._scope_for(kind=kind, cancellation=True)
+        return self.policy_for_request(kind=kind, app_name=app_name).cancel_scope
 
     def list_operations(
         self,
         *,
         kind: NodeOperationKind | None = None,
+        app_name: str | None = None,
         limit: int | None = None,
     ) -> tuple[NodeOperationView, ...]:
         """List registered operations newest first without their log bodies."""
 
-        if kind is not None:
-            self.policy_for(kind)
+        policy = self.policy_for_request(kind=kind, app_name=app_name)
+        target_app_name = policy.app_name_for_request(app_name)
         records = self._operations.list_records(
-            kind=kind,
+            kind=policy.kind,
+            app_name=target_app_name,
             limit=limit,
             include_log_lines=False,
         )
-        return tuple(self._view_for(record) for record in records)
+        return tuple(
+            self._view_for(record)
+            for record in records
+            if self._matches_target(
+                record=record,
+                policy=policy,
+                app_name=target_app_name,
+            )
+        )
 
     def get_operation(
         self,
         *,
         operation_id: str,
         kind: NodeOperationKind | None = None,
+        app_name: str | None = None,
     ) -> NodeOperationView:
         """Return one registered operation with its retained log lines."""
 
+        policy = self.policy_for_request(kind=kind, app_name=app_name)
+        target_app_name = policy.app_name_for_request(app_name)
         record = self._operations.get(operation_id)
-        self._require_matching_kind(record=record, kind=kind)
+        self._require_matching_kind(record=record, kind=policy.kind)
+        self._require_matching_target(
+            record=record,
+            policy=policy,
+            app_name=target_app_name,
+        )
         return self._view_for(record)
 
     async def cancel_operation(
@@ -135,12 +192,19 @@ class NodeOperationApiService:
         operation_id: str,
         actor_user_id: int,
         kind: NodeOperationKind | None = None,
+        app_name: str | None = None,
     ) -> NodeOperationView:
         """Delegate cancellation to the operation kind's safe executor path."""
 
+        policy = self.policy_for_request(kind=kind, app_name=app_name)
+        target_app_name = policy.app_name_for_request(app_name)
         record = self._operations.get(operation_id)
-        self._require_matching_kind(record=record, kind=kind)
-        policy = self.policy_for(record.kind)
+        self._require_matching_kind(record=record, kind=policy.kind)
+        self._require_matching_target(
+            record=record,
+            policy=policy,
+            app_name=target_app_name,
+        )
         handler = policy.cancellation_handler
         if handler is None:
             raise ValueError(f"{policy.kind_label} operations cannot be cancelled.")
@@ -164,24 +228,24 @@ class NodeOperationApiService:
                 f"Operation type {kind.value} is not exposed through the operations API."
             ) from xcp
 
-    def _scope_for(
+    def policy_for_request(
         self,
         *,
         kind: NodeOperationKind | None,
-        cancellation: bool,
-    ) -> NodeApiScope:
+        app_name: str | None,
+    ) -> NodeOperationKindPolicy:
+        """Return the policy applicable before looking up an operation record."""
+
         if kind is not None:
             policy = self.policy_for(kind)
-            return policy.cancel_scope if cancellation else policy.read_scope
-        scopes = {
-            policy.cancel_scope if cancellation else policy.read_scope
-            for policy in self._policies_by_kind.values()
-        }
-        if len(scopes) != 1:
+        elif len(self._policies_by_kind) == 1:
+            policy = next(iter(self._policies_by_kind.values()))
+        else:
             raise ValueError(
-                "Operation kind is required when exposed operation types use different access scopes."
+                "Operation kind is required when multiple operation types are exposed."
             )
-        return next(iter(scopes))
+        policy.app_name_for_request(app_name)
+        return policy
 
     def _view_for(self, record: NodeOperationRecord) -> NodeOperationView:
         policy = self.policy_for(record.kind)
@@ -203,10 +267,46 @@ class NodeOperationApiService:
         if kind is not None and record.kind is not kind:
             raise LookupError("Operation was not found.")
 
+    @staticmethod
+    def _matches_target(
+        *,
+        record: NodeOperationRecord,
+        policy: NodeOperationKindPolicy,
+        app_name: str | None,
+    ) -> bool:
+        try:
+            NodeOperationApiService._require_matching_target(
+                record=record,
+                policy=policy,
+                app_name=app_name,
+            )
+        except LookupError:
+            return False
+        return True
+
+    @staticmethod
+    def _require_matching_target(
+        *,
+        record: NodeOperationRecord,
+        policy: NodeOperationKindPolicy,
+        app_name: str | None,
+    ) -> None:
+        if policy.target_scope is NodeOperationTargetScope.NODE:
+            if record.app_name is not None:
+                raise LookupError("Operation was not found.")
+            return
+        if (
+            app_name is None
+            or record.app_name is None
+            or record.app_name.casefold() != app_name.casefold()
+        ):
+            raise LookupError("Operation was not found.")
+
 
 __all__: tuple[str, ...] = (
     "NodeOperationApiService",
     "NodeOperationCancellationHandler",
     "NodeOperationKindPolicy",
+    "NodeOperationTargetScope",
     "NodeOperationView",
 )

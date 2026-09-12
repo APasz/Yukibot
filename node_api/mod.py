@@ -7,7 +7,6 @@ the large node API composition module.
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -344,7 +343,6 @@ class NodeModPageResolveRequest(NodeLauncherProviderSelectionRequest):
 
 
 class NodeBulkLauncherMetadataRequest(BaseModel):
-    operation_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     mod_names: tuple[str, ...] = ()
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -366,7 +364,7 @@ class NodeBulkLauncherMetadataRequest(BaseModel):
 
 
 class NodeBulkLauncherMetadataApplyRequest(NodeBulkLauncherMetadataRequest):
-    discovery_operation_id: uuid.UUID
+    discovery_operation_id: str = Field(min_length=1)
     apply_suggested_type_mod_names: tuple[str, ...] = ()
 
     @field_validator("apply_suggested_type_mod_names", mode="before")
@@ -378,6 +376,8 @@ class NodeBulkLauncherMetadataApplyRequest(NodeBulkLauncherMetadataRequest):
 
     @model_validator(mode="after")
     def validate_type_selections(self) -> NodeBulkLauncherMetadataApplyRequest:
+        if not self.mod_names:
+            raise ValueError("bulk metadata apply requires at least one selected mod")
         selected_names = self.apply_suggested_type_mod_names
         if any(not name for name in selected_names):
             raise ValueError("bulk launcher metadata type selection names must not be blank")
@@ -556,12 +556,6 @@ class TimedModInventory:
     captured_at_seconds: float
     summary: NodeModSummary
     mods: tuple[NodeModEntry, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class CachedBulkMetadataDiscovery:
-    captured_at_seconds: float
-    discovery: BulkLauncherMetadataDiscovery
 
 
 @dataclass(frozen=True, slots=True)

@@ -35,7 +35,6 @@ from apps._app import (
 )
 from apps._config import (
     AppTitleFont,
-    BulkLauncherMetadataDiscovery,
     ClientPackConfig,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
@@ -167,7 +166,6 @@ from node_api.app_state import (
 from node_api.app_installer import NodeAppInstallScopeOption, NodeAppInstallerSettingsState
 from node_api.console import NodeConsoleActionEntry, NodeConsoleActionParameter
 from node_api.mod import (
-    NodeBulkLauncherMetadataApplyResult,
     NodeModEntry,
     NodeModList,
     NodeModMutationAction,
@@ -175,6 +173,8 @@ from node_api.mod import (
     NodeModSummary,
     NodeModUploadBatchResult,
 )
+from node_api.operation_service import NodeOperationView
+from node_api.operations import NodeOperationKind, NodeOperationRecord, NodeOperationState
 from node_api.route_contracts import DiscordServiceState
 from node_auth import NodeApiScope, verify_node_token
 from relay_notices import (
@@ -12475,15 +12475,54 @@ class ModWebTests(unittest.TestCase):
         ui = FakeUi()
         rendered_mod_names: list[str] = []
         remote_json = AsyncMock(return_value={"changelog": "Persisted after Save."})
+        metadata_operation_id = "c50f39cb-acde-441f-ab92-3fd507c7b290"
+        metadata_operation = NodeOperationView(
+            record=NodeOperationRecord(
+                operation_id=metadata_operation_id,
+                kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+                node_name="yuki",
+                subject="Minecraft Alpha",
+                state=NodeOperationState.RUNNING,
+                summary="Scanning…",
+                requested_by_user_id=42,
+                app_name="minecraft_alpha",
+                created_at_unix_ms=1,
+                started_at_unix_ms=2,
+            ),
+            kind_label="Mod metadata discovery",
+            cancellable=True,
+        )
+        cancelled_metadata_operation = NodeOperationView(
+            record=replace(
+                metadata_operation.record,
+                state=NodeOperationState.CANCELLED,
+                summary="Metadata discovery cancelled.",
+                finished_at_unix_ms=3,
+            ),
+            kind_label=metadata_operation.kind_label,
+            cancellable=False,
+        )
+        cancellation_requested = asyncio.Event()
 
-        async def wait_for_metadata_cancellation(
-            **_kwargs: object,
-        ) -> BulkLauncherMetadataDiscovery:
-            await asyncio.Event().wait()
-            return BulkLauncherMetadataDiscovery()
+        async def wait_for_metadata_cancellation(**_kwargs: object) -> NodeOperationView:
+            await cancellation_requested.wait()
+            return cancelled_metadata_operation
 
-        discover_bulk_metadata = AsyncMock(side_effect=wait_for_metadata_cancellation)
-        cancel_bulk_metadata = AsyncMock(return_value=True)
+        async def cancel_metadata_operation(**_kwargs: object) -> NodeOperationView:
+            cancellation_requested.set()
+            return NodeOperationView(
+                record=replace(
+                    metadata_operation.record,
+                    state=NodeOperationState.CANCEL_REQUESTED,
+                    summary="Cancellation requested.",
+                ),
+                kind_label=metadata_operation.kind_label,
+                cancellable=False,
+            )
+
+        start_bulk_metadata = AsyncMock(return_value=metadata_operation)
+        node_operation = AsyncMock(side_effect=wait_for_metadata_cancellation)
+        cancel_node_operation = AsyncMock(side_effect=cancel_metadata_operation)
         set_changelog_draft = Mock()
         get_changelog_draft = Mock(side_effect=[None, "Fresh shared draft."])
 
@@ -12492,13 +12531,22 @@ class ModWebTests(unittest.TestCase):
             patch.object(service, "_remote_json_async", new=remote_json),
             patch.object(
                 service,
-                "_discover_bulk_mod_metadata",
-                new=discover_bulk_metadata,
+                "_start_bulk_mod_metadata_discovery",
+                new=start_bulk_metadata,
             ),
             patch.object(
                 service,
-                "_cancel_bulk_mod_metadata",
-                new=cancel_bulk_metadata,
+                "_node_operation",
+                new=node_operation,
+            ),
+            patch.object(
+                service,
+                "_cancel_node_operation",
+                new=cancel_node_operation,
+            ),
+            patch(
+                "web_dash.app_page._BULK_METADATA_OPERATION_POLL_SECONDS",
+                0.0,
             ),
             patch.object(
                 service._backend,
@@ -12720,10 +12768,14 @@ class ModWebTests(unittest.TestCase):
             self.assertIn("mod-toolbar-status-button", metadata_status_button.class_value or "")
             self.assertTrue(metadata_status_button.visible)
             self.assertFalse(metadata_status_button.enabled)
-            discovery_operation_id = discover_bulk_metadata.await_args.kwargs["operation_id"]
-            cancel_bulk_metadata.assert_awaited_once_with(
+            start_bulk_metadata.assert_awaited_once_with(
                 model=model,
-                operation_id=discovery_operation_id,
+                user=user,
+            )
+            cancel_node_operation.assert_awaited_once_with(
+                model=model,
+                operation_id=metadata_operation_id,
+                kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
                 user=user,
             )
             self.assertIsNotNone(ui.modlist_format_select)
@@ -13785,10 +13837,24 @@ class ModWebTests(unittest.TestCase):
             },
         )
 
-    def test_bulk_metadata_discovery_uses_bulk_node_endpoint(self) -> None:
+    def test_bulk_metadata_discovery_starts_a_durable_operation(self) -> None:
         service = ModWebService()
         operation_id = "c50f39cb-acde-441f-ab92-3fd507c7b290"
-        expected = BulkLauncherMetadataDiscovery()
+        expected = NodeOperationView(
+            record=NodeOperationRecord(
+                operation_id=operation_id,
+                kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+                node_name="yuki",
+                subject="Minecraft Alpha",
+                state=NodeOperationState.QUEUED,
+                summary="Queued to scan mod metadata.",
+                requested_by_user_id=42,
+                app_name="minecraft_alpha",
+                created_at_unix_ms=1,
+            ),
+            kind_label="Mod metadata discovery",
+            cancellable=True,
+        )
         model = cast(
             ModWebPageModel,
             cast(object, SimpleNamespace(node_name="yuki", app_name="minecraft_alpha")),
@@ -13809,13 +13875,12 @@ class ModWebTests(unittest.TestCase):
             patch.object(
                 service,
                 "_remote_json_async",
-                new=AsyncMock(return_value=expected.model_dump(mode="json")),
+                new=AsyncMock(return_value=expected.to_mapping()),
             ) as remote_json,
         ):
             result = asyncio.run(
-                service._discover_bulk_mod_metadata(
+                service._start_bulk_mod_metadata_discovery(
                     model=model,
-                    operation_id=operation_id,
                     user=user,
                 )
             )
@@ -13828,8 +13893,7 @@ class ModWebTests(unittest.TestCase):
             scopes=(NodeApiScope.MODS_WRITE,),
             user=user,
             method="POST",
-            json_payload={"operation_id": operation_id, "mod_names": []},
-            timeout=600.0,
+            json_payload={"mod_names": []},
         )
 
     def test_bulk_metadata_apply_sends_selected_mod_names_and_type_opt_ins(
@@ -13838,9 +13902,20 @@ class ModWebTests(unittest.TestCase):
         service = ModWebService()
         operation_id = "c50f39cb-acde-441f-ab92-3fd507c7b291"
         discovery_operation_id = "c50f39cb-acde-441f-ab92-3fd507c7b290"
-        expected = NodeBulkLauncherMetadataApplyResult(
-            discovery=BulkLauncherMetadataDiscovery(),
-            applied_mod_names=("alpha.jar",),
+        expected = NodeOperationView(
+            record=NodeOperationRecord(
+                operation_id=operation_id,
+                kind=NodeOperationKind.MOD_METADATA_APPLY,
+                node_name="yuki",
+                subject="Minecraft Alpha",
+                state=NodeOperationState.QUEUED,
+                summary="Queued to apply mod metadata.",
+                requested_by_user_id=42,
+                app_name="minecraft_alpha",
+                created_at_unix_ms=1,
+            ),
+            kind_label="Mod metadata apply",
+            cancellable=True,
         )
         model = cast(
             ModWebPageModel,
@@ -13862,13 +13937,12 @@ class ModWebTests(unittest.TestCase):
             patch.object(
                 service,
                 "_remote_json_async",
-                new=AsyncMock(return_value=expected.model_dump(mode="json")),
+                new=AsyncMock(return_value=expected.to_mapping()),
             ) as remote_json,
         ):
             result = asyncio.run(
-                service._apply_bulk_mod_metadata(
+                service._start_bulk_mod_metadata_apply(
                     model=model,
-                    operation_id=operation_id,
                     discovery_operation_id=discovery_operation_id,
                     mod_names=("alpha.jar",),
                     apply_suggested_type_mod_names=("alpha.jar",),
@@ -13885,12 +13959,10 @@ class ModWebTests(unittest.TestCase):
             user=user,
             method="POST",
             json_payload={
-                "operation_id": operation_id,
                 "discovery_operation_id": discovery_operation_id,
                 "mod_names": ["alpha.jar"],
                 "apply_suggested_type_mod_names": ["alpha.jar"],
             },
-            timeout=600.0,
         )
 
     def test_bulk_metadata_cancel_uses_operation_endpoint(self) -> None:
@@ -13917,27 +13989,103 @@ class ModWebTests(unittest.TestCase):
                 service,
                 "_remote_json_async",
                 new=AsyncMock(
-                    return_value={"operation_id": operation_id, "cancelled": True}
+                    return_value=NodeOperationView(
+                        record=NodeOperationRecord(
+                            operation_id=operation_id,
+                            kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+                            node_name="yuki",
+                            subject="Minecraft Alpha",
+                            state=NodeOperationState.CANCEL_REQUESTED,
+                            summary="Cancellation requested.",
+                            requested_by_user_id=42,
+                            app_name="minecraft_alpha",
+                            created_at_unix_ms=1,
+                        ),
+                        kind_label="Mod metadata discovery",
+                        cancellable=False,
+                    ).to_mapping()
                 ),
             ) as remote_json,
         ):
             cancelled = asyncio.run(
-                service._cancel_bulk_mod_metadata(
+                service._cancel_node_operation(
                     model=model,
                     operation_id=operation_id,
+                    kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
                     user=user,
                 )
             )
 
-        self.assertTrue(cancelled)
+        self.assertEqual(cancelled.record.state, NodeOperationState.CANCEL_REQUESTED)
         remote_json.assert_awaited_once_with(
             node=node,
             app_name="minecraft_alpha",
-            path=f"/apps/minecraft_alpha/mods/metadata/{operation_id}/cancel",
+            path=(
+                f"/operations/{operation_id}/cancel?"
+                "kind=mod_metadata_discovery&app_name=minecraft_alpha"
+            ),
             scopes=(NodeApiScope.MODS_WRITE,),
             user=user,
             method="POST",
             json_payload={},
+        )
+
+    def test_bulk_metadata_operation_list_uses_app_scoped_endpoint(self) -> None:
+        service = ModWebService()
+        operation_id = "c50f39cb-acde-441f-ab92-3fd507c7b293"
+        expected = NodeOperationView(
+            record=NodeOperationRecord(
+                operation_id=operation_id,
+                kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+                node_name="yuki",
+                subject="Minecraft Alpha",
+                state=NodeOperationState.RUNNING,
+                summary="Scanning mod metadata.",
+                requested_by_user_id=42,
+                app_name="minecraft_alpha",
+                created_at_unix_ms=1,
+                started_at_unix_ms=2,
+            ),
+            kind_label="Mod metadata discovery",
+            cancellable=True,
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="minecraft_alpha")),
+        )
+        node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="https://yuki.example/api/node",
+            api_url="/api/node-proxy/yuki/apps",
+            is_current=True,
+        )
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_json_async",
+                new=AsyncMock(return_value={"operations": [expected.to_mapping()]}),
+            ) as remote_json,
+        ):
+            operations = asyncio.run(
+                service._node_operations(
+                    model=model,
+                    kind=NodeOperationKind.MOD_METADATA_DISCOVERY,
+                    user=user,
+                )
+            )
+
+        self.assertEqual(operations, (expected,))
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="minecraft_alpha",
+            path="/operations?kind=mod_metadata_discovery&app_name=minecraft_alpha",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
         )
 
     def test_render_saves_editor_uses_direct_upload_with_relay_fallback_and_settings_search_styling(
