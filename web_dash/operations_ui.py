@@ -152,15 +152,11 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         all_nodes: tuple[ModWebNodeLink, ...],
         portal: bool,
     ) -> tuple[ModWebNodeLink, ...]:
-        """Choose authoritative live sources; Portal never uses its own operation database."""
+        """Choose authoritative live operation sources for this view."""
 
         if not portal:
             return (node,)
-        return tuple(
-            candidate
-            for candidate in all_nodes
-            if candidate.node_name.casefold() != node.node_name.casefold()
-        )
+        return all_nodes
 
     @staticmethod
     def _operation_rows(
@@ -307,7 +303,7 @@ class ModWebOperationsMixin(ModWebServiceSupport):
             self._render_flat_tab_empty_state(
                 ui=ui,
                 title="No operation nodes",
-                description="Portal has no reachable execution nodes configured.",
+                description="No operation-capable nodes are configured.",
             )
             return
 

@@ -82,20 +82,18 @@ class _CancellationHarness(ModWebOperationsMixin):
 
 
 class OperationsUiCheck(unittest.TestCase):
-    def test_portal_aggregation_orders_and_filters_authoritative_node_snapshots(
+    def test_portal_aggregation_merges_local_and_remote_authoritative_node_snapshots(
         self,
     ) -> None:
         alpha = _node("alpha")
         beta = _node("beta")
         portal = _node("portal")
-        self.assertEqual(
-            ModWebOperationsMixin._operation_source_nodes(
-                node=portal,
-                all_nodes=(portal, alpha, beta),
-                portal=True,
-            ),
-            (alpha, beta),
+        portal_sources = ModWebOperationsMixin._operation_source_nodes(
+            node=portal,
+            all_nodes=(portal, alpha, beta),
+            portal=True,
         )
+        self.assertEqual(portal_sources, (portal, alpha, beta))
         self.assertEqual(
             ModWebOperationsMixin._operation_source_nodes(
                 node=alpha,
@@ -103,6 +101,12 @@ class OperationsUiCheck(unittest.TestCase):
                 portal=False,
             ),
             (alpha,),
+        )
+        portal_active = _operation(
+            operation_id="portal-active",
+            node_name="portal",
+            state=NodeOperationState.RUNNING,
+            created_at_unix_ms=40,
         )
         completed = _operation(
             operation_id="completed",
@@ -126,8 +130,12 @@ class OperationsUiCheck(unittest.TestCase):
             app_name="minecraft_alpha",
         )
         rows = ModWebOperationsMixin._operation_rows(
-            nodes=(alpha, beta),
+            nodes=portal_sources,
             snapshots_by_node={
+                "portal": ModWebNodeOperationSnapshot(
+                    node_name="portal",
+                    operations=(portal_active,),
+                ),
                 "alpha": ModWebNodeOperationSnapshot(
                     node_name="alpha",
                     operations=(completed, alpha_active),
@@ -138,6 +146,7 @@ class OperationsUiCheck(unittest.TestCase):
                 ),
             },
             availability_by_node={
+                "portal": RemoteNodeAvailability.ONLINE,
                 "alpha": RemoteNodeAvailability.ONLINE,
                 "beta": RemoteNodeAvailability.ONLINE,
             },
@@ -145,7 +154,7 @@ class OperationsUiCheck(unittest.TestCase):
 
         self.assertEqual(
             tuple(row.operation.record.operation_id for row in rows),
-            ("alpha-active", "beta-active", "completed"),
+            ("portal-active", "alpha-active", "beta-active", "completed"),
         )
         self.assertEqual(
             tuple(
@@ -176,11 +185,18 @@ class OperationsUiCheck(unittest.TestCase):
             ("completed",),
         )
 
-    def test_portal_disconnect_marks_retained_snapshot_stale_without_losing_other_nodes(
+    def test_portal_aggregation_marks_only_offline_node_data_stale(
         self,
     ) -> None:
+        portal = _node("portal")
         alpha = _node("alpha")
         beta = _node("beta")
+        portal_operation = _operation(
+            operation_id="portal-active",
+            node_name="portal",
+            state=NodeOperationState.RUNNING,
+            created_at_unix_ms=15,
+        )
         alpha_operation = _operation(
             operation_id="alpha-active",
             node_name="alpha",
@@ -196,8 +212,12 @@ class OperationsUiCheck(unittest.TestCase):
             summary="Upload failed.",
         )
         rows = ModWebOperationsMixin._operation_rows(
-            nodes=(alpha, beta),
+            nodes=(portal, alpha, beta),
             snapshots_by_node={
+                "portal": ModWebNodeOperationSnapshot(
+                    node_name="portal",
+                    operations=(portal_operation,),
+                ),
                 "alpha": ModWebNodeOperationSnapshot(
                     node_name="alpha",
                     operations=(alpha_operation,),
@@ -208,13 +228,18 @@ class OperationsUiCheck(unittest.TestCase):
                 ),
             },
             availability_by_node={
+                "portal": RemoteNodeAvailability.ONLINE,
                 "alpha": RemoteNodeAvailability.ONLINE,
                 "beta": RemoteNodeAvailability.OFFLINE,
             },
         )
 
         rows_by_id = {row.operation.record.operation_id: row for row in rows}
-        self.assertEqual(set(rows_by_id), {"alpha-active", "beta-failed"})
+        self.assertEqual(
+            set(rows_by_id),
+            {"portal-active", "alpha-active", "beta-failed"},
+        )
+        self.assertFalse(rows_by_id["portal-active"].stale)
         self.assertFalse(rows_by_id["alpha-active"].stale)
         self.assertTrue(rows_by_id["beta-failed"].stale)
 
