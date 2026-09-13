@@ -237,6 +237,62 @@ class AppPortClaimTests(unittest.TestCase):
                 ),
             )
 
+    def test_sevendays_reuses_last_known_server_config_while_file_is_missing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            serverconfig_path = directory / "serverconfig.xml"
+            userdata_path = directory / "userdata"
+            save_path = userdata_path / "Saves" / "Navezgane" / "Alpha"
+            save_path.mkdir(parents=True)
+
+            def write_serverconfig(*, telnet_port: int, user_data_path: Path) -> None:
+                serverconfig_path.write_text(
+                    "<ServerSettings>"
+                    '<property name="TelnetEnabled" value="true" />'
+                    f'<property name="TelnetPort" value="{telnet_port}" />'
+                    f'<property name="UserDataFolder" value="{user_data_path}" />'
+                    "</ServerSettings>",
+                    encoding="utf-8",
+                )
+
+            write_serverconfig(telnet_port=18081, user_data_path=userdata_path)
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = directory
+            app.cfg = SimpleNamespace(join_port=26901)
+
+            known_claims = app.listening_port_claims
+            known_save_roots = app.save_file_roots
+            app.updater = SimpleNamespace(status=lambda: SimpleNamespace(running=True))
+            serverconfig_path.unlink()
+
+            self.assertEqual(app.listening_port_claims, known_claims)
+            self.assertEqual(app.save_file_roots, known_save_roots)
+            self.assertTrue(app.supports_save_uploads)
+
+            app.updater = None
+            with self.assertRaises(FileNotFoundError):
+                _ = app.listening_port_claims
+            with self.assertRaises(FileNotFoundError):
+                _ = app.save_file_roots
+
+            restored_userdata_path = directory / "restored-userdata"
+            write_serverconfig(telnet_port=18082, user_data_path=restored_userdata_path)
+
+            self.assertIn(
+                AppPortClaim(protocol=NetworkProtocol.TCP, port=18082, purpose="Telnet"),
+                app.listening_port_claims,
+            )
+            self.assertEqual(app._userdata_root_path(), restored_userdata_path)
+
+    def test_sevendays_requires_server_config_before_first_snapshot(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = Path(temp_dir)
+            app.cfg = SimpleNamespace(join_port=26901)
+
+            with self.assertRaises(FileNotFoundError):
+                _ = app.listening_port_claims
+
 
 if __name__ == "__main__":
     unittest.main()

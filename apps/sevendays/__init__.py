@@ -14,6 +14,7 @@ from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from re import Pattern
+from types import MappingProxyType
 from typing import Any, Final, cast
 from urllib.parse import quote, unquote, urlsplit
 
@@ -89,6 +90,7 @@ log = logging.getLogger(__name__)
 
 type GameStatValue = int | float | str | bool | None
 type SevenDaysRuntimeLogSignature = tuple[int, int, int, int]
+type SevenDaysServerConfigSignature = tuple[int, int, int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +139,42 @@ class SevenDaysUploadTarget:
     kind: SevenDaysUploadKind
     root: AppSaveRoot
     save_root: AppSaveRoot | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SevenDaysServerConfigSnapshot:
+    """The parsed values from one valid 7 Days to Die server configuration."""
+
+    values: Mapping[str, str | None]
+
+    @classmethod
+    def load(cls, pointer: Path) -> "_SevenDaysServerConfigSnapshot":
+        root = ET.parse(pointer).getroot()
+        values: dict[str, str | None] = {}
+        for node in root.iter("property"):
+            property_name = node.attrib.get("name")
+            if property_name is None or property_name in values:
+                continue
+            raw_value = node.attrib.get("value")
+            if raw_value is None:
+                continue
+            values[property_name] = raw_value.strip() or None
+        return cls(values=MappingProxyType(values))
+
+    def value(self, property_name: str) -> str | None:
+        return self.values.get(property_name)
+
+
+@dataclass(frozen=True, slots=True)
+class _SevenDaysServerConfigCache:
+    signature: SevenDaysServerConfigSignature
+    snapshot: _SevenDaysServerConfigSnapshot
+
+
+def _sevendays_serverconfig_signature(pointer: Path) -> SevenDaysServerConfigSignature:
+    stat = pointer.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
 
 _SEVENDAYS_NEXUSMODS_GAME_DOMAIN = "7daystodie"
 _SEVENDAYS_VERSION_RE = re.compile(
@@ -461,13 +499,12 @@ def _candidate_sevendays_logs(*, directory: Path, server_log: Path | None) -> tu
     return tuple(existing)
 
 
-def _sevendays_serverconfig_port(
-    pointer: Path,
+def _sevendays_serverconfig_port_from_value(
+    raw_port: str | None,
     *,
     property_name: str,
     default_port: int,
 ) -> int:
-    raw_port = _read_serverconfig_value(pointer, property_name)
     if raw_port is None:
         return default_port
     if not raw_port.isdigit():
@@ -478,8 +515,9 @@ def _sevendays_serverconfig_port(
     return port
 
 
-def _sevendays_serverconfig_bool(pointer: Path, *, property_name: str) -> bool | None:
-    raw_value = _read_serverconfig_value(pointer, property_name)
+def _sevendays_serverconfig_bool_from_value(
+    raw_value: str | None, *, property_name: str
+) -> bool | None:
     if raw_value is None:
         return None
     normalised = raw_value.casefold()
@@ -511,17 +549,25 @@ def _sevendays_game_port_claims(server_port: int) -> tuple[AppPortClaim, ...]:
     )
 
 
-def _sevendays_admin_web_ports(pointer: Path) -> tuple[int, ...]:
+def _sevendays_admin_web_ports_from_snapshot(
+    serverconfig: _SevenDaysServerConfigSnapshot,
+) -> tuple[int, ...]:
     port_property_by_enabled_property = (
         ("WebDashboardEnabled", "WebDashboardPort"),
         ("ControlPanelEnabled", "ControlPanelPort"),
     )
     ports: list[int] = []
     for enabled_property, port_property in port_property_by_enabled_property:
-        if _sevendays_serverconfig_bool(pointer, property_name=enabled_property) is not True:
+        if (
+            _sevendays_serverconfig_bool_from_value(
+                serverconfig.value(enabled_property),
+                property_name=enabled_property,
+            )
+            is not True
+        ):
             continue
-        port = _sevendays_serverconfig_port(
-            pointer,
+        port = _sevendays_serverconfig_port_from_value(
+            serverconfig.value(port_property),
             property_name=port_property,
             default_port=_SEVENDAYS_DEFAULT_WEB_DASHBOARD_PORT,
         )
@@ -530,22 +576,32 @@ def _sevendays_admin_web_ports(pointer: Path) -> tuple[int, ...]:
     return tuple(ports)
 
 
-def _sevendays_server_port(pointer: Path) -> int:
-    return _sevendays_serverconfig_port(
-        pointer,
+def _sevendays_server_port_from_snapshot(serverconfig: _SevenDaysServerConfigSnapshot) -> int:
+    return _sevendays_serverconfig_port_from_value(
+        serverconfig.value("ServerPort"),
         property_name="ServerPort",
         default_port=_SEVENDAYS_DEFAULT_SERVER_PORT,
     )
 
 
-def _sevendays_telnet_port(pointer: Path) -> int:
-    if _sevendays_serverconfig_bool(pointer, property_name="TelnetEnabled") is False:
+def _sevendays_telnet_port_from_snapshot(serverconfig: _SevenDaysServerConfigSnapshot) -> int:
+    if (
+        _sevendays_serverconfig_bool_from_value(
+            serverconfig.value("TelnetEnabled"),
+            property_name="TelnetEnabled",
+        )
+        is False
+    ):
         raise ValueError("7D2D Telnet must be enabled for server management")
-    return _sevendays_serverconfig_port(
-        pointer,
+    return _sevendays_serverconfig_port_from_value(
+        serverconfig.value("TelnetPort"),
         property_name="TelnetPort",
         default_port=_SEVENDAYS_DEFAULT_TELNET_PORT,
     )
+
+
+def _sevendays_telnet_port(pointer: Path) -> int:
+    return _sevendays_telnet_port_from_snapshot(_SevenDaysServerConfigSnapshot.load(pointer))
 
 
 def _app_version_from_sevendays_text(raw_version: str) -> AppVersion:
@@ -620,16 +676,7 @@ def _mod_page_from_sevendays_website(raw_website: str | None) -> ModPageLink | N
 
 
 def _read_serverconfig_value(pointer: Path, property_name: str) -> str | None:
-    root = ET.parse(pointer).getroot()
-    for node in root.iter("property"):
-        if node.attrib.get("name") != property_name:
-            continue
-        raw_value = node.attrib.get("value")
-        if raw_value is None:
-            continue
-        value = str(raw_value).strip()
-        return value or None
-    return None
+    return _SevenDaysServerConfigSnapshot.load(pointer).value(property_name)
 
 
 def _ensure_serverconfig_property(
@@ -2413,6 +2460,7 @@ class SevenDays(App[App_Config]):
     chat_relay_outbound = True
     relay_notice_player_session_supported = True
     relay_notice_player_death_supported = True
+    _serverconfig_cache: _SevenDaysServerConfigCache | None = None
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = 0xB91C1C
@@ -2431,7 +2479,12 @@ class SevenDays(App[App_Config]):
             persist=False,
         )
 
-        self._telnet_port = _sevendays_telnet_port(file_settings)
+        serverconfig = _SevenDaysServerConfigSnapshot.load(file_settings)
+        self._serverconfig_cache = _SevenDaysServerConfigCache(
+            signature=_sevendays_serverconfig_signature(file_settings),
+            snapshot=serverconfig,
+        )
+        self._telnet_port = _sevendays_telnet_port_from_snapshot(serverconfig)
         self._relay = TelnetClient(self.check_running, self._telnet_port)
         self._tail: Tailer | None = None
         self._tail_matchers: set[Callable[[str], Awaitable[None]]] = set()
@@ -2448,21 +2501,54 @@ class SevenDays(App[App_Config]):
     def detect_installed_version(self) -> AppVersion | None:
         return detect_sevendays_version(directory=self.cfg.directory, server_log=self.cfg.server_log_file)
 
-    @property
-    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+    def _is_update_running(self) -> bool:
+        status = self.update_status
+        return status is not None and status.running
+
+    def _load_serverconfig_snapshot(self) -> _SevenDaysServerConfigSnapshot:
+        """Retain valid config data while SteamCMD temporarily replaces the file."""
+
         serverconfig_path = self.directory / "serverconfig.xml"
+        cached = self._serverconfig_cache
+        try:
+            signature = _sevendays_serverconfig_signature(serverconfig_path)
+        except FileNotFoundError:
+            if cached is None or not self._is_update_running():
+                raise
+            return cached.snapshot
+        if cached is not None and cached.signature == signature:
+            return cached.snapshot
+        try:
+            snapshot = _SevenDaysServerConfigSnapshot.load(serverconfig_path)
+        except FileNotFoundError:
+            if cached is None or not self._is_update_running():
+                raise
+            return cached.snapshot
+        self._serverconfig_cache = _SevenDaysServerConfigCache(
+            signature=signature,
+            snapshot=snapshot,
+        )
+        return snapshot
+
+    def _listening_port_claims_from_snapshot(
+        self, serverconfig: _SevenDaysServerConfigSnapshot
+    ) -> tuple[AppPortClaim, ...]:
         server_port = self.cfg.join_port
         if server_port is None:
-            server_port = _sevendays_server_port(serverconfig_path)
-        telnet_port = _sevendays_telnet_port(serverconfig_path)
+            server_port = _sevendays_server_port_from_snapshot(serverconfig)
+        telnet_port = _sevendays_telnet_port_from_snapshot(serverconfig)
         return (
             *_sevendays_game_port_claims(server_port),
             AppPortClaim(protocol=NetworkProtocol.TCP, port=telnet_port, purpose="Telnet"),
             *(
                 AppPortClaim(protocol=NetworkProtocol.TCP, port=port, purpose="web dashboard")
-                for port in _sevendays_admin_web_ports(serverconfig_path)
+                for port in _sevendays_admin_web_ports_from_snapshot(serverconfig)
             ),
         )
+
+    @property
+    def listening_port_claims(self) -> tuple[AppPortClaim, ...]:
+        return self._listening_port_claims_from_snapshot(self._load_serverconfig_snapshot())
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
@@ -2816,14 +2902,14 @@ class SevenDays(App[App_Config]):
         )
 
     def _userdata_root_path(self) -> Path | None:
-        raw_value = _read_serverconfig_value(self.directory / "serverconfig.xml", "UserDataFolder")
+        raw_value = self._load_serverconfig_snapshot().value("UserDataFolder")
         candidate = Path(raw_value or _SEVENDAYS_MANAGED_USERDATA_FOLDER).expanduser()
         if not candidate.is_absolute():
             candidate = (self.directory / candidate).resolve()
         return candidate
 
     def _serverconfig_setting_value(self, key: str) -> str | None:
-        raw_value = _read_serverconfig_value(self.directory / "serverconfig.xml", key)
+        raw_value = self._load_serverconfig_snapshot().value(key)
         if raw_value is None:
             return None
         return raw_value.strip() or None
