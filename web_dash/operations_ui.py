@@ -399,7 +399,9 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                             "text-lg font-black mod-title-small"
                         )
                         if portal:
-                            self._badge(ui=ui, text="Portal live merge", tone="purple")
+                            self._badge(ui=ui, text="Aggregate Mode", tone="purple")
+                        else:
+                            self._badge(ui=ui, text=f"{node.label} Only Mode", tone="purple")
 
                     filter_grid_classes = (
                         "w-full grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-5"
