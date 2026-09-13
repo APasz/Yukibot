@@ -56,6 +56,7 @@ from apps._config import (
     ModPageDiscovery,
     ModPlacement,
 )
+from apps._updater import AppUpdateOperationKind
 from apps._steam import SteamGameServerLoginTokenStatus
 from apps.factorio.node_api import (
     NodeFactorioGenerationState,
@@ -406,7 +407,7 @@ class NodeApiService:
                 ),
                 operation_service.NodeOperationKindPolicy(
                     kind=operations.NodeOperationKind.APP_VERIFY,
-                    kind_label="App verify",
+                    kind_label=AppUpdateOperationKind.VERIFY.display_label,
                     read_scope=NodeApiScope.APP_MANAGE,
                     cancel_scope=NodeApiScope.APP_MANAGE,
                     required_level=Power_Level.sudo,

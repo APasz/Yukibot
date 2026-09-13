@@ -312,15 +312,15 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         return NodeOperationView.from_mapping(payload)
 
     @staticmethod
-    def _operation_stream_update_is_significant(
+    def _operation_detail_revision_changed(
         previous: NodeOperationView | None,
         current: NodeOperationView,
     ) -> bool:
-        """Return whether a summary change invalidates separately loaded detail."""
+        """Return whether a stream update has a different retained detail revision."""
 
         if previous is None:
             return True
-        return previous.without_log_lines() != current.without_log_lines()
+        return previous.record.detail_revision != current.record.detail_revision
 
     @classmethod
     def _operation_detail_refresh_required(
@@ -330,9 +330,9 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         *,
         details_open: bool,
     ) -> bool:
-        """Reload detail only when an expanded row receives a changed summary."""
+        """Reload expanded detail only when its retained detail revision changed."""
 
-        return details_open and cls._operation_stream_update_is_significant(
+        return details_open and cls._operation_detail_revision_changed(
             previous,
             current,
         )
@@ -399,9 +399,9 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                             "text-lg font-black mod-title-small"
                         )
                         if portal:
-                            self._badge(ui=ui, text="Aggregate Mode", tone="purple")
+                            self._badge(ui=ui, text="Scope · All nodes", tone="purple")
                         else:
-                            self._badge(ui=ui, text=f"{node.label} Only Mode", tone="purple")
+                            self._badge(ui=ui, text=f"Scope · {node.label}", tone="purple")
 
                     filter_grid_classes = (
                         "w-full grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-5"
@@ -825,7 +825,7 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                             previous_operation = previous_operations_by_id.get(
                                 operation.record.operation_id
                             )
-                            if self._operation_stream_update_is_significant(
+                            if self._operation_detail_revision_changed(
                                 previous_operation,
                                 operation,
                             ):

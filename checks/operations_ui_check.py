@@ -392,7 +392,9 @@ class OperationsUiCheck(unittest.TestCase):
         self.assertNotIn("log_lines", operation_payload)
         self.assertEqual(operation_payload["detail_revision"], 7)
 
-    def test_log_revision_refreshes_expanded_detail_without_streaming_log_bodies(self) -> None:
+    def test_detail_revision_controls_expanded_detail_reload_without_streaming_log_bodies(
+        self,
+    ) -> None:
         previous = _operation(
             operation_id="first",
             node_name="alpha",
@@ -410,12 +412,29 @@ class OperationsUiCheck(unittest.TestCase):
             log_lines=("stdout: Two.",),
             detail_revision=1,
         )
-        progress_change = _operation(
-            operation_id="first",
-            node_name="alpha",
-            state=NodeOperationState.RUNNING,
-            created_at_unix_ms=10,
-            summary="Extracting.",
+        detail_only_change = replace(
+            previous,
+            record=replace(
+                previous.record,
+                detail="Extracting archive.",
+                detail_revision=1,
+            ),
+        )
+        unrevised_detail_change = replace(
+            previous,
+            record=replace(previous.record, detail="Extracting archive."),
+        )
+        progress_only_change = replace(
+            previous,
+            record=replace(previous.record, progress_percent=50.0),
+        )
+        state_only_change = replace(
+            previous,
+            record=replace(previous.record, state=NodeOperationState.CANCEL_REQUESTED),
+        )
+        summary_only_change = replace(
+            previous,
+            record=replace(previous.record, summary="Extracting."),
         )
 
         event = NodeOperationStreamEvent(
@@ -434,7 +453,7 @@ class OperationsUiCheck(unittest.TestCase):
         assert stream_summary is not None
         self.assertEqual(stream_summary.record.log_lines, ())
         self.assertTrue(
-            ModWebOperationsMixin._operation_stream_update_is_significant(
+            ModWebOperationsMixin._operation_detail_revision_changed(
                 previous,
                 stream_summary,
             )
@@ -454,9 +473,51 @@ class OperationsUiCheck(unittest.TestCase):
             )
         )
         self.assertTrue(
-            ModWebOperationsMixin._operation_stream_update_is_significant(
+            ModWebOperationsMixin._operation_detail_refresh_required(
                 previous,
-                progress_change,
+                detail_only_change,
+                details_open=True,
+            )
+        )
+        for summary_change in (
+            progress_only_change,
+            state_only_change,
+            summary_only_change,
+        ):
+            self.assertFalse(
+                ModWebOperationsMixin._operation_detail_revision_changed(
+                    previous,
+                    summary_change,
+                )
+            )
+            self.assertFalse(
+                ModWebOperationsMixin._operation_detail_refresh_required(
+                    previous,
+                    summary_change,
+                    details_open=True,
+                )
+            )
+        # The retained-detail revision, rather than a summary field comparison,
+        # is the source of truth for a reload decision.
+        self.assertFalse(
+            ModWebOperationsMixin._operation_detail_revision_changed(
+                previous,
+                unrevised_detail_change,
+            )
+        )
+        self.assertFalse(
+            ModWebOperationsMixin._operation_detail_refresh_required(
+                previous,
+                unrevised_detail_change,
+                details_open=True,
+            )
+        )
+        # An initial stream snapshot still needs the separately fetched detail.
+        self.assertTrue(
+            ModWebOperationsMixin._operation_detail_refresh_required(
+                None,
+                progress_only_change,
+                details_open=True,
             )
         )
 

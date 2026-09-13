@@ -10,7 +10,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, assert_never
 
 import _errors
 import config
@@ -36,6 +36,16 @@ class AppUpdateProviderKind(enum.StrEnum):
 class AppUpdateOperationKind(enum.StrEnum):
     UPDATE = "update"
     VERIFY = "verify"
+
+    @property
+    def display_label(self) -> str:
+        match self:
+            case AppUpdateOperationKind.UPDATE:
+                return "Update"
+            case AppUpdateOperationKind.VERIFY:
+                return "Verify / repair"
+            case _:
+                assert_never(self)
 
 
 class AppUpdateState(enum.StrEnum):

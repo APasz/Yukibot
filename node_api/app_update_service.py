@@ -57,12 +57,12 @@ _APP_UPDATE_OPERATION_SPECS: tuple[_AppUpdateOperationSpec, ...] = (
     _AppUpdateOperationSpec(
         updater_kind=AppUpdateOperationKind.UPDATE,
         operation_kind=NodeOperationKind.APP_UPDATE,
-        label="Update",
+        label=AppUpdateOperationKind.UPDATE.display_label,
     ),
     _AppUpdateOperationSpec(
         updater_kind=AppUpdateOperationKind.VERIFY,
         operation_kind=NodeOperationKind.APP_VERIFY,
-        label="Verify",
+        label=AppUpdateOperationKind.VERIFY.display_label,
     ),
 )
 

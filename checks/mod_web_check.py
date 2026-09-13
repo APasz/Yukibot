@@ -4186,7 +4186,7 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(view_state.target_change_pending)
         self.assertEqual(view_state.install_alignment_badge, _ModWebBadgeSpec(text="Different branch installed", tone="purple"))
         self.assertEqual(view_state.update_button_label, "Retry update")
-        self.assertEqual(view_state.verify_button_label, "Verify")
+        self.assertEqual(view_state.verify_button_label, "Verify / repair")
         self.assertEqual(view_state.action_status_text, "Target applies on the next action.")
         self.assertEqual(view_state.status_title, "Update failed")
         self.assertTrue(view_state.show_log)
@@ -4219,7 +4219,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(view_state.status_title, "Latest result")
         self.assertEqual(view_state.update_button_label, "Update")
-        self.assertEqual(view_state.verify_button_label, "Verify")
+        self.assertEqual(view_state.verify_button_label, "Verify / repair")
         self.assertFalse(view_state.show_log)
         self.assertTrue(view_state.branch_selection_disabled)
         self.assertEqual(view_state.action_status_text, "Requires Sudo access.")
@@ -4336,7 +4336,7 @@ class ModWebTests(unittest.TestCase):
                 created_at_unix_ms=1,
                 started_at_unix_ms=2,
             ),
-            kind_label="App verify",
+            kind_label="Verify / repair",
             cancellable=False,
         )
 
@@ -4383,7 +4383,7 @@ class ModWebTests(unittest.TestCase):
                 created_at_unix_ms=3,
                 finished_at_unix_ms=4,
             ),
-            kind_label="App verify",
+            kind_label="Verify / repair",
             cancellable=False,
         )
 
@@ -4497,7 +4497,7 @@ class ModWebTests(unittest.TestCase):
                 update_running=False,
                 supports_verify=True,
             ),
-            "Stop the app to update or verify.",
+            "Stop the app to update or verify / repair.",
         )
 
     def test_update_action_block_reason_prioritises_running_operation(self) -> None:
@@ -19655,7 +19655,7 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(
             ModWebService._app_action_pending_label(NodeAppMutationAction.VERIFY),
-            "Verifying...",
+            "Verify / repair in progress...",
         )
         self.assertEqual(
             ModWebService._app_action_pending_message(NodeAppMutationAction.START, "Minecraft Alpha"),
@@ -19675,7 +19675,7 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(
             ModWebService._app_action_pending_message(NodeAppMutationAction.VERIFY, "Minecraft Alpha"),
-            "Verify requested for Minecraft Alpha.",
+            "Verify / repair requested for Minecraft Alpha.",
         )
 
     def test_app_action_completion_message_suppresses_duplicate_pending_notification(

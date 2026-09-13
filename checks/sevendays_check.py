@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 import zipfile
+import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -430,6 +431,64 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             port = _sevendays_telnet_port(serverconfig)
 
         self.assertEqual(port, 18081)
+
+    def test_serverconfig_snapshot_uses_known_good_cache_for_truncated_xml_during_update(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            app_dir = Path(tmp)
+            serverconfig = app_dir / "serverconfig.xml"
+            serverconfig.write_text(
+                '<ServerSettings><property name="ServerPort" value="26900" /></ServerSettings>',
+                encoding="utf-8",
+            )
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            cached = app._load_serverconfig_snapshot()
+            serverconfig.write_text(
+                '<ServerSettings><property name="ServerPort" value="27000">',
+                encoding="utf-8",
+            )
+            app._is_update_running = lambda: True
+
+            snapshot = app._load_serverconfig_snapshot()
+
+        self.assertIs(snapshot, cached)
+
+    def test_serverconfig_snapshot_raises_for_malformed_xml_outside_update(self) -> None:
+        with TemporaryDirectory() as tmp:
+            app_dir = Path(tmp)
+            serverconfig = app_dir / "serverconfig.xml"
+            serverconfig.write_text(
+                '<ServerSettings><property name="ServerPort" value="26900" /></ServerSettings>',
+                encoding="utf-8",
+            )
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app._load_serverconfig_snapshot()
+            serverconfig.write_text(
+                '<ServerSettings><property name="ServerPort" value="27000">',
+                encoding="utf-8",
+            )
+            app._is_update_running = lambda: False
+
+            with self.assertRaises(ET.ParseError):
+                app._load_serverconfig_snapshot()
+
+    def test_serverconfig_snapshot_raises_for_malformed_xml_without_cache(self) -> None:
+        with TemporaryDirectory() as tmp:
+            app_dir = Path(tmp)
+            (app_dir / "serverconfig.xml").write_text(
+                '<ServerSettings><property name="ServerPort" value="27000">',
+                encoding="utf-8",
+            )
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app._serverconfig_cache = None
+            app._is_update_running = lambda: True
+
+            with self.assertRaises(ET.ParseError):
+                app._load_serverconfig_snapshot()
 
     def test_disabled_telnet_is_rejected(self) -> None:
         with TemporaryDirectory() as tmp:

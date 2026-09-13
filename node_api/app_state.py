@@ -1167,7 +1167,7 @@ class NodeAppMutationService:
                 actor_user_id=actor_user_id,
             )
             operation_id = operation.operation_id
-            message = f"Verify queued for {app.friendly}."
+            message = f"{AppUpdateOperationKind.VERIFY.display_label} queued for {app.friendly}."
         else:
             raise ValueError(f"Unsupported app mutation action: {action}")
 

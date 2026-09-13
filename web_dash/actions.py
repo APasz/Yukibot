@@ -31,6 +31,7 @@ from .constants import (
 )
 from .nicegui_protocols import ModWebUi, _value_as_object, _value_as_text
 from .runtime_imports import (
+    AppUpdateOperationKind,
     Awaitable,
     BadgeTone,
     BulkLauncherMetadataDiscovery,
@@ -1622,7 +1623,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         if action is NodeAppMutationAction.UPDATE:
             return "Updating..."
         if action is NodeAppMutationAction.VERIFY:
-            return "Verifying..."
+            return f"{AppUpdateOperationKind.VERIFY.display_label} in progress..."
         return None
 
     @classmethod
@@ -1636,7 +1637,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         if action is NodeAppMutationAction.UPDATE:
             return f"Update requested for {app_friendly}."
         if action is NodeAppMutationAction.VERIFY:
-            return f"Verify requested for {app_friendly}."
+            return f"{AppUpdateOperationKind.VERIFY.display_label} requested for {app_friendly}."
         return None
 
     @staticmethod

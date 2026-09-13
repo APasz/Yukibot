@@ -2520,7 +2520,7 @@ class SevenDays(App[App_Config]):
             return cached.snapshot
         try:
             snapshot = _SevenDaysServerConfigSnapshot.load(serverconfig_path)
-        except FileNotFoundError:
+        except (FileNotFoundError, ET.ParseError):
             if cached is None or not self._is_update_running():
                 raise
             return cached.snapshot

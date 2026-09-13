@@ -381,7 +381,10 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         if update_running:
             return "Another update operation is already running."
         if app_running:
-            return "Stop the app to update or verify."
+            return (
+                "Stop the app to update or "
+                f"{AppUpdateOperationKind.VERIFY.display_label.lower()}."
+            )
         if action is NodeAppMutationAction.VERIFY and not supports_verify:
             return "Verification is not available for this update provider."
         return None
@@ -580,11 +583,12 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         if status is None:
             return "Activity"
         if operation is not None:
-            operation_label = (
-                "Verify"
+            operation_kind = (
+                AppUpdateOperationKind.VERIFY
                 if operation.record.kind is NodeOperationKind.APP_VERIFY
-                else "Update"
+                else AppUpdateOperationKind.UPDATE
             )
+            operation_label = operation_kind.display_label
             if operation.record.state.active:
                 return "Current operation"
             if operation.record.state is NodeOperationState.CANCELLED:
@@ -598,7 +602,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             return "Current operation" if status.running else "Latest result"
         if status.operation_kind is None:
             return "Update failed"
-        return f"{status.operation_kind.value.title()} failed"
+        return f"{status.operation_kind.display_label} failed"
 
     @classmethod
     def _update_section_view_state(
@@ -641,7 +645,11 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             else None
         )
         update_button_prefix = "Retry update" if failed_operation is AppUpdateOperationKind.UPDATE else "Update"
-        verify_button_label = "Retry verify" if failed_operation is AppUpdateOperationKind.VERIFY else "Verify"
+        verify_button_label = (
+            f"Retry {AppUpdateOperationKind.VERIFY.display_label}"
+            if failed_operation is AppUpdateOperationKind.VERIFY
+            else AppUpdateOperationKind.VERIFY.display_label
+        )
         installed_version = (
             "Unknown" if model.app_stats is None or model.app_stats.version is None else model.app_stats.version
         )
@@ -778,11 +786,17 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                             ),
                         )
                         if status.operation_kind is not None:
-                            self._badge(ui=ui, text=status.operation_kind.value.title(), tone="black")
+                            self._badge(
+                                ui=ui,
+                                text=status.operation_kind.display_label,
+                                tone="black",
+                            )
                         if view_state.progress_percent is not None:
                             self._badge(ui=ui, text=view_state.progress_text, tone="grey")
                 if status is None:
-                    ui.label("Run Update or Verify to start.").classes("mod-subtitle text-sm")
+                    ui.label(
+                        f"Run Update or {AppUpdateOperationKind.VERIFY.display_label} to start."
+                    ).classes("mod-subtitle text-sm")
                     return
                 with ui.column().classes("w-full gap-2"):
                     ui.label(view_state.status_summary).classes("text-sm font-black mod-title-small break-all")
@@ -1119,7 +1133,11 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                     self._render_flat_tab_header(
                         ui=ui,
                         title="Update",
-                        description="Choose a version or beta, then update or verify while the app is stopped.",
+                        description=(
+                            "Choose a version or beta, then update or "
+                            f"{AppUpdateOperationKind.VERIFY.display_label.lower()} "
+                            "while the app is stopped."
+                        ),
                         secondary_description=None if can_manage_updates else "Sudo access is required for update actions.",
                     )
                     with ui.element("div").classes("grid grid-cols-1 xl:grid-cols-12 gap-3 w-full"):
