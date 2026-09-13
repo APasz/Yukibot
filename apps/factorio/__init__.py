@@ -2571,6 +2571,10 @@ class Factorio_Updater(Update_Manager):
     _scope_update_locks: dict[str, threading.Lock] = {}
     _scope_update_locks_guard = threading.Lock()
 
+    @property
+    def supports_verify(self) -> bool:
+        return True
+
     def __init__(self, app: Factorio, *, base: bool = False, mods: bool = False) -> None:
         super().__init__(app, base=base, mods=mods)
         self.version: tuple[int, ...] | None = None
@@ -2587,6 +2591,7 @@ class Factorio_Updater(Update_Manager):
             summary="Ready",
         )
         self._log_tail: deque[str] = deque(maxlen=80)
+        self._log_cursor: int = 0
         self._operation_running: bool = False
         self._active_task: asyncio.Task[AppUpdateOperationResult] | None = None
         self._held_scope_update_lock: threading.Lock | None = None
@@ -2612,7 +2617,7 @@ class Factorio_Updater(Update_Manager):
                 )
                 for branch in _FACTORIO_UPDATE_BRANCHES
             ),
-            supports_verify=True,
+            supports_verify=self.supports_verify,
             installed_branch_id=installed_branch.value if installed_branch is not None else None,
         )
 
@@ -2688,6 +2693,7 @@ class Factorio_Updater(Update_Manager):
                 summary=f"Starting {kind.value}...",
                 operation_kind=kind,
                 progress_percent=0.0,
+                log_cursor=self._log_cursor,
                 started_at_unix_ms=started_at_unix_ms,
             )
         self._append_log(f"Selected branch: {branch.display_label} ({branch.value})")
@@ -2913,8 +2919,13 @@ class Factorio_Updater(Update_Manager):
             return
         with self._state_lock:
             self._log_tail.append(clean_line)
+            self._log_cursor += 1
             if self._status.state is AppUpdateState.RUNNING:
-                self._status = replace(self._status, log_lines=tuple(self._log_tail))
+                self._status = replace(
+                    self._status,
+                    log_lines=tuple(self._log_tail),
+                    log_cursor=self._log_cursor,
+                )
 
     def _update_running_status(self, *, summary: str, detail: str | None, progress_percent: float | None) -> None:
         with self._state_lock:
@@ -2926,6 +2937,7 @@ class Factorio_Updater(Update_Manager):
                 detail=detail,
                 progress_percent=progress_percent,
                 log_lines=tuple(self._log_tail),
+                log_cursor=self._log_cursor,
             )
 
     def _finish_operation(
@@ -2945,6 +2957,7 @@ class Factorio_Updater(Update_Manager):
                 detail=detail,
                 progress_percent=progress_percent,
                 log_lines=tuple(self._log_tail),
+                log_cursor=self._log_cursor,
                 finished_at_unix_ms=finished_at_unix_ms,
             )
 

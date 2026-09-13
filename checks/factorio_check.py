@@ -1488,6 +1488,7 @@ class FactorioUpdaterTests(unittest.TestCase):
         self.assertEqual(update_info.selected_branch_label, "Stable")
         self.assertEqual([branch.branch_id for branch in update_info.branches], ["stable", "experimental"])
         self.assertTrue(update_info.supports_verify)
+        self.assertEqual(update_info.supports_verify, updater.supports_verify)
 
     def test_factorio_updater_select_branch_persists_choice(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -51,6 +51,7 @@ def _operation(
     summary: str = "Working.",
     detail: str | None = None,
     log_lines: tuple[str, ...] = (),
+    detail_revision: int = 0,
 ) -> NodeOperationView:
     return NodeOperationView(
         record=NodeOperationRecord(
@@ -63,6 +64,7 @@ def _operation(
             requested_by_user_id=42,
             app_name=app_name,
             detail=detail,
+            detail_revision=detail_revision,
             log_lines=log_lines,
             created_at_unix_ms=created_at_unix_ms,
             finished_at_unix_ms=(finished_at_unix_ms if state.terminal else None),
@@ -357,6 +359,7 @@ class OperationsUiCheck(unittest.TestCase):
             state=NodeOperationState.RUNNING,
             created_at_unix_ms=10,
             log_lines=("stdout: Extracting.",),
+            detail_revision=7,
         )
 
         snapshot = NodeOperationStreamEvent(
@@ -381,13 +384,15 @@ class OperationsUiCheck(unittest.TestCase):
         self.assertIsInstance(snapshot_operation_view, dict)
         assert isinstance(snapshot_operation_view, dict)
         self.assertNotIn("log_lines", snapshot_operation_view)
+        self.assertEqual(snapshot_operation_view["detail_revision"], 7)
         payload = event.to_mapping()
         operation_payload = payload["operation"]
         self.assertIsInstance(operation_payload, dict)
         assert isinstance(operation_payload, dict)
         self.assertNotIn("log_lines", operation_payload)
+        self.assertEqual(operation_payload["detail_revision"], 7)
 
-    def test_significant_stream_updates_ignore_retained_log_only_changes(self) -> None:
+    def test_log_revision_refreshes_expanded_detail_without_streaming_log_bodies(self) -> None:
         previous = _operation(
             operation_id="first",
             node_name="alpha",
@@ -403,6 +408,7 @@ class OperationsUiCheck(unittest.TestCase):
             created_at_unix_ms=10,
             summary="Downloading.",
             log_lines=("stdout: Two.",),
+            detail_revision=1,
         )
         progress_change = _operation(
             operation_id="first",
@@ -412,10 +418,39 @@ class OperationsUiCheck(unittest.TestCase):
             summary="Extracting.",
         )
 
-        self.assertFalse(
+        event = NodeOperationStreamEvent(
+            kind=NodeOperationStreamEventKind.UPDATED,
+            node_name="alpha",
+            operation=log_only_change,
+        )
+        payload = event.to_mapping()
+        operation_payload = payload["operation"]
+        self.assertIsInstance(operation_payload, dict)
+        assert isinstance(operation_payload, dict)
+        self.assertNotIn("log_lines", operation_payload)
+        self.assertEqual(operation_payload["detail_revision"], 1)
+        stream_summary = event.operation
+        self.assertIsNotNone(stream_summary)
+        assert stream_summary is not None
+        self.assertEqual(stream_summary.record.log_lines, ())
+        self.assertTrue(
             ModWebOperationsMixin._operation_stream_update_is_significant(
                 previous,
-                log_only_change,
+                stream_summary,
+            )
+        )
+        self.assertTrue(
+            ModWebOperationsMixin._operation_detail_refresh_required(
+                previous,
+                stream_summary,
+                details_open=True,
+            )
+        )
+        self.assertFalse(
+            ModWebOperationsMixin._operation_detail_refresh_required(
+                previous,
+                stream_summary,
+                details_open=False,
             )
         )
         self.assertTrue(

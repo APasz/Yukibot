@@ -30,7 +30,7 @@ _CANCEL_REQUESTED_SUMMARY = "Cancellation requested."
 _CANCELLED_SUMMARY = "Operation cancelled."
 _UNREPORTED_COMPLETION_SUMMARY = "Operation ended without reporting a result."
 _UNEXPECTED_FAILURE_SUMMARY = "Operation task failed unexpectedly."
-_DATABASE_SCHEMA_VERSION = 2
+_DATABASE_SCHEMA_VERSION = 3
 
 _SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
     """
@@ -128,9 +128,40 @@ _SCHEMA_V2_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
+_SCHEMA_V3_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "node_operations",
+        (
+            "operation_id",
+            "kind",
+            "node_name",
+            "subject",
+            "requested_by_user_id",
+            "state",
+            "summary",
+            "phase",
+            "result_reference",
+            "detail",
+            "progress_percent",
+            "created_at_unix_ms",
+            "started_at_unix_ms",
+            "finished_at_unix_ms",
+            "app_name",
+            "detail_revision",
+        ),
+    ),
+    ("node_operation_logs", ("operation_id", "sequence", "line")),
+    ("node_operation_resources", ("resource_key", "operation_id")),
+    (
+        "node_operation_results",
+        ("operation_id", "payload_json", "expires_at_unix_ms"),
+    ),
+)
+
 _SCHEMA_COLUMNS_BY_VERSION: dict[int, tuple[tuple[str, tuple[str, ...]], ...]] = {
     1: _SCHEMA_V1_COLUMNS,
     2: _SCHEMA_V2_COLUMNS,
+    3: _SCHEMA_V3_COLUMNS,
 }
 
 log = logging.getLogger(__name__)
@@ -226,6 +257,7 @@ class NodeOperationRecord:
     created_at_unix_ms: int = 0
     started_at_unix_ms: int | None = None
     finished_at_unix_ms: int | None = None
+    detail_revision: int = 0
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -251,6 +283,12 @@ class NodeOperationRecord:
             and not 0.0 <= self.progress_percent <= 100.0
         ):
             raise ValueError("Operation progress must be between 0 and 100 percent.")
+        if (
+            isinstance(self.detail_revision, bool)
+            or not isinstance(self.detail_revision, int)
+            or self.detail_revision < 0
+        ):
+            raise ValueError("Operation detail revision must be a non-negative integer.")
         if self.created_at_unix_ms <= 0:
             raise ValueError(
                 "Operation creation time must be positive Unix milliseconds."
@@ -328,6 +366,10 @@ class NodeOperationRecord:
             detail=_mapping_optional_text(
                 payload.get("detail"), label="Operation detail"
             ),
+            detail_revision=_mapping_nonnegative_int(
+                payload.get("detail_revision", 0),
+                label="Operation detail revision",
+            ),
             progress_percent=_mapping_optional_progress(
                 payload.get("progress_percent")
             ),
@@ -358,6 +400,7 @@ class NodeOperationRecord:
             "phase": self.phase,
             "result_reference": self.result_reference,
             "detail": self.detail,
+            "detail_revision": self.detail_revision,
             "progress_percent": self.progress_percent,
             "created_at_unix_ms": self.created_at_unix_ms,
             "started_at_unix_ms": self.started_at_unix_ms,
@@ -633,6 +676,7 @@ class NodeOperationService:
                 progress_percent=progress.progress_percent,
                 started_at_unix_ms=self._now_unix_ms(),
             )
+            updated = self._with_detail_revision(current=current, updated=updated)
             self._write_record_locked(updated)
             self._queue_change_locked(
                 NodeOperationChange(
@@ -667,6 +711,11 @@ class NodeOperationService:
                 detail=progress.detail,
                 progress_percent=progress.progress_percent,
             )
+            updated = self._with_detail_revision(
+                current=current,
+                updated=updated,
+                log_content_changed=log_line is not None,
+            )
             self._write_record_locked(updated, log_line=log_line)
             updated = self._record_locked(operation_id)
             self._queue_change_locked(
@@ -687,7 +736,11 @@ class NodeOperationService:
             current = self._record_locked(operation_id)
             if current.state.terminal:
                 return current
-            self._write_record_locked(current, log_line=log_line)
+            updated = replace(
+                current,
+                detail_revision=current.detail_revision + 1,
+            )
+            self._write_record_locked(updated, log_line=log_line)
             updated = self._record_locked(operation_id)
             self._queue_change_locked(
                 NodeOperationChange(
@@ -698,6 +751,22 @@ class NodeOperationService:
             )
         self._dispatch_changes()
         return updated
+
+    @staticmethod
+    def _with_detail_revision(
+        *,
+        current: NodeOperationRecord,
+        updated: NodeOperationRecord,
+        log_content_changed: bool = False,
+    ) -> NodeOperationRecord:
+        """Advance the detail revision only when retained detail or logs changed."""
+
+        if current.detail == updated.detail and not log_content_changed:
+            return updated
+        return replace(
+            updated,
+            detail_revision=current.detail_revision + 1,
+        )
 
     def finish(
         self,
@@ -742,6 +811,7 @@ class NodeOperationService:
                 progress_percent=progress.progress_percent,
                 finished_at_unix_ms=self._now_unix_ms(),
             )
+            updated = self._with_detail_revision(current=current, updated=updated)
             removed_records = self._finish_record_locked(updated, operation_result=result)
             self._queue_finished_changes_locked(updated, removed_records)
         self._dispatch_changes()
@@ -1155,6 +1225,10 @@ class NodeOperationService:
             self._migrate_schema_v1_to_v2_locked()
             self._validate_database_schema_locked(version=to_version)
             return
+        if from_version == 2 and to_version == 3:
+            self._migrate_schema_v2_to_v3_locked()
+            self._validate_database_schema_locked(version=to_version)
+            return
         raise RuntimeError(
             "Operation database migration path is unsupported: "
             f"{from_version} to {to_version}."
@@ -1182,6 +1256,13 @@ class NodeOperationService:
             CREATE INDEX node_operations_app_kind_index
                 ON node_operations (app_name, kind, created_at_unix_ms DESC, operation_id DESC)
             """
+        )
+
+    def _migrate_schema_v2_to_v3_locked(self) -> None:
+        database = self._require_database_locked()
+        database.execute(
+            "ALTER TABLE node_operations "
+            "ADD COLUMN detail_revision INTEGER NOT NULL DEFAULT 0"
         )
 
     def _validate_database_schema_locked(self, *, version: int) -> None:
@@ -1270,8 +1351,9 @@ class NodeOperationService:
                 INSERT INTO node_operations (
                     operation_id, kind, node_name, subject, requested_by_user_id,
                     state, summary, phase, result_reference, detail, progress_percent,
-                    created_at_unix_ms, started_at_unix_ms, finished_at_unix_ms, app_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at_unix_ms, started_at_unix_ms, finished_at_unix_ms, app_name,
+                    detail_revision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 _record_values(record),
             )
@@ -1396,6 +1478,7 @@ class NodeOperationService:
             phase=_database_optional_text(row["phase"]),
             result_reference=_database_optional_text(row["result_reference"]),
             detail=_database_optional_text(row["detail"]),
+            detail_revision=_database_required_int(row["detail_revision"]),
             progress_percent=_database_optional_float(row["progress_percent"]),
             log_lines=log_lines,
             created_at_unix_ms=_database_required_int(row["created_at_unix_ms"]),
@@ -1430,7 +1513,8 @@ class NodeOperationService:
                 """
                 UPDATE node_operations
                 SET state = ?, summary = ?, phase = ?, result_reference = ?, detail = ?,
-                    progress_percent = ?, started_at_unix_ms = ?, finished_at_unix_ms = ?
+                    detail_revision = ?, progress_percent = ?, started_at_unix_ms = ?,
+                    finished_at_unix_ms = ?
                 WHERE operation_id = ?
                 """,
                 (
@@ -1439,6 +1523,7 @@ class NodeOperationService:
                     record.phase,
                     record.result_reference,
                     record.detail,
+                    record.detail_revision,
                     record.progress_percent,
                     record.started_at_unix_ms,
                     record.finished_at_unix_ms,
@@ -1473,7 +1558,8 @@ class NodeOperationService:
                 """
                 UPDATE node_operations
                 SET state = ?, summary = ?, phase = ?, result_reference = ?, detail = ?,
-                    progress_percent = ?, started_at_unix_ms = ?, finished_at_unix_ms = ?
+                    detail_revision = ?, progress_percent = ?, started_at_unix_ms = ?,
+                    finished_at_unix_ms = ?
                 WHERE operation_id = ?
                 """,
                 (
@@ -1482,6 +1568,7 @@ class NodeOperationService:
                     record.phase,
                     record.result_reference,
                     record.detail,
+                    record.detail_revision,
                     record.progress_percent,
                     record.started_at_unix_ms,
                     record.finished_at_unix_ms,
@@ -1717,6 +1804,7 @@ def _record_values(record: NodeOperationRecord) -> tuple[object, ...]:
         record.started_at_unix_ms,
         record.finished_at_unix_ms,
         record.app_name,
+        record.detail_revision,
     )
 
 
@@ -1783,6 +1871,12 @@ def _mapping_optional_int(value: object, *, label: str) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} is invalid.")
+    return value
+
+
+def _mapping_nonnegative_int(value: object, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{label} is invalid.")
     return value
 

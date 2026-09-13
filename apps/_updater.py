@@ -212,6 +212,7 @@ class AppUpdateStatus:
     log_lines: tuple[str, ...] = ()
     started_at_unix_ms: int | None = None
     finished_at_unix_ms: int | None = None
+    log_cursor: int = 0
 
     @property
     def running(self) -> bool:
@@ -225,6 +226,7 @@ class AppUpdateStatus:
         progress_percent = payload.get("progress_percent")
         detail = payload.get("detail")
         raw_log_lines = payload.get("log_lines", [])
+        log_cursor = payload.get("log_cursor", 0)
         started_at_unix_ms = payload.get("started_at_unix_ms")
         finished_at_unix_ms = payload.get("finished_at_unix_ms")
         if not isinstance(raw_state, str):
@@ -239,6 +241,8 @@ class AppUpdateStatus:
             raise ValueError("App update status detail is invalid.")
         if not isinstance(raw_log_lines, list):
             raise ValueError("App update status log lines are invalid.")
+        if isinstance(log_cursor, bool) or not isinstance(log_cursor, int) or log_cursor < 0:
+            raise ValueError("App update status log cursor is invalid.")
         if started_at_unix_ms is not None and (
             isinstance(started_at_unix_ms, bool) or not isinstance(started_at_unix_ms, int)
         ):
@@ -272,6 +276,7 @@ class AppUpdateStatus:
             progress_percent=progress_value,
             detail=detail.strip() if isinstance(detail, str) and detail.strip() else None,
             log_lines=tuple(log_lines),
+            log_cursor=log_cursor,
             started_at_unix_ms=started_at_unix_ms,
             finished_at_unix_ms=finished_at_unix_ms,
         )
@@ -284,6 +289,7 @@ class AppUpdateStatus:
             "progress_percent": self.progress_percent,
             "detail": self.detail,
             "log_lines": list(self.log_lines),
+            "log_cursor": self.log_cursor,
             "started_at_unix_ms": self.started_at_unix_ms,
             "finished_at_unix_ms": self.finished_at_unix_ms,
         }
@@ -418,6 +424,12 @@ class Update_Manager:
         self.can_base = base
         self.can_mods = mods if app.mods else False
 
+    @property
+    def supports_verify(self) -> bool:
+        """Return whether this updater can verify its selected installation."""
+
+        return False
+
     @staticmethod
     def stringise(version: tuple[int, ...]) -> str:
         return ".".join(map(str, version))
@@ -475,6 +487,10 @@ class Update_Manager:
 
 
 class SteamCmd_Update_Manager(Update_Manager):
+    @property
+    def supports_verify(self) -> bool:
+        return True
+
     def __init__(self, app: UpdateManagerApp) -> None:
         super().__init__(app, base=True, mods=False)
         steam_update = self._steam_update_config()
@@ -486,6 +502,7 @@ class SteamCmd_Update_Manager(Update_Manager):
             summary="Ready",
         )
         self._log_tail: deque[str] = deque(maxlen=80)
+        self._log_cursor: int = 0
         self._last_logged_manifest_signature: tuple[int, str | None, int | None] | None = None
         self._operation_running: bool = False
         self._active_task: asyncio.Task[AppUpdateOperationResult] | None = None
@@ -512,7 +529,7 @@ class SteamCmd_Update_Manager(Update_Manager):
                 )
                 for branch in branches
             ),
-            supports_verify=True,
+            supports_verify=self.supports_verify,
             installed_build_id=installed_manifest.build_id if installed_manifest is not None else None,
             installed_branch_id=installed_manifest.branch_id if installed_manifest is not None else None,
         )
@@ -596,6 +613,7 @@ class SteamCmd_Update_Manager(Update_Manager):
                 summary=f"Starting {kind.value}...",
                 operation_kind=kind,
                 progress_percent=0.0,
+                log_cursor=self._log_cursor,
                 started_at_unix_ms=started_at_unix_ms,
             )
         self._reset_command_log(kind=kind, branch=branch)
@@ -872,6 +890,7 @@ class SteamCmd_Update_Manager(Update_Manager):
             log.info("SteamCMD success marker: app=%s line=%s", self.app.friendly, clean_line)
         with self._state_lock:
             self._log_tail.append(f"{source}: {clean_line}")
+            self._log_cursor += 1
             if self._status.state is not AppUpdateState.RUNNING:
                 return
             next_status = replace(
@@ -879,6 +898,7 @@ class SteamCmd_Update_Manager(Update_Manager):
                 summary=clean_line,
                 detail=clean_line,
                 log_lines=tuple(self._log_tail),
+                log_cursor=self._log_cursor,
             )
             if progress is not None:
                 phase_text, progress_percent = progress
@@ -906,6 +926,7 @@ class SteamCmd_Update_Manager(Update_Manager):
                 detail=detail,
                 progress_percent=progress_percent,
                 log_lines=tuple(self._log_tail),
+                log_cursor=self._log_cursor,
                 finished_at_unix_ms=finished_at_unix_ms,
             )
 

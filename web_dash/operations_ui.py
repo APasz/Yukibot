@@ -316,11 +316,26 @@ class ModWebOperationsMixin(ModWebServiceSupport):
         previous: NodeOperationView | None,
         current: NodeOperationView,
     ) -> bool:
-        """Ignore retained-log-only changes when deciding whether detail must reload."""
+        """Return whether a summary change invalidates separately loaded detail."""
 
         if previous is None:
             return True
         return previous.without_log_lines() != current.without_log_lines()
+
+    @classmethod
+    def _operation_detail_refresh_required(
+        cls,
+        previous: NodeOperationView | None,
+        current: NodeOperationView,
+        *,
+        details_open: bool,
+    ) -> bool:
+        """Reload detail only when an expanded row receives a changed summary."""
+
+        return details_open and cls._operation_stream_update_is_significant(
+            previous,
+            current,
+        )
 
     def _render_operations_ui(
         self,
@@ -624,6 +639,8 @@ class ModWebOperationsMixin(ModWebServiceSupport):
 
                     def _invalidate_operation_detail(
                         detail_key: _ModWebOperationDetailKey,
+                        *,
+                        reload: bool = True,
                     ) -> None:
                         if (
                             detail_key not in expanded_detail_keys
@@ -637,7 +654,7 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                         detail_refresh_generations[detail_key] = (
                             detail_refresh_generations.get(detail_key, 0) + 1
                         )
-                        if detail_key in expanded_detail_keys:
+                        if reload and detail_key in expanded_detail_keys:
                             _start_operation_detail_load(detail_key)
 
                     async def _load_operation_detail(
@@ -803,13 +820,23 @@ class ModWebOperationsMixin(ModWebServiceSupport):
                                 node_key=node_key,
                                 operation_id=operation.record.operation_id,
                             )
+                            previous_operation = previous_operations_by_id.get(
+                                operation.record.operation_id
+                            )
                             if self._operation_stream_update_is_significant(
-                                previous_operations_by_id.get(
-                                    operation.record.operation_id
-                                ),
+                                previous_operation,
                                 operation,
                             ):
-                                _invalidate_operation_detail(detail_key)
+                                _invalidate_operation_detail(
+                                    detail_key,
+                                    reload=self._operation_detail_refresh_required(
+                                        previous_operation,
+                                        operation,
+                                        details_open=(
+                                            detail_key in expanded_detail_keys
+                                        ),
+                                    ),
+                                )
                         for operation_id in previous_operations_by_id.keys() - current_operation_ids:
                             _discard_operation_detail(
                                 _ModWebOperationDetailKey(

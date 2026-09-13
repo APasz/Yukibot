@@ -50,7 +50,7 @@ class _AppUpdateProgressCursor:
     """The updater snapshot already examined for progress and log deltas."""
 
     status: AppUpdateStatus | None = None
-    log_lines: tuple[str, ...] = ()
+    log_cursor: int = 0
 
 
 _APP_UPDATE_OPERATION_SPECS: tuple[_AppUpdateOperationSpec, ...] = (
@@ -117,7 +117,8 @@ class NodeAppUpdateOperationService:
         await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
         if availability_check is not None:
             availability_check()
-        self._require_updater(app, spec=spec)
+        updater = self._require_updater(app, spec=spec)
+        self._require_updater_capability(updater=updater, app=app, spec=spec)
         if app.check_running():
             raise self._http_exception(
                 409,
@@ -184,6 +185,10 @@ class NodeAppUpdateOperationService:
         except LookupError as xcp:
             raise LookupError("App update operation was not found.") from xcp
         self._spec_for_operation_kind(operation.kind)
+        if operation.state is not NodeOperationState.QUEUED:
+            raise ValueError(
+                "Updater work can only be cancelled before it starts."
+            )
         self._operations.request_cancellation(operation_id=operation.operation_id)
 
     def cancel_pending(self) -> None:
@@ -259,6 +264,7 @@ class NodeAppUpdateOperationService:
         progress_cursor = _AppUpdateProgressCursor()
         try:
             updater = self._require_updater(app, spec=spec)
+            self._require_updater_capability(updater=updater, app=app, spec=spec)
             operation = self._operations.begin(
                 operation_id=operation_id,
                 progress=NodeOperationProgress(
@@ -310,7 +316,7 @@ class NodeAppUpdateOperationService:
                         updater=updater,
                         spec=spec,
                         previous_status=progress_cursor.status,
-                        previous_log_lines=progress_cursor.log_lines,
+                        previous_log_cursor=progress_cursor.log_cursor,
                     )
                 except Exception as status_xcp:
                     log.warning(
@@ -348,8 +354,8 @@ class NodeAppUpdateOperationService:
     ) -> tuple[AppUpdateOperationResult, AppUpdateStatus | None]:
         previous_status = self._read_updater_status(updater)
         progress_cursor.status = previous_status
-        progress_cursor.log_lines = (
-            () if previous_status is None else previous_status.log_lines
+        progress_cursor.log_cursor = (
+            0 if previous_status is None else previous_status.log_cursor
         )
         updater_task: asyncio.Task[AppUpdateOperationResult] = asyncio.create_task(
             self._invoke_updater(
@@ -361,12 +367,12 @@ class NodeAppUpdateOperationService:
         )
         try:
             while not updater_task.done():
-                progress_cursor.status, progress_cursor.log_lines = self._sync_updater_status(
+                progress_cursor.status, progress_cursor.log_cursor = self._sync_updater_status(
                     operation_id=operation_id,
                     updater=updater,
                     spec=spec,
                     previous_status=progress_cursor.status,
-                    previous_log_lines=progress_cursor.log_lines,
+                    previous_log_cursor=progress_cursor.log_cursor,
                 )
                 try:
                     await asyncio.wait_for(
@@ -382,12 +388,12 @@ class NodeAppUpdateOperationService:
         except Exception:
             await self._wait_for_updater_safe_boundary(updater_task)
             raise
-        progress_cursor.status, progress_cursor.log_lines = self._sync_updater_status(
+        progress_cursor.status, progress_cursor.log_cursor = self._sync_updater_status(
             operation_id=operation_id,
             updater=updater,
             spec=spec,
             previous_status=progress_cursor.status,
-            previous_log_lines=progress_cursor.log_lines,
+            previous_log_cursor=progress_cursor.log_cursor,
         )
         return result, progress_cursor.status
 
@@ -438,34 +444,33 @@ class NodeAppUpdateOperationService:
         updater: Update_Manager,
         spec: _AppUpdateOperationSpec,
         previous_status: AppUpdateStatus | None,
-        previous_log_lines: tuple[str, ...],
-    ) -> tuple[AppUpdateStatus | None, tuple[str, ...]]:
+        previous_log_cursor: int,
+    ) -> tuple[AppUpdateStatus | None, int]:
         status = self._read_updater_status(updater)
         if status is None:
-            return previous_status, previous_log_lines
-        current_log_lines = status.log_lines
+            return previous_status, previous_log_cursor
         appended_log_lines = tuple(
             log_line
             for log_line in self._appended_log_lines(
-                previous_log_lines=previous_log_lines,
-                current_log_lines=current_log_lines,
+                previous_log_cursor=previous_log_cursor,
+                status=status,
             )
             if log_line.strip()
         )
         if status == previous_status and not appended_log_lines:
-            return status, current_log_lines
+            return status, status.log_cursor
         try:
             operation = self._operations.get(operation_id, include_log_lines=False)
         except LookupError:
-            return status, current_log_lines
+            return status, status.log_cursor
         if not operation.state.active:
-            return status, current_log_lines
+            return status, status.log_cursor
         if operation.state is NodeOperationState.CANCEL_REQUESTED:
             self._append_log_lines(
                 operation_id=operation_id,
                 log_lines=appended_log_lines,
             )
-            return status, current_log_lines
+            return status, status.log_cursor
         if status.state is AppUpdateState.RUNNING:
             progress = NodeOperationProgress(
                 summary=status.summary,
@@ -493,7 +498,7 @@ class NodeAppUpdateOperationService:
                 operation_id=operation_id,
                 log_lines=appended_log_lines,
             )
-        return status, current_log_lines
+        return status, status.log_cursor
 
     def _finish_success(
         self,
@@ -560,16 +565,19 @@ class NodeAppUpdateOperationService:
     @staticmethod
     def _appended_log_lines(
         *,
-        previous_log_lines: tuple[str, ...],
-        current_log_lines: tuple[str, ...],
+        previous_log_cursor: int,
+        status: AppUpdateStatus,
     ) -> tuple[str, ...]:
-        if current_log_lines[: len(previous_log_lines)] == previous_log_lines:
-            return current_log_lines[len(previous_log_lines) :]
-        maximum_overlap = min(len(previous_log_lines), len(current_log_lines))
-        for overlap_length in range(maximum_overlap, 0, -1):
-            if previous_log_lines[-overlap_length:] == current_log_lines[:overlap_length]:
-                return current_log_lines[overlap_length:]
-        return current_log_lines
+        """Return newly retained updater lines using its monotonic log cursor."""
+
+        if status.log_cursor == previous_log_cursor:
+            return ()
+        if status.log_cursor < previous_log_cursor:
+            return status.log_lines
+        appended_count = status.log_cursor - previous_log_cursor
+        if appended_count >= len(status.log_lines):
+            return status.log_lines
+        return status.log_lines[-appended_count:]
 
     def _append_log_lines(
         self,
@@ -608,6 +616,19 @@ class NodeAppUpdateOperationService:
             )
             raise ValueError(f"{app.friendly} does not support {capability}.")
         return updater
+
+    @staticmethod
+    def _require_updater_capability(
+        *,
+        updater: Update_Manager,
+        app: App,
+        spec: _AppUpdateOperationSpec,
+    ) -> None:
+        if (
+            spec.updater_kind is AppUpdateOperationKind.VERIFY
+            and not updater.supports_verify
+        ):
+            raise ValueError(f"{app.friendly} does not support verification.")
 
     @staticmethod
     def _selected_branch_detail(app: App) -> str | None:

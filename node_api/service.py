@@ -399,6 +399,9 @@ class NodeApiService:
                     cancel_scope=NodeApiScope.APP_MANAGE,
                     required_level=Power_Level.sudo,
                     target_scope=operation_service.NodeOperationTargetScope.APP,
+                    cancellable_states=frozenset(
+                        {operations.NodeOperationState.QUEUED}
+                    ),
                     cancellation_handler=self._cancel_app_update_operation,
                 ),
                 operation_service.NodeOperationKindPolicy(
@@ -408,6 +411,9 @@ class NodeApiService:
                     cancel_scope=NodeApiScope.APP_MANAGE,
                     required_level=Power_Level.sudo,
                     target_scope=operation_service.NodeOperationTargetScope.APP,
+                    cancellable_states=frozenset(
+                        {operations.NodeOperationState.QUEUED}
+                    ),
                     cancellation_handler=self._cancel_app_update_operation,
                 ),
                 operation_service.NodeOperationKindPolicy(

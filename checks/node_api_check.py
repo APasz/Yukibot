@@ -7622,14 +7622,20 @@ class NodeApiTests(unittest.TestCase):
         app = _build_app(Mock())
         app.updater = Mock()
         app.updater.status.return_value = None
-        app.updater.update_selected = AsyncMock(
-            return_value=AppUpdateOperationResult(
+        update_started = asyncio.Event()
+        allow_update_completion = asyncio.Event()
+
+        async def _update_selected() -> AppUpdateOperationResult:
+            update_started.set()
+            await allow_update_completion.wait()
+            return AppUpdateOperationResult(
                 kind=AppUpdateOperationKind.UPDATE,
                 message="Updated Minecraft Alpha on Steam branch Stable.",
                 selected_branch_id="public",
                 selected_branch_label="Stable",
             )
-        )
+
+        app.updater.update_selected = AsyncMock(side_effect=_update_selected)
         manager = Mock()
         manager.start_blocker = Mock(return_value=None)
         service = NodeApiService()
@@ -7663,6 +7669,26 @@ class NodeApiTests(unittest.TestCase):
                 )
                 if result.operation_id is None:
                     raise AssertionError("Update mutation did not return an operation ID.")
+                try:
+                    await update_started.wait()
+                    operation_view = service.operation_api.get_operation(
+                        operation_id=result.operation_id,
+                        kind=NodeOperationKind.APP_UPDATE,
+                        app_name=app.name,
+                    )
+                    self.assertFalse(operation_view.cancellable)
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "not in a cancellable state",
+                    ):
+                        await service.operation_api.cancel_operation(
+                            operation_id=result.operation_id,
+                            actor_user_id=42,
+                            kind=NodeOperationKind.APP_UPDATE,
+                            app_name=app.name,
+                        )
+                finally:
+                    allow_update_completion.set()
                 for _ in range(20):
                     operation = service.operations.get(result.operation_id)
                     if operation.state.terminal:

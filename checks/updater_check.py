@@ -4,6 +4,7 @@ import asyncio
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import apps._steam as steam_metadata
@@ -22,6 +23,8 @@ from apps._updater import (
     AppUpdateProviderKind,
     AppUpdateState,
     SteamCmd_Update_Manager,
+    Update_Manager,
+    UpdateManagerApp,
     _command_error_text,
     run_steamcmd_command,
 )
@@ -69,6 +72,14 @@ class _FakeApp:
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_base_updater_does_not_advertise_verification(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            updater = Update_Manager(
+                cast(UpdateManagerApp, _FakeApp(Path(temp_dir)))
+            )
+
+        self.assertFalse(updater.supports_verify)
+
     def test_steamcmd_runner_keeps_early_success_when_output_tail_rolls_over(self) -> None:
         class FakeProcess:
             def __init__(self) -> None:
@@ -216,6 +227,8 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(app.persisted, 1)
         self.assertEqual(update_info.provider_kind, AppUpdateProviderKind.STEAMCMD)
         self.assertEqual(update_info.selected_branch_label, "Experimental")
+        self.assertTrue(updater.supports_verify)
+        self.assertEqual(update_info.supports_verify, updater.supports_verify)
 
     def test_steamcmd_update_manager_lists_version_branches_for_existing_instance(self) -> None:
         with TemporaryDirectory() as temp_dir:

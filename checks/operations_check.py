@@ -184,6 +184,51 @@ class NodeOperationsCheck(unittest.TestCase):
         self.assertEqual(summary[0].log_lines, ())
         self.assertEqual(detail.log_lines, ("stdout: Downloading content.",))
 
+    def test_detail_revision_advances_for_retained_detail_and_log_changes(self) -> None:
+        operations = NodeOperationService()
+        operation = operations.create(
+            kind=NodeOperationKind.APP_INSTALL,
+            node_name="node-a",
+            subject="demo",
+            requested_by_user_id=42,
+            progress=NodeOperationProgress(summary="Queued."),
+        )
+
+        started = operations.begin(
+            operation_id=operation.operation_id,
+            progress=NodeOperationProgress(
+                summary="Preparing.",
+                detail="Preparing installation.",
+            ),
+        )
+        logged = operations.append_log(
+            operation_id=operation.operation_id,
+            log_line="stdout: Preparing installation.",
+        )
+        updated = operations.update_active(
+            operation_id=operation.operation_id,
+            progress=NodeOperationProgress(
+                summary="Downloading.",
+                detail="Downloading content.",
+            ),
+            log_line="stdout: Downloading content.",
+        )
+        finished = operations.finish(
+            operation_id=operation.operation_id,
+            state=NodeOperationState.SUCCEEDED,
+            summary="Installed.",
+        )
+
+        self.assertEqual(operation.detail_revision, 0)
+        self.assertEqual(started.detail_revision, 1)
+        self.assertEqual(logged.detail_revision, 2)
+        self.assertEqual(updated.detail_revision, 3)
+        self.assertEqual(finished.detail_revision, 4)
+        self.assertEqual(
+            operations.get(operation.operation_id, include_log_lines=False).detail_revision,
+            4,
+        )
+
     def test_persisted_result_artifact_retains_its_app_target_and_expires(self) -> None:
         now_unix_ms = [1_000]
         with TemporaryDirectory() as temp_dir:
@@ -411,6 +456,7 @@ class NodeOperationsCheck(unittest.TestCase):
         self.assertIsInstance(update_operation, dict)
         assert isinstance(update_operation, dict)
         self.assertNotIn("log_lines", update_operation)
+        self.assertEqual(update_operation["detail_revision"], 1)
         self.assertEqual(
             operation_api.get_operation(
                 operation_id=first.operation_id,
@@ -1213,7 +1259,7 @@ class NodeOperationsCheck(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 ).fetchall()
 
-        self.assertEqual(version, (2,))
+        self.assertEqual(version, (3,))
         self.assertEqual(
             {row[0] for row in table_rows},
             {
@@ -1249,7 +1295,7 @@ class NodeOperationsCheck(unittest.TestCase):
             with sqlite3.connect(database_path) as database:
                 version = database.execute("PRAGMA user_version").fetchone()
 
-        self.assertEqual(version, (2,))
+        self.assertEqual(version, (3,))
 
     def test_version_zero_database_is_upgraded_to_current_schema_version(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1275,7 +1321,7 @@ class NodeOperationsCheck(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 ).fetchall()
 
-        self.assertEqual(version, (2,))
+        self.assertEqual(version, (3,))
         self.assertEqual(marker, ("kept",))
         self.assertTrue(
             {
@@ -1287,7 +1333,7 @@ class NodeOperationsCheck(unittest.TestCase):
             <= {row[0] for row in table_rows}
         )
 
-    def test_version_one_database_upgrades_existing_records_to_version_two(self) -> None:
+    def test_version_one_database_upgrades_existing_records_to_current_version(self) -> None:
         with TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "operations.sqlite3"
             with sqlite3.connect(database_path) as database:
@@ -1366,8 +1412,10 @@ class NodeOperationsCheck(unittest.TestCase):
                 )
 
         self.assertEqual(record.app_name, None)
-        self.assertEqual(version, (2,))
+        self.assertEqual(version, (3,))
         self.assertIn("app_name", columns)
+        self.assertIn("detail_revision", columns)
+        self.assertEqual(record.detail_revision, 0)
 
     def test_failed_database_migration_rolls_back(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1395,7 +1443,7 @@ class NodeOperationsCheck(unittest.TestCase):
             database_path = Path(temp_dir) / "operations.sqlite3"
             with sqlite3.connect(database_path) as database:
                 database.execute("CREATE TABLE future_marker (value TEXT NOT NULL)")
-                database.execute("PRAGMA user_version = 3")
+                database.execute("PRAGMA user_version = 4")
 
             with self.assertRaises(NodeOperationSchemaVersionError) as raised:
                 NodeOperationService(database_path=database_path).list_records()
@@ -1406,9 +1454,9 @@ class NodeOperationsCheck(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 ).fetchall()
 
-        self.assertEqual(raised.exception.database_version, 3)
-        self.assertEqual(raised.exception.supported_version, 2)
-        self.assertEqual(version, (3,))
+        self.assertEqual(raised.exception.database_version, 4)
+        self.assertEqual(raised.exception.supported_version, 3)
+        self.assertEqual(version, (4,))
         self.assertEqual(table_rows, [("future_marker",)])
 
 

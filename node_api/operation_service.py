@@ -56,6 +56,7 @@ class NodeOperationKindPolicy:
     required_level: Power_Level
     target_scope: NodeOperationTargetScope = NodeOperationTargetScope.NODE
     cancellation_handler: NodeOperationCancellationHandler | None = None
+    cancellable_states: frozenset[NodeOperationState] = _CANCELLABLE_OPERATION_STATES
 
     def __post_init__(self) -> None:
         if not self.kind_label.strip():
@@ -65,6 +66,17 @@ class NodeOperationKindPolicy:
         except (TypeError, ValueError) as xcp:
             raise ValueError("Operation target scope is invalid.") from xcp
         object.__setattr__(self, "target_scope", target_scope)
+        try:
+            cancellable_states = frozenset(
+                NodeOperationState(state) for state in self.cancellable_states
+            )
+        except (TypeError, ValueError) as xcp:
+            raise ValueError("Operation cancellable states are invalid.") from xcp
+        if not cancellable_states <= _CANCELLABLE_OPERATION_STATES:
+            raise ValueError(
+                "Operation cancellable states must be queued or running."
+            )
+        object.__setattr__(self, "cancellable_states", cancellable_states)
 
     def app_name_for_request(self, app_name: str | None) -> str | None:
         """Validate and normalize the app boundary supplied by an API request."""
@@ -80,6 +92,14 @@ class NodeOperationKindPolicy:
         if not (normalised_app_name := app_name.strip()):
             raise ValueError("Operation app name must not be blank.")
         return normalised_app_name
+
+    def is_cancellable(self, record: NodeOperationRecord) -> bool:
+        """Return whether this policy permits cancellation for the record now."""
+
+        return (
+            self.cancellation_handler is not None
+            and record.state in self.cancellable_states
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,7 +461,7 @@ class NodeOperationApiService:
             raise ValueError("Cancellation has already been requested.")
         if record.state.terminal:
             raise ValueError("Operation has already finished.")
-        if record.state not in _CANCELLABLE_OPERATION_STATES:
+        if not policy.is_cancellable(record):
             raise ValueError("Operation is not in a cancellable state.")
         await handler(record.operation_id, actor_user_id)
         record = self._operations.get(record.operation_id, include_log_lines=False)
@@ -487,10 +507,7 @@ class NodeOperationApiService:
         return NodeOperationView(
             record=record,
             kind_label=policy.kind_label,
-            cancellable=(
-                policy.cancellation_handler is not None
-                and record.state in _CANCELLABLE_OPERATION_STATES
-            ),
+            cancellable=policy.is_cancellable(record),
             cancellation_scope=cancellation_scope,
             cancellation_app_name=(
                 cancellation_app_name
