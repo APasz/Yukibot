@@ -234,6 +234,7 @@ from web_dash.home import (
 )
 from web_dash.links import current_node_app_url, mod_web_node_system_path
 from web_dash.nicegui_protocols import ModWebRouteUi, ModWebUi
+from web_dash.operation_stream import ModWebNodeOperationSnapshot
 from web_dash.remote_node_monitor import RemoteNodeAvailability, RemoteNodeMonitor, RemoteNodeMonitorSnapshot
 from web_dash.routes import _ModWebGZipMiddleware
 from web_dash.service import ModWebService
@@ -4318,6 +4319,148 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(ModWebService._update_status_badge_text(status), "Running")
+
+    def test_update_status_projects_app_verify_operation_state(self) -> None:
+        operation = NodeOperationView(
+            record=NodeOperationRecord(
+                operation_id="verify-operation",
+                kind=NodeOperationKind.APP_VERIFY,
+                node_name="erin",
+                subject="Minecraft Alpha",
+                state=NodeOperationState.CANCEL_REQUESTED,
+                summary="Cancellation requested.",
+                requested_by_user_id=42,
+                app_name="minecraft_alpha",
+                detail="SteamCMD is finishing its current step.",
+                progress_percent=50.0,
+                created_at_unix_ms=1,
+                started_at_unix_ms=2,
+            ),
+            kind_label="App verify",
+            cancellable=False,
+        )
+
+        status = ModWebService._update_status_from_operation(operation)
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status.state, AppUpdateState.RUNNING)
+        self.assertEqual(status.operation_kind, AppUpdateOperationKind.VERIFY)
+        self.assertEqual(status.progress_percent, 50.0)
+        self.assertEqual(
+            ModWebService._update_status_badge_text(status, operation=operation),
+            "Cancelling",
+        )
+
+    def test_update_operation_snapshot_prefers_the_latest_terminal_result(self) -> None:
+        earlier = NodeOperationView(
+            record=NodeOperationRecord(
+                operation_id="earlier-update",
+                kind=NodeOperationKind.APP_UPDATE,
+                node_name="erin",
+                subject="Minecraft Alpha",
+                state=NodeOperationState.SUCCEEDED,
+                summary="Updated Minecraft Alpha.",
+                requested_by_user_id=42,
+                app_name="minecraft_alpha",
+                created_at_unix_ms=1,
+                started_at_unix_ms=1,
+                finished_at_unix_ms=2,
+            ),
+            kind_label="App update",
+            cancellable=False,
+        )
+        latest = NodeOperationView(
+            record=NodeOperationRecord(
+                operation_id="latest-verify",
+                kind=NodeOperationKind.APP_VERIFY,
+                node_name="erin",
+                subject="Minecraft Alpha",
+                state=NodeOperationState.FAILED,
+                summary="Verify failed for Minecraft Alpha.",
+                requested_by_user_id=42,
+                app_name="MINECRAFT_ALPHA",
+                created_at_unix_ms=3,
+                finished_at_unix_ms=4,
+            ),
+            kind_label="App verify",
+            cancellable=False,
+        )
+
+        selected = ModWebService._app_update_operation_from_snapshot(
+            snapshot=ModWebNodeOperationSnapshot(
+                node_name="erin",
+                operations=(earlier, latest),
+            ),
+            app_name="minecraft_alpha",
+        )
+
+        self.assertIs(selected, latest)
+
+    def test_update_operation_status_remains_authoritative_after_completion(self) -> None:
+        operation = NodeOperationView(
+            record=NodeOperationRecord(
+                operation_id="completed-update",
+                kind=NodeOperationKind.APP_UPDATE,
+                node_name="erin",
+                subject="Minecraft Alpha",
+                state=NodeOperationState.SUCCEEDED,
+                summary="Updated Minecraft Alpha.",
+                requested_by_user_id=42,
+                app_name="minecraft_alpha",
+                created_at_unix_ms=1,
+                started_at_unix_ms=1,
+                finished_at_unix_ms=2,
+            ),
+            kind_label="App update",
+            cancellable=False,
+        )
+
+        self.assertTrue(
+            ModWebService._operation_status_is_authoritative(
+                operation=operation,
+                authoritative_operation_id="completed-update",
+            )
+        )
+        self.assertFalse(
+            ModWebService._operation_status_is_authoritative(
+                operation=operation,
+                authoritative_operation_id="other-operation",
+            )
+        )
+        newer_legacy_status = AppUpdateStatus(
+            state=AppUpdateState.FAILED,
+            summary="Legacy update failed.",
+            operation_kind=AppUpdateOperationKind.UPDATE,
+            started_at_unix_ms=3,
+            finished_at_unix_ms=4,
+        )
+        self.assertTrue(
+            ModWebService._legacy_update_status_should_override_terminal_operation(
+                status=newer_legacy_status,
+                operation=operation,
+                operation_status_is_authoritative=False,
+            )
+        )
+        self.assertTrue(
+            ModWebService._legacy_update_status_should_override_terminal_operation(
+                status=newer_legacy_status,
+                operation=operation,
+                operation_status_is_authoritative=True,
+            )
+        )
+        self.assertFalse(
+            ModWebService._legacy_update_status_should_override_terminal_operation(
+                status=AppUpdateStatus(
+                    state=AppUpdateState.RUNNING,
+                    summary="Stale updater status.",
+                    operation_kind=AppUpdateOperationKind.UPDATE,
+                    started_at_unix_ms=1,
+                ),
+                operation=operation,
+                operation_status_is_authoritative=True,
+            )
+        )
 
     def test_update_progress_text_reports_unavailable_when_percent_missing(
         self,

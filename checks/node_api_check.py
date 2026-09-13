@@ -62,6 +62,7 @@ from apps._config import (
     ModPlatformMetadata,
     ModrinthModMetadata,
     ModType,
+    SteamUpdateConfig,
 )
 from apps._config_files import (
     AppConfigFile,
@@ -247,7 +248,7 @@ from node_api.mod import (
     required_mod_mutation_level,
 )
 from node_api.mod_service import NodeModService
-from node_api.operations import NodeOperationKind, NodeOperationState
+from node_api.operations import NodeOperationKind, NodeOperationRecord, NodeOperationState
 from node_api.relay import NodeRelayTTSRequest, RemoteRelayTTSForwarder
 from node_api.request_auth import NodeRequestAuth, NodeRequestContext
 from node_api.route_contracts import DiscordHealthComponentState, DiscordHealthSnapshot, DiscordServiceState
@@ -1881,9 +1882,10 @@ class NodeApiTests(unittest.TestCase):
             app_name="minecraft_alpha",
             app_friendly="Minecraft Alpha",
             node="erin",
-            action=NodeAppMutationAction.START,
-            message="Started Minecraft Alpha.",
+            action=NodeAppMutationAction.UPDATE,
+            message="Update queued for Minecraft Alpha.",
             app_stats=None,
+            operation_id="operation-123",
         )
 
         mapped = result.to_mapping()
@@ -7217,6 +7219,170 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.app_friendly, "Demo Alpha")
         self.assertEqual(result.message, "Updated details for Demo Alpha.")
 
+    def test_mutate_app_update_details_reserves_only_changed_update_configuration(self) -> None:
+        app = _build_app(Mock())
+        app.cfg.steam_update = SteamUpdateConfig(app_id=294420)
+        manager = Mock()
+        manager.start_blocker = Mock(return_value=None)
+        manager.update_app_details = Mock(return_value="Demo Alpha")
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+        service._app_update_operations.has_active_update_operation = Mock(return_value=True)
+        service._app_update_operations.ensure_update_configuration_available = Mock()
+        runtime_summary = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version=None,
+            player_count=None,
+            player_capacity=None,
+            relay_support=app.chat_relay_support,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+
+        async def _update_details(selected_branch: str) -> None:
+            await service.mutate_app(
+                app=app,
+                action=NodeAppMutationAction.UPDATE_DETAILS,
+                actor_user_id=42,
+                friendly_name="Demo Alpha",
+                notes="Main shard",
+                lifecycle_notice_started=False,
+                lifecycle_notice_stopped=True,
+                lifecycle_notice_crashed=False,
+                running_cpu_points=3,
+                running_ram_points=7,
+                startup_cpu_points=None,
+                startup_ram_points=None,
+                steam_update_enabled=True,
+                steam_update_selected_branch=selected_branch,
+            )
+
+        with patch.object(
+            service,
+            "build_app_runtime_summary",
+            new=AsyncMock(return_value=runtime_summary),
+        ):
+            asyncio.run(_update_details("PUBLIC"))
+            service._app_update_operations.ensure_update_configuration_available.assert_not_called()
+
+            asyncio.run(_update_details("beta"))
+
+        service._app_update_operations.ensure_update_configuration_available.assert_called_once_with(app)
+
+    def test_mutate_app_blocks_lifecycle_changes_while_update_work_is_active(self) -> None:
+        app = _build_app(Mock())
+        manager = Mock()
+        manager.delete_instance = AsyncMock()
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+        service._app_update_operations.ensure_no_active_update_operation = Mock(
+            side_effect=HTTPException(409, "Update work is active.")
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.START,
+                    actor_user_id=42,
+                )
+            )
+        self.assertEqual(raised.exception.status_code, 409)
+        manager.start_blocker.assert_not_called()
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.DELETE,
+                    actor_user_id=42,
+                )
+            )
+        self.assertEqual(raised.exception.status_code, 409)
+        manager.delete_instance.assert_not_awaited()
+
+    def test_mutate_app_update_waits_for_an_active_lifecycle_change(self) -> None:
+        async def _run() -> None:
+            app = _build_app(Mock())
+            manager = Mock()
+            service = NodeApiService()
+            service.set_manager(cast(Any, manager))
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service.set_acl(cast(Any, acl))
+            release_lifecycle_task = asyncio.Event()
+
+            async def _wait_for_lifecycle_change() -> None:
+                await release_lifecycle_task.wait()
+
+            lifecycle_task = asyncio.create_task(_wait_for_lifecycle_change())
+            service._app_mutations._tasks[app.name.casefold()] = lifecycle_task
+            try:
+                with self.assertRaises(HTTPException) as raised:
+                    await service.mutate_app(
+                        app=app,
+                        action=NodeAppMutationAction.UPDATE,
+                        actor_user_id=42,
+                    )
+                self.assertEqual(raised.exception.status_code, 409)
+                self.assertFalse(service._app_update_operations.has_active_update_operation(app))
+            finally:
+                release_lifecycle_task.set()
+                await lifecycle_task
+
+        asyncio.run(_run())
+
+    def test_mutate_app_update_rechecks_lifecycle_after_authorisation(self) -> None:
+        async def _run() -> None:
+            app = _build_app(Mock())
+            manager = Mock()
+            service = NodeApiService()
+            service.set_manager(cast(Any, manager))
+            permission_started = asyncio.Event()
+            release_permission = asyncio.Event()
+
+            async def _permit(*_args: object) -> None:
+                permission_started.set()
+                await release_permission.wait()
+
+            acl = Mock()
+            acl.perm_check = AsyncMock(side_effect=_permit)
+            service.set_acl(cast(Any, acl))
+            release_lifecycle_task = asyncio.Event()
+
+            async def _wait_for_lifecycle_change() -> None:
+                await release_lifecycle_task.wait()
+
+            update_task = asyncio.create_task(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.UPDATE,
+                    actor_user_id=42,
+                )
+            )
+            await permission_started.wait()
+            lifecycle_task = asyncio.create_task(_wait_for_lifecycle_change())
+            service._app_mutations._tasks[app.name.casefold()] = lifecycle_task
+            release_permission.set()
+            try:
+                with self.assertRaises(HTTPException) as raised:
+                    await update_task
+                self.assertEqual(raised.exception.status_code, 409)
+                self.assertFalse(service._app_update_operations.has_active_update_operation(app))
+            finally:
+                release_lifecycle_task.set()
+                await lifecycle_task
+
+        asyncio.run(_run())
+
     def test_mutate_app_update_details_passes_relay_advancement_toggle(self) -> None:
         class _RelayApp(_DummyApp):
             @property
@@ -7452,13 +7618,14 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.action, NodeAppMutationAction.SELECT_UPDATE_BRANCH)
         self.assertEqual(result.message, "Selected update branch Experimental for Minecraft Alpha.")
 
-    def test_mutate_app_update_uses_updater_result(self) -> None:
+    def test_mutate_app_update_queues_a_durable_updater_operation(self) -> None:
         app = _build_app(Mock())
         app.updater = Mock()
-        app.updater.start_selected_update = AsyncMock(
+        app.updater.status.return_value = None
+        app.updater.update_selected = AsyncMock(
             return_value=AppUpdateOperationResult(
                 kind=AppUpdateOperationKind.UPDATE,
-                message="Started update for Minecraft Alpha on Steam branch Stable.",
+                message="Updated Minecraft Alpha on Steam branch Stable.",
                 selected_branch_id="public",
                 selected_branch_label="Stable",
             )
@@ -7488,17 +7655,45 @@ class NodeApiTests(unittest.TestCase):
                 )
             ),
         ):
-            result = asyncio.run(
-                service.mutate_app(
+            async def _run() -> tuple[NodeAppMutationResult, NodeOperationRecord]:
+                result = await service.mutate_app(
                     app=app,
                     action=NodeAppMutationAction.UPDATE,
                     actor_user_id=42,
                 )
-            )
+                if result.operation_id is None:
+                    raise AssertionError("Update mutation did not return an operation ID.")
+                for _ in range(20):
+                    operation = service.operations.get(result.operation_id)
+                    if operation.state.terminal:
+                        return result, operation
+                    await asyncio.sleep(0)
+                raise AssertionError("Update operation did not finish.")
 
-        app.updater.start_selected_update.assert_awaited_once()
+            result, operation = asyncio.run(_run())
+
+        app.updater.update_selected.assert_awaited_once()
         self.assertEqual(result.action, NodeAppMutationAction.UPDATE)
-        self.assertEqual(result.message, "Started update for Minecraft Alpha on Steam branch Stable.")
+        self.assertEqual(result.message, "Update queued for Minecraft Alpha.")
+        self.assertIsNotNone(result.operation_id)
+        self.assertEqual(operation.kind, NodeOperationKind.APP_UPDATE)
+        self.assertEqual(operation.app_name, app.name)
+        self.assertEqual(operation.state, NodeOperationState.SUCCEEDED)
+        self.assertEqual(operation.summary, "Updated Minecraft Alpha on Steam branch Stable.")
+        self.assertEqual(
+            service.operation_api.get_operation(
+                operation_id=operation.operation_id,
+                kind=NodeOperationKind.APP_UPDATE,
+                app_name=app.name,
+            ).record,
+            operation,
+        )
+        with self.assertRaises(LookupError):
+            service.operation_api.get_operation(
+                operation_id=operation.operation_id,
+                kind=NodeOperationKind.APP_UPDATE,
+                app_name="factorio_alpha",
+            )
 
     def test_mutate_node_capacity_requires_root_and_returns_result(self) -> None:
         manager = Mock()

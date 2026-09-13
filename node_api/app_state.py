@@ -42,7 +42,9 @@ from apps._node_api import (
     required_string,
     string_tuple,
 )
-from apps._updater import AppUpdateInfo, AppUpdateStatus
+from apps._updater import AppUpdateInfo, AppUpdateOperationKind, AppUpdateStatus
+from .app_update_service import NodeAppUpdateOperationService
+from .operations import NodeOperationRecord
 from .route_contracts import DiscordHealthSnapshot, HttpExceptionFactory
 from .system import NodeSystemSummary
 from node_auth import NodeApiScope
@@ -846,6 +848,7 @@ class NodeAppMutationResult:
     action: NodeAppMutationAction
     message: str
     app_stats: NodeAppRuntimeSummary | None
+    operation_id: str | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppMutationResult":
@@ -859,8 +862,13 @@ class NodeAppMutationResult:
         except ValueError as xcp:
             raise ValueError("Node app mutation action is invalid.") from xcp
         raw_app_stats = payload.get("app_stats")
+        operation_id = payload.get("operation_id")
         if raw_app_stats is not None and not isinstance(raw_app_stats, Mapping):
             raise ValueError("Node app mutation app_stats are invalid.")
+        if operation_id is not None and (
+            not isinstance(operation_id, str) or not operation_id.strip()
+        ):
+            raise ValueError("Node app mutation operation id is invalid.")
         return cls(
             app_name=app_name,
             app_friendly=app_friendly,
@@ -868,6 +876,7 @@ class NodeAppMutationResult:
             action=action,
             message=message,
             app_stats=NodeAppRuntimeSummary.from_mapping(raw_app_stats) if raw_app_stats is not None else None,
+            operation_id=operation_id.strip() if isinstance(operation_id, str) else None,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -878,6 +887,7 @@ class NodeAppMutationResult:
             "action": self.action.value,
             "message": self.message,
             "app_stats": self.app_stats.to_mapping() if self.app_stats is not None else None,
+            "operation_id": self.operation_id,
         }
 
 
@@ -896,6 +906,7 @@ class NodeAppMutationService:
         build_runtime_summary: Callable[[App], Awaitable[NodeAppRuntimeSummary]],
         build_live_runtime_summary: Callable[[App], Awaitable[NodeAppRuntimeSummary]],
         transition_ttl_seconds: float,
+        app_update_operations: NodeAppUpdateOperationService,
     ) -> None:
         if transition_ttl_seconds <= 0:
             raise ValueError("App transition cache TTL must be positive.")
@@ -908,6 +919,7 @@ class NodeAppMutationService:
         self._build_runtime_summary = build_runtime_summary
         self._build_live_runtime_summary = build_live_runtime_summary
         self._transition_ttl_seconds = transition_ttl_seconds
+        self._app_update_operations = app_update_operations
         self._transitions: dict[str, NodeAppTransitionSnapshot] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._deleting_app_keys: set[str] = set()
@@ -977,11 +989,23 @@ class NodeAppMutationService:
         manager = self._require_manager()
         acl = self._require_acl()
         http_exception = self._http_exception
-        await acl.perm_check(actor_user_id, required_app_mutation_level(action))
+        app_update_action = action in {
+            NodeAppMutationAction.UPDATE,
+            NodeAppMutationAction.VERIFY,
+        }
+        # The durable update executor owns the shared authorisation boundary
+        # for operation creation and cancellation.
+        if not app_update_action:
+            await acl.perm_check(actor_user_id, required_app_mutation_level(action))
         app_key = app.name.casefold()
         if action is not NodeAppMutationAction.DELETE and app_key in self._deleting_app_keys:
             raise http_exception(409, f"Cannot change {app.friendly}; deletion is in progress.")
+        operation_id: str | None = None
         if action is NodeAppMutationAction.START:
+            self._app_update_operations.ensure_no_active_update_operation(
+                app,
+                message=f"Cannot start {app.friendly} while it is updating or verifying.",
+            )
             blocker = manager.start_blocker(app)
             if blocker is not None:
                 raise http_exception(409, blocker.message)
@@ -1009,8 +1033,11 @@ class NodeAppMutationService:
             )
             message = f"Kill requested for {app.friendly}."
         elif action is NodeAppMutationAction.DELETE:
-            pending_task = self._tasks.get(app_key)
-            if pending_task is not None and not pending_task.done():
+            self._app_update_operations.ensure_no_active_update_operation(
+                app,
+                message=f"Cannot delete {app.friendly} while it is updating or verifying.",
+            )
+            if self._has_active_lifecycle_task(app.name):
                 raise http_exception(409, f"Cannot delete {app.friendly}; another state change is in progress.")
             if app_key in self._deleting_app_keys:
                 raise http_exception(409, f"Cannot delete {app.friendly}; deletion is already in progress.")
@@ -1049,30 +1076,37 @@ class NodeAppMutationService:
                 raise ValueError("Running CPU points must not be empty.")
             if running_ram_points is None:
                 raise ValueError("Running RAM points must not be empty.")
-            manager.update_app_details(
-                app,
-                AppDetailsUpdate(
-                    friendly_name=friendly_name,
-                    title_font_preset=title_font_preset,
-                    notes=notes,
-                    lifecycle_notice_started=lifecycle_notice_started,
-                    lifecycle_notice_stopped=lifecycle_notice_stopped,
-                    lifecycle_notice_crashed=lifecycle_notice_crashed,
-                    relay_notice_player_session=relay_notice_player_session,
-                    relay_notice_player_death=relay_notice_player_death,
-                    relay_notice_progress=relay_notice_progress,
-                    relay_advancements_enabled=relay_advancements_enabled,
-                    factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
-                    rcon_requires_online_players=rcon_requires_online_players,
-                    disabled_activity_provider_ids=disabled_activity_provider_ids,
-                    running_cpu_points=running_cpu_points,
-                    running_ram_points=running_ram_points,
-                    startup_cpu_points=startup_cpu_points,
-                    startup_ram_points=startup_ram_points,
-                    steam_update_enabled=steam_update_enabled,
-                    steam_update_selected_branch=steam_update_selected_branch,
-                ),
+            details = AppDetailsUpdate(
+                friendly_name=friendly_name,
+                title_font_preset=title_font_preset,
+                notes=notes,
+                lifecycle_notice_started=lifecycle_notice_started,
+                lifecycle_notice_stopped=lifecycle_notice_stopped,
+                lifecycle_notice_crashed=lifecycle_notice_crashed,
+                relay_notice_player_session=relay_notice_player_session,
+                relay_notice_player_death=relay_notice_player_death,
+                relay_notice_progress=relay_notice_progress,
+                relay_advancements_enabled=relay_advancements_enabled,
+                factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
+                rcon_requires_online_players=rcon_requires_online_players,
+                disabled_activity_provider_ids=disabled_activity_provider_ids,
+                running_cpu_points=running_cpu_points,
+                running_ram_points=running_ram_points,
+                startup_cpu_points=startup_cpu_points,
+                startup_ram_points=startup_ram_points,
+                steam_update_enabled=steam_update_enabled,
+                steam_update_selected_branch=steam_update_selected_branch,
             )
+            if (
+                steam_update_enabled is not None
+                and self._app_update_operations.has_active_update_operation(app)
+                and App_Manager.steam_update_configuration_would_change(
+                    app=app,
+                    details=details,
+                )
+            ):
+                self._app_update_operations.ensure_update_configuration_available(app)
+            manager.update_app_details(app, details)
             message = f"Updated details for {app.friendly}."
         elif action is NodeAppMutationAction.SET_STEAM_GAME_SERVER_LOGIN_TOKEN:
             if steam_game_server_login_token is None:
@@ -1113,30 +1147,27 @@ class NodeAppMutationService:
                 update_branch_id,
                 actor_user_id,
             )
+            self._app_update_operations.ensure_branch_selection_available(app)
             update_info = app.updater.select_branch(update_branch_id)
             message = f"Selected update branch {update_info.selected_branch_label} for {app.friendly}."
         elif action is NodeAppMutationAction.UPDATE:
-            if app.updater is None:
-                raise ValueError(f"{app.friendly} does not support updates.")
-            self._log.info(
-                "Node API starting update: node=%s app=%s actor=%s branch=%s",
-                self._node_name(),
-                app.name,
-                actor_user_id,
-                app.update_info.selected_branch_id if app.update_info is not None else None,
+            operation = await self._queue_app_update_operation(
+                app=app,
+                action=action,
+                updater_kind=AppUpdateOperationKind.UPDATE,
+                actor_user_id=actor_user_id,
             )
-            message = (await app.updater.start_selected_update()).message
+            operation_id = operation.operation_id
+            message = f"Update queued for {app.friendly}."
         elif action is NodeAppMutationAction.VERIFY:
-            if app.updater is None:
-                raise ValueError(f"{app.friendly} does not support verification.")
-            self._log.info(
-                "Node API starting verify: node=%s app=%s actor=%s branch=%s",
-                self._node_name(),
-                app.name,
-                actor_user_id,
-                app.update_info.selected_branch_id if app.update_info is not None else None,
+            operation = await self._queue_app_update_operation(
+                app=app,
+                action=action,
+                updater_kind=AppUpdateOperationKind.VERIFY,
+                actor_user_id=actor_user_id,
             )
-            message = (await app.updater.start_selected_verify()).message
+            operation_id = operation.operation_id
+            message = f"Verify queued for {app.friendly}."
         else:
             raise ValueError(f"Unsupported app mutation action: {action}")
 
@@ -1173,6 +1204,7 @@ class NodeAppMutationService:
             action=action,
             message=message,
             app_stats=app_stats,
+            operation_id=operation_id,
         )
 
     def _write_steam_game_server_login_token(self, *, app: App, token: str | None) -> None:
@@ -1195,6 +1227,53 @@ class NodeAppMutationService:
                 else "Unable to update the Steam game server login token."
             )
             raise self._http_exception(400, detail) from None
+
+    async def _queue_app_update_operation(
+        self,
+        *,
+        app: App,
+        action: NodeAppMutationAction,
+        updater_kind: AppUpdateOperationKind,
+        actor_user_id: int,
+    ) -> NodeOperationRecord:
+        self._ensure_app_update_available(app=app, action=action)
+        self._log.info(
+            "Node API queuing %s: node=%s app=%s actor=%s",
+            action.value,
+            self._node_name(),
+            app.name,
+            actor_user_id,
+        )
+        return await self._app_update_operations.start(
+            app=app,
+            updater_kind=updater_kind,
+            actor_user_id=actor_user_id,
+            availability_check=lambda: self._ensure_app_update_available(
+                app=app,
+                action=action,
+            ),
+        )
+
+    def _ensure_app_update_available(
+        self,
+        *,
+        app: App,
+        action: NodeAppMutationAction,
+    ) -> None:
+        if app.name.casefold() in self._deleting_app_keys:
+            raise self._http_exception(
+                409,
+                f"Cannot {action.value} {app.friendly}; deletion is in progress.",
+            )
+        if self._has_active_lifecycle_task(app.name):
+            raise self._http_exception(
+                409,
+                f"Cannot {action.value} {app.friendly}; another state change is in progress.",
+            )
+
+    def _has_active_lifecycle_task(self, app_name: str) -> bool:
+        task = self._tasks.get(app_name.casefold())
+        return task is not None and not task.done()
 
     def _track_task(
         self,

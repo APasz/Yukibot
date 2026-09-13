@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from .constants import log
 from .nicegui_protocols import ModWebNotificationType, ModWebUi, ModWebValueContainer, _value_as_text
 from .runtime_imports import (
+    AbstractEventLoop,
     AppUpdateInfo,
     AppUpdateOperationKind,
     AppUpdateState,
@@ -15,6 +16,9 @@ from .runtime_imports import (
     ModWebUser,
     NodeAppMutationAction,
     NodeAppRuntimeSummary,
+    NodeOperationKind,
+    NodeOperationState,
+    NodeOperationView,
     SteamUpdatePreset,
     app_scope_from_name,
     cached_steam_update_branches,
@@ -24,8 +28,11 @@ from .runtime_imports import (
     replace,
     required_app_mutation_level,
     steam_update_preset_for_scope,
+    asyncio,
     time,
 )
+from .operation_stream import ModWebNodeOperationSnapshot
+from .operations_ui import operation_detail_path
 from .service_base import ModWebServiceSupport
 from .types import ModWebBasePageModel, _ModWebBadgeSpec
 
@@ -42,6 +49,7 @@ class _UpdateSectionViewState:
     app_id: int | None
     install_alignment_badge: _ModWebBadgeSpec
     status: AppUpdateStatus | None
+    operation: NodeOperationView | None
     status_summary: str
     status_detail: str | None
     progress_percent: float | None
@@ -56,6 +64,119 @@ class _UpdateSectionViewState:
 
 
 class ModWebAppPageUpdateMixin(ModWebServiceSupport):
+    _APP_UPDATE_OPERATION_KINDS: frozenset[NodeOperationKind] = frozenset(
+        {
+            NodeOperationKind.APP_UPDATE,
+            NodeOperationKind.APP_VERIFY,
+        }
+    )
+
+    @classmethod
+    def _app_update_operation_from_snapshot(
+        cls,
+        *,
+        snapshot: ModWebNodeOperationSnapshot | None,
+        app_name: str,
+    ) -> NodeOperationView | None:
+        """Choose the active app update first, then the latest retained result."""
+
+        if snapshot is None:
+            return None
+        candidates = tuple(
+            operation
+            for operation in snapshot.operations
+            if operation.record.kind in cls._APP_UPDATE_OPERATION_KINDS
+            and operation.record.app_name is not None
+            and operation.record.app_name.casefold() == app_name.casefold()
+        )
+        if not candidates:
+            return None
+        active_candidates = tuple(
+            operation for operation in candidates if operation.record.state.active
+        )
+        if active_candidates:
+            return max(active_candidates, key=cls._update_operation_sort_key)
+        return max(candidates, key=cls._update_operation_sort_key)
+
+    @staticmethod
+    def _update_operation_sort_key(operation: NodeOperationView) -> tuple[int, str]:
+        return (
+            operation.record.created_at_unix_ms,
+            operation.record.operation_id,
+        )
+
+    @staticmethod
+    def _operation_status_is_authoritative(
+        *,
+        operation: NodeOperationView | None,
+        authoritative_operation_id: str | None,
+    ) -> bool:
+        return (
+            operation is not None
+            and authoritative_operation_id is not None
+            and operation.record.operation_id == authoritative_operation_id
+        )
+
+    @classmethod
+    def _legacy_update_status_should_override_terminal_operation(
+        cls,
+        *,
+        status: AppUpdateStatus | None,
+        operation: NodeOperationView | None,
+        operation_status_is_authoritative: bool,
+    ) -> bool:
+        """Retain a newer legacy updater result without hiding known operation work."""
+
+        if (
+            status is None
+            or operation is None
+            or not operation.record.state.terminal
+        ):
+            return False
+        if status.running and not operation_status_is_authoritative:
+            return True
+        operation_status = cls._update_status_from_operation(operation)
+        if operation_status is None:
+            return False
+        return cls._update_status_sort_key(status) > cls._update_status_sort_key(
+            operation_status
+        )
+
+    @staticmethod
+    def _update_status_from_operation(
+        operation: NodeOperationView | None,
+    ) -> AppUpdateStatus | None:
+        """Project a durable operation into the existing update-card data shape."""
+
+        if operation is None:
+            return None
+        record = operation.record
+        if record.kind is NodeOperationKind.APP_UPDATE:
+            operation_kind = AppUpdateOperationKind.UPDATE
+        elif record.kind is NodeOperationKind.APP_VERIFY:
+            operation_kind = AppUpdateOperationKind.VERIFY
+        else:
+            raise ValueError("App update UI received an unrelated operation kind.")
+        if record.state in {
+            NodeOperationState.QUEUED,
+            NodeOperationState.RUNNING,
+            NodeOperationState.CANCEL_REQUESTED,
+        }:
+            state = AppUpdateState.RUNNING
+        elif record.state is NodeOperationState.SUCCEEDED:
+            state = AppUpdateState.SUCCEEDED
+        else:
+            state = AppUpdateState.FAILED
+        return AppUpdateStatus(
+            state=state,
+            summary=record.summary,
+            operation_kind=operation_kind,
+            progress_percent=record.progress_percent,
+            detail=record.detail,
+            started_at_unix_ms=record.started_at_unix_ms,
+            finished_at_unix_ms=record.finished_at_unix_ms,
+        )
+
     @staticmethod
     def _update_section_badges(model: ModWebBasePageModel) -> tuple[_ModWebBadgeSpec, ...]:
         update_info = model.update_info
@@ -152,7 +273,27 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         return preset.app_id
 
     @staticmethod
-    def _update_status_badge_text(status: AppUpdateStatus) -> str:
+    def _update_status_badge_text(
+        status: AppUpdateStatus,
+        *,
+        operation: NodeOperationView | None = None,
+    ) -> str:
+        if operation is not None:
+            match operation.record.state:
+                case NodeOperationState.QUEUED:
+                    return "Queued"
+                case NodeOperationState.RUNNING:
+                    return "Running"
+                case NodeOperationState.CANCEL_REQUESTED:
+                    return "Cancelling"
+                case NodeOperationState.SUCCEEDED:
+                    return "Complete"
+                case NodeOperationState.FAILED:
+                    return "Failed"
+                case NodeOperationState.CANCELLED:
+                    return "Cancelled"
+                case NodeOperationState.INTERRUPTED:
+                    return "Interrupted"
         if status.state is AppUpdateState.RUNNING:
             return "Running"
         if status.state is AppUpdateState.SUCCEEDED:
@@ -160,7 +301,23 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         return status.state.value.title()
 
     @staticmethod
-    def _update_status_badge_tone(status: AppUpdateStatus) -> BadgeTone:
+    def _update_status_badge_tone(
+        status: AppUpdateStatus,
+        *,
+        operation: NodeOperationView | None = None,
+    ) -> BadgeTone:
+        if operation is not None:
+            match operation.record.state:
+                case NodeOperationState.QUEUED | NodeOperationState.RUNNING:
+                    return "purple"
+                case NodeOperationState.CANCEL_REQUESTED:
+                    return "warn"
+                case NodeOperationState.SUCCEEDED:
+                    return "black"
+                case NodeOperationState.FAILED:
+                    return "red"
+                case NodeOperationState.CANCELLED | NodeOperationState.INTERRUPTED:
+                    return "warn"
         if status.state is AppUpdateState.RUNNING:
             return "purple"
         if status.state is AppUpdateState.FAILED:
@@ -415,9 +572,28 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         return None
 
     @staticmethod
-    def _update_status_title(status: AppUpdateStatus | None) -> str:
+    def _update_status_title(
+        status: AppUpdateStatus | None,
+        *,
+        operation: NodeOperationView | None = None,
+    ) -> str:
         if status is None:
             return "Activity"
+        if operation is not None:
+            operation_label = (
+                "Verify"
+                if operation.record.kind is NodeOperationKind.APP_VERIFY
+                else "Update"
+            )
+            if operation.record.state.active:
+                return "Current operation"
+            if operation.record.state is NodeOperationState.CANCELLED:
+                return f"{operation_label} cancelled"
+            if operation.record.state is NodeOperationState.INTERRUPTED:
+                return f"{operation_label} interrupted"
+            if operation.record.state is NodeOperationState.FAILED:
+                return f"{operation_label} failed"
+            return "Latest result"
         if status.state is not AppUpdateState.FAILED:
             return "Current operation" if status.running else "Latest result"
         if status.operation_kind is None:
@@ -434,12 +610,17 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         selected_branch_id: str,
         can_manage_updates: bool,
         dry_preview_active: bool,
+        operation: NodeOperationView | None = None,
     ) -> _UpdateSectionViewState:
         target_branch_id = cls._resolve_update_target_branch_id(update_info, selected_branch_id)
         target_change_pending = target_branch_id.casefold() != update_info.selected_branch_id.casefold()
         displayed_status = None if status is None or status.state is AppUpdateState.IDLE else status
         app_running = model.app_stats is not None and model.app_stats.running
-        update_running = displayed_status.running if displayed_status is not None else False
+        update_running = (
+            operation.record.state.active
+            if operation is not None
+            else displayed_status.running if displayed_status is not None else False
+        )
         update_block_reason = cls._update_action_block_reason(
             action=NodeAppMutationAction.UPDATE,
             can_manage_updates=can_manage_updates,
@@ -481,6 +662,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 target_branch_id=target_branch_id,
             ),
             status=displayed_status,
+            operation=operation,
             status_summary="No update recorded." if displayed_status is None else displayed_status.summary,
             status_detail=None if displayed_status is None else displayed_status.detail,
             progress_percent=progress_percent,
@@ -494,10 +676,17 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 verify_block_reason=verify_block_reason,
                 target_change_pending=target_change_pending,
             ),
-            status_title=cls._update_status_title(displayed_status),
+            status_title=cls._update_status_title(
+                displayed_status,
+                operation=operation,
+            ),
             show_log=(
                 displayed_status is not None
-                and (bool(displayed_status.log_lines) or displayed_status.state is AppUpdateState.FAILED)
+                and (
+                    operation is not None
+                    or bool(displayed_status.log_lines)
+                    or displayed_status.state is AppUpdateState.FAILED
+                )
             ),
         )
 
@@ -579,8 +768,14 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                     else:
                         self._badge(
                             ui=ui,
-                            text=self._update_status_badge_text(status),
-                            tone=self._update_status_badge_tone(status),
+                            text=self._update_status_badge_text(
+                                status,
+                                operation=view_state.operation,
+                            ),
+                            tone=self._update_status_badge_tone(
+                                status,
+                                operation=view_state.operation,
+                            ),
                         )
                         if status.operation_kind is not None:
                             self._badge(ui=ui, text=status.operation_kind.value.title(), tone="black")
@@ -650,11 +845,32 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                     )
                     self._render_update_value(ui=ui, label="Manifest build", value=view_state.manifest_build)
 
-    def _render_update_log(self, *, ui: ModWebUi, view_state: _UpdateSectionViewState) -> None:
+    def _render_update_log(
+        self,
+        *,
+        ui: ModWebUi,
+        view_state: _UpdateSectionViewState,
+        node_name: str,
+    ) -> None:
         status = view_state.status
         if status is None or not view_state.show_log:
             return
         with ui.card().classes("mod-card w-full xl:col-span-12"):
+            operation = view_state.operation
+            if operation is not None:
+                with ui.column().classes("w-full gap-2"):
+                    ui.label("Operation log").classes("text-sm font-black mod-title-small")
+                    ui.label(
+                        "Live progress comes from the shared operation stream. Retained output is available in Operations."
+                    ).classes("mod-subtitle text-sm")
+                    ui.link(
+                        "View retained log",
+                        operation_detail_path(
+                            node_name=node_name,
+                            operation_id=operation.record.operation_id,
+                        ),
+                    ).classes("mod-list-button secondary w-fit")
+                return
             log_details = ui.element("details").classes("mod-update-log-details w-full")
             if status.state is AppUpdateState.FAILED:
                 log_details.props("open")
@@ -695,6 +911,10 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         dry_preview_statuses: tuple[AppUpdateStatus, ...] = self._dry_update_preview_statuses()
         dry_preview_index: int = -1
         dry_preview_status: AppUpdateStatus | None = None
+        operation_snapshot: ModWebNodeOperationSnapshot | None = None
+        authoritative_operation_id: str | None = None
+        page_closed = False
+        operation_loop: AbstractEventLoop = asyncio.get_running_loop()
         from nicegui.context import context as nicegui_context
 
         notify_client = nicegui_context.client
@@ -702,6 +922,12 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
         def _notify(message: str, *, tone: ModWebNotificationType) -> None:
             with notify_client:
                 ui.notify(message, type=tone)
+
+        def _current_update_operation() -> NodeOperationView | None:
+            return self._app_update_operation_from_snapshot(
+                snapshot=operation_snapshot,
+                app_name=current_model.app_name,
+            )
 
         def _set_selected_branch(event: ModWebValueContainer) -> None:
             nonlocal selected_branch_id
@@ -721,7 +947,6 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 )
                 return
             next_model = await refresh_async_runtime_model()
-            previous_status = current_model.update_status
             previous_branch_id = (
                 current_model.update_info.selected_branch_id if current_model.update_info is not None else None
             )
@@ -732,25 +957,12 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 not selected_branch_id or selected_branch_id == previous_branch_id
             ):
                 selected_branch_id = next_model.update_info.selected_branch_id
-            next_status = current_model.update_status
             log.debug(
-                "Update section refreshed: node=%s app=%s state=%s progress=%s branch=%s",
+                "Update section refreshed: node=%s app=%s branch=%s",
                 current_model.node_name,
                 current_model.app_name,
-                None if next_status is None else next_status.state.value,
-                None if next_status is None else next_status.progress_percent,
                 None if next_model.update_info is None else next_model.update_info.selected_branch_id,
             )
-            if (
-                previous_status is not None
-                and previous_status.running
-                and next_status is not None
-                and not next_status.running
-            ):
-                _notify(
-                    next_status.summary,
-                    tone="positive" if next_status.state is AppUpdateState.SUCCEEDED else "negative",
-                )
             next_view_signature = self._update_section_view_signature(current_model)
             if next_view_signature != previous_view_signature or selected_branch_id != previous_selected_branch_id:
                 render_update_section.refresh(current_model)
@@ -785,7 +997,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             return True
 
         async def _run_update_action(action: NodeAppMutationAction) -> None:
-            nonlocal dry_preview_status
+            nonlocal authoritative_operation_id, dry_preview_status
             dry_preview_status = None
             try:
                 await _apply_selected_branch(notify_result=False)
@@ -830,6 +1042,9 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 action.value,
                 result.message,
             )
+            if result.operation_id is not None:
+                authoritative_operation_id = result.operation_id
+            render_update_section.refresh(current_model)
             _notify(result.message, tone="positive")
             await _refresh_update_model()
 
@@ -856,9 +1071,37 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             section_update_info = section_model.update_info
             if section_update_info is None:
                 return
-            section_update_status = (
-                dry_preview_status if dry_preview_status is not None else section_model.update_status
+            section_operation = _current_update_operation()
+            operation_status_is_authoritative = self._operation_status_is_authoritative(
+                operation=section_operation,
+                authoritative_operation_id=authoritative_operation_id,
             )
+            if dry_preview_status is not None:
+                section_update_status = dry_preview_status
+                displayed_operation = None
+            elif (
+                operation_snapshot is None
+                or section_operation is None
+                or (
+                    section_operation.record.state.terminal
+                    and self._legacy_update_status_should_override_terminal_operation(
+                        status=section_model.update_status,
+                        operation=section_operation,
+                        operation_status_is_authoritative=operation_status_is_authoritative,
+                    )
+                )
+            ):
+                # The shared stream becomes authoritative after its first
+                # matching active operation. Keep existing state visible while
+                # it connects, for read-only users, and for legacy updater
+                # work that follows retained operation history.
+                section_update_status = section_model.update_status
+                displayed_operation = None
+            else:
+                section_update_status = self._update_status_from_operation(
+                    section_operation
+                )
+                displayed_operation = section_operation
             branch_options = self._update_branch_options(section_update_info)
             resolved_selected_branch_id = self._resolve_update_target_branch_id(section_update_info, selected_branch_id)
             view_state = self._update_section_view_state(
@@ -868,6 +1111,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 selected_branch_id=selected_branch_id,
                 can_manage_updates=can_manage_updates,
                 dry_preview_active=dry_preview_status is not None,
+                operation=displayed_operation,
             )
 
             with ui.card().classes(self._flat_tab_card_classes()):
@@ -892,9 +1136,68 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                         )
                         self._render_update_status_card(ui=ui, view_state=view_state)
                         self._render_update_installed_card(ui=ui, view_state=view_state)
-                        self._render_update_log(ui=ui, view_state=view_state)
+                        self._render_update_log(
+                            ui=ui,
+                            view_state=view_state,
+                            node_name=section_model.node_name,
+                        )
 
         render_update_section(current_model)
+
+        if can_manage_updates:
+
+            def _apply_operation_snapshot(snapshot: ModWebNodeOperationSnapshot) -> None:
+                nonlocal authoritative_operation_id, operation_snapshot
+                if page_closed:
+                    return
+                previous_operation = _current_update_operation()
+                operation_snapshot = snapshot
+                next_operation = _current_update_operation()
+                if next_operation is not None and next_operation.record.state.active:
+                    authoritative_operation_id = next_operation.record.operation_id
+                operation_changed = previous_operation != next_operation
+                if (
+                    previous_operation is not None
+                    and previous_operation.record.state.active
+                    and next_operation is not None
+                    and next_operation.record.operation_id
+                    == previous_operation.record.operation_id
+                    and next_operation.record.state.terminal
+                ):
+                    notification_tone: ModWebNotificationType
+                    if next_operation.record.state is NodeOperationState.SUCCEEDED:
+                        notification_tone = "positive"
+                    elif next_operation.record.state in {
+                        NodeOperationState.CANCELLED,
+                        NodeOperationState.INTERRUPTED,
+                    }:
+                        notification_tone = "warning"
+                    else:
+                        notification_tone = "negative"
+                    _notify(next_operation.record.summary, tone=notification_tone)
+                if operation_changed:
+                    render_update_section.refresh(current_model)
+
+            def _handle_operation_snapshot(snapshot: ModWebNodeOperationSnapshot) -> None:
+                operation_loop.call_soon_threadsafe(
+                    lambda: _apply_operation_snapshot(snapshot)
+                )
+
+            unsubscribe_operation_stream = self._create_remote_operation_subscription(
+                node=self._remote_node_link(current_model.node_name),
+                user=user,
+                on_update=_handle_operation_snapshot,
+            )
+
+            def _cleanup_operation_stream() -> None:
+                nonlocal page_closed
+                page_closed = True
+                unsubscribe_operation_stream()
+
+            self._register_client_cleanup(
+                ui=ui,
+                cleanup=_cleanup_operation_stream,
+            )
 
         def apply_update_model(next_model: ModWebBasePageModel) -> None:
             nonlocal current_model, selected_branch_id

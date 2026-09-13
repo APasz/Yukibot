@@ -1172,6 +1172,19 @@ class App_Manager(metaclass=config.Singleton):
         return preset.build_config(selected_branch=selected_branch)
 
     @staticmethod
+    def steam_update_configuration_would_change(
+        *,
+        app: ManagedApp,
+        details: AppDetailsUpdate,
+    ) -> bool:
+        """Return whether an app-details request changes updater configuration."""
+
+        return app.cfg.steam_update != App_Manager._resolve_next_steam_update_config(
+            app=app,
+            details=details,
+        )
+
+    @staticmethod
     def _resolve_next_relay_advancements_enabled(*, app: ManagedApp, details: AppDetailsUpdate) -> bool | None:
         current_relay_advancements = app.relay_advancements_enabled
         if details.relay_advancements_enabled is None:

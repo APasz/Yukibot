@@ -140,6 +140,8 @@ class NodeOperationKind(StrEnum):
     """A durable operation type understood by the local node."""
 
     APP_INSTALL = "app_install"
+    APP_UPDATE = "app_update"
+    APP_VERIFY = "app_verify"
     MOD_METADATA_DISCOVERY = "mod_metadata_discovery"
     MOD_METADATA_APPLY = "mod_metadata_apply"
 

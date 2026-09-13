@@ -28,6 +28,7 @@ from . import (
     app_game_service,
     app_operations,
     app_state,
+    app_update_service,
     chat_service,
     client_pack,
     map_service,
@@ -224,6 +225,20 @@ class NodeApiService:
             restart_delay_seconds=_NODE_RESTART_DELAY_SECONDS,
         )
         self._system_history_task: asyncio.Task[None] | None = None
+        self.operations = operations.NodeOperationService(
+            database_path=config.node_operation_database_path(
+                config.MOD_WEB_SERVER.node_name
+            )
+        )
+        self._app_update_operations = app_update_service.NodeAppUpdateOperationService(
+            node_name=lambda: self.node_name,
+            require_acl=self._require_acl,
+            http_exception=_http_exception,
+            invalidate_state_caches=lambda app_name: self._invalidate_state_caches(
+                app_name=app_name
+            ),
+            operations=self.operations,
+        )
         self._app_mutations = app_state.NodeAppMutationService(
             node_name=lambda: self.node_name,
             require_manager=self._require_manager,
@@ -238,6 +253,7 @@ class NodeApiService:
                 app
             ),
             transition_ttl_seconds=_APP_TRANSITION_TTL_SECONDS,
+            app_update_operations=self._app_update_operations,
         )
         self._app_state_subscriptions = app_state.NodeAppStateSubscriptionService(
             node_name=lambda: self.node_name,
@@ -281,11 +297,6 @@ class NodeApiService:
             http_exception=_http_exception,
             runtime_http_exception=self._runtime_http_exception,
             traffic_log=traffic_log,
-        )
-        self.operations = operations.NodeOperationService(
-            database_path=config.node_operation_database_path(
-                config.MOD_WEB_SERVER.node_name
-            )
         )
         self.realtime = NodeRealtimeService(
             node_name=lambda: self.node_name,
@@ -382,6 +393,24 @@ class NodeApiService:
                     cancellation_handler=self._cancel_app_install_operation,
                 ),
                 operation_service.NodeOperationKindPolicy(
+                    kind=operations.NodeOperationKind.APP_UPDATE,
+                    kind_label="App update",
+                    read_scope=NodeApiScope.APP_MANAGE,
+                    cancel_scope=NodeApiScope.APP_MANAGE,
+                    required_level=Power_Level.sudo,
+                    target_scope=operation_service.NodeOperationTargetScope.APP,
+                    cancellation_handler=self._cancel_app_update_operation,
+                ),
+                operation_service.NodeOperationKindPolicy(
+                    kind=operations.NodeOperationKind.APP_VERIFY,
+                    kind_label="App verify",
+                    read_scope=NodeApiScope.APP_MANAGE,
+                    cancel_scope=NodeApiScope.APP_MANAGE,
+                    required_level=Power_Level.sudo,
+                    target_scope=operation_service.NodeOperationTargetScope.APP,
+                    cancellation_handler=self._cancel_app_update_operation,
+                ),
+                operation_service.NodeOperationKindPolicy(
                     kind=operations.NodeOperationKind.MOD_METADATA_DISCOVERY,
                     kind_label="Mod metadata discovery",
                     read_scope=NodeApiScope.MODS_WRITE,
@@ -428,6 +457,18 @@ class NodeApiService:
 
         await self._app_installer.cancel_install(
             job_id=operation_id,
+            actor_user_id=actor_user_id,
+        )
+
+    async def _cancel_app_update_operation(
+        self,
+        operation_id: str,
+        actor_user_id: int,
+    ) -> None:
+        """Request safe, cooperative cancellation of app updater work."""
+
+        await self._app_update_operations.cancel(
+            operation_id=operation_id,
             actor_user_id=actor_user_id,
         )
 
@@ -505,6 +546,7 @@ class NodeApiService:
         history_task = self._system_history_task
         self._system_history_task = None
         self._app_mutations.cancel_pending()
+        self._app_update_operations.cancel_pending()
         self._app_installer.cancel_pending()
         self._mod_service.cancel_pending()
         self._app_state_subscriptions.close()
