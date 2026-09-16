@@ -37,6 +37,7 @@ from apps.gmod import (
     resolve_gmod_game_port,
 )
 from node_api.app_installer import NodeAppInstallInputKind, NodeAppInstallRequest, NodeAppInstallerService
+from node_api.service import NodeApiService
 
 
 def _write_gmod_steam_manifest(directory: Path, *, build_id: int, branch_id: str = "public") -> None:
@@ -280,12 +281,21 @@ class GmodIntegrationTests(unittest.TestCase):
 
             server_config = gmod_server_config_path(directory)
             server_config.write_text(
-                f'hostname "GMod Alpha"; sv_setsteamaccount {token}\n',
+                f'hostname "GMod Alpha"; sv_setsteamaccount {token}; sv_lan 0\n',
                 encoding="utf-8",
             )
-            displayed_config = app.read_config_file("server/server.cfg").content
+            displayed = app.read_config_file("server/server.cfg")
+            displayed_config = displayed.content
             self.assertNotIn(token, displayed_config)
-            self.assertIn("[REDACTED]", displayed_config)
+            self.assertEqual(
+                displayed_config,
+                'hostname "GMod Alpha"; sv_setsteamaccount [REDACTED]; sv_lan 0\n',
+            )
+            self.assertIsNotNone(displayed.warning)
+            assert displayed.warning is not None
+            self.assertIn("legacy/manual", displayed.warning)
+            self.assertIn("Remove it", displayed.warning)
+            self.assertIn("Yukibot", displayed.warning)
             with self.assertRaisesRegex(ValueError, "managed"):
                 app.write_config_file("server/server.cfg", f"hostname GMod; sv_setsteamaccount {token}\n")
 
@@ -310,6 +320,52 @@ class GmodIntegrationTests(unittest.TestCase):
             app.set_steam_game_server_login_token(None)
             self.assertFalse(app.steam_game_server_login_token_status.configured)
             self.assertFalse(token_path.exists())
+
+    def test_legacy_server_config_redacts_quoted_inline_token_without_hiding_commands(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            server_config = gmod_server_config_path(directory)
+            server_config.write_text(
+                f'hostname "Foo"; sv_setsteamaccount "{token}"; sv_lan 0\n',
+                encoding="utf-8",
+            )
+
+            displayed = app.read_config_file("server/server.cfg")
+
+        self.assertEqual(
+            displayed.content,
+            'hostname "Foo"; sv_setsteamaccount "[REDACTED]"; sv_lan 0\n',
+        )
+        self.assertNotIn(token, displayed.content)
+        self.assertIsNotNone(displayed.warning)
+
+    def test_legacy_server_config_download_is_redacted(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            server_config = gmod_server_config_path(directory)
+            server_config.write_text(
+                f'hostname "Foo"; sv_setsteamaccount {token}; sv_lan 0\n',
+                encoding="utf-8",
+            )
+
+            response = asyncio.run(
+                NodeApiService().storage.build_config_root_download_response(app=app, root_id="server")
+            )
+
+        downloaded_content = bytes(response.body).decode("utf-8")
+        self.assertEqual(
+            downloaded_content,
+            'hostname "Foo"; sv_setsteamaccount [REDACTED]; sv_lan 0\n',
+        )
+        self.assertNotIn(token, downloaded_content)
+        self.assertEqual(
+            response.headers["content-disposition"],
+            'attachment; filename="server.cfg"',
+        )
 
     def test_steam_updater_uses_gmod_dedicated_server_app_id_and_verify_flow(self) -> None:
         with TemporaryDirectory() as temporary_directory:

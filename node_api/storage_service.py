@@ -7,10 +7,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Never, Protocol
+from urllib.parse import quote
 
 from fastapi import UploadFile
 from fastapi.responses import FileResponse, Response
 
+import config
 from _file import File_Utils
 from _security import Access_Control
 from _utils import Utilities
@@ -171,7 +173,7 @@ class NodeStorageService:
         app: App,
         root_id: str,
         actor_user_id: int | None = None,
-    ) -> FileResponse:
+    ) -> Response:
         try:
             root = app.resolve_config_root(root_id)
         except ValueError as xcp:
@@ -205,13 +207,31 @@ class NodeStorageService:
                 404, f"No downloadable config files found in root: {root.label}"
             )
         if root_path.is_file():
+            config_file = visible_configs[0]
+            try:
+                config_content = app.read_config_file(config_file.id)
+            except FileNotFoundError as xcp:
+                raise self._http_exception(404, str(xcp)) from xcp
+            except ValueError as xcp:
+                raise self._http_exception(400, str(xcp)) from xcp
             self._traffic_log.info(
-                "Node API sending config file root: node=%s app=%s root=%s",
+                "Node API sending config file root through app reader: node=%s app=%s root=%s",
                 self._node_name(),
                 app.name,
                 root_id,
             )
-            return FileResponse(path=root_path, filename=root_path.name)
+            filename = root_path.name
+            quoted_filename = quote(filename, safe="")
+            content_disposition = (
+                f"attachment; filename*=UTF-8''{quoted_filename}"
+                if quoted_filename != filename
+                else f'attachment; filename="{filename}"'
+            )
+            return Response(
+                content=config_content.content.encode(config.STR_ENCODE),
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": content_disposition},
+            )
 
         paths = tuple(
             app.resolve_config_file(config_file.id) for config_file in visible_configs
@@ -706,6 +726,7 @@ class NodeStorageService:
             node=self._node_name(),
             config=self._config_entry(content.file),
             content=content.content,
+            warning=content.warning,
         )
 
     @staticmethod

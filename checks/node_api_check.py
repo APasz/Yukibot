@@ -186,6 +186,7 @@ from node_api.console import (
     NodeConsoleStdoutStreamEventKind,
 )
 from node_api.files import (
+    NodeConfigContent,
     NodeConfigList,
     NodeSaveBatchMutationResult,
     NodeSaveList,
@@ -9470,7 +9471,13 @@ class NodeApiTests(unittest.TestCase):
             size_bytes=11,
             modified_at=datetime(2026, 5, 26, 12, 0, 0),
         )
-        app.read_config_file = Mock(return_value=AppConfigFileContent(file=config_file, content="motd=hello\n"))  # type: ignore[method-assign]
+        app.read_config_file = Mock(  # type: ignore[method-assign]
+            return_value=AppConfigFileContent(
+                file=config_file,
+                content="motd=hello\n",
+                warning="This config needs attention.",
+            )
+        )
 
         service = NodeApiService()
         content = service.storage.read_config_file(
@@ -9481,6 +9488,11 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(content.app_name, "minecraft_alpha")
         self.assertEqual(content.content, "motd=hello\n")
         self.assertEqual(content.config.relative_path, "server.properties")
+        self.assertEqual(content.warning, "This config needs attention.")
+        self.assertEqual(NodeConfigContent.from_mapping(content.to_mapping()), content)
+        legacy_payload = content.to_mapping()
+        legacy_payload.pop("warning")
+        self.assertIsNone(NodeConfigContent.from_mapping(legacy_payload).warning)
 
     def test_config_root_download_creates_archive_from_visible_root_files(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -46,8 +46,25 @@ _GMOD_STEAM_ACCOUNT_COMMAND_RE: Final[re.Pattern[str]] = re.compile(
     r"\bsv_setsteamaccount(?:\s|$)",
     re.IGNORECASE,
 )
+_GMOD_STEAM_ACCOUNT_VALUE_RE: Final[re.Pattern[str]] = re.compile(
+    r"""
+    (?P<command>\bsv_setsteamaccount\b)
+    (?P<spacing>[ \t]+)
+    (?:
+        (?P<quoted>"(?:\\[^\r\n]|[^"\\\r\n])*")(?=[ \t;\r\n]|$)
+        # A malformed quoted value has no safe suffix boundary, so redact through EOL.
+        | (?P<unterminated_quote>"[^\r\n]*)
+        | (?P<unquoted>(?!//)[^\s;]+)
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 _GMOD_LEGACY_PLACEHOLDER_VERSION: Final[str] = "0.0"
 _REDACTED_SECRET: Final[str] = "[REDACTED]"
+_GMOD_LEGACY_STEAM_ACCOUNT_WARNING: Final[str] = (
+    "server.cfg contains legacy/manual sv_setsteamaccount configuration. Remove it and use "
+    "Yukibot's dedicated Steam Game Server Login Token (GSLT) setting instead."
+)
 
 
 def gmod_server_config_path(directory: Path) -> Path:
@@ -306,21 +323,17 @@ def _server_config_contains_steam_account_command(content: str) -> bool:
 
 
 def _redact_server_config_steam_account_command(content: str) -> str:
-    redacted_lines: list[str] = []
-    for line in content.splitlines(keepends=True):
-        if _GMOD_STEAM_ACCOUNT_COMMAND_RE.search(line) is None:
-            redacted_lines.append(line)
-            continue
-        if line.endswith("\r\n"):
-            line_ending = "\r\n"
-        elif line.endswith("\n"):
-            line_ending = "\n"
-        elif line.endswith("\r"):
-            line_ending = "\r"
-        else:
-            line_ending = ""
-        redacted_lines.append(f"sv_setsteamaccount {_REDACTED_SECRET}{line_ending}")
-    return "".join(redacted_lines)
+    """Redact GSLT values without interpreting the rest of a Source config line."""
+
+    def redact_value(match: re.Match[str]) -> str:
+        redacted_value = (
+            f'"{_REDACTED_SECRET}"' if match.group("quoted") is not None else _REDACTED_SECRET
+        )
+        return f"{match.group('command')}{match.group('spacing')}{redacted_value}"
+
+    return "".join(
+        _GMOD_STEAM_ACCOUNT_VALUE_RE.sub(redact_value, line) for line in content.splitlines(keepends=True)
+    )
 
 
 async def prepare_gmod_server_installation(
@@ -421,10 +434,12 @@ class Gmod(App[App_Config]):
         )
 
     def read_config_file(self, file_id: str) -> AppConfigFileContent:
-        content = super().read_config_file(file_id)
+        config_content = super().read_config_file(file_id)
+        has_legacy_steam_account_command = _server_config_contains_steam_account_command(config_content.content)
         return replace(
-            content,
-            content=_redact_server_config_steam_account_command(content.content),
+            config_content,
+            content=_redact_server_config_steam_account_command(config_content.content),
+            warning=_GMOD_LEGACY_STEAM_ACCOUNT_WARNING if has_legacy_steam_account_command else None,
         )
 
     def write_config_file(self, file_id: str, content: str) -> AppConfigFileContent:

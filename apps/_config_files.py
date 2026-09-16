@@ -90,6 +90,7 @@ class AppConfigFile:
 class AppConfigFileContent:
     file: AppConfigFile
     content: str
+    warning: str | None = None
 
 
 def effective_config_root_read_level(*, root: AppConfigFileRoot, default: Power_Level) -> Power_Level:

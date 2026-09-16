@@ -339,7 +339,7 @@ def register_storage_routes(
         root_id: str,
         request: Request,
         access_token: str | None = None,
-    ) -> FileResponse:
+    ) -> Response:
         traffic_log.info(
             "Node API config root download request: node=%s app=%s root=%s",
             auth.node_name,

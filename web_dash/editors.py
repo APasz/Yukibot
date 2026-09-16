@@ -2668,7 +2668,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             editor.set_value(loaded.content)
             loaded_label.set_text(f"{loaded.config.root_label} / {loaded.config.relative_path}")
             meta_label.set_text(f"{loaded.config.size_text} · modified {loaded.config.modified_at}")
-            if notify:
+            if loaded.warning is not None:
+                ui.notify(loaded.warning, type="warning", multi_line=True)
+            elif notify:
                 ui.notify("Config loaded.", type="positive")
 
         async def load_selected_config() -> None:

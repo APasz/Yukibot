@@ -175,6 +175,7 @@ class NodeConfigContent:
     node: str
     config: NodeConfigEntry
     content: str
+    warning: str | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeConfigContent:
@@ -184,12 +185,16 @@ class NodeConfigContent:
         content = payload.get("content")
         if not isinstance(content, str):
             raise ValueError("Node config content is invalid.")
+        warning = payload.get("warning")
+        if warning is not None and not isinstance(warning, str):
+            raise ValueError("Node config content warning is invalid.")
         return cls(
             app_name=_required_string(payload, "app_name"),
             app_friendly=_required_string(payload, "app_friendly"),
             node=_required_string(payload, "node"),
             config=NodeConfigEntry.from_mapping(raw_config),
             content=content,
+            warning=warning,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -199,6 +204,7 @@ class NodeConfigContent:
             "node": self.node,
             "config": self.config.to_mapping(),
             "content": self.content,
+            "warning": self.warning,
         }
 
 
