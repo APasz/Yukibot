@@ -5,7 +5,7 @@ from mirror_service import MirrorService
 
 from . import avatars as mod_web_avatars
 from .actions import ModWebActionsMixin
-from .app_installer import ModWebAppInstallerMixin, _AppInstallerPageLock
+from .app_installer import ModWebAppInstallerMixin
 from .app_page import ModWebAppPageMixin
 from .backend import ModWebDashboardBackend
 from .chat import ModWebChatMixin
@@ -22,6 +22,7 @@ from .links import (
 from .models import ModWebModelsMixin
 from .mirrors import ModWebMirrorsMixin
 from .operations_ui import ModWebOperationsMixin
+from .portal_app_installer import ModWebPortalAppInstallerMixin, PortalAppInstallCoordinator
 from .nicegui_protocols import (
     ModWebFastApiApp,
     ModWebRouteUi,
@@ -82,6 +83,7 @@ class ModWebService(
     ModWebChatMixin,
     ModWebTabsMixin,
     ModWebModelsMixin,
+    ModWebPortalAppInstallerMixin,
     ModWebAppInstallerMixin,
     ModWebOperationsMixin,
     ModWebHomeMixin,
@@ -112,7 +114,11 @@ class ModWebService(
         self._remote_node_monitors_lock = threading.RLock()
         self._mod_update_check_cache_lock = threading.RLock()
         self._mod_update_check_cache: dict[_ModWebModUpdateCacheKey, _ModWebModUpdateCacheEntry] = {}
-        self._app_installer_page_lock = _AppInstallerPageLock()
+        self._portal_app_install_coordinator = PortalAppInstallCoordinator()
+        self._portal_app_install_recovery_task: asyncio.Task[None] | None = None
+        self._portal_app_install_recovery_lock = asyncio.Lock()
+        self._portal_app_install_multiple_warning_active = False
+        self._portal_app_install_recovery_error: str | None = None
         self._remote_node_state_broker: SharedAsyncStreamBroker[RemoteNodeStreamKey, NodeStateStreamEvent] = (
             SharedAsyncStreamBroker()
         )

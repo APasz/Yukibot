@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO
 
 from apps._scs_truck_simulator import SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE
+from apps.gmod import GMOD_MANAGE_EMBED_COLOR
 from apps.minecraft import (
     Minecraft,
     MinecraftCookingRecipe,
@@ -273,6 +274,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         "base": "#6B7280",
         "beammp": "#F97316",
         "factorio": "#DC6B0F",
+        "gmod": f"#{GMOD_MANAGE_EMBED_COLOR:06X}",
         "minecraft": "#22C55E",
         "satisfactory": "#F59E0B",
         "sevendays": "#B91C1C",
@@ -2413,9 +2415,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
         if method == "GET":
             self._raise_if_remote_node_circuit_open(node)
         if user is None:
-            if method != "GET" or app_name is not None or scopes != (NodeApiScope.APPS_READ,):
-                raise ValueError("The Portal node monitor may perform only node-level app read requests.")
-            token: str = self._remote_node_monitor_token(node=node)
+            if method != "GET" or app_name is not None:
+                raise ValueError("Portal background requests must be node-level reads.")
+            if scopes == (NodeApiScope.APPS_READ,):
+                token = self._remote_node_monitor_token(node=node)
+            elif scopes == (NodeApiScope.OPERATIONS_READ,):
+                token = self._portal_app_install_recovery_token(node=node)
+            else:
+                raise ValueError("Portal background requests have unsupported node API scopes.")
         else:
             token = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
         node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
@@ -2666,6 +2673,26 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 node=node.node_name,
                 app=None,
                 scopes=frozenset({NodeApiScope.APPS_READ}),
+                expires_at=int(time.time()) + _REMOTE_NODE_TOKEN_TTL_SECONDS,
+            ),
+        )
+
+    @staticmethod
+    def _portal_app_install_recovery_token(*, node: ModWebNodeLink) -> str:
+        """Issue the least-privilege token for Portal app-install recovery."""
+
+        secret: str | None = config.MOD_WEB_SERVER.token_secret
+        if secret is None:
+            if config.INDEV or config.ALLOW_UNAUTH_NODE_API:
+                return _DEVELOPMENT_UNAUTHENTICATED_NODE_TOKEN
+            raise RuntimeError("NODE_API_TOKEN_SECRET is required to recover Portal app installs.")
+        return issue_node_token(
+            secret=secret,
+            grant=NodeAccessGrant(
+                subject="portal:app-install-recovery",
+                node=node.node_name,
+                app=None,
+                scopes=frozenset({NodeApiScope.OPERATIONS_READ}),
                 expires_at=int(time.time()) + _REMOTE_NODE_TOKEN_TTL_SECONDS,
             ),
         )

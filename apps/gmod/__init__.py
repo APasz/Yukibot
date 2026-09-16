@@ -32,6 +32,7 @@ GMOD_DEFAULT_PORT: Final[int] = 27015
 GMOD_DEFAULT_GAMEMODE: Final[str] = "sandbox"
 GMOD_DEFAULT_STARTUP_MAP: Final[str] = "gm_construct"
 GMOD_DEFAULT_MAX_PLAYERS: Final[int] = 16
+GMOD_MANAGE_EMBED_COLOR: Final[int] = 0x1194F0
 STEAM_GAME_APP_ID: Final[int] = 4000
 STEAM_APP_ID: Final[int] = 4020
 STEAM_UPDATE_PRESET: Final[SteamUpdatePreset] = SteamUpdatePreset(app_id=STEAM_APP_ID)
@@ -343,7 +344,7 @@ class Gmod(App[App_Config]):
         return ["./srcds_run", "-game", "garrysmod"]
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
-        self.manage_embed_color = 0xF97316
+        self.manage_embed_color = GMOD_MANAGE_EMBED_COLOR
         self.proc_name = "srcds_linux"
         self.proc_cmd = [self.proc_name, "-game", "garrysmod"]
         ensure_gmod_managed_files(cfg.directory)

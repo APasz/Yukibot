@@ -1,4 +1,10 @@
-"""HTTP routes for node-local app installation jobs."""
+"""Lower-level HTTP routes for node-local app installation jobs.
+
+The normal Portal workflow adds a Portal-wide single-install lease before it
+calls these endpoints. Direct calls remain supported for internal use and can
+bypass that orchestration; node-local operation resource locks still protect
+folders and instance identities.
+"""
 
 from __future__ import annotations
 

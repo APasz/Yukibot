@@ -194,11 +194,13 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             return fallback
 
     def _on_startup(self) -> None:
+        self._start_portal_app_install_recovery()
         self._backend.start_background_tasks()
         self._startup_signal.set()
         log.info("Mod web startup event received")
 
     async def _on_shutdown(self) -> None:
+        await self._stop_portal_app_install_recovery()
         with self._remote_node_monitors_lock:
             monitors = tuple(self._remote_node_monitors.values())
             self._remote_node_monitors.clear()

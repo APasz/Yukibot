@@ -173,6 +173,8 @@ from node_api.app_installer import (
     NodeAppInstallRequest,
     NodeAppInstallRecipe,
     NodeAppInstallScopeOption,
+    NodeAppInstallState,
+    NodeAppInstallStatus,
     NodeAppInstallerSettingsState,
 )
 from node_api.console import NodeConsoleActionEntry, NodeConsoleActionParameter
@@ -211,13 +213,18 @@ from web_dash.app_page import (
     _MinecraftRecipeEditorState,
 )
 from web_dash.app_installer import (
-    _AppInstallerPageLock,
     _AppInstallerPageState,
     _automatic_instance_key,
     _notify_in_page_client,
     _preflight_install_request,
     _redact_install_error_detail,
     _validate_preflight_result,
+)
+from web_dash.portal_app_installer import (
+    PORTAL_APP_INSTALL_CONFLICT_MESSAGE,
+    PortalAppInstallConflictError,
+    PortalAppInstallCoordinator,
+    PortalAppInstallOperation,
 )
 from web_dash.app_page_factorio import (
     _ENEMY_EXPANSION_SETTINGS,
@@ -3802,16 +3809,267 @@ class ModWebTests(unittest.TestCase):
             _APP_INSTALLER_POLICY_SELECT_PROPS,
         )
 
-    def test_app_installer_page_lock_remains_held_until_its_job_finishes(self) -> None:
-        lock = _AppInstallerPageLock()
+    def test_portal_app_install_coordinator_holds_one_lease_until_terminal(self) -> None:
+        for terminal_state in (
+            NodeOperationState.SUCCEEDED,
+            NodeOperationState.FAILED,
+            NodeOperationState.CANCELLED,
+            NodeOperationState.INTERRUPTED,
+        ):
+            coordinator = PortalAppInstallCoordinator()
+            coordinator.acquire_start(owner_token="first", node_name="erin")
+            self.assertTrue(coordinator.held_by_other(owner_token="second"))
+            with self.assertRaisesRegex(PortalAppInstallConflictError, PORTAL_APP_INSTALL_CONFLICT_MESSAGE):
+                coordinator.acquire_start(owner_token="second", node_name="yuki")
+            coordinator.associate_operation(
+                owner_token="first",
+                node_name="erin",
+                operation_id="job-1",
+            )
+            self.assertTrue(
+                coordinator.observe_operation(
+                    node_name="erin",
+                    operation_id="job-1",
+                    state=terminal_state,
+                )
+            )
+            self.assertIsNone(coordinator.current())
 
-        self.assertTrue(lock.acquire(owner_token="first", node_name="erin"))
-        self.assertFalse(lock.acquire(owner_token="second", node_name="yuki"))
-        lock.record_job(owner_token="first", node_name="erin", job_id="job-1")
-        self.assertFalse(lock.release(owner_token="second"))
-        self.assertFalse(lock.release_completed_job(job_id="job-2"))
-        self.assertTrue(lock.release_completed_job(job_id="job-1"))
-        self.assertTrue(lock.acquire(owner_token="second", node_name="yuki"))
+    def test_portal_app_install_coordinator_recovers_multiple_active_operations(self) -> None:
+        coordinator = PortalAppInstallCoordinator()
+
+        multiple_operations = coordinator.reconcile_operations(
+            (
+                PortalAppInstallOperation(
+                    node_name="erin",
+                    operation_id="job-1",
+                    state=NodeOperationState.RUNNING,
+                ),
+                PortalAppInstallOperation(
+                    node_name="yuki",
+                    operation_id="job-2",
+                    state=NodeOperationState.CANCEL_REQUESTED,
+                ),
+            )
+        )
+
+        self.assertEqual(
+            tuple(operation.operation_id for operation in multiple_operations),
+            ("job-1", "job-2"),
+        )
+        lease = coordinator.current()
+        assert lease is not None
+        self.assertTrue(lease.unresolved_recovery_conflict)
+        coordinator.reconcile_operations(
+            (
+                PortalAppInstallOperation(
+                    node_name="yuki",
+                    operation_id="job-2",
+                    state=NodeOperationState.RUNNING,
+                ),
+            )
+        )
+        lease = coordinator.current()
+        assert lease is not None
+        self.assertEqual((lease.node_name, lease.operation_id), ("yuki", "job-2"))
+        coordinator.reconcile_operations(
+            (
+                PortalAppInstallOperation(
+                    node_name="yuki",
+                    operation_id="job-2",
+                    state=NodeOperationState.CANCELLED,
+                ),
+            )
+        )
+        self.assertIsNone(coordinator.current())
+
+    def test_portal_recovery_warns_and_blocks_for_multiple_node_installs(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            portal = ModWebNodeLink(
+                node_name="portal",
+                label="Portal",
+                url="/mod-web/nodes/portal",
+                api_base_url="https://portal.example/api/node",
+                api_url="/api/node-proxy/portal/apps",
+                is_current=False,
+            )
+            erin = replace(portal, node_name="erin", label="Erin")
+            yuki = replace(portal, node_name="yuki", label="Yuki")
+            operations_by_node = {
+                "erin": (
+                    PortalAppInstallOperation(
+                        node_name="erin",
+                        operation_id="job-1",
+                        state=NodeOperationState.RUNNING,
+                    ),
+                ),
+                "yuki": (
+                    PortalAppInstallOperation(
+                        node_name="yuki",
+                        operation_id="job-2",
+                        state=NodeOperationState.QUEUED,
+                    ),
+                ),
+            }
+
+            async def node_operations(*, node: ModWebNodeLink) -> tuple[PortalAppInstallOperation, ...]:
+                return operations_by_node[node.node_name]
+
+            with (
+                patch.object(service, "_node_links", return_value=(portal, erin, yuki)),
+                patch.object(
+                    service,
+                    "_node_is_portal",
+                    side_effect=lambda node: node.node_name == "portal",
+                ),
+                patch.object(
+                    service,
+                    "_portal_node_app_install_operations",
+                    new=AsyncMock(side_effect=node_operations),
+                ) as read_operations,
+                patch("web_dash.portal_app_installer.log.warning") as warning,
+            ):
+                await service._recover_portal_app_install_lease()
+                await service._recover_portal_app_install_lease()
+
+            self.assertEqual(read_operations.await_count, 4)
+            warning.assert_called_once()
+            lease = service._portal_app_install_coordinator.current()
+            assert lease is not None
+            self.assertTrue(lease.unresolved_recovery_conflict)
+
+        asyncio.run(exercise())
+
+    def test_portal_start_reserves_the_lease_before_calling_the_node(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            expected_status = NodeAppInstallStatus(
+                job_id="job-1",
+                node="erin",
+                scope="gmod",
+                state=NodeAppInstallState.QUEUED,
+                summary="Queued.",
+            )
+
+            async def start_install() -> NodeAppInstallStatus:
+                lease = service._portal_app_install_coordinator.current()
+                assert lease is not None
+                self.assertEqual(
+                    (lease.owner_token, lease.node_name, lease.operation_id, lease.starting),
+                    ("page-1", "erin", None, True),
+                )
+                return expected_status
+
+            with patch.object(
+                service,
+                "_recover_portal_app_install_lease",
+                new=AsyncMock(),
+            ):
+                status = await service._start_portal_app_install(
+                    node=node,
+                    owner_token="page-1",
+                    start_install=start_install,
+                )
+
+            self.assertEqual(status, expected_status)
+            lease = service._portal_app_install_coordinator.current()
+            assert lease is not None
+            self.assertEqual(
+                (lease.owner_token, lease.node_name, lease.operation_id, lease.starting),
+                ("page-1", "erin", "job-1", False),
+            )
+            service._portal_app_install_coordinator.observe_operation(
+                node_name="erin",
+                operation_id="job-1",
+                state=NodeOperationState.SUCCEEDED,
+            )
+
+            async def fail_to_start() -> NodeAppInstallStatus:
+                raise RuntimeError("node start failed")
+
+            with patch.object(
+                service,
+                "_recover_portal_app_install_lease",
+                new=AsyncMock(),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "node start failed"):
+                    await service._start_portal_app_install(
+                        node=node,
+                        owner_token="page-1",
+                        start_install=fail_to_start,
+                    )
+            self.assertIsNone(service._portal_app_install_coordinator.current())
+
+            completed_status = replace(
+                expected_status,
+                job_id="job-2",
+                state=NodeAppInstallState.READY,
+                summary="Installed.",
+            )
+
+            async def complete_immediately() -> NodeAppInstallStatus:
+                return completed_status
+
+            with patch.object(
+                service,
+                "_recover_portal_app_install_lease",
+                new=AsyncMock(),
+            ):
+                self.assertEqual(
+                    await service._start_portal_app_install(
+                        node=node,
+                        owner_token="page-1",
+                        start_install=complete_immediately,
+                    ),
+                    completed_status,
+                )
+            self.assertIsNone(service._portal_app_install_coordinator.current())
+
+        asyncio.run(exercise())
+
+    def test_portal_start_fails_closed_when_operation_recovery_is_unavailable(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            start_install = AsyncMock()
+
+            with patch.object(
+                service,
+                "_recover_portal_app_install_lease",
+                new=AsyncMock(side_effect=RuntimeError("node unavailable")),
+            ):
+                with self.assertRaisesRegex(
+                    PortalAppInstallConflictError,
+                    PORTAL_APP_INSTALL_CONFLICT_MESSAGE,
+                ):
+                    await service._start_portal_app_install(
+                        node=node,
+                        owner_token="page-1",
+                        start_install=start_install,
+                    )
+
+            start_install.assert_not_awaited()
+            lease = service._portal_app_install_coordinator.current()
+            assert lease is not None
+            self.assertTrue(lease.unresolved_recovery_conflict)
+
+        asyncio.run(exercise())
 
     def test_app_installer_automatically_derives_manager_safe_instance_ids(self) -> None:
         self.assertEqual(_automatic_instance_key("Yuki's ETS2 Server"), "yuki-s-ets2-server")
@@ -5472,6 +5730,28 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(len(links), 1)
         self.assertEqual(links[0].color_hex, "#22C55E")
+
+    def test_app_links_resolve_missing_gmod_color_from_scope(self) -> None:
+        service: ModWebService = ModWebService()
+        user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        entry = NodeAppEntry(
+            name="gmod_alpha",
+            friendly="GMod Alpha",
+            node="yuki",
+            running=False,
+            enabled=True,
+            supports_mods=False,
+            supports_configs=False,
+            supports_chat=True,
+            color_hex=None,
+            scope="gmod",
+        )
+
+        with patch.object(ModWebService, "_remote_apps_async", AsyncMock(return_value=(entry,))):
+            links: tuple[ModWebAppLink, ...] = asyncio.run(service._app_links(user))
+
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].color_hex, "#1194F0")
 
     def test_remote_apps_from_payload_replaces_generic_default_app_color(self) -> None:
         payload: dict[str, object] = {

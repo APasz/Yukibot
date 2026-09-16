@@ -768,6 +768,27 @@ class OperationsUiCheck(unittest.TestCase):
         )
         self.assertTrue(all(call["user"] is user for call in harness.calls))
 
+    def test_app_install_status_rejects_an_operation_from_another_node(self) -> None:
+        node = _node("alpha")
+        operation = _operation(
+            operation_id="install",
+            node_name="beta",
+            state=NodeOperationState.RUNNING,
+            created_at_unix_ms=10,
+        )
+        user = ModWebUser(
+            discord_id=42,
+            username="operator",
+            global_name=None,
+            avatar_hash=None,
+        )
+        harness = _AppInstallerRequestHarness((operation.to_mapping(),))
+
+        with self.assertRaisesRegex(ValueError, "different node"):
+            asyncio.run(
+                harness._app_install_status(node=node, job_id="install", user=user)
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

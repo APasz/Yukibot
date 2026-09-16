@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, overload
 
 from mirror_service import MirrorService
+from node_api.app_installer import NodeAppInstallStatus
 
 from .backend import ModWebDashboardBackend
 from .nicegui_protocols import AsyncRefresh, ModWebFastApiApp, ModWebRouteUi, WebChatRelayPublisher
@@ -594,7 +595,13 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_on_startup"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_observe_portal_app_install_operation"]) -> Callable[..., bool]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_persist_uploaded_file"]) -> Callable[..., Awaitable[Path]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_portal_app_install_lease_held_by_other"]) -> Callable[..., bool]: ...
 
     @overload
     def __getattr__(self, name: Literal["_page_tabs"]) -> Callable[..., tuple[ModWebAppTabDefinition, ...]]: ...
@@ -1032,6 +1039,15 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_render_app_installer_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_start_portal_app_install"]) -> Callable[..., Awaitable[NodeAppInstallStatus]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_start_portal_app_install_recovery"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_stop_portal_app_install_recovery"]) -> Callable[..., Awaitable[None]]: ...
 
     @overload
     def __getattr__(

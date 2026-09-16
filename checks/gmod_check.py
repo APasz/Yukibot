@@ -22,6 +22,7 @@ from apps.gmod import (
     GMOD_DEFAULT_MAX_PLAYERS,
     GMOD_DEFAULT_PORT,
     GMOD_DEFAULT_STARTUP_MAP,
+    GMOD_MANAGE_EMBED_COLOR,
     STEAM_APP_ID,
     STEAM_GAME_APP_ID,
     STEAM_UPDATE_PRESET,
@@ -142,6 +143,13 @@ class GmodIntegrationTests(unittest.TestCase):
         self.assertEqual(resolve_gmod_game_port(None), GMOD_DEFAULT_PORT)
         with self.assertRaisesRegex(TypeError, "integer"):
             resolve_gmod_game_port(True)
+
+    def test_manage_embed_color_uses_gmod_blue(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            app = self._app(Path(temporary_directory))
+
+        self.assertEqual(GMOD_MANAGE_EMBED_COLOR, 0x1194F0)
+        self.assertEqual(app.manage_embed_color, GMOD_MANAGE_EMBED_COLOR)
 
     def test_gslt_is_write_only_and_redacted_from_config_and_runtime_output(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"

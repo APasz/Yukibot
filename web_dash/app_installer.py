@@ -5,7 +5,6 @@ from __future__ import annotations
 import enum
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from threading import RLock
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
@@ -26,6 +25,12 @@ from node_auth import NodeApiScope
 
 from .nicegui_protocols import ModWebNotificationType, ModWebUi
 from .operations_ui import operation_detail_path
+from .portal_app_installer import (
+    PORTAL_APP_INSTALL_CONFLICT_MESSAGE,
+    PortalAppInstallConflictError,
+    PortalAppInstallCoordinator,
+    PortalAppInstallOperation,
+)
 from .runtime_imports import Button, Card, Input, Label, ModWebUser, Select, Textarea, Timer, asyncio
 from .service_base import ModWebServiceSupport
 from .types import ModWebNodeLink
@@ -208,60 +213,6 @@ class _AppInstallerStatusControls:
     app_path: str = "#"
 
 
-@dataclass(frozen=True, slots=True)
-class _AppInstallerPageLease:
-    owner_token: str
-    node_name: str
-    job_id: str | None = None
-
-
-class _AppInstallerPageLock:
-    """Keep one dashboard install workflow active at a time."""
-
-    def __init__(self) -> None:
-        self._lock = RLock()
-        self._lease: _AppInstallerPageLease | None = None
-
-    def current(self) -> _AppInstallerPageLease | None:
-        with self._lock:
-            return self._lease
-
-    def acquire(self, *, owner_token: str, node_name: str) -> bool:
-        with self._lock:
-            lease = self._lease
-            if lease is not None:
-                return lease.owner_token == owner_token
-            self._lease = _AppInstallerPageLease(owner_token=owner_token, node_name=node_name)
-            return True
-
-    def record_job(self, *, owner_token: str, node_name: str, job_id: str) -> None:
-        with self._lock:
-            lease = self._lease
-            if lease is None or lease.owner_token != owner_token:
-                raise RuntimeError("App installer page lock was released before the job was recorded.")
-            self._lease = _AppInstallerPageLease(
-                owner_token=owner_token,
-                node_name=node_name,
-                job_id=job_id,
-            )
-
-    def release(self, *, owner_token: str) -> bool:
-        with self._lock:
-            lease = self._lease
-            if lease is None or lease.owner_token != owner_token:
-                return False
-            self._lease = None
-            return True
-
-    def release_completed_job(self, *, job_id: str) -> bool:
-        with self._lock:
-            lease = self._lease
-            if lease is None or lease.job_id != job_id:
-                return False
-            self._lease = None
-            return True
-
-
 def _recipe_from_catalog(*, catalog: NodeAppInstallCatalog | None, scope: str | None) -> NodeAppInstallRecipe | None:
     if catalog is None or scope is None:
         return None
@@ -326,7 +277,19 @@ def _validate_preflight_result(
 class ModWebAppInstallerMixin(ModWebServiceSupport):
     """Render and broker recipe-backed installs across dashboard nodes."""
 
-    _app_installer_page_lock: _AppInstallerPageLock = cast(_AppInstallerPageLock, cast(object, None))
+    _portal_app_install_coordinator: PortalAppInstallCoordinator = cast(
+        PortalAppInstallCoordinator,
+        cast(object, None),
+    )
+
+    def _observe_portal_app_install_operation(
+        self,
+        operation: PortalAppInstallOperation,
+    ) -> bool:
+        """Provide a standalone no-op hook when this UI mixin is unit-tested alone."""
+
+        del operation
+        return False
 
     async def _render_app_installer_page(self, *, ui: ModWebUi, user: ModWebUser) -> None:
         self._apply_theme_for_user(ui=ui, user=user)
@@ -367,6 +330,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
 
         notification_client = nicegui_context.client
         page_closed = False
+        observed_portal_install_lease = self._portal_app_install_coordinator.current()
 
         def mark_page_closed() -> None:
             nonlocal page_closed
@@ -461,12 +425,16 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
         def install_is_active() -> bool:
             return state.install_starting or (state.status is not None and state.status.running)
 
-        def page_lock_is_held_by_other() -> bool:
-            lease = self._app_installer_page_lock.current()
-            return lease is not None and lease.owner_token != page_token
+        def portal_install_is_held_by_other() -> bool:
+            return self._portal_app_install_lease_held_by_other(
+                owner_token=page_token
+            )
 
         def wizard_is_locked() -> bool:
-            return state.preflight_checking or install_is_active() or page_lock_is_held_by_other()
+            return state.preflight_checking or install_is_active()
+
+        def install_start_is_locked() -> bool:
+            return wizard_is_locked() or portal_install_is_held_by_other()
 
         def reject_when_wizard_locked() -> bool:
             if state.preflight_checking:
@@ -475,13 +443,23 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             if install_is_active():
                 notify("Wait for the install to finish.", tone="warning")
                 return True
-            if page_lock_is_held_by_other():
-                notify("Another dashboard session is already starting or running an install.", tone="warning")
+            return False
+
+        def reject_when_install_start_locked() -> bool:
+            if reject_when_wizard_locked():
+                return True
+            if portal_install_is_held_by_other():
+                notify(PORTAL_APP_INSTALL_CONFLICT_MESSAGE, tone="warning")
                 return True
             return False
 
         def disable_when_wizard_locked(*controls: Button | Input | Select) -> None:
             if wizard_is_locked():
+                for control in controls:
+                    control.disable()
+
+        def disable_when_install_start_locked(*controls: Button) -> None:
+            if install_start_is_locked():
                 for control in controls:
                     control.disable()
 
@@ -597,7 +575,6 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 return
             invalidate_catalog_request()
             invalidate_release_request()
-            self._app_installer_page_lock.release_completed_job(job_id=status.job_id)
             state.clear_job()
             state.catalog = None
             state.catalog_error = None
@@ -694,38 +671,48 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             controls.cancel_button.set_enabled(can_cancel)
             controls.new_install_button.set_visibility(not status.running)
 
-        async def refresh_page_lock() -> bool:
-            lease = self._app_installer_page_lock.current()
-            if lease is None or lease.job_id is None:
+        async def refresh_install_status() -> bool:
+            status = state.status
+            if status is None or not status.running:
                 return False
-            node = nodes_by_name.get(lease.node_name.casefold())
+            node = nodes_by_name.get(status.node.casefold())
             if node is None:
+                state.status_error = "The install node is no longer available."
+                update_status_view()
                 return False
             try:
-                status = await self._app_install_status(node=node, job_id=lease.job_id, user=user)
+                refreshed_status = await self._app_install_status(
+                    node=node,
+                    job_id=status.job_id,
+                    user=user,
+                )
             except Exception as xcp:
-                if lease.owner_token == page_token:
-                    state.status_error = str(xcp) or type(xcp).__name__
-                    update_status_view()
-                return False
-            if lease.owner_token == page_token:
-                state.job_id = status.job_id
-                state.status = status
-                state.status_error = None
+                state.status_error = str(xcp) or type(xcp).__name__
                 update_status_view()
-            if status.running:
                 return False
-            return self._app_installer_page_lock.release_completed_job(job_id=lease.job_id)
+            changed = state.status != refreshed_status or state.status_error is not None
+            state.job_id = refreshed_status.job_id
+            state.status = refreshed_status
+            state.status_error = None
+            update_status_view()
+            return changed
 
         async def poll_status() -> None:
+            nonlocal observed_portal_install_lease
             if state.status_polling:
                 return
             state.status_polling = True
             try:
-                lock_released = await refresh_page_lock()
+                status_changed = await refresh_install_status()
             finally:
                 state.status_polling = False
-            if lock_released and not page_closed:
+            current_lease = self._portal_app_install_coordinator.current()
+            lease_changed = observed_portal_install_lease != current_lease
+            observed_portal_install_lease = current_lease
+            if (
+                (status_changed or lease_changed)
+                and not page_closed
+            ):
                 render_wizard.refresh()
 
         def change_node(event: ValueChangeEventArguments[str | None]) -> None:
@@ -979,11 +966,9 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 synchronising_automatic_identity = False
 
         async def start_install() -> None:
-            if await refresh_page_lock() and not page_closed:
-                render_wizard.refresh()
             if page_closed:
                 return
-            if reject_when_wizard_locked():
+            if reject_when_install_start_locked():
                 return
             recipe = selected_recipe()
             if recipe is None:
@@ -999,27 +984,23 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 notify(f"Could not start install: {detail}", tone="negative", multi_line=True)
                 return
 
-            if not self._app_installer_page_lock.acquire(owner_token=page_token, node_name=state.node_name):
-                notify("Another dashboard session is already starting or running an install.", tone="warning")
-                render_wizard.refresh()
-                return
             state.install_starting = True
             render_wizard.refresh()
             try:
-                status = await self._start_app_install(node=selected_node(), request=request, user=user)
+                status = await self._start_app_install(
+                    node=selected_node(),
+                    request=request,
+                    user=user,
+                    owner_token=page_token,
+                )
             except asyncio.CancelledError:
-                self._app_installer_page_lock.release(owner_token=page_token)
                 raise
+            except PortalAppInstallConflictError:
+                notify(PORTAL_APP_INSTALL_CONFLICT_MESSAGE, tone="warning")
             except Exception as xcp:
-                self._app_installer_page_lock.release(owner_token=page_token)
                 detail = _redact_install_error_detail(xcp, inputs=state.inputs)
                 notify(f"Could not start install: {detail}", tone="negative", multi_line=True)
             else:
-                self._app_installer_page_lock.record_job(
-                    owner_token=page_token,
-                    node_name=status.node,
-                    job_id=status.job_id,
-                )
                 state.job_id = status.job_id
                 state.status = status
                 state.status_error = None
@@ -1051,18 +1032,29 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 return
             with ui.card().classes("mod-card w-full"):
                 with ui.column().classes("w-full gap-4"):
-                    lease = self._app_installer_page_lock.current()
-                    if page_lock_is_held_by_other() and lease is not None:
-                        ui.label(
-                            f"Another dashboard session is installing on {lease.node_name}. "
-                            "This wizard will unlock when it completes."
-                        ).classes("mod-subtitle text-sm")
-                        if lease.job_id is not None:
+                    lease = self._portal_app_install_coordinator.current()
+                    if portal_install_is_held_by_other() and lease is not None:
+                        if lease.unresolved_recovery_conflict:
+                            ui.label(
+                                "Existing app installs are being reconciled. "
+                                "You can continue configuring this install, but it cannot start until they complete."
+                            ).classes("mod-subtitle text-sm")
+                        elif lease.starting:
+                            ui.label(
+                                f"Another dashboard session is starting an install on {lease.node_name}. "
+                                "You can continue configuring this install, but it cannot start until it completes."
+                            ).classes("mod-subtitle text-sm")
+                        else:
+                            ui.label(
+                                f"Another dashboard session is installing on {lease.node_name}. "
+                                "You can continue configuring this install, but it cannot start until it completes."
+                            ).classes("mod-subtitle text-sm")
+                        if lease.node_name is not None and lease.operation_id is not None:
                             ui.link(
                                 "View active install",
                                 operation_detail_path(
                                     node_name=lease.node_name,
-                                    operation_id=lease.job_id,
+                                    operation_id=lease.operation_id,
                                 ),
                             ).classes("text-sm font-semibold")
                     if state.install_starting:
@@ -1324,7 +1316,8 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                                 icon="download",
                                 on_click=start_install,
                             ).classes("mod-list-button")
-                            disable_when_wizard_locked(back_button, install_button)
+                            disable_when_wizard_locked(back_button)
+                            disable_when_install_start_locked(install_button)
 
         render_wizard()
         update_status_view()
@@ -1402,7 +1395,29 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
         node: ModWebNodeLink,
         request: NodeAppInstallRequest,
         user: ModWebUser,
+        owner_token: str | None = None,
     ) -> NodeAppInstallStatus:
+        """Start through the Portal coordinator before contacting the selected node."""
+
+        return await self._start_portal_app_install(
+            node=node,
+            owner_token=owner_token,
+            start_install=lambda: self._start_node_app_install(
+                node=node,
+                request=request,
+                user=user,
+            ),
+        )
+
+    async def _start_node_app_install(
+        self,
+        *,
+        node: ModWebNodeLink,
+        request: NodeAppInstallRequest,
+        user: ModWebUser,
+    ) -> NodeAppInstallStatus:
+        """Call the lower-level node-local installer endpoint after Portal approval."""
+
         if node.is_current:
             return await self._node_api.app_installer.start_install(
                 request=request,
@@ -1431,17 +1446,26 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 operation_id=job_id,
                 kind=NodeOperationKind.APP_INSTALL,
             )
-            return NodeAppInstallStatus.from_operation(operation.record)
-        payload = await self._remote_json_async(
-            node=node,
-            app_name=None,
-            path=f"/operations/{quote(job_id, safe='')}?kind={NodeOperationKind.APP_INSTALL.value}",
-            scopes=(NodeApiScope.APP_MANAGE,),
-            user=user,
+        else:
+            payload = await self._remote_json_async(
+                node=node,
+                app_name=None,
+                path=f"/operations/{quote(job_id, safe='')}?kind={NodeOperationKind.APP_INSTALL.value}",
+                scopes=(NodeApiScope.APP_MANAGE,),
+                user=user,
+            )
+            operation = NodeOperationView.from_mapping(payload)
+        record = operation.record
+        if record.node_name.casefold() != node.node_name.casefold():
+            raise ValueError("The selected node returned an install operation for a different node.")
+        self._observe_portal_app_install_operation(
+            PortalAppInstallOperation(
+                node_name=record.node_name,
+                operation_id=record.operation_id,
+                state=record.state,
+            )
         )
-        return NodeAppInstallStatus.from_operation(
-            NodeOperationView.from_mapping(payload).record
-        )
+        return NodeAppInstallStatus.from_operation(record)
 
     async def _cancel_app_install(
         self,
