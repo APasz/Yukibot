@@ -613,19 +613,74 @@ class FactorioUpdateConfig(BaseModel):
 class SteamUpdatePreset:
     app_id: int
     default_selected_branch: str = "public"
+    required_selected_branch: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.app_id) is not int:
+            raise TypeError("Steam app ID must be an integer.")
+        if self.app_id <= 0:
+            raise ValueError("Steam app ID must be positive.")
+        default_branch = _normalise_required_text(
+            self.default_selected_branch,
+            field_name="default Steam branch",
+        )
+        required_branch = normalise_optional_text(self.required_selected_branch)
+        object.__setattr__(self, "default_selected_branch", default_branch)
+        object.__setattr__(self, "required_selected_branch", required_branch)
+        if required_branch is not None and default_branch.casefold() != required_branch.casefold():
+            raise ValueError("A required Steam branch must be the preset's default branch.")
+
+    def validate_selected_branch(self, branch_id: str) -> str:
+        """Validate one user-selected branch against this preset's constraints."""
+
+        selected_branch = _normalise_required_text(branch_id, field_name="selected Steam branch")
+        required_branch = self.required_selected_branch
+        if required_branch is not None and selected_branch.casefold() != required_branch.casefold():
+            raise ValueError(f"Steam app {self.app_id} requires branch {required_branch!r}.")
+        if required_branch is not None:
+            return required_branch
+        return selected_branch
+
+    def normalise_config(self, steam_update: SteamUpdateConfig) -> SteamUpdateConfig:
+        """Return a Steam update configuration constrained by this preset."""
+
+        if steam_update.app_id != self.app_id:
+            raise ValueError(f"Steam app ID {steam_update.app_id} does not match preset app ID {self.app_id}.")
+        required_branch = self.required_selected_branch
+        if required_branch is None:
+            return steam_update
+        try:
+            existing_branch = steam_update.branch(required_branch)
+        except ValueError:
+            selected_branch = SteamUpdateBranch(branch_id=required_branch)
+        else:
+            selected_branch = SteamUpdateBranch(
+                branch_id=required_branch,
+                label=existing_branch.label,
+                beta_password=existing_branch.beta_password,
+            )
+        return steam_update.model_copy(
+            update={
+                "branches": (selected_branch,),
+                "selected_branch": selected_branch.branch_id,
+            }
+        )
 
     def build_config(self, *, selected_branch: str | None = None) -> SteamUpdateConfig:
+        requested_branch = normalise_optional_text(selected_branch)
         resolved_selected_branch = (
             self.default_selected_branch
-            if selected_branch is None or not selected_branch.strip()
-            else selected_branch.strip()
+            if requested_branch is None
+            else self.validate_selected_branch(requested_branch)
         )
         default_config = SteamUpdateConfig(
             app_id=self.app_id,
             branches=(SteamUpdateBranch(branch_id=self.default_selected_branch),),
             selected_branch=self.default_selected_branch,
         )
-        return default_config.with_selected_branch(resolved_selected_branch, add_if_missing=True)
+        return self.normalise_config(
+            default_config.with_selected_branch(resolved_selected_branch, add_if_missing=True)
+        )
 
 
 class RelayChannelSource(enum.StrEnum):

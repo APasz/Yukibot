@@ -5,11 +5,11 @@ import json
 import logging
 import shutil
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import hikari
 import lightbulb
@@ -41,6 +41,7 @@ from apps._scs_truck_simulator import (
     scs_server_log_file_template,
 )
 from apps.gmod import (
+    GMOD_DEFAULT_INSTALL_SUBFOLDER,
     GMOD_DEFAULT_PORT,
     STEAM_GAME_APP_ID as GMOD_STEAM_GAME_APP_ID,
     prepare_gmod_server_installation,
@@ -69,6 +70,52 @@ type JsonObject = dict[str, object]
 type JsonMapping = Mapping[str, object]
 type ManagedApp = App[App_Config]
 type ManagedAppType = type[ManagedApp]
+
+DEFAULT_INSTANCE_KEY: Final[str] = "alpha"
+
+_DEFAULT_INSTANCE_KEY_SEQUENCE: Final[tuple[str, ...]] = (
+    DEFAULT_INSTANCE_KEY,
+    "beta",
+    "charlie",
+    "delta",
+    "echo",
+    "foxtrot",
+    "golf",
+    "hotel",
+    "india",
+    "juliett",
+    "kilo",
+    "lima",
+    "mike",
+    "november",
+    "oscar",
+    "papa",
+    "quebec",
+    "romeo",
+    "sierra",
+    "tango",
+    "uniform",
+    "victor",
+    "whiskey",
+    "x-ray",
+    "yankee",
+    "zulu",
+)
+
+
+def next_available_instance_key(existing_instance_keys: Iterable[str]) -> str:
+    """Return the next conventional key after the configured instance count."""
+
+    existing_keys = tuple(existing_instance_keys)
+    occupied_keys = {instance_key.casefold() for instance_key in existing_keys}
+    sequence_index = len(existing_keys)
+    while True:
+        cycle, word_index = divmod(sequence_index, len(_DEFAULT_INSTANCE_KEY_SEQUENCE))
+        instance_key = _DEFAULT_INSTANCE_KEY_SEQUENCE[word_index]
+        candidate = instance_key if cycle == 0 else f"{instance_key}-{cycle + 1}"
+        if candidate not in occupied_keys:
+            return candidate
+        sequence_index += 1
 
 
 class AppStartBlockerKind(enum.StrEnum):
@@ -220,6 +267,14 @@ class AppInstanceCreationPlan:
     steam_branch: str | None
     scope_path: Path
     instances_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class AppInstanceInstallDefaults:
+    """Suggested identity values for a newly installed app instance."""
+
+    instance_key: str
+    subfolder: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1258,16 +1313,21 @@ class App_Manager(metaclass=config.Singleton):
     @staticmethod
     def _resolve_next_steam_update_config(*, app: ManagedApp, details: AppDetailsUpdate) -> SteamUpdateConfig | None:
         current_steam_update = app.cfg.steam_update
+        preset = steam_update_preset_for_scope(app.scope)
         if details.steam_update_enabled is None:
-            return current_steam_update
+            if current_steam_update is None or preset is None:
+                return current_steam_update
+            return preset.normalise_config(current_steam_update)
         if not details.steam_update_enabled:
             return None
         selected_branch = details.steam_update_selected_branch
         if current_steam_update is not None:
             if selected_branch is None:
-                return current_steam_update
-            return current_steam_update.with_selected_branch(selected_branch, add_if_missing=True)
-        preset = steam_update_preset_for_scope(app.scope)
+                return current_steam_update if preset is None else preset.normalise_config(current_steam_update)
+            if preset is not None:
+                selected_branch = preset.validate_selected_branch(selected_branch)
+            next_steam_update = current_steam_update.with_selected_branch(selected_branch, add_if_missing=True)
+            return next_steam_update if preset is None else preset.normalise_config(next_steam_update)
         if preset is None:
             raise ValueError(f"{app.friendly} does not support Steam update configuration.")
         return preset.build_config(selected_branch=selected_branch)
@@ -1528,6 +1588,22 @@ class App_Manager(metaclass=config.Singleton):
                 continue
             scopes.append(entry.name)
         return tuple(sorted(scopes, key=str.casefold))
+
+    def suggest_instance_install_defaults(self, *, scope: str) -> AppInstanceInstallDefaults:
+        """Suggest an unused instance ID and install folder for one app scope."""
+
+        scope_key = self._validate_scope_name(scope).casefold()
+        scope_path = Path("apps") / scope_key
+        if not scope_path.is_dir():
+            raise ValueError(f"Unknown app scope: {scope_key}")
+        existing_instance_keys = tuple(self._read_json_object(scope_path / "instances.json"))
+        instance_key = next_available_instance_key(existing_instance_keys)
+        subfolder = (
+            GMOD_DEFAULT_INSTALL_SUBFOLDER
+            if scope_key == "gmod" and not existing_instance_keys
+            else f"{scope_key}-{instance_key}"
+        )
+        return AppInstanceInstallDefaults(instance_key=instance_key, subfolder=subfolder)
 
     def list_known_scopes(self) -> tuple[str, ...]:
         scopes: set[str] = {app.scope.strip().lower() for app in self.apps.values() if app.scope.strip()}
@@ -2368,17 +2444,24 @@ class App_Manager(metaclass=config.Singleton):
             if configured_config.app_id != default_config.app_id:
                 raise ValueError(f"Steam app ID for scope `{scope}` does not match its installation recipe.")
         discovered_branches = cached_steam_update_branches(default_config.app_id, allow_stale=True) or ()
-        return configured_config.model_copy(
+        merged_config = configured_config.model_copy(
             update={"branches": merge_steam_update_branches(discovered_branches, configured_config.branches)}
         )
+        preset = steam_update_preset_for_scope(scope)
+        return merged_config if preset is None else preset.normalise_config(merged_config)
 
     def _validate_steam_install_branch(self, *, scope: str, branch_id: str | None) -> str | None:
+        preset = steam_update_preset_for_scope(scope)
         if branch_id is None:
+            if preset is not None and preset.required_selected_branch is not None:
+                return preset.required_selected_branch
             return None
         recipe = self._steam_install_recipe_for_scope(scope)
         if recipe is None:
             raise ValueError(f"SteamCMD installation is not supported for scope `{scope}`.")
-        requested_branch = SteamUpdateBranch(branch_id=branch_id)
+        requested_branch = SteamUpdateBranch(
+            branch_id=preset.validate_selected_branch(branch_id) if preset is not None else branch_id
+        )
         try:
             return recipe.steam_update.branch(requested_branch.branch_id).branch_id
         except ValueError:

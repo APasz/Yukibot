@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from _manager import AppInstallInput, App_Manager
 from apps._app import AppPortClaim, NetworkProtocol
-from apps._config import App_Config, AppVersion, SteamUpdateBranch
+from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
 from apps._updater import SteamCmd_Update_Manager
 from apps._steam import STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL
 from apps.gmod import (
@@ -22,7 +22,9 @@ from apps.gmod import (
     GMOD_DEFAULT_MAX_PLAYERS,
     GMOD_DEFAULT_PORT,
     GMOD_DEFAULT_STARTUP_MAP,
+    GMOD_DEFAULT_INSTALL_SUBFOLDER,
     GMOD_MANAGE_EMBED_COLOR,
+    GMOD_X64_STEAM_BRANCH,
     STEAM_APP_ID,
     STEAM_GAME_APP_ID,
     STEAM_UPDATE_PRESET,
@@ -40,7 +42,12 @@ from node_api.app_installer import NodeAppInstallInputKind, NodeAppInstallReques
 from node_api.service import NodeApiService
 
 
-def _write_gmod_steam_manifest(directory: Path, *, build_id: int, branch_id: str = "public") -> None:
+def _write_gmod_steam_manifest(
+    directory: Path,
+    *,
+    build_id: int,
+    branch_id: str = GMOD_X64_STEAM_BRANCH,
+) -> None:
     manifest_path = directory / "steamapps" / f"appmanifest_{STEAM_APP_ID}.acf"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     user_config: tuple[str, ...] = ()
@@ -64,6 +71,13 @@ def _write_gmod_steam_manifest(directory: Path, *, build_id: int, branch_id: str
         ),
         encoding="utf-8",
     )
+
+
+def _write_gmod_x64_runtime(directory: Path) -> None:
+    (directory / "srcds_run_x64").write_text("#!/bin/sh\n", encoding="utf-8")
+    binary = directory / "bin" / "linux64" / "srcds"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("binary\n", encoding="utf-8")
 
 
 class GmodSettingsTests(unittest.TestCase):
@@ -103,7 +117,7 @@ class GmodSettingsTests(unittest.TestCase):
         self.assertEqual(
             command,
             [
-                "./srcds_run",
+                "./srcds_run_x64",
                 "-game",
                 "garrysmod",
                 "+port",
@@ -172,7 +186,7 @@ class GmodIntegrationTests(unittest.TestCase):
                 instance_key="alpha",
                 friendly_name="GMod Alpha",
                 subfolder="gmod-alpha",
-                steam_branch_id="public",
+                steam_branch_id=GMOD_X64_STEAM_BRANCH,
                 inputs={AppInstallInput.GAME_SERVER_LOGIN_TOKEN: token},
             )
         )
@@ -187,12 +201,12 @@ class GmodIntegrationTests(unittest.TestCase):
             with patch("apps._updater.steam_update_branch_cache_is_fresh", return_value=True):
                 update_info = app.update_info
 
-        self.assertEqual(app.cfg.version, AppVersion(steam_branch="public", steam_build=1234567))
-        self.assertEqual(app.version_display, "Steam public build 1234567")
+        self.assertEqual(app.cfg.version, AppVersion(steam_branch=GMOD_X64_STEAM_BRANCH, steam_build=1234567))
+        self.assertEqual(app.version_display, f"Steam {GMOD_X64_STEAM_BRANCH} build 1234567")
         self.assertNotIn("0.0", app.version_display)
         assert update_info is not None
         self.assertEqual(update_info.installed_build_id, 1234567)
-        self.assertEqual(update_info.installed_branch_id, "public")
+        self.assertEqual(update_info.installed_branch_id, GMOD_X64_STEAM_BRANCH)
 
     def test_legacy_placeholder_is_not_reported_without_a_manifest(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -210,7 +224,7 @@ class GmodIntegrationTests(unittest.TestCase):
                 _write_gmod_steam_manifest(directory, build_id=100)
                 app = self._app(directory, version=AppVersion(main="0.0"))
                 assert isinstance(app.updater, SteamCmd_Update_Manager)
-                self.assertEqual(app.version_display, "Steam public build 100")
+                self.assertEqual(app.version_display, f"Steam {GMOD_X64_STEAM_BRANCH} build 100")
                 builds = iter((200, 300))
 
                 async def _run_steamcmd(*, branch: SteamUpdateBranch, validate: bool) -> bool:
@@ -220,19 +234,19 @@ class GmodIntegrationTests(unittest.TestCase):
 
                 with patch.object(app.updater, "_run_steamcmd", new=_run_steamcmd):
                     update_result = await app.updater.update_selected()
-                    self.assertEqual(app.version_display, "Steam public build 200")
+                    self.assertEqual(app.version_display, f"Steam {GMOD_X64_STEAM_BRANCH} build 200")
                     verify_result = await app.updater.verify_selected()
 
                 with patch("apps._updater.steam_update_branch_cache_is_fresh", return_value=True):
                     update_info = app.update_info
-                self.assertEqual(update_result.version_text, "Steam public build 200")
-                self.assertEqual(verify_result.version_text, "Steam public build 300")
-                self.assertEqual(app.cfg.version, AppVersion(steam_branch="public", steam_build=300))
-                self.assertEqual(app.version_display, "Steam public build 300")
+                self.assertEqual(update_result.version_text, f"Steam {GMOD_X64_STEAM_BRANCH} build 200")
+                self.assertEqual(verify_result.version_text, f"Steam {GMOD_X64_STEAM_BRANCH} build 300")
+                self.assertEqual(app.cfg.version, AppVersion(steam_branch=GMOD_X64_STEAM_BRANCH, steam_build=300))
+                self.assertEqual(app.version_display, f"Steam {GMOD_X64_STEAM_BRANCH} build 300")
                 self.assertNotIn("0.0", app.version_display)
                 assert update_info is not None
                 self.assertEqual(update_info.installed_build_id, 300)
-                self.assertEqual(update_info.installed_branch_id, "public")
+                self.assertEqual(update_info.installed_branch_id, GMOD_X64_STEAM_BRANCH)
 
         asyncio.run(_run())
 
@@ -448,7 +462,7 @@ class GmodIntegrationTests(unittest.TestCase):
 
         self.assertEqual(STEAM_APP_ID, 4020)
         self.assertEqual(steam_update.login.username, "anonymous")
-        self.assertEqual(steam_update.selected_branch, "public")
+        self.assertEqual(steam_update.selected_branch, GMOD_X64_STEAM_BRANCH)
         self.assertEqual(
             command,
             [
@@ -460,16 +474,62 @@ class GmodIntegrationTests(unittest.TestCase):
                 "+app_update",
                 "4020",
                 "-beta",
-                "public",
+                GMOD_X64_STEAM_BRANCH,
                 "validate",
                 "+quit",
             ],
         )
 
-    def test_launch_failure_does_not_surface_the_gslt(self) -> None:
+    def test_legacy_steam_branch_is_migrated_to_x64_and_cannot_be_selected(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            cfg = self._config(directory)
+            cfg.steam_update = SteamUpdateConfig(
+                app_id=STEAM_APP_ID,
+                branches=(
+                    SteamUpdateBranch(branch_id="public", label="Public"),
+                    SteamUpdateBranch(branch_id="X86-64", label="64-bit binaries"),
+                ),
+                selected_branch="public",
+            )
+            with patch("apps._updater.resolve_steamcmd_command_prefix", return_value=("steamcmd",)):
+                app = Gmod(Mock(), Mock(), cfg)
+
+            steam_update = app.cfg.steam_update
+            assert steam_update is not None
+            self.assertEqual(steam_update.selected_branch, GMOD_X64_STEAM_BRANCH)
+            self.assertEqual([branch.branch_id for branch in steam_update.branches], [GMOD_X64_STEAM_BRANCH])
+            self.assertEqual(steam_update.selected_branch_config.display_label, "64-bit binaries")
+            assert isinstance(app.updater, SteamCmd_Update_Manager)
+            with self.assertRaisesRegex(ValueError, "requires branch"):
+                app.updater.select_branch("public")
+
+    def test_start_requires_the_x64_launcher(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
         with TemporaryDirectory() as temporary_directory:
             app = self._app(Path(temporary_directory))
+            app.set_steam_game_server_login_token(token)
+
+            with self.assertRaisesRegex(FileNotFoundError, "64-bit launcher"):
+                asyncio.run(app.start())
+
+    def test_start_requires_the_x64_engine_binary(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            (directory / "srcds_run_x64").write_text("#!/bin/sh\n", encoding="utf-8")
+            app = self._app(directory)
+            app.set_steam_game_server_login_token(token)
+
+            with self.assertRaisesRegex(FileNotFoundError, "engine binary"):
+                asyncio.run(app.start())
+
+    def test_launch_failure_does_not_surface_the_gslt(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            _write_gmod_x64_runtime(directory)
+            app = self._app(directory)
             app.set_steam_game_server_login_token(token)
 
             async def _start() -> RuntimeError:
@@ -494,12 +554,12 @@ class GmodIntegrationTests(unittest.TestCase):
             expected = tuple(part.casefold() for part in app.proc_cmd)
 
             matches = app._matches_leftover_process(
-                command_line=("srcds_linux", "-game", "garrysmod"),
+                command_line=("srcds", "-game", "garrysmod"),
                 expected_command_parts=expected,
                 process_cwd=str(directory),
             )
             different_directory = app._matches_leftover_process(
-                command_line=("srcds_linux", "-game", "garrysmod"),
+                command_line=("srcds", "-game", "garrysmod"),
                 expected_command_parts=expected,
                 process_cwd=str(directory / "other"),
             )
@@ -513,9 +573,9 @@ class GmodIntegrationTests(unittest.TestCase):
         class _Process:
             def __init__(self, directory: Path) -> None:
                 self.info = {
-                    "name": "srcds_linux",
+                    "name": "srcds",
                     "pid": 123,
-                    "cmdline": ["srcds_linux", "-game", "garrysmod", "+sv_setsteamaccount", token],
+                    "cmdline": ["srcds", "-game", "garrysmod", "+sv_setsteamaccount", token],
                     "cwd": str(directory),
                 }
                 self.terminate_calls = 0
@@ -529,8 +589,8 @@ class GmodIntegrationTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             app = object.__new__(Gmod)
-            app.proc_name = "srcds_linux"
-            app.proc_cmd = ["srcds_linux", "-game", "garrysmod"]
+            app.proc_name = "srcds"
+            app.proc_cmd = ["srcds", "-game", "garrysmod"]
             app.directory = directory
             process = _Process(directory)
 
@@ -606,12 +666,25 @@ class GmodInstallerTests(unittest.TestCase):
                 self.assertEqual(recipe.label, "Garry's Mod")
                 self.assertEqual(recipe.default_port, GMOD_DEFAULT_PORT)
                 self.assertEqual(recipe.steam_update.app_id, STEAM_APP_ID)
+                self.assertEqual(recipe.steam_update.selected_branch, GMOD_X64_STEAM_BRANCH)
+                self.assertEqual(
+                    [branch.branch_id for branch in recipe.steam_update.branches],
+                    [GMOD_X64_STEAM_BRANCH],
+                )
                 self.assertEqual(recipe.inputs, (AppInstallInput.GAME_SERVER_LOGIN_TOKEN,))
                 self.assertEqual(recipe.game_server_login_token_app_id, STEAM_GAME_APP_ID)
                 self.assertNotEqual(recipe.game_server_login_token_app_id, recipe.steam_update.app_id)
                 self.assertIsNotNone(recipe.post_steam_install)
 
-                catalog_recipe = NodeAppInstallerService._catalog_recipe(recipe)
+                catalog = asyncio.run(
+                    NodeAppInstallerService(
+                        node_name=lambda: "node-a",
+                        invalidate_state_caches=Mock(),
+                    ).build_catalog(manager=manager)
+                )
+                catalog_recipe = catalog.recipes[0]
+                self.assertEqual(catalog_recipe.default_instance_key, "alpha")
+                self.assertEqual(catalog_recipe.default_subfolder, GMOD_DEFAULT_INSTALL_SUBFOLDER)
                 install_field = catalog_recipe.fields[0]
                 self.assertEqual(install_field.key, AppInstallInput.GAME_SERVER_LOGIN_TOKEN.value)
                 self.assertEqual(install_field.kind, NodeAppInstallInputKind.PASSWORD)
@@ -626,7 +699,7 @@ class GmodInstallerTests(unittest.TestCase):
                     friendly_name="GMod Alpha",
                     subfolder="gmod-alpha",
                     port=27031,
-                    steam_branch_id="public",
+                    steam_branch_id=GMOD_X64_STEAM_BRANCH,
                     inputs={AppInstallInput.GAME_SERVER_LOGIN_TOKEN: token},
                 )
                 self.assertNotIn(token, repr(request))
@@ -635,6 +708,8 @@ class GmodInstallerTests(unittest.TestCase):
                 self.assertNotIn(token, repr(create_request))
                 with self.assertRaisesRegex(ValueError, "Login Token is required"):
                     manager.prepare_instance_creation(replace(create_request, steam_game_server_login_token=None))
+                with self.assertRaisesRegex(ValueError, "requires branch"):
+                    manager.prepare_instance_creation(replace(create_request, steam_branch="public"))
                 redacted_detail = NodeAppInstallerService._redact_install_detail(
                     detail=f"SteamCMD printed {token}",
                     steam_update=recipe.steam_update,
@@ -644,7 +719,7 @@ class GmodInstallerTests(unittest.TestCase):
 
                 staging_directory = directory / "staging"
                 staging_directory.mkdir()
-                (staging_directory / "srcds_run").write_text("#!/bin/sh\n", encoding="utf-8")
+                _write_gmod_x64_runtime(staging_directory)
                 post_processor = recipe.post_steam_install
                 assert post_processor is not None
                 asyncio.run(post_processor(staging_directory, create_request))
@@ -658,4 +733,5 @@ class GmodInstallerTests(unittest.TestCase):
 
         self.assertEqual(instance_payload["alpha"]["join_port"], 27031)
         self.assertEqual(instance_payload["alpha"]["steam_update"]["app_id"], STEAM_APP_ID)
+        self.assertEqual(instance_payload["alpha"]["steam_update"]["selected_branch"], GMOD_X64_STEAM_BRANCH)
         self.assertNotIn(token, json.dumps(instance_payload))

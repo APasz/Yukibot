@@ -3921,6 +3921,11 @@ class ModWebTheme:
                     height: 1.6rem;
                     min-width: 1.6rem;
                 }}
+                .mod-app-installer-node-avatar {{
+                    width: 2rem;
+                    height: 2rem;
+                    min-width: 2rem;
+                }}
                 .mod-system-hero-avatar {{
                     width: 4rem;
                     height: 4rem;

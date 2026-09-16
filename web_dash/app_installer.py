@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import enum
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
+
+from nicegui.elements.card import Card
 
 from _manager import AppInstallInput
 from node_api.app_installer import (
@@ -79,6 +81,26 @@ def _redact_install_error_detail(
     return detail
 
 
+def _create_selectable_install_card(
+    *,
+    ui: ModWebUi,
+    is_selected: bool,
+    on_activate: Callable[[object | None], object],
+) -> Card:
+    card_classes = "mod-card mod-card-link w-full gap-2 cursor-pointer"
+    if is_selected:
+        card_classes += " border border-accent"
+    card = ui.card().classes(card_classes).props(f"aria-pressed={'true' if is_selected else 'false'}")
+    if is_selected:
+        card.style("border-color: var(--mod-accent) !important")
+    ModWebUiHelpersMixin._make_activatable(
+        target=card,
+        role="button",
+        on_activate=on_activate,
+    )
+    return card
+
+
 class _AppInstallerWizardStep(enum.StrEnum):
     NODE = "node"
     APP = "app"
@@ -106,7 +128,7 @@ class _AppInstallerWizardStep(enum.StrEnum):
 
 @dataclass(slots=True)
 class _AppInstallerPageState:
-    node_name: str
+    node_name: str | None = None
     step: _AppInstallerWizardStep = _AppInstallerWizardStep.NODE
     catalog: NodeAppInstallCatalog | None = None
     recipe_scope: str | None = None
@@ -153,8 +175,8 @@ class _AppInstallerPageState:
             self.inputs.clear()
             return
         self.friendly_name = f"{recipe.label} Server"
-        self.instance_key = _automatic_instance_key(self.friendly_name)
-        self.subfolder = f"{recipe.scope}-{self.instance_key}"
+        self.instance_key = recipe.default_instance_key
+        self.subfolder = recipe.default_subfolder
         self.port_text = "" if recipe.default_port is None else str(recipe.default_port)
         self.steam_branch_id = recipe.default_branch_id
         self.inputs = {AppInstallInput(install_input.key): "" for install_input in recipe.fields}
@@ -184,6 +206,9 @@ class _AppInstallerPageState:
         self.release_error = None
         if self.steam_branch_id.casefold() not in {branch.branch_id.casefold() for branch in recipe.branches}:
             self.steam_branch_id = recipe.default_branch_id
+        if not self.instance_identity_customized:
+            self.instance_key = recipe.default_instance_key
+            self.subfolder = recipe.default_subfolder
 
     def clear_submitted_secrets(self) -> None:
         for input_key in self.inputs:
@@ -229,31 +254,13 @@ def _optional_port(raw_port: str) -> int | None:
     return int(text)
 
 
-def _automatic_instance_key(friendly_name: str) -> str:
-    """Build a manager-safe internal identifier from a user-facing server name."""
-
-    parts: list[str] = []
-    previous_was_separator = False
-    for character in friendly_name.casefold():
-        if character.isascii() and character.isalnum():
-            parts.append(character)
-            previous_was_separator = False
-        elif not previous_was_separator:
-            parts.append("-")
-            previous_was_separator = True
-    instance_key = "".join(parts).strip("-")
-    return instance_key or "server"
-
-
 def _preflight_install_request(request: NodeAppInstallRequest) -> NodeAppInstallRequest:
     """Replace write-only values before a non-mutating remote preflight check."""
 
     return request.model_copy(
         update={
             "inputs": {
-                input_key: (
-                    _INSTALL_PREFLIGHT_SECRET_PLACEHOLDER if input_key.is_secret else value
-                )
+                input_key: (_INSTALL_PREFLIGHT_SECRET_PLACEHOLDER if input_key.is_secret else value)
                 for input_key, value in request.inputs.items()
             }
         }
@@ -319,13 +326,11 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
         nodes: tuple[ModWebNodeLink, ...],
     ) -> None:
         nodes_by_name = {node.node_name.casefold(): node for node in nodes}
-        state = _AppInstallerPageState(node_name=nodes[0].node_name)
+        state = _AppInstallerPageState()
         page_token = uuid4().hex
         status_controls: _AppInstallerStatusControls | None = None
         catalog_request_id = 0
         release_request_id = 0
-        automatic_identity_controls: tuple[Input, Input] | None = None
-        synchronising_automatic_identity = False
         from nicegui.context import context as nicegui_context
 
         notification_client = nicegui_context.client
@@ -355,7 +360,10 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             )
 
         def selected_node() -> ModWebNodeLink:
-            node = nodes_by_name.get(state.node_name.casefold())
+            node_name = state.node_name
+            if node_name is None:
+                raise RuntimeError("Choose an available node.")
+            node = nodes_by_name.get(node_name.casefold())
             if node is None:
                 raise RuntimeError("Selected node is no longer available.")
             return node
@@ -377,6 +385,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 not page_closed
                 and catalog_request_id == request_id
                 and state.step is _AppInstallerWizardStep.APP
+                and state.node_name is not None
                 and state.node_name.casefold() == node_name.casefold()
             )
 
@@ -391,6 +400,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 not page_closed
                 and release_request_id == request_id
                 and state.step is _AppInstallerWizardStep.RELEASE
+                and state.node_name is not None
                 and state.node_name.casefold() == node_name.casefold()
                 and recipe is not None
                 and recipe.scope.casefold() == scope.casefold()
@@ -400,9 +410,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             recipe = selected_recipe()
             if recipe is None:
                 return (_AppInstallerWizardStep.NODE, _AppInstallerWizardStep.APP)
-            requirement_step = (
-                (_AppInstallerWizardStep.REQUIREMENTS,) if recipe.fields else ()
-            )
+            requirement_step = (_AppInstallerWizardStep.REQUIREMENTS,) if recipe.fields else ()
             return (
                 _AppInstallerWizardStep.NODE,
                 _AppInstallerWizardStep.APP,
@@ -426,9 +434,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             return state.install_starting or (state.status is not None and state.status.running)
 
         def portal_install_is_held_by_other() -> bool:
-            return self._portal_app_install_lease_held_by_other(
-                owner_token=page_token
-            )
+            return self._portal_app_install_lease_held_by_other(owner_token=page_token)
 
         def wizard_is_locked() -> bool:
             return state.preflight_checking or install_is_active()
@@ -588,17 +594,17 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 with ui.column().classes("w-full gap-3"):
                     with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
                         ui.label("Install status").classes("text-lg font-black mod-title-small")
-                        state_label = ui.label("").classes(
-                            "text-xs font-bold uppercase tracking-wide mod-subtitle"
-                        )
+                        state_label = ui.label("").classes("text-xs font-bold uppercase tracking-wide mod-subtitle")
                     with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
                         summary_label = ui.label("").classes("font-semibold")
                         progress_label = ui.label("").classes("mod-subtitle text-sm")
                     detail_label = ui.label("").classes("mod-subtitle text-sm break-words")
                     app_link = ui.link("Open app", "#").classes("text-sm font-semibold")
-                    log_textarea = ui.textarea(value="").props(
-                        "readonly filled square dense hide-bottom-space rows=8"
-                    ).classes("w-full font-mono text-xs mod-config-input")
+                    log_textarea = (
+                        ui.textarea(value="")
+                        .props("readonly filled square dense hide-bottom-space rows=8")
+                        .classes("w-full font-mono text-xs mod-config-input")
+                    )
                     cancel_button = ui.button("Cancel install", icon="cancel", on_click=cancel_install).classes(
                         "mod-list-button secondary self-start"
                     )
@@ -709,33 +715,21 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             current_lease = self._portal_app_install_coordinator.current()
             lease_changed = observed_portal_install_lease != current_lease
             observed_portal_install_lease = current_lease
-            if (
-                (status_changed or lease_changed)
-                and not page_closed
-            ):
+            if (status_changed or lease_changed) and not page_closed:
                 render_wizard.refresh()
 
-        def change_node(event: ValueChangeEventArguments[str | None]) -> None:
+        async def choose_node(requested_node_name: str) -> None:
             if reject_when_wizard_locked():
-                return
-            requested_node_name = event.value
-            if requested_node_name is None:
-                notify("Choose an available node.", tone="warning")
                 return
             if requested_node_name.casefold() not in nodes_by_name:
                 notify("Choose an available node.", tone="warning")
                 return
-            if requested_node_name.casefold() == state.node_name.casefold():
-                return
-            invalidate_catalog_request()
-            invalidate_release_request()
-            state.node_name = nodes_by_name[requested_node_name.casefold()].node_name
-            state.clear_job()
-            state.catalog = None
-            state.catalog_error = None
-            state.apply_recipe(None)
-            render_wizard.refresh()
-            update_status_view()
+            if state.node_name is None or requested_node_name.casefold() != state.node_name.casefold():
+                invalidate_catalog_request()
+                state.node_name = nodes_by_name[requested_node_name.casefold()].node_name
+                state.clear_job()
+                update_status_view()
+            await continue_to_app_step()
 
         async def choose_recipe(scope: str) -> None:
             if reject_when_wizard_locked():
@@ -770,16 +764,10 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             if recipe is None:
                 notify("Choose an app.", tone="warning")
                 return
-            if state.steam_branch_id.casefold() not in {
-                branch.branch_id.casefold() for branch in recipe.branches
-            }:
+            if state.steam_branch_id.casefold() not in {branch.branch_id.casefold() for branch in recipe.branches}:
                 notify("Choose an available release.", tone="warning")
                 return
-            state.step = (
-                _AppInstallerWizardStep.REQUIREMENTS
-                if recipe.fields
-                else _AppInstallerWizardStep.SERVER
-            )
+            state.step = _AppInstallerWizardStep.REQUIREMENTS if recipe.fields else _AppInstallerWizardStep.SERVER
             render_wizard.refresh()
 
         def validate_requirements(recipe: NodeAppInstallRecipe) -> str | None:
@@ -788,9 +776,8 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 value = state.inputs.get(input_key, "")
                 if install_field.required and not value.strip():
                     return f"{install_field.label} is required."
-                if (
-                    input_key is AppInstallInput.GAME_SERVER_LOGIN_TOKEN
-                    and any(character.isspace() for character in value)
+                if input_key is AppInstallInput.GAME_SERVER_LOGIN_TOKEN and any(
+                    character.isspace() for character in value
                 ):
                     return "Steam Game Server Login Token (GSLT) must not contain whitespace."
             return None
@@ -899,21 +886,12 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             render_wizard.refresh()
 
         def set_text(attribute: _AppInstallerTextField, event: ValueChangeEventArguments[str | None]) -> None:
-            nonlocal synchronising_automatic_identity
             if wizard_is_locked():
                 return
             value = "" if event.value is None else event.value
             setattr(state, attribute, value)
             if attribute in {"instance_key", "subfolder"}:
-                if not synchronising_automatic_identity:
-                    state.instance_identity_customized = True
-                return
-            if attribute == "friendly_name" and not state.instance_identity_customized:
-                recipe = selected_recipe()
-                if recipe is not None:
-                    state.instance_key = _automatic_instance_key(value)
-                    state.subfolder = f"{recipe.scope}-{state.instance_key}"
-                    sync_automatic_identity_controls()
+                state.instance_identity_customized = True
 
         def set_input_value(key: AppInstallInput, event: ValueChangeEventArguments[str | None]) -> None:
             if wizard_is_locked():
@@ -945,25 +923,10 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             recipe = selected_recipe()
             if recipe is None:
                 return
-            state.instance_key = _automatic_instance_key(state.friendly_name)
-            state.subfolder = f"{recipe.scope}-{state.instance_key}"
+            state.instance_key = recipe.default_instance_key
+            state.subfolder = recipe.default_subfolder
             state.instance_identity_customized = False
             render_wizard.refresh()
-
-        def sync_automatic_identity_controls() -> None:
-            """Keep visible advanced fields aligned with the generated identity."""
-
-            nonlocal synchronising_automatic_identity
-            controls = automatic_identity_controls
-            if controls is None:
-                return
-            synchronising_automatic_identity = True
-            try:
-                instance_key_input, subfolder_input = controls
-                instance_key_input.set_value(state.instance_key)
-                subfolder_input.set_value(state.subfolder)
-            finally:
-                synchronising_automatic_identity = False
 
         async def start_install() -> None:
             if page_closed:
@@ -1013,21 +976,10 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 if not page_closed:
                     render_wizard.refresh()
 
-        node_options = {
-            node.node_name: (
-                node.label
-                if node.label.casefold() == node.node_name.casefold()
-                else f"{node.label} · {node.node_name}"
-            )
-            for node in nodes
-        }
-
         status_controls = create_status_controls()
 
         @ui.refreshable
         def render_wizard() -> None:
-            nonlocal automatic_identity_controls
-            automatic_identity_controls = None
             if state.status is not None:
                 return
             with ui.card().classes("mod-card w-full"):
@@ -1057,19 +1009,41 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                     steps = wizard_steps()
                     if state.step not in steps:
                         state.step = steps[-1]
-                    step_number = steps.index(state.step) + 1
+                    step_number: int = steps.index(state.step) + 1
                     ui.label(f"Step {step_number} of {len(steps)} · {state.step.label}").classes(
                         "text-sm font-black mod-title-small"
                     )
                     if state.step is _AppInstallerWizardStep.NODE:
-                        node_select = ui.select(node_options, value=state.node_name, label="Node").props(
-                            _INSTALL_SELECT_PROPS
-                        ).classes("w-full md:max-w-md mod-app-details-field")
-                        node_select.on_value_change(change_node)
-                        next_button = ui.button("Next", icon="arrow_forward", on_click=continue_to_app_step).classes(
-                            "mod-list-button self-start"
-                        )
-                        disable_when_wizard_locked(node_select, next_button)
+                        with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 gap-3"):
+                            for available_node in nodes:
+                                is_selected: bool = (
+                                    state.node_name is not None
+                                    and state.node_name.casefold() == available_node.node_name.casefold()
+                                )
+                                node_card: Card = _create_selectable_install_card(
+                                    ui=ui,
+                                    is_selected=is_selected,
+                                    on_activate=(
+                                        lambda _event=None, node_name=available_node.node_name: choose_node(node_name)
+                                    ),
+                                )
+                                with node_card:
+                                    with ui.row().classes("items-center gap-3"):
+                                        ui.html(
+                                            self._node_bot_avatar_markup(
+                                                node_name=available_node.node_name,
+                                                display_name=available_node.label,
+                                                extra_class="mod-app-installer-node-avatar",
+                                            )
+                                        ).classes("shrink-0")
+                                        with ui.column().classes("gap-0 min-w-0"):
+                                            node_label = ui.label(available_node.label).classes("font-bold")
+                                            if node_text_style := self._node_text_style(
+                                                node_name=available_node.node_name
+                                            ):
+                                                node_label.style(node_text_style)
+                                            if available_node.label.casefold() != available_node.node_name.casefold():
+                                                ui.label(available_node.node_name).classes("mod-subtitle text-sm")
                         return
 
                     if state.step is _AppInstallerWizardStep.APP:
@@ -1094,18 +1068,12 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                                             recipe is not None
                                             and recipe.scope.casefold() == available.scope.casefold()
                                         )
-                                        card_classes = "mod-card mod-card-link w-full gap-2 cursor-pointer"
-                                        if is_selected:
-                                            card_classes += " border border-accent"
-                                        app_card = ui.card().classes(card_classes).props(
-                                            f"aria-pressed={'true' if is_selected else 'false'}"
-                                        )
-                                        if is_selected:
-                                            app_card.style("border-color: var(--mod-accent) !important")
-                                        ModWebUiHelpersMixin._make_activatable(
-                                            target=app_card,
-                                            role="button",
-                                            on_activate=lambda _event=None, scope=available.scope: choose_recipe(scope),
+                                        app_card = _create_selectable_install_card(
+                                            ui=ui,
+                                            is_selected=is_selected,
+                                            on_activate=(
+                                                lambda _event=None, scope=available.scope: choose_recipe(scope)
+                                            ),
                                         )
                                         with app_card:
                                             ui.label(available.label).classes("font-bold")
@@ -1211,7 +1179,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                     if state.step is _AppInstallerWizardStep.SERVER:
                         ui.label("Set up the server").classes("font-semibold")
                         ui.label(
-                            "The instance ID and install folder are generated from the server name unless you change them."
+                            "The next instance ID is chosen from this app's existing instances. You can change it or the install folder."
                         ).classes("mod-subtitle text-sm")
                         with ui.element("div").classes("w-full grid grid-cols-1 md:grid-cols-2 gap-3"):
                             friendly_name_input = ui.input("Server name", value=state.friendly_name).props(
@@ -1250,14 +1218,11 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                                 subfolder_input = ui.input("Install folder", value=state.subfolder).props(
                                     _INSTALL_FIELD_PROPS
                                 ).classes("w-full mod-app-details-field")
-                                subfolder_input.on_value_change(
-                                    lambda event: set_text("subfolder", event)
-                                )
-                            automatic_identity_controls = (instance_key_input, subfolder_input)
+                                subfolder_input.on_value_change(lambda event: set_text("subfolder", event))
                             server_controls.extend((instance_key_input, subfolder_input))
                             if state.instance_identity_customized:
                                 reset_button = ui.button(
-                                    "Reset automatic IDs",
+                                    "Reset suggested IDs",
                                     icon="restart_alt",
                                     on_click=reset_automatic_identity,
                                 ).classes("mod-list-button secondary self-start")

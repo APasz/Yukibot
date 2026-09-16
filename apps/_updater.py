@@ -23,6 +23,7 @@ from apps._steam import (
     merge_steam_update_branches,
     parse_steam_keyvalues_mapping,
     steam_update_branch_cache_is_fresh,
+    steam_update_preset_for_scope,
 )
 
 log = logging.getLogger(__name__)
@@ -548,11 +549,16 @@ class SteamCmd_Update_Manager(Update_Manager):
         if self.status().running:
             raise RuntimeError(f"Cannot change the Steam branch while {self.app.friendly} is updating.")
         steam_update = self._steam_update_config()
+        preset = steam_update_preset_for_scope(self.app.scope)
+        if preset is not None:
+            branch_id = preset.validate_selected_branch(branch_id)
         try:
             selected_branch = self._available_branch(self._available_branches(steam_update), branch_id)
         except ValueError:
             selected_branch = SteamUpdateBranch(branch_id=branch_id)
         next_update = steam_update.with_selected_branch(selected_branch, add_if_missing=True)
+        if preset is not None:
+            next_update = preset.normalise_config(next_update)
         branch = self._available_branch(self._available_branches(next_update), next_update.selected_branch)
         if next_update == steam_update:
             return self.info()
@@ -837,11 +843,16 @@ class SteamCmd_Update_Manager(Update_Manager):
         steam_update = cfg.steam_update
         if steam_update is None:
             raise _errors.UnsupportedUpdate(f"{self.app.friendly} does not have a Steam update configuration.")
-        return steam_update
+        preset = steam_update_preset_for_scope(self.app.scope)
+        return steam_update if preset is None else preset.normalise_config(steam_update)
 
     def _available_branches(self, steam_update: SteamUpdateConfig) -> tuple[SteamUpdateBranch, ...]:
         discovered_branches = cached_steam_update_branches(steam_update.app_id, allow_stale=True) or ()
-        return merge_steam_update_branches(discovered_branches, steam_update.branches)
+        available_config = steam_update.model_copy(
+            update={"branches": merge_steam_update_branches(discovered_branches, steam_update.branches)}
+        )
+        preset = steam_update_preset_for_scope(self.app.scope)
+        return available_config.branches if preset is None else preset.normalise_config(available_config).branches
 
     def _schedule_branch_refresh(self, steam_update: SteamUpdateConfig) -> None:
         if steam_update_branch_cache_is_fresh(steam_update.app_id):

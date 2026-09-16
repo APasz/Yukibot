@@ -126,6 +126,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-home-section-grid", css)
         self.assertIn(".mod-home-section", css)
         self.assertIn(".mod-home-section-avatar", css)
+        self.assertIn(".mod-app-installer-node-avatar", css)
         self.assertIn("container-name: mod-home-section", css)
         self.assertIn("container-name: mod-app-card", css)
         self.assertIn(".mod-home-app-count-badge", css)

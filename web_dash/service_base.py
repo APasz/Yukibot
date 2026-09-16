@@ -583,6 +583,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_primary_guild_bot_role_color_hex"]) -> Callable[..., str | None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_node_bot_avatar_markup"]) -> Callable[..., str]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_node_bot_user_id"]) -> Callable[..., int | None]: ...
 
     @overload

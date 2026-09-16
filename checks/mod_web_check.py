@@ -214,7 +214,6 @@ from web_dash.app_page import (
 )
 from web_dash.app_installer import (
     _AppInstallerPageState,
-    _automatic_instance_key,
     _notify_in_page_client,
     _preflight_install_request,
     _redact_install_error_detail,
@@ -4077,17 +4076,17 @@ class ModWebTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_app_installer_automatically_derives_manager_safe_instance_ids(self) -> None:
-        self.assertEqual(_automatic_instance_key("Yuki's ETS2 Server"), "yuki-s-ets2-server")
-        self.assertEqual(_automatic_instance_key("  --  "), "server")
-        self.assertEqual(_automatic_instance_key("Alpha_日本語"), "alpha")
+    def test_app_installer_starts_without_a_selected_node(self) -> None:
+        self.assertIsNone(_AppInstallerPageState().node_name)
 
-    def test_app_installer_recipe_defaults_use_the_automatic_instance_identity(self) -> None:
+    def test_app_installer_recipe_defaults_use_the_node_instance_identity(self) -> None:
         recipe = NodeAppInstallRecipe(
             scope="ets",
             label="Euro Truck Simulator 2",
             default_port=27015,
             default_branch_id="public",
+            default_instance_key="alpha",
+            default_subfolder="ets-alpha",
             branches=(NodeAppInstallBranch(branch_id="public", label="Public"),),
         )
         state = _AppInstallerPageState(node_name="erin")
@@ -4095,8 +4094,8 @@ class ModWebTests(unittest.TestCase):
         state.apply_recipe(recipe)
 
         self.assertEqual(state.friendly_name, "Euro Truck Simulator 2 Server")
-        self.assertEqual(state.instance_key, "euro-truck-simulator-2-server")
-        self.assertEqual(state.subfolder, "ets-euro-truck-simulator-2-server")
+        self.assertEqual(state.instance_key, "alpha")
+        self.assertEqual(state.subfolder, "ets-alpha")
 
     def test_app_installer_preflight_replaces_write_only_values(self) -> None:
         secret = "write-only-token"

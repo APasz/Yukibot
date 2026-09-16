@@ -236,6 +236,9 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             cached_steam_update_branches(preset.app_id, allow_stale=True) or (),
             fallback_config.branches,
         )
+        branches = preset.normalise_config(
+            fallback_config.model_copy(update={"branches": branches})
+        ).branches
         return {
             branch.branch_id: cls._update_branch_option_label(
                 branch_id=branch.branch_id,

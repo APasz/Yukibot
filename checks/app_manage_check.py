@@ -27,6 +27,7 @@ from _manager import (
     AppStartBlockerKind,
     Provider_Player,
     Provider_Process,
+    next_available_instance_key,
 )
 from _relay_embeds import build_app_lifecycle_embed
 from _security import Power_Level
@@ -62,6 +63,7 @@ from apps._console import (
 from apps._mod import Mod
 from apps._scs_truck_simulator import ATS_PROFILE, ETS2_PROFILE
 from apps._settings import ChoiceOption, ChoiceSpec
+from apps.gmod import GMOD_DEFAULT_INSTALL_SUBFOLDER
 from apps.minecraft import Minecraft, Minecraft_Config, MinecraftLoader, MinecraftRuntimeInfo
 from apps.sevendays import SevenDays
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatHub
@@ -3072,6 +3074,39 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted.allowed_scopes, ("satisfactory",))
         self.assertEqual(current, persisted)
         self.assertEqual(loaded.app_installer, persisted)
+
+    def test_instance_install_defaults_follow_existing_ids_and_use_gmod_folder(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            demo_scope_path = temp_path / "apps" / "demo"
+            demo_scope_path.mkdir(parents=True)
+            (demo_scope_path / "instances.json").write_text(
+                json.dumps({"Alpha": {}, "charlie": {}, "custom": {}}),
+                encoding="utf-8",
+            )
+            gmod_scope_path = temp_path / "apps" / "gmod"
+            gmod_scope_path.mkdir(parents=True)
+            gmod_instances_path = gmod_scope_path / "instances.json"
+            gmod_instances_path.write_text("{}", encoding="utf-8")
+
+            os.chdir(temp_path)
+            try:
+                demo_defaults = manager.suggest_instance_install_defaults(scope="demo")
+                first_gmod_defaults = manager.suggest_instance_install_defaults(scope="gmod")
+                gmod_instances_path.write_text(json.dumps({"alpha": {}}), encoding="utf-8")
+                second_gmod_defaults = manager.suggest_instance_install_defaults(scope="gmod")
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(next_available_instance_key(("Alpha", "beta")), "charlie")
+        self.assertEqual(demo_defaults.instance_key, "delta")
+        self.assertEqual(demo_defaults.subfolder, "demo-delta")
+        self.assertEqual(first_gmod_defaults.instance_key, "alpha")
+        self.assertEqual(first_gmod_defaults.subfolder, GMOD_DEFAULT_INSTALL_SUBFOLDER)
+        self.assertEqual(second_gmod_defaults.instance_key, "beta")
+        self.assertEqual(second_gmod_defaults.subfolder, "gmod-beta")
 
     async def test_launch_waits_for_start_completion_before_marking_lifecycle_started(self) -> None:
         manager = object.__new__(App_Manager)

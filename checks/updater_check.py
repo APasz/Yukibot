@@ -4,12 +4,11 @@ import asyncio
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import apps._steam as steam_metadata
 import config
-from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
+from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig, SteamUpdatePreset
 from apps._steam import (
     STEAM_BRANCH_CACHE_TTL_SECONDS,
     load_steam_update_branches,
@@ -25,7 +24,6 @@ from apps._updater import (
     SteamAppManifestState,
     SteamCmd_Update_Manager,
     Update_Manager,
-    UpdateManagerApp,
     _command_error_text,
     run_steamcmd_command,
 )
@@ -71,13 +69,14 @@ class _FakeApp:
     def check_running(self) -> bool:
         return self.running
 
+    def detect_installed_version(self) -> AppVersion | None:
+        return None
+
 
 class UpdaterTests(unittest.TestCase):
     def test_base_updater_does_not_advertise_verification(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            updater = Update_Manager(
-                cast(UpdateManagerApp, _FakeApp(Path(temp_dir)))
-            )
+            updater = Update_Manager(_FakeApp(Path(temp_dir)))
 
         self.assertFalse(updater.supports_verify)
 
@@ -196,6 +195,30 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual([branch.branch_id for branch in update_config.branches], ["public", "v3.1.0"])
         self.assertEqual(update_config.selected_branch_config.display_label, "v3.1.0")
 
+    def test_steam_update_preset_requires_one_canonical_branch(self) -> None:
+        preset = SteamUpdatePreset(
+            app_id=4020,
+            default_selected_branch="x86-64",
+            required_selected_branch="x86-64",
+        )
+        legacy_config = SteamUpdateConfig(
+            app_id=4020,
+            branches=(
+                SteamUpdateBranch(branch_id="public", label="Public"),
+                SteamUpdateBranch(branch_id="X86-64", label="64-bit binaries"),
+            ),
+            selected_branch="public",
+        )
+
+        constrained_config = preset.normalise_config(legacy_config)
+
+        self.assertEqual(preset.validate_selected_branch("X86-64"), "x86-64")
+        self.assertEqual(constrained_config.selected_branch, "x86-64")
+        self.assertEqual([branch.branch_id for branch in constrained_config.branches], ["x86-64"])
+        self.assertEqual(constrained_config.selected_branch_config.display_label, "64-bit binaries")
+        with self.assertRaisesRegex(ValueError, "requires branch"):
+            preset.build_config(selected_branch="public")
+
     def test_steam_update_preset_resolves_satisfactory_app_metadata(self) -> None:
         from apps.satisfactory import STEAM_APP_ID, STEAM_UPDATE_PRESET
 
@@ -224,12 +247,36 @@ class UpdaterTests(unittest.TestCase):
 
             update_info = updater.select_branch("latest_experimental")
 
-        self.assertEqual(app.cfg.steam_update.selected_branch, "latest_experimental")  # type: ignore[union-attr]
+        assert app.cfg.steam_update is not None
+        self.assertEqual(app.cfg.steam_update.selected_branch, "latest_experimental")
         self.assertEqual(app.persisted, 1)
         self.assertEqual(update_info.provider_kind, AppUpdateProviderKind.STEAMCMD)
         self.assertEqual(update_info.selected_branch_label, "Experimental")
         self.assertTrue(updater.supports_verify)
         self.assertEqual(update_info.supports_verify, updater.supports_verify)
+
+    def test_steamcmd_update_manager_normalises_a_required_branch_before_reporting_info(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _FakeApp(Path(temp_dir))
+            app.friendly = "GMod Alpha"
+            app.scope = "gmod"
+            app.cfg.steam_update = SteamUpdateConfig(
+                app_id=4020,
+                branches=(
+                    SteamUpdateBranch(branch_id="public", label="Public"),
+                    SteamUpdateBranch(branch_id="X86-64", label="64-bit binaries"),
+                ),
+                selected_branch="public",
+            )
+            with (
+                patch("apps._updater.cached_steam_update_branches", return_value=()),
+                patch("apps._updater.steam_update_branch_cache_is_fresh", return_value=True),
+            ):
+                update_info = SteamCmd_Update_Manager(app).info()
+
+        self.assertEqual(update_info.selected_branch_id, "x86-64")
+        self.assertEqual(update_info.selected_branch_label, "64-bit binaries")
+        self.assertEqual([branch.branch_id for branch in update_info.branches], ["x86-64"])
 
     def test_steamcmd_update_manager_lists_version_branches_for_existing_instance(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -32,15 +32,25 @@ GMOD_DEFAULT_PORT: Final[int] = 27015
 GMOD_DEFAULT_GAMEMODE: Final[str] = "sandbox"
 GMOD_DEFAULT_STARTUP_MAP: Final[str] = "gm_construct"
 GMOD_DEFAULT_MAX_PLAYERS: Final[int] = 16
+GMOD_DEFAULT_INSTALL_SUBFOLDER: Final[str] = "garrymod"
 GMOD_MANAGE_EMBED_COLOR: Final[int] = 0x1194F0
 STEAM_GAME_APP_ID: Final[int] = 4000
 STEAM_APP_ID: Final[int] = 4020
-STEAM_UPDATE_PRESET: Final[SteamUpdatePreset] = SteamUpdatePreset(app_id=STEAM_APP_ID)
+GMOD_X64_STEAM_BRANCH: Final[str] = "x86-64"
+STEAM_UPDATE_PRESET: Final[SteamUpdatePreset] = SteamUpdatePreset(
+    app_id=STEAM_APP_ID,
+    default_selected_branch=GMOD_X64_STEAM_BRANCH,
+    required_selected_branch=GMOD_X64_STEAM_BRANCH,
+)
 
 _GMOD_MANAGED_DIRECTORY_NAME: Final[str] = ".yukibot"
 _GMOD_SETTINGS_FILENAME: Final[str] = "gmod-settings.json"
 _GMOD_GSLT_FILENAME: Final[str] = "steam-game-server-login-token"
 _GMOD_SERVER_CONFIG_FILENAME: Final[str] = "server.cfg"
+_GMOD_X64_LAUNCHER_NAME: Final[str] = "srcds_run_x64"
+_GMOD_X64_LAUNCH_COMMAND: Final[str] = f"./{_GMOD_X64_LAUNCHER_NAME}"
+_GMOD_X64_BINARY_RELATIVE_PATH: Final[Path] = Path("bin") / "linux64" / "srcds"
+_GMOD_X64_PROCESS_NAME: Final[str] = _GMOD_X64_BINARY_RELATIVE_PATH.name
 _GMOD_LAUNCH_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _GMOD_STEAM_ACCOUNT_COMMAND_RE: Final[re.Pattern[str]] = re.compile(
     r"\bsv_setsteamaccount(?:\s|$)",
@@ -91,6 +101,23 @@ def gmod_game_server_login_token_path(directory: Path) -> Path:
     return gmod_managed_directory(directory) / _GMOD_GSLT_FILENAME
 
 
+def _require_gmod_x64_installation(directory: Path) -> None:
+    """Validate the required 64-bit runtime or explain how to repair the install."""
+
+    launcher = directory / _GMOD_X64_LAUNCHER_NAME
+    if not launcher.is_file():
+        raise FileNotFoundError(
+            f"Garry's Mod 64-bit launcher is missing: {launcher}. "
+            f"Update the server on Steam branch {GMOD_X64_STEAM_BRANCH!r}."
+        )
+    binary = directory / _GMOD_X64_BINARY_RELATIVE_PATH
+    if not binary.is_file():
+        raise FileNotFoundError(
+            f"Garry's Mod 64-bit engine binary is missing: {binary}. "
+            f"Update the server on Steam branch {GMOD_X64_STEAM_BRANCH!r}."
+        )
+
+
 def resolve_gmod_game_port(port: int | None) -> int:
     """Resolve one configured Garry's Mod game port."""
 
@@ -130,7 +157,7 @@ def gmod_start_command(
     resolved_map = _normalise_gmod_launch_name(startup_map, label="startup map")
     token = normalise_steam_game_server_login_token(game_server_login_token)
     return [
-        "./srcds_run",
+        _GMOD_X64_LAUNCH_COMMAND,
         "-game",
         "garrysmod",
         "+port",
@@ -368,9 +395,7 @@ async def prepare_gmod_server_installation(
 ) -> None:
     """Prepare a freshly downloaded GMod server before it is registered."""
 
-    launcher = directory / "srcds_run"
-    if not launcher.is_file():
-        raise FileNotFoundError(f"Garry's Mod launcher is missing after SteamCMD install: {launcher}")
+    _require_gmod_x64_installation(directory)
     if game_server_login_token is None:
         raise ValueError("Garry's Mod requires a Steam Game Server Login Token.")
     ensure_gmod_managed_files(directory)
@@ -386,11 +411,13 @@ class Gmod(App[App_Config]):
     def _base_launch_command() -> list[str]:
         """Return the non-secret portion safe to retain outside an active launch."""
 
-        return ["./srcds_run", "-game", "garrysmod"]
+        return [_GMOD_X64_LAUNCH_COMMAND, "-game", "garrysmod"]
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = GMOD_MANAGE_EMBED_COLOR
-        self.proc_name = "srcds_linux"
+        if cfg.steam_update is not None:
+            cfg.steam_update = STEAM_UPDATE_PRESET.normalise_config(cfg.steam_update)
+        self.proc_name = _GMOD_X64_PROCESS_NAME
         self.proc_cmd = [self.proc_name, "-game", "garrysmod"]
         ensure_gmod_managed_files(cfg.directory)
         # App initialisation logs this value. The real command is only assembled
@@ -554,6 +581,7 @@ class Gmod(App[App_Config]):
                 self._clear_launch_token()
 
     async def start(self) -> bool:
+        _require_gmod_x64_installation(self.directory)
         token = _read_gmod_game_server_login_token(self.directory)
         if token is None:
             raise ValueError("Configure a Steam Game Server Login Token before starting Garry's Mod.")

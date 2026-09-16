@@ -14,7 +14,13 @@ from fastapi import FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient, Response
 
 import config
-from _manager import AppInstallInput, AppInstanceCreateRequest, AppInstanceCreationPlan, AppSteamInstallRecipe
+from _manager import (
+    AppInstallInput,
+    AppInstanceCreateRequest,
+    AppInstanceCreationPlan,
+    AppInstanceInstallDefaults,
+    AppSteamInstallRecipe,
+)
 from _security import Power_Level
 from apps._config import SteamUpdateBranch, SteamUpdateConfig, SteamUpdateLogin
 from node_api.app_installer import (
@@ -68,6 +74,10 @@ class _InstallerManager:
             scope_path=root / "apps" / "demo",
             instances_path=root / "apps" / "demo" / "instances.json",
         )
+        self.install_defaults = AppInstanceInstallDefaults(
+            instance_key="alpha",
+            subfolder="demo-alpha",
+        )
         self.create_requests: list[AppInstanceCreateRequest] = []
         self.on_create_instance: Callable[[AppInstanceCreateRequest], None] | None = None
         self.loaded_instances: list[tuple[str, str]] = []
@@ -75,6 +85,11 @@ class _InstallerManager:
 
     def list_steam_install_recipes(self) -> tuple[AppSteamInstallRecipe, ...]:
         return (self.recipe,)
+
+    def suggest_instance_install_defaults(self, *, scope: str) -> AppInstanceInstallDefaults:
+        if scope == "demo":
+            return self.install_defaults
+        return AppInstanceInstallDefaults(instance_key="alpha", subfolder=f"{scope}-alpha")
 
     def prepare_instance_creation(self, request: AppInstanceCreateRequest) -> AppInstanceCreationPlan:
         assert request.scope == "demo"
@@ -282,9 +297,32 @@ class AppInstallerCheck(unittest.TestCase):
 
         self.assertEqual(catalog.node, "node-a")
         self.assertEqual(catalog.recipes[0].scope, "demo")
+        self.assertEqual(catalog.recipes[0].default_instance_key, "alpha")
+        self.assertEqual(catalog.recipes[0].default_subfolder, "demo-alpha")
         self.assertEqual(catalog.recipes[0].fields[0].key, AppInstallInput.ADMIN_PASSWORD.value)
         self.assertIn("claiming it in the game client", catalog.recipes[0].fields[0].help_text or "")
         self.assertNotIn("not-disclosed", str(catalog.to_mapping()))
+
+    def test_install_recipe_identity_defaults_round_trip_with_legacy_fallback(self) -> None:
+        recipe = NodeAppInstallRecipe(
+            scope="gmod",
+            label="Garry's Mod",
+            default_port=27015,
+            default_branch_id="x86-64",
+            default_instance_key="beta",
+            default_subfolder="gmod-beta",
+            branches=(NodeAppInstallBranch(branch_id="x86-64", label="64-bit binaries"),),
+        )
+
+        payload = recipe.to_mapping()
+        legacy_payload = dict(payload)
+        legacy_payload.pop("default_instance_key")
+        legacy_payload.pop("default_subfolder")
+
+        self.assertEqual(NodeAppInstallRecipe.from_mapping(payload), recipe)
+        legacy_recipe = NodeAppInstallRecipe.from_mapping(legacy_payload)
+        self.assertEqual(legacy_recipe.default_instance_key, "alpha")
+        self.assertEqual(legacy_recipe.default_subfolder, "gmod-alpha")
 
     def test_catalog_exposes_the_game_app_id_required_for_gslts(self) -> None:
         with TemporaryDirectory() as temp_dir:

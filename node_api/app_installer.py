@@ -18,8 +18,10 @@ from _manager import (
     AppInstallInput,
     AppInstanceCreateRequest,
     AppInstanceCreationPlan,
+    AppInstanceInstallDefaults,
     AppSteamInstallPostProcessor,
     AppSteamInstallRecipe,
+    DEFAULT_INSTANCE_KEY,
 )
 from _async_utils import run_blocking
 from _security import Access_Control, Power_Level
@@ -168,9 +170,24 @@ class NodeAppInstallRecipe:
     default_branch_id: str
     branches: tuple[NodeAppInstallBranch, ...]
     fields: tuple[NodeAppInstallField, ...] = ()
+    default_instance_key: str = DEFAULT_INSTANCE_KEY
+    default_subfolder: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.default_instance_key, str):
+            raise TypeError("Install default instance key must be text.")
+        default_instance_key = self.default_instance_key.strip()
+        if not default_instance_key:
+            raise ValueError("Install default instance key must not be empty.")
+        if not isinstance(self.default_subfolder, str):
+            raise TypeError("Install default subfolder must be text.")
+        default_subfolder = self.default_subfolder.strip() or f"{self.scope}-{default_instance_key}"
+        object.__setattr__(self, "default_instance_key", default_instance_key)
+        object.__setattr__(self, "default_subfolder", default_subfolder)
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppInstallRecipe":
+        scope = _required_text(payload, "scope", label="install scope")
         default_port = _optional_port(payload.get("default_port"), label="install default port")
         raw_branches = _mapping_sequence(payload.get("branches"), label="install branches")
         raw_fields = _mapping_sequence(payload.get("fields", ()), label="install fields")
@@ -181,12 +198,20 @@ class NodeAppInstallRecipe:
         if default_branch_id.casefold() not in {branch.branch_id.casefold() for branch in branches}:
             raise ValueError("Install recipe default branch is not available.")
         return cls(
-            scope=_required_text(payload, "scope", label="install scope"),
+            scope=scope,
             label=_required_text(payload, "label", label="install label"),
             default_port=default_port,
             default_branch_id=default_branch_id,
             branches=branches,
             fields=tuple(NodeAppInstallField.from_mapping(field) for field in raw_fields),
+            default_instance_key=(
+                _optional_text(payload.get("default_instance_key"), label="install default instance key")
+                or DEFAULT_INSTANCE_KEY
+            ),
+            default_subfolder=(
+                _optional_text(payload.get("default_subfolder"), label="install default subfolder")
+                or ""
+            ),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -195,6 +220,8 @@ class NodeAppInstallRecipe:
             "label": self.label,
             "default_port": self.default_port,
             "default_branch_id": self.default_branch_id,
+            "default_instance_key": self.default_instance_key,
+            "default_subfolder": self.default_subfolder,
             "branches": [branch.to_mapping() for branch in self.branches],
             "fields": [field.to_mapping() for field in self.fields],
         }
@@ -496,6 +523,8 @@ class NodeAppInstallerManager(Protocol):
 
     def list_steam_install_recipes(self) -> tuple[AppSteamInstallRecipe, ...]: ...
 
+    def suggest_instance_install_defaults(self, *, scope: str) -> AppInstanceInstallDefaults: ...
+
     def prepare_instance_creation(self, request: AppInstanceCreateRequest) -> AppInstanceCreationPlan: ...
 
     def create_instance(self, request: AppInstanceCreateRequest) -> str: ...
@@ -543,7 +572,10 @@ class NodeAppInstallerService:
         return NodeAppInstallCatalog(
             node=self._node_name(),
             recipes=tuple(
-                self._catalog_recipe(recipe)
+                self._catalog_recipe(
+                    recipe,
+                    defaults=resolved_manager.suggest_instance_install_defaults(scope=recipe.scope),
+                )
                 for recipe in self._available_recipes(manager=resolved_manager)
             ),
         )
@@ -562,11 +594,11 @@ class NodeAppInstallerService:
         """
 
         self._ensure_available()
+        resolved_manager = self._resolve_manager(manager)
+        recipe = await self._recipe_for_scope(manager=resolved_manager, scope=scope)
         return self._catalog_recipe(
-            await self._recipe_for_scope(
-                manager=self._resolve_manager(manager),
-                scope=scope,
-            )
+            recipe,
+            defaults=resolved_manager.suggest_instance_install_defaults(scope=recipe.scope),
         )
 
     async def preflight_install(
@@ -881,12 +913,18 @@ class NodeAppInstallerService:
                 )
 
     @staticmethod
-    def _catalog_recipe(recipe: AppSteamInstallRecipe) -> NodeAppInstallRecipe:
+    def _catalog_recipe(
+        recipe: AppSteamInstallRecipe,
+        *,
+        defaults: AppInstanceInstallDefaults,
+    ) -> NodeAppInstallRecipe:
         return NodeAppInstallRecipe(
             scope=recipe.scope,
             label=recipe.label,
             default_port=recipe.default_port,
             default_branch_id=recipe.steam_update.selected_branch,
+            default_instance_key=defaults.instance_key,
+            default_subfolder=defaults.subfolder,
             branches=tuple(
                 NodeAppInstallBranch(branch_id=branch.branch_id, label=branch.display_label)
                 for branch in recipe.steam_update.branches
@@ -955,7 +993,8 @@ class NodeAppInstallerService:
 
     @staticmethod
     async def _with_discovered_branches(recipe: AppSteamInstallRecipe) -> AppSteamInstallRecipe:
-        if steam_update_preset_for_scope(recipe.scope) is None:
+        preset = steam_update_preset_for_scope(recipe.scope)
+        if preset is None:
             return recipe
         working_directory = config.DIR_LOG / "steamcmd-app-info"
         try:
@@ -973,7 +1012,8 @@ class NodeAppInstallerService:
                 xcp,
             )
         branches = merge_steam_update_branches(discovered_branches, recipe.steam_update.branches)
-        return replace(recipe, steam_update=recipe.steam_update.model_copy(update={"branches": branches}))
+        steam_update = recipe.steam_update.model_copy(update={"branches": branches})
+        return replace(recipe, steam_update=preset.normalise_config(steam_update))
 
     @staticmethod
     def _recipe_branch(*, recipe: AppSteamInstallRecipe, branch_id: str) -> SteamUpdateBranch:
