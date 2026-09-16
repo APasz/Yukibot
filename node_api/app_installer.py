@@ -388,7 +388,7 @@ class NodeAppInstallRequest(BaseModel):
     subfolder: str
     port: int | None = None
     steam_branch_id: str
-    inputs: dict[AppInstallInput, str] = Field(default_factory=dict)
+    inputs: dict[AppInstallInput, str] = Field(default_factory=dict, repr=False)
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -856,6 +856,7 @@ class NodeAppInstallerService:
             subfolder=request.subfolder,
             port=request.port,
             admin_password=request.inputs.get(AppInstallInput.ADMIN_PASSWORD),
+            steam_game_server_login_token=request.inputs.get(AppInstallInput.GAME_SERVER_LOGIN_TOKEN),
             steam_branch=request.steam_branch_id,
             initial_version=AppVersion(main="0.0"),
         )

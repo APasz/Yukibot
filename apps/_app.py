@@ -1399,8 +1399,8 @@ class App(Generic[ConfigT], ABC):
                 shell=self.shell,
                 env=environment,
             )
-        except Exception:
-            log.exception(f"Failed to launch: {self.name}")
+        except Exception as xcp:
+            log.error("Failed to launch %s: error_type=%s", self.name, type(xcp).__name__)
             raise
         log.info("Launched %s with pid=%s", self.name, self.process.pid)
         self._stderr_task = asyncio.create_task(self._tee(self.process.stderr, self.file_errout, "STDERR"))
@@ -1501,7 +1501,7 @@ class App(Generic[ConfigT], ABC):
                 await run_blocking(process.wait, 5)
                 await self._drain_stderr_task()
             except Exception as xcp:
-                log.exception(f"Termination failed: {xcp}")
+                log.warning("Termination failed for %s: error_type=%s", self.name, type(xcp).__name__)
 
             for _ in range(10):
                 if process.poll() is not None:
@@ -1514,7 +1514,7 @@ class App(Generic[ConfigT], ABC):
                     await self._drain_stderr_task()
                     log.warning(f"{self.name} kill escalation")
                 except Exception as xcp:
-                    log.exception(f"Kill escalation failed: {xcp}")
+                    log.warning("Kill escalation failed for %s: error_type=%s", self.name, type(xcp).__name__)
             if self.process is process:
                 self.process = None
 
@@ -1546,11 +1546,16 @@ class App(Generic[ConfigT], ABC):
         expected_process_name = self.proc_name.casefold()
         expected_command_parts = tuple(part.casefold() for part in self.proc_cmd if part)
         for proc in psutil.process_iter(attrs=["name", "pid", "cmdline", "cwd"]):
+            process_name: str | None = None
+            process_id: int | None = None
             try:
                 raw_name = proc.info.get("name")
                 raw_cmdline = proc.info.get("cmdline")
                 if not isinstance(raw_name, str) or not isinstance(raw_cmdline, list):
                     continue
+                process_name = raw_name
+                raw_process_id = proc.info.get("pid")
+                process_id = raw_process_id if type(raw_process_id) is int else None
                 command_line = tuple(str(argument).casefold() for argument in raw_cmdline)
                 raw_cwd = proc.info.get("cwd")
                 process_cwd = raw_cwd if isinstance(raw_cwd, str) else None
@@ -1560,19 +1565,28 @@ class App(Generic[ConfigT], ABC):
                     process_cwd=process_cwd,
                 ):
                     continue
-                log.info(f"Force-stopping stray process: {proc.info}")
+                log.info("Force-stopping stray process: name=%s pid=%s", process_name, process_id)
                 proc.terminate()
                 try:
                     proc.wait(timeout=10)
                 except psutil.TimeoutExpired:
-                    log.warning("Force-killing unresponsive stray process: %s", proc.info)
+                    log.warning(
+                        "Force-killing unresponsive stray process: name=%s pid=%s",
+                        process_name,
+                        process_id,
+                    )
                     proc.kill()
                     proc.wait(timeout=5)
 
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
             except Exception as xcp:
-                log.exception(f"Failed to stop {proc.info}: {xcp}")
+                log.warning(
+                    "Failed to stop stray process: name=%s pid=%s error_type=%s",
+                    process_name,
+                    process_id,
+                    type(xcp).__name__,
+                )
 
     def _matches_leftover_process(
         self,

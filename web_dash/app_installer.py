@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from threading import RLock
@@ -51,6 +52,24 @@ def _notify_in_page_client(
     """Emit a notification outside a refreshable event handler's deleted slot."""
     with client:
         ui.notify(message, type=tone, multi_line=multi_line)
+
+
+def _redact_install_error_detail(
+    error: Exception,
+    *,
+    inputs: Mapping[AppInstallInput, str],
+) -> str:
+    """Remove submitted secret recipe values from a locally displayed error."""
+
+    detail = str(error)
+    secret_values: set[str] = set()
+    for input_key, value in inputs.items():
+        if input_key.is_secret:
+            secret_values.update((value, value.strip()))
+    secret_values.discard("")
+    for value in sorted(secret_values, key=len, reverse=True):
+        detail = detail.replace(value, "[REDACTED]")
+    return detail
 
 
 class _AppInstallerWizardStep(enum.StrEnum):
@@ -557,7 +576,8 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                     inputs=dict(state.inputs),
                 )
             except Exception as xcp:
-                notify(f"Could not start install: {xcp}", tone="negative", multi_line=True)
+                detail = _redact_install_error_detail(xcp, inputs=state.inputs)
+                notify(f"Could not start install: {detail}", tone="negative", multi_line=True)
                 return
 
             if not self._app_installer_page_lock.acquire(owner_token=page_token, node_name=state.node_name):
@@ -573,7 +593,8 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 raise
             except Exception as xcp:
                 self._app_installer_page_lock.release(owner_token=page_token)
-                notify(f"Could not start install: {xcp}", tone="negative", multi_line=True)
+                detail = _redact_install_error_detail(xcp, inputs=state.inputs)
+                notify(f"Could not start install: {detail}", tone="negative", multi_line=True)
             else:
                 self._app_installer_page_lock.record_job(
                     owner_token=page_token,

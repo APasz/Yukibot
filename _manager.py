@@ -6,7 +6,7 @@ import logging
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
@@ -40,9 +40,11 @@ from apps._scs_truck_simulator import (
     resolve_scs_connection_port,
     scs_server_log_file_template,
 )
+from apps.gmod import GMOD_DEFAULT_PORT, prepare_gmod_server_installation
 from apps._steam import (
     cached_steam_update_branches,
     merge_steam_update_branches,
+    normalise_steam_game_server_login_token,
     steam_update_preset_for_scope,
 )
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatHub
@@ -102,6 +104,7 @@ class AppInstanceCreateRequest:
     admin_password: str | None = None
     steam_branch: str | None = None
     initial_version: AppVersion | None = None
+    steam_game_server_login_token: str | None = field(default=None, repr=False)
 
 
 type AppSteamInstallPostProcessor = Callable[[Path, AppInstanceCreateRequest], Awaitable[None]]
@@ -111,22 +114,27 @@ class AppInstallInput(enum.StrEnum):
     """A typed app-specific value requested by an installation recipe."""
 
     ADMIN_PASSWORD = "admin_password"
+    GAME_SERVER_LOGIN_TOKEN = "steam_game_server_login_token"
 
     @property
     def label(self) -> str:
         if self is AppInstallInput.ADMIN_PASSWORD:
             return "Admin password"
+        if self is AppInstallInput.GAME_SERVER_LOGIN_TOKEN:
+            return "Steam Game Server Login Token"
         raise ValueError(f"Unsupported app installation input: {self}")
 
     @property
     def help_text(self) -> str:
         if self is AppInstallInput.ADMIN_PASSWORD:
             return "For a new Satisfactory server, use this password when claiming it in the game client."
+        if self is AppInstallInput.GAME_SERVER_LOGIN_TOKEN:
+            return "Create a unique token for this server in Steam Game Server Accounts. It is stored write-only."
         raise ValueError(f"Unsupported app installation input: {self}")
 
     @property
     def is_secret(self) -> bool:
-        return self is AppInstallInput.ADMIN_PASSWORD
+        return self is AppInstallInput.ADMIN_PASSWORD or self is AppInstallInput.GAME_SERVER_LOGIN_TOKEN
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +266,18 @@ async def _prepare_scs_truck_simulator_steam_install(
     await prepare_scs_server_installation(directory=directory, connection_port=request.port, profile=profile)
 
 
+async def _prepare_gmod_steam_install(
+    directory: Path,
+    request: AppInstanceCreateRequest,
+) -> None:
+    """Create GMod's non-secret settings and private GSLT before registration."""
+
+    await prepare_gmod_server_installation(
+        directory=directory,
+        game_server_login_token=request.steam_game_server_login_token,
+    )
+
+
 def _scs_truck_simulator_instance_template(profile: ScsTruckSimulatorProfile) -> AppInstanceTemplate:
     """Build the standard SteamCMD installation template for one SCS profile."""
 
@@ -288,6 +308,13 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
         client_overrides_dir="{WD}/client-overrides",
         server_log_file="{WD}/factorio-current.log",
         join_port=34197,
+    ),
+    "gmod": AppInstanceTemplate(
+        label="Garry's Mod",
+        install_inputs=(AppInstallInput.GAME_SERVER_LOGIN_TOKEN,),
+        join_port=GMOD_DEFAULT_PORT,
+        steam_update_factory=lambda: _required_scope_steam_update_template("gmod"),
+        post_steam_install=_prepare_gmod_steam_install,
     ),
     "minecraft": AppInstanceTemplate(
         mods_dir="{WD}/mods",
@@ -1479,6 +1506,10 @@ class App_Manager(metaclass=config.Singleton):
         scs_profile = SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE.get(scope)
         if scs_profile is not None:
             resolve_scs_connection_port(profile=scs_profile, port=request.port)
+        if scope == "gmod":
+            if request.steam_game_server_login_token is None:
+                raise ValueError("Steam Game Server Login Token is required.")
+            normalise_steam_game_server_login_token(request.steam_game_server_login_token)
         server_log_file = self._validate_optional_config_path(
             request.server_log_file,
             label="Server log file",

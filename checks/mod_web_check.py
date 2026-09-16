@@ -26,6 +26,7 @@ from yarl import URL
 
 import config
 from _minecraft_heads import minecraft_dev_bypass_head_data_uri
+from _manager import AppInstallInput
 from _security import Access_Control, Power_Level
 from apps._app import (
     AppRuntimeFault,
@@ -199,7 +200,7 @@ from web_dash.app_page import (
     _MinecraftRecipeEditorSelection,
     _MinecraftRecipeEditorState,
 )
-from web_dash.app_installer import _AppInstallerPageLock, _notify_in_page_client
+from web_dash.app_installer import _AppInstallerPageLock, _notify_in_page_client, _redact_install_error_detail
 from web_dash.app_page_factorio import (
     _ENEMY_EXPANSION_SETTINGS,
     ModWebAppPageFactorioMixin,
@@ -3793,6 +3794,17 @@ class ModWebTests(unittest.TestCase):
         self.assertFalse(lock.release_completed_job(job_id="job-2"))
         self.assertTrue(lock.release_completed_job(job_id="job-1"))
         self.assertTrue(lock.acquire(owner_token="second", node_name="yuki"))
+
+    def test_app_installer_error_redacts_secret_recipe_values(self) -> None:
+        token = "gmod-secret-token"
+
+        detail = _redact_install_error_detail(
+            ValueError(f"Invalid Steam Game Server Login Token: {token}"),
+            inputs={AppInstallInput.GAME_SERVER_LOGIN_TOKEN: f"  {token}  "},
+        )
+
+        self.assertNotIn(token, detail)
+        self.assertIn("[REDACTED]", detail)
 
     def test_app_installer_notification_reenters_captured_page_client(self) -> None:
         class FakeClient:

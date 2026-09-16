@@ -988,6 +988,50 @@ class AppInstallerCheck(unittest.TestCase):
             required_level=Power_Level.sudo.name,
         )
 
+    def test_start_route_redacts_invalid_secret_recipe_inputs(self) -> None:
+        token = "gmod-secret-token"
+        app = FastAPI()
+        service = _RouteService()
+        auth = _RouteAuth()
+        register_app_installer_routes(
+            app,
+            auth=auth,
+            installer=service,
+            api_prefix="/api",
+            http_exception=lambda status_code, detail: HTTPException(status_code=status_code, detail=detail),
+            traffic_log=logging.getLogger(__name__),
+        )
+
+        async def _request_routes() -> tuple[Response, Response]:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+                request_payload = {
+                    "scope": "gmod",
+                    "instance_key": "alpha",
+                    "friendly_name": "GMod Alpha",
+                    "subfolder": "gmod-alpha",
+                    "steam_branch_id": "public",
+                }
+                return (
+                    await client.post(
+                        "/api/app-installer/jobs",
+                        json={**request_payload, "inputs": {"unsupported": token}},
+                    ),
+                    await client.post(
+                        "/api/app-installer/jobs",
+                        json={**request_payload, "inputs": token},
+                    ),
+                )
+
+        responses = asyncio.run(_request_routes())
+
+        for response in responses:
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json(), {"detail": "App install request is invalid."})
+            self.assertNotIn(token, response.text)
+        self.assertEqual(service.start_requests, [])
+        self.assertEqual(auth.access_requests, [])
+
     def test_cancel_route_uses_sudo_app_manage_scope(self) -> None:
         app = FastAPI()
         service = _RouteService()

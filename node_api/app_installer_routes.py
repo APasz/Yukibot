@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from typing import Annotated, Any, Protocol
 
-from fastapi import Request
+from fastapi import Body, Request
+from pydantic import ValidationError
 
 from _audit import audit_log
 from _security import Power_Level
@@ -74,14 +75,21 @@ def register_app_installer_routes(
 
     @nicegui_app.post(f"{api_prefix}/app-installer/jobs")
     async def _start_job(
-        payload: NodeAppInstallRequest,
         request: Request,
+        payload: Annotated[object, Body()],
         access_token: str | None = None,
     ) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise http_exception(400, "App install request is invalid.")
+        try:
+            install_request = NodeAppInstallRequest.model_validate(payload)
+        except (TypeError, ValidationError):
+            # Pydantic error details retain submitted input, which may be a secret token.
+            raise http_exception(400, "App install request is invalid.") from None
         traffic_log.info(
             "Node API app installer start request: node=%s scope=%s",
             auth.node_name,
-            payload.scope,
+            install_request.scope,
         )
         context = auth.require_access(
             request,
@@ -92,7 +100,7 @@ def register_app_installer_routes(
         actor_user_id = auth.require_actor(context).require_actor_user_id()
         try:
             status = await installer.start_install(
-                request=payload,
+                request=install_request,
                 actor_user_id=actor_user_id,
             )
         except ValueError as xcp:
@@ -103,9 +111,9 @@ def register_app_installer_routes(
             "app.install_started",
             actor_user_id=actor_user_id,
             node_name=auth.node_name,
-            app_scope=payload.scope,
-            instance_key=payload.instance_key,
-            steam_branch_id=payload.steam_branch_id,
+            app_scope=install_request.scope,
+            instance_key=install_request.instance_key,
+            steam_branch_id=install_request.steam_branch_id,
             job_id=status.job_id,
             required_level=Power_Level.sudo.name,
         )
