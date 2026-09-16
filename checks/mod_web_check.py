@@ -3809,6 +3809,12 @@ class ModWebTests(unittest.TestCase):
             _APP_INSTALLER_POLICY_SELECT_PROPS,
         )
 
+    def test_portal_app_install_conflict_message_is_generic(self) -> None:
+        self.assertEqual(
+            PORTAL_APP_INSTALL_CONFLICT_MESSAGE,
+            "Another app install is active, or Portal cannot yet verify that it is safe to start one.",
+        )
+
     def test_portal_app_install_coordinator_holds_one_lease_until_terminal(self) -> None:
         for terminal_state in (
             NodeOperationState.SUCCEEDED,

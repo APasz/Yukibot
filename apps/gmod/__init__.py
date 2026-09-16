@@ -318,8 +318,31 @@ class Gmod_Settings(App_Settings):
         return setting.value
 
 
+def _source_config_active_content(line: str) -> str:
+    """Return one Source config line before an unquoted ``//`` comment."""
+
+    in_quotes = False
+    escaped = False
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if in_quotes and character == "\\":
+            escaped = True
+            continue
+        if character == '"':
+            in_quotes = not in_quotes
+            continue
+        if not in_quotes and character == "/" and line.startswith("//", index):
+            return line[:index]
+    return line
+
+
 def _server_config_contains_steam_account_command(content: str) -> bool:
-    return any(_GMOD_STEAM_ACCOUNT_COMMAND_RE.search(line) is not None for line in content.splitlines())
+    return any(
+        _GMOD_STEAM_ACCOUNT_COMMAND_RE.search(_source_config_active_content(line)) is not None
+        for line in content.splitlines()
+    )
 
 
 def _redact_server_config_steam_account_command(content: str) -> str:
@@ -331,9 +354,11 @@ def _redact_server_config_steam_account_command(content: str) -> str:
         )
         return f"{match.group('command')}{match.group('spacing')}{redacted_value}"
 
-    return "".join(
-        _GMOD_STEAM_ACCOUNT_VALUE_RE.sub(redact_value, line) for line in content.splitlines(keepends=True)
-    )
+    def redact_line(line: str) -> str:
+        active_content = _source_config_active_content(line)
+        return _GMOD_STEAM_ACCOUNT_VALUE_RE.sub(redact_value, active_content) + line[len(active_content) :]
+
+    return "".join(redact_line(line) for line in content.splitlines(keepends=True))
 
 
 async def prepare_gmod_server_installation(

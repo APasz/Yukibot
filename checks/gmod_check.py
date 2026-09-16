@@ -341,6 +341,71 @@ class GmodIntegrationTests(unittest.TestCase):
         self.assertNotIn(token, displayed.content)
         self.assertIsNotNone(displayed.warning)
 
+    def test_commented_legacy_server_config_commands_are_ignored(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        content = f'// sv_setsteamaccount {token}\nhostname "Foo" // sv_setsteamaccount {token}\n'
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            server_config = gmod_server_config_path(directory)
+            server_config.write_text(content, encoding="utf-8")
+
+            displayed = app.read_config_file("server/server.cfg")
+            written = app.write_config_file("server/server.cfg", content)
+
+        self.assertEqual(displayed.content, content)
+        self.assertIsNone(displayed.warning)
+        self.assertEqual(written.content, content)
+
+    def test_legacy_server_config_keeps_quoted_double_slashes_out_of_comments(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        content = f'hostname "Foo // Preview"; sv_setsteamaccount "{token}"; sv_lan 0\n'
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            server_config = gmod_server_config_path(directory)
+            server_config.write_text(content, encoding="utf-8")
+
+            displayed = app.read_config_file("server/server.cfg")
+            with self.assertRaisesRegex(ValueError, "managed"):
+                app.write_config_file("server/server.cfg", content)
+
+        self.assertEqual(
+            displayed.content,
+            'hostname "Foo // Preview"; sv_setsteamaccount "[REDACTED]"; sv_lan 0\n',
+        )
+        self.assertNotIn(token, displayed.content)
+        self.assertIsNotNone(displayed.warning)
+
+    def test_legacy_server_config_only_redacts_active_commands_in_mixed_content(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        content = (
+            f"// sv_setsteamaccount {token}\n"
+            f'hostname "Foo" // sv_setsteamaccount {token}\n'
+            f"sv_setsteamaccount {token}; sv_lan 0\n"
+            f"sv_setsteamaccount {token}; sv_lan 0 // sv_setsteamaccount {token}\n"
+        )
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            server_config = gmod_server_config_path(directory)
+            server_config.write_text(content, encoding="utf-8")
+
+            displayed = app.read_config_file("server/server.cfg")
+            with self.assertRaisesRegex(ValueError, "managed"):
+                app.write_config_file("server/server.cfg", content)
+
+        self.assertEqual(
+            displayed.content,
+            (
+                f"// sv_setsteamaccount {token}\n"
+                f'hostname "Foo" // sv_setsteamaccount {token}\n'
+                "sv_setsteamaccount [REDACTED]; sv_lan 0\n"
+                f"sv_setsteamaccount [REDACTED]; sv_lan 0 // sv_setsteamaccount {token}\n"
+            ),
+        )
+        self.assertIsNotNone(displayed.warning)
+
     def test_legacy_server_config_download_is_redacted(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
         with TemporaryDirectory() as temporary_directory:

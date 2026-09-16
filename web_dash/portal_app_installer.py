@@ -24,7 +24,7 @@ from .types import ModWebNodeLink
 
 _PORTAL_APP_INSTALL_RECOVERY_SECONDS = 1.0
 PORTAL_APP_INSTALL_CONFLICT_MESSAGE = (
-    "Another dashboard session is already starting or running an install."
+    "Another app install is active, or Portal cannot yet verify that it is safe to start one."
 )
 
 
@@ -105,7 +105,7 @@ class PortalAppInstallCoordinator:
             return self._lease
 
     def held_by_other(self, *, owner_token: str) -> bool:
-        """Return whether another dashboard session or recovery lease holds policy."""
+        """Return whether another install start or recovery lease holds policy."""
 
         with self._lock:
             lease = self._lease

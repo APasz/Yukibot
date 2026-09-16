@@ -1034,21 +1034,14 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 with ui.column().classes("w-full gap-4"):
                     lease = self._portal_app_install_coordinator.current()
                     if portal_install_is_held_by_other() and lease is not None:
+                        ui.label(PORTAL_APP_INSTALL_CONFLICT_MESSAGE).classes("mod-subtitle text-sm")
                         if lease.unresolved_recovery_conflict:
                             ui.label(
-                                "Existing app installs are being reconciled. "
-                                "You can continue configuring this install, but it cannot start until they complete."
+                                "Portal is reconciling install state and waiting for all nodes to be reachable."
                             ).classes("mod-subtitle text-sm")
-                        elif lease.starting:
-                            ui.label(
-                                f"Another dashboard session is starting an install on {lease.node_name}. "
-                                "You can continue configuring this install, but it cannot start until it completes."
-                            ).classes("mod-subtitle text-sm")
-                        else:
-                            ui.label(
-                                f"Another dashboard session is installing on {lease.node_name}. "
-                                "You can continue configuring this install, but it cannot start until it completes."
-                            ).classes("mod-subtitle text-sm")
+                        ui.label(
+                            "You can continue configuring this install, but it cannot start yet."
+                        ).classes("mod-subtitle text-sm")
                         if lease.node_name is not None and lease.operation_id is not None:
                             ui.link(
                                 "View active install",
