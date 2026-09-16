@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from _manager import AppInstallInput, App_Manager
 from apps._app import AppPortClaim, NetworkProtocol
-from apps._config import App_Config
+from apps._config import App_Config, AppVersion, SteamUpdateBranch
 from apps._updater import SteamCmd_Update_Manager
 from apps._steam import STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL
 from apps.gmod import (
@@ -37,6 +37,32 @@ from apps.gmod import (
     resolve_gmod_game_port,
 )
 from node_api.app_installer import NodeAppInstallInputKind, NodeAppInstallRequest, NodeAppInstallerService
+
+
+def _write_gmod_steam_manifest(directory: Path, *, build_id: int, branch_id: str = "public") -> None:
+    manifest_path = directory / "steamapps" / f"appmanifest_{STEAM_APP_ID}.acf"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    user_config: tuple[str, ...] = ()
+    if branch_id != "public":
+        user_config = (
+            '    "UserConfig"',
+            "    {",
+            f'        "betakey" "{branch_id}"',
+            "    }",
+        )
+    manifest_path.write_text(
+        "\n".join(
+            (
+                '"AppState"',
+                "{",
+                f'    "appid" "{STEAM_APP_ID}"',
+                f'    "buildid" "{build_id}"',
+                *user_config,
+                "}",
+            )
+        ),
+        encoding="utf-8",
+    )
 
 
 class GmodSettingsTests(unittest.TestCase):
@@ -107,7 +133,13 @@ class GmodSettingsTests(unittest.TestCase):
 
 class GmodIntegrationTests(unittest.TestCase):
     @staticmethod
-    def _config(directory: Path, *, port: int | None = None, steam_update: bool = True) -> App_Config:
+    def _config(
+        directory: Path,
+        *,
+        port: int | None = None,
+        steam_update: bool = True,
+        version: AppVersion | None = None,
+    ) -> App_Config:
         return App_Config(
             name="gmod_alpha",
             instance_key="alpha",
@@ -116,13 +148,92 @@ class GmodIntegrationTests(unittest.TestCase):
             apps_dir=directory / "apps" / "gmod",
             join_port=port,
             scope="gmod",
+            version=version,
             steam_update=STEAM_UPDATE_PRESET.build_config() if steam_update else None,
         )
 
     @classmethod
-    def _app(cls, directory: Path, *, port: int | None = None) -> Gmod:
+    def _app(
+        cls,
+        directory: Path,
+        *,
+        port: int | None = None,
+        version: AppVersion | None = None,
+    ) -> Gmod:
         with patch("apps._updater.resolve_steamcmd_command_prefix", return_value=("steamcmd",)):
-            return Gmod(Mock(), Mock(), cls._config(directory, port=port))
+            return Gmod(Mock(), Mock(), cls._config(directory, port=port, version=version))
+
+    def test_fresh_install_loads_and_displays_the_steam_manifest_build(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        request = NodeAppInstallerService._create_request(
+            NodeAppInstallRequest(
+                scope="gmod",
+                instance_key="alpha",
+                friendly_name="GMod Alpha",
+                subfolder="gmod-alpha",
+                steam_branch_id="public",
+                inputs={AppInstallInput.GAME_SERVER_LOGIN_TOKEN: token},
+            )
+        )
+        self.assertIsNone(request.initial_version)
+        self.assertTrue(request.clear_template_version)
+
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            _write_gmod_steam_manifest(directory, build_id=1234567)
+
+            app = self._app(directory)
+            with patch("apps._updater.steam_update_branch_cache_is_fresh", return_value=True):
+                update_info = app.update_info
+
+        self.assertEqual(app.cfg.version, AppVersion(steam_branch="public", steam_build=1234567))
+        self.assertEqual(app.version_display, "Steam public build 1234567")
+        self.assertNotIn("0.0", app.version_display)
+        assert update_info is not None
+        self.assertEqual(update_info.installed_build_id, 1234567)
+        self.assertEqual(update_info.installed_branch_id, "public")
+
+    def test_legacy_placeholder_is_not_reported_without_a_manifest(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            app = self._app(
+                Path(temporary_directory),
+                version=AppVersion(main="0.0", steam_branch="public"),
+            )
+
+        self.assertEqual(app.version_display, "none")
+
+    def test_update_and_verify_refresh_the_displayed_steam_build(self) -> None:
+        async def _run() -> None:
+            with TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                _write_gmod_steam_manifest(directory, build_id=100)
+                app = self._app(directory, version=AppVersion(main="0.0"))
+                assert isinstance(app.updater, SteamCmd_Update_Manager)
+                self.assertEqual(app.version_display, "Steam public build 100")
+                builds = iter((200, 300))
+
+                async def _run_steamcmd(*, branch: SteamUpdateBranch, validate: bool) -> bool:
+                    del branch, validate
+                    _write_gmod_steam_manifest(directory, build_id=next(builds))
+                    return True
+
+                with patch.object(app.updater, "_run_steamcmd", new=_run_steamcmd):
+                    update_result = await app.updater.update_selected()
+                    self.assertEqual(app.version_display, "Steam public build 200")
+                    verify_result = await app.updater.verify_selected()
+
+                with patch("apps._updater.steam_update_branch_cache_is_fresh", return_value=True):
+                    update_info = app.update_info
+                self.assertEqual(update_result.version_text, "Steam public build 200")
+                self.assertEqual(verify_result.version_text, "Steam public build 300")
+                self.assertEqual(app.cfg.version, AppVersion(steam_branch="public", steam_build=300))
+                self.assertEqual(app.version_display, "Steam public build 300")
+                self.assertNotIn("0.0", app.version_display)
+                assert update_info is not None
+                self.assertEqual(update_info.installed_build_id, 300)
+                self.assertEqual(update_info.installed_branch_id, "public")
+
+        asyncio.run(_run())
 
     def test_port_claims_reserve_only_the_configured_udp_game_port(self) -> None:
         with TemporaryDirectory() as temporary_directory:

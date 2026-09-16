@@ -425,7 +425,7 @@ class NodeClientPackService:
             format=pack_format,
             name=(client_pack_metadata.name if client_pack_metadata is not None else app.friendly),
             version_id=version_id,
-            minecraft_version=version.main,
+            minecraft_version=version.semantic_main,
             loader=version.loader,
             loader_version=version.framework,
             author=getattr(app.cfg, "pack_author", "Yukibot"),
@@ -666,7 +666,7 @@ class NodeClientPackService:
                             app=app,
                             purpose=pack_purpose,
                             pack_format=request.pack_format,
-                            version_id=generated_pack_version or version.main,
+                            version_id=generated_pack_version or version.semantic_main,
                         ),
                         archive_name,
                         unique_output=True,
@@ -717,7 +717,7 @@ class NodeClientPackService:
             metadata = self.metadata(app)
             version = app.cfg.version
             if metadata is not None and version is not None:
-                pack_version = client_pack_version or app.cfg.client_pack_published_version or version.main
+                pack_version = client_pack_version or app.cfg.client_pack_published_version or version.semantic_main
                 format_name = {
                     PackFormat.MODRINTH: "modrinth",
                     PackFormat.CURSEFORGE: "curseforge",
@@ -726,7 +726,7 @@ class NodeClientPackService:
                 stem = metadata.filename_stem(
                     app_name=app.name,
                     version=pack_version,
-                    minecraft_version=version.main,
+                    minecraft_version=version.semantic_main,
                     format_name=format_name,
                 )
                 return f"{stem}{request.pack_format.suffix}"

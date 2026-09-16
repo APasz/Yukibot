@@ -744,6 +744,20 @@ class SteamCmd_Update_Manager(Update_Manager):
     def _detect_installed_version(self) -> AppVersion | None:
         return self.app.detect_installed_version()
 
+    def installed_manifest_version(self) -> AppVersion | None:
+        """Return the installed Steam build as a version when no semantic version is available."""
+
+        return self._manifest_version(self._safe_read_installed_manifest())
+
+    @staticmethod
+    def _manifest_version(manifest_state: SteamAppManifestState | None) -> AppVersion | None:
+        if manifest_state is None or manifest_state.build_id is None:
+            return None
+        return AppVersion(
+            steam_build=manifest_state.build_id,
+            steam_branch=manifest_state.branch_id,
+        )
+
     def _version_with_manifest_data(
         self,
         version: AppVersion | None,
@@ -753,9 +767,12 @@ class SteamCmd_Update_Manager(Update_Manager):
             return version
         base_version = version if version is not None else self._app_config().version
         if base_version is None:
-            return None
-        return base_version.model_copy(
-            update={
+            return self._manifest_version(manifest_state)
+        if manifest_state.build_id is None and base_version.main is None:
+            return base_version
+        return AppVersion.model_validate(
+            {
+                **base_version.model_dump(),
                 "steam_build": manifest_state.build_id,
                 "steam_branch": manifest_state.branch_id,
             }

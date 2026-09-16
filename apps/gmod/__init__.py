@@ -19,7 +19,7 @@ import config
 from _async_utils import run_blocking
 from _security import Power_Level
 from apps._app import App, AppPortClaim, NetworkProtocol
-from apps._config import App_Config, SteamUpdatePreset
+from apps._config import App_Config, AppVersion, SteamUpdatePreset
 from apps._config_files import AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
 from apps._settings import App_Settings, IntSettingSpec, Setting, Setting_Label, StringSettingSpec
 from apps._steam import SteamGameServerLoginTokenStatus, normalise_steam_game_server_login_token
@@ -46,6 +46,7 @@ _GMOD_STEAM_ACCOUNT_COMMAND_RE: Final[re.Pattern[str]] = re.compile(
     r"\bsv_setsteamaccount(?:\s|$)",
     re.IGNORECASE,
 )
+_GMOD_LEGACY_PLACEHOLDER_VERSION: Final[str] = "0.0"
 _REDACTED_SECRET: Final[str] = "[REDACTED]"
 
 
@@ -222,6 +223,12 @@ def _load_gmod_settings_payload(pointer: Path) -> dict[str, Any]:
     return cast(dict[str, Any], raw_payload)
 
 
+def _gmod_version_needs_manifest_refresh(version: AppVersion | None) -> bool:
+    """Return whether a stored version lacks a reliable GMod version identity."""
+
+    return version is None or version.main is None or version.main == _GMOD_LEGACY_PLACEHOLDER_VERSION
+
+
 class Gmod_Settings(App_Settings):
     """Yukibot-owned startup settings that are applied as Source launch arguments."""
 
@@ -357,6 +364,28 @@ class Gmod(App[App_Config]):
         super().__init__(bot, am, cfg, Gmod_Settings(gmod_settings_path(cfg.directory)))
         if cfg.steam_update is not None:
             self.updater = SteamCmd_Update_Manager(self)
+            if _gmod_version_needs_manifest_refresh(cfg.version):
+                self.apply_version(self.detect_installed_version(), persist=False)
+
+    @property
+    def version_display(self) -> str:
+        """Avoid presenting the former installer placeholder as a GMod release."""
+
+        version = self.cfg.version
+        if version is not None and version.main == _GMOD_LEGACY_PLACEHOLDER_VERSION:
+            steam_display = version.steam_display_value
+            if version.steam_build is not None and steam_display is not None:
+                return steam_display
+            return "none"
+        return super().version_display
+
+    def detect_installed_version(self) -> AppVersion | None:
+        """Report the Steam build recorded for this dedicated-server installation."""
+
+        updater = self.updater
+        if not isinstance(updater, SteamCmd_Update_Manager):
+            return None
+        return updater.installed_manifest_version()
 
     @property
     def listening_port_claims(self) -> tuple[AppPortClaim, ...]:

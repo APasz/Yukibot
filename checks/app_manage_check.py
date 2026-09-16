@@ -3298,7 +3298,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         assert relayed_message.relay_embed is not None
         self.assertEqual(relayed_message.relay_embed.title, "Dummy Started")
 
-    def test_create_instance_overrides_template_version_with_initial_version(self) -> None:
+    def test_create_instance_replaces_or_clears_template_version(self) -> None:
         manager = object.__new__(App_Manager)
         original_cwd = Path.cwd()
         with TemporaryDirectory() as temp_dir:
@@ -3334,6 +3334,15 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
                         initial_version=AppVersion(main="0.0"),
                     )
                 )
+                cleared_instance_name = manager.create_instance(
+                    AppInstanceCreateRequest(
+                        scope="demo",
+                        instance_key="gamma",
+                        friendly_name="Demo Gamma",
+                        subfolder="demo-gamma",
+                        clear_template_version=True,
+                    )
+                )
             finally:
                 os.chdir(original_cwd)
 
@@ -3344,6 +3353,8 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["beta"]["server_log_file"], "{WD}/logs/server.log")
             self.assertEqual(payload["beta"]["join_port"], 23456)
             self.assertEqual(payload["beta"]["version"], {"main": "0.0"})
+            self.assertEqual(cleared_instance_name, "demo_gamma")
+            self.assertNotIn("version", payload["gamma"])
 
     def test_create_instance_writes_builtin_steam_update_template_for_sevendays(self) -> None:
         manager = object.__new__(App_Manager)

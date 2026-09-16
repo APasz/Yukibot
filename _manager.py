@@ -109,7 +109,14 @@ class AppInstanceCreateRequest:
     admin_password: str | None = None
     steam_branch: str | None = None
     initial_version: AppVersion | None = None
+    clear_template_version: bool = False
     steam_game_server_login_token: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if type(self.clear_template_version) is not bool:
+            raise TypeError("clear_template_version must be a boolean.")
+        if self.clear_template_version and self.initial_version is not None:
+            raise ValueError("An app instance cannot clear and set its initial version.")
 
 
 type AppSteamInstallPostProcessor = Callable[[Path, AppInstanceCreateRequest], Awaitable[None]]
@@ -1639,7 +1646,9 @@ class App_Manager(metaclass=config.Singleton):
             next_payload["server_log_file"] = plan.server_log_file
         if plan.admin_password is not None:
             next_payload["admin_password"] = plan.admin_password
-        if request.initial_version is not None:
+        if request.clear_template_version:
+            next_payload.pop("version", None)
+        elif request.initial_version is not None:
             next_payload["version"] = request.initial_version.model_dump(mode="json", exclude_none=True)
         if plan.steam_branch is not None:
             steam_recipe = self._steam_install_recipe_for_scope(plan.scope)

@@ -16,7 +16,7 @@ from httpx import ASGITransport, AsyncClient, Response
 import config
 from _manager import AppInstallInput, AppInstanceCreateRequest, AppInstanceCreationPlan, AppSteamInstallRecipe
 from _security import Power_Level
-from apps._config import AppVersion, SteamUpdateBranch, SteamUpdateConfig, SteamUpdateLogin
+from apps._config import SteamUpdateBranch, SteamUpdateConfig, SteamUpdateLogin
 from node_api.app_installer import (
     NodeAppInstallCatalog,
     NodeAppInstallBranch,
@@ -80,7 +80,8 @@ class _InstallerManager:
         assert request.scope == "demo"
         assert request.instance_key == self.plan.instance_key
         assert request.steam_branch == "public"
-        assert request.initial_version == AppVersion(main="0.0")
+        assert request.initial_version is None
+        assert request.clear_template_version
         return self.plan
 
     def create_instance(self, request: AppInstanceCreateRequest) -> str:
@@ -483,7 +484,8 @@ class AppInstallerCheck(unittest.TestCase):
                 self.assertEqual(prepared_requests, [manager.create_requests[0]])
                 self.assertEqual(manager.create_requests[0].admin_password, "secret")
                 self.assertEqual(manager.create_requests[0].steam_branch, "public")
-                self.assertEqual(manager.create_requests[0].initial_version, AppVersion(main="0.0"))
+                self.assertIsNone(manager.create_requests[0].initial_version)
+                self.assertTrue(manager.create_requests[0].clear_template_version)
                 acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
                 invalidated.assert_called_once_with()
 

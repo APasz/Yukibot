@@ -22,6 +22,7 @@ from apps._updater import (
     AppUpdateOperationKind,
     AppUpdateProviderKind,
     AppUpdateState,
+    SteamAppManifestState,
     SteamCmd_Update_Manager,
     Update_Manager,
     UpdateManagerApp,
@@ -642,3 +643,17 @@ Steam> quit
                 )
 
         asyncio.run(_run())
+
+    def test_manifest_without_a_build_does_not_invalidate_a_build_only_version(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _FakeApp(Path(temp_dir))
+            with patch("apps._updater.config.load_bot_configuration", return_value=config.BotConfiguration()):
+                updater = SteamCmd_Update_Manager(app)
+
+            version = AppVersion(steam_branch="public", steam_build=24680)
+            resolved = updater._version_with_manifest_data(
+                version,
+                SteamAppManifestState(app_id=294420, branch_id="latest_experimental"),
+            )
+
+        self.assertEqual(resolved, version)

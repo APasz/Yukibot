@@ -1443,7 +1443,7 @@ def _runtime_info_from_config(cfg: "Minecraft_Config") -> MinecraftRuntimeInfo |
     if version.loader is not None:
         loader = MinecraftLoader(version.loader)
     runtime = MinecraftRuntimeInfo(
-        minecraft_version=version.main,
+        minecraft_version=version.semantic_main,
         loader=loader,
         loader_version=version.framework,
     )
@@ -4274,7 +4274,7 @@ class Matchers:
             log.info(
                 "%s detected Minecraft runtime: version=%s loader=%s",
                 self.app.name,
-                self.app.cfg.version.main if self.app.cfg.version is not None else None,
+                self.app.cfg.version.semantic_main if self.app.cfg.version is not None else None,
                 loader_value,
             )
 

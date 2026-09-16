@@ -1835,7 +1835,7 @@ def _compare_app_version_main(left_main: str, right_main: str) -> int:
 
 
 class AppVersion(BaseModel):
-    main: str
+    main: str | None = None
     build: int | None = None
     framework: str | None = None
     loader: str | None = None
@@ -1845,8 +1845,35 @@ class AppVersion(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     @property
+    def semantic_main(self) -> str:
+        """Return the publisher's semantic version when one is available."""
+
+        if self.main is None:
+            raise ValueError("This Steam build-only version has no semantic main version.")
+        return self.main
+
+    @property
+    def steam_display_value(self) -> str | None:
+        """Return the local Steam manifest identity when it is available."""
+
+        if self.steam_build is None and self.steam_branch is None:
+            return None
+        steam_parts = ["Steam"]
+        if self.steam_branch is not None:
+            steam_parts.append(self.steam_branch)
+        if self.steam_build is not None:
+            steam_parts.extend(("build", str(self.steam_build)))
+        return " ".join(steam_parts)
+
+    @property
     def display_value(self) -> str:
-        main_value = self.main if self.build is None else f"{self.main}:{self.build}"
+        main_value: str | None
+        if self.main is None:
+            main_value = None
+        elif self.build is None:
+            main_value = self.main
+        else:
+            main_value = f"{self.main}:{self.build}"
         extra_parts: list[str] = []
         if self.loader is not None and self.framework is not None:
             extra_parts.append(f"{self.loader} {self.framework}")
@@ -1854,19 +1881,17 @@ class AppVersion(BaseModel):
             extra_parts.append(self.loader)
         elif self.framework is not None:
             extra_parts.append(self.framework)
-        if self.steam_build is not None or self.steam_branch is not None:
-            steam_parts = ["Steam"]
-            if self.steam_branch is not None:
-                steam_parts.append(self.steam_branch)
-            if self.steam_build is not None:
-                steam_parts.extend(("build", str(self.steam_build)))
-            extra_parts.append(" ".join(steam_parts))
+        steam_display_value = self.steam_display_value
+        if steam_display_value is not None:
+            extra_parts.append(steam_display_value)
+        if main_value is None:
+            return " ".join(extra_parts)
         if not extra_parts:
             return main_value
         return f"{main_value} {' '.join(f'[{part}]' for part in extra_parts)}"
 
     def compare_main_and_build(self, other: "AppVersion") -> int:
-        main_cmp = _compare_app_version_main(self.main, other.main)
+        main_cmp = _compare_app_version_main(self.semantic_main, other.semantic_main)
         if main_cmp != 0:
             return main_cmp
         left_build = -1 if self.build is None else self.build
@@ -1876,9 +1901,13 @@ class AppVersion(BaseModel):
         return -1 if left_build < right_build else 1
 
     def is_at_least(self, minimum: "AppVersion") -> bool:
+        if self.main is None:
+            return False
         return self.compare_main_and_build(minimum) >= 0
 
     def is_at_most(self, maximum: "AppVersion") -> bool:
+        if self.main is None:
+            return False
         return self.compare_main_and_build(maximum) <= 0
 
     @field_validator("main", "framework", "steam_branch", mode="before")
@@ -1895,6 +1924,16 @@ class AppVersion(BaseModel):
     @classmethod
     def validate_loader(cls, raw: object) -> str | None:
         return normalise_version_loader(raw)
+
+    @model_validator(mode="after")
+    def validate_version_source(self) -> "AppVersion":
+        if self.main is not None:
+            return self
+        if self.build is not None or self.framework is not None or self.loader is not None:
+            raise ValueError("Build-only Steam versions cannot define semantic-version fields.")
+        if self.steam_build is None:
+            raise ValueError("App versions must define a main version or Steam build.")
+        return self
 
 
 def normalise_app_version(raw: object) -> AppVersion | None:

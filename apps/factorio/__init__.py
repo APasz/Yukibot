@@ -665,7 +665,11 @@ def _factorio_mod_release_matches_game_version(
     release: FactorioModPortalRelease,
     factorio_version: AppVersion | None,
 ) -> bool:
-    if factorio_version is None or release.factorio_version is None:
+    if (
+        factorio_version is None
+        or factorio_version.main is None
+        or release.factorio_version is None
+    ):
         return True
     installed_parts = factorio_version.main.split(".")
     if len(installed_parts) < 2:
@@ -2580,7 +2584,7 @@ class Factorio_Updater(Update_Manager):
         self.version: tuple[int, ...] | None = None
         app_version: AppVersion | None = detect_factorio_version(directory=app.directory)
         if app_version is not None:
-            self.version = _parse_factorio_version_text(app_version.main, label="local Factorio version")
+            self.version = _parse_factorio_version_text(app_version.semantic_main, label="local Factorio version")
         if self.version:
             log.info(f"Factorio local version: {self.stringise(self.version)}")
         else:

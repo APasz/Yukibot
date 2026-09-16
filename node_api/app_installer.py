@@ -23,7 +23,7 @@ from _manager import (
 )
 from _async_utils import run_blocking
 from _security import Access_Control, Power_Level
-from apps._config import AppVersion, SteamUpdateBranch, SteamUpdateConfig
+from apps._config import SteamUpdateBranch, SteamUpdateConfig
 from apps._steam import cached_steam_update_branches, load_steam_update_branches, merge_steam_update_branches, steam_update_preset_for_scope
 from apps._updater import (
     build_steamcmd_command,
@@ -993,7 +993,7 @@ class NodeAppInstallerService:
             admin_password=request.inputs.get(AppInstallInput.ADMIN_PASSWORD),
             steam_game_server_login_token=request.inputs.get(AppInstallInput.GAME_SERVER_LOGIN_TOKEN),
             steam_branch=request.steam_branch_id,
-            initial_version=AppVersion(main="0.0"),
+            clear_template_version=True,
         )
 
     @staticmethod

@@ -523,6 +523,21 @@ class ConfigLoggingTests(unittest.TestCase):
 
 
 class AppVersionTests(unittest.TestCase):
+    def test_display_value_supports_steam_build_only_versions(self) -> None:
+        version = AppVersion(steam_branch="public", steam_build=987654)
+
+        self.assertEqual(version.display_value, "Steam public build 987654")
+        self.assertEqual(
+            version.model_dump(mode="json", exclude_none=True),
+            {"steam_build": 987654, "steam_branch": "public"},
+        )
+        with self.assertRaisesRegex(ValueError, "no semantic main version"):
+            version.semantic_main
+        self.assertFalse(version.is_at_least(AppVersion(main="1.0")))
+        self.assertFalse(version.is_at_most(AppVersion(main="1.0")))
+        with self.assertRaisesRegex(ValueError, "main version or Steam build"):
+            AppVersion()
+
     def test_display_value_includes_steam_manifest_metadata(self) -> None:
         self.assertEqual(
             AppVersion(
