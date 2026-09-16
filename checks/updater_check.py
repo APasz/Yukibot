@@ -192,7 +192,7 @@ class UpdaterTests(unittest.TestCase):
         update_config = preset.build_config(selected_branch="v3.1.0")
 
         self.assertEqual(update_config.selected_branch, "v3.1.0")
-        self.assertEqual([branch.branch_id for branch in update_config.branches], ["latest_experimental", "v3.1.0"])
+        self.assertEqual([branch.branch_id for branch in update_config.branches], ["public", "v3.1.0"])
         self.assertEqual(update_config.selected_branch_config.display_label, "v3.1.0")
 
     def test_steam_update_preset_resolves_satisfactory_app_metadata(self) -> None:

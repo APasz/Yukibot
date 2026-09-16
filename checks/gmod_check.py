@@ -16,6 +16,7 @@ from _manager import AppInstallInput, App_Manager
 from apps._app import AppPortClaim, NetworkProtocol
 from apps._config import App_Config
 from apps._updater import SteamCmd_Update_Manager
+from apps._steam import STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL
 from apps.gmod import (
     GMOD_DEFAULT_GAMEMODE,
     GMOD_DEFAULT_MAX_PLAYERS,
@@ -366,12 +367,17 @@ class GmodInstallerTests(unittest.TestCase):
                 self.assertEqual(recipe.default_port, GMOD_DEFAULT_PORT)
                 self.assertEqual(recipe.steam_update.app_id, STEAM_APP_ID)
                 self.assertEqual(recipe.inputs, (AppInstallInput.GAME_SERVER_LOGIN_TOKEN,))
+                self.assertEqual(recipe.game_server_login_token_app_id, STEAM_GAME_APP_ID)
+                self.assertNotEqual(recipe.game_server_login_token_app_id, recipe.steam_update.app_id)
                 self.assertIsNotNone(recipe.post_steam_install)
 
                 catalog_recipe = NodeAppInstallerService._catalog_recipe(recipe)
                 install_field = catalog_recipe.fields[0]
                 self.assertEqual(install_field.key, AppInstallInput.GAME_SERVER_LOGIN_TOKEN.value)
                 self.assertEqual(install_field.kind, NodeAppInstallInputKind.PASSWORD)
+                self.assertEqual(install_field.game_server_login_token_app_id, STEAM_GAME_APP_ID)
+                self.assertEqual(install_field.action_label, "Manage tokens on Steam")
+                self.assertEqual(install_field.action_url, STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL)
                 self.assertNotIn(token, str(catalog_recipe.to_mapping()))
 
                 request = NodeAppInstallRequest(

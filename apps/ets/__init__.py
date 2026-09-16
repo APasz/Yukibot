@@ -55,11 +55,17 @@ def configure_ets_server_ports(*, config_path: Path, connection_port: int | None
     )
 
 
-async def prepare_ets_server_installation(*, directory: Path, connection_port: int | None) -> None:
+async def prepare_ets_server_installation(
+    *,
+    directory: Path,
+    connection_port: int | None,
+    game_server_login_token: str | None = None,
+) -> None:
     await _scs.prepare_scs_server_installation(
         directory=directory,
         connection_port=connection_port,
         profile=_scs.ETS2_PROFILE,
+        game_server_login_token=game_server_login_token,
     )
 
 

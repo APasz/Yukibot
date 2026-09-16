@@ -164,7 +164,17 @@ from node_api.app_state import (
     ClientPackFilePreview,
     NodeAppMutationAction,
 )
-from node_api.app_installer import NodeAppInstallScopeOption, NodeAppInstallerSettingsState
+from node_api.app_installer import (
+    NodeAppInstallBranch,
+    NodeAppInstallCatalog,
+    NodeAppInstallField,
+    NodeAppInstallInputKind,
+    NodeAppInstallPreflight,
+    NodeAppInstallRequest,
+    NodeAppInstallRecipe,
+    NodeAppInstallScopeOption,
+    NodeAppInstallerSettingsState,
+)
 from node_api.console import NodeConsoleActionEntry, NodeConsoleActionParameter
 from node_api.mod import (
     NodeModEntry,
@@ -200,7 +210,15 @@ from web_dash.app_page import (
     _MinecraftRecipeEditorSelection,
     _MinecraftRecipeEditorState,
 )
-from web_dash.app_installer import _AppInstallerPageLock, _notify_in_page_client, _redact_install_error_detail
+from web_dash.app_installer import (
+    _AppInstallerPageLock,
+    _AppInstallerPageState,
+    _automatic_instance_key,
+    _notify_in_page_client,
+    _preflight_install_request,
+    _redact_install_error_detail,
+    _validate_preflight_result,
+)
 from web_dash.app_page_factorio import (
     _ENEMY_EXPANSION_SETTINGS,
     ModWebAppPageFactorioMixin,
@@ -3795,6 +3813,112 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(lock.release_completed_job(job_id="job-1"))
         self.assertTrue(lock.acquire(owner_token="second", node_name="yuki"))
 
+    def test_app_installer_automatically_derives_manager_safe_instance_ids(self) -> None:
+        self.assertEqual(_automatic_instance_key("Yuki's ETS2 Server"), "yuki-s-ets2-server")
+        self.assertEqual(_automatic_instance_key("  --  "), "server")
+        self.assertEqual(_automatic_instance_key("Alpha_日本語"), "alpha")
+
+    def test_app_installer_recipe_defaults_use_the_automatic_instance_identity(self) -> None:
+        recipe = NodeAppInstallRecipe(
+            scope="ets",
+            label="Euro Truck Simulator 2",
+            default_port=27015,
+            default_branch_id="public",
+            branches=(NodeAppInstallBranch(branch_id="public", label="Public"),),
+        )
+        state = _AppInstallerPageState(node_name="erin")
+
+        state.apply_recipe(recipe)
+
+        self.assertEqual(state.friendly_name, "Euro Truck Simulator 2 Server")
+        self.assertEqual(state.instance_key, "euro-truck-simulator-2-server")
+        self.assertEqual(state.subfolder, "ets-euro-truck-simulator-2-server")
+
+    def test_app_installer_preflight_replaces_write_only_values(self) -> None:
+        secret = "write-only-token"
+        request = NodeAppInstallRequest(
+            scope="gmod",
+            instance_key="alpha",
+            friendly_name="GMod Alpha",
+            subfolder="gmod-alpha",
+            steam_branch_id="public",
+            inputs={AppInstallInput.GAME_SERVER_LOGIN_TOKEN: secret},
+        )
+
+        preflight_request = _preflight_install_request(request)
+
+        self.assertEqual(
+            preflight_request.inputs,
+            {AppInstallInput.GAME_SERVER_LOGIN_TOKEN: "preflight-secret"},
+        )
+        self.assertNotIn(secret, str(preflight_request.model_dump(mode="json")))
+
+    def test_app_installer_preflight_result_must_match_the_selected_target(self) -> None:
+        result = NodeAppInstallPreflight(
+            node="Erin",
+            scope="ets",
+            message="Server setup is ready to install.",
+        )
+
+        _validate_preflight_result(result=result, node_name="erin", scope="ETS")
+        with self.assertRaisesRegex(ValueError, "different node"):
+            _validate_preflight_result(result=result, node_name="yuki", scope="ets")
+        with self.assertRaisesRegex(ValueError, "different app"):
+            _validate_preflight_result(result=result, node_name="erin", scope="ats")
+
+    def test_app_installer_replaces_the_selected_recipe_with_live_release_options(self) -> None:
+        cached_recipe = NodeAppInstallRecipe(
+            scope="sevendays",
+            label="7 Days to Die",
+            default_port=26900,
+            default_branch_id="public",
+            branches=(NodeAppInstallBranch(branch_id="public", label="Public"),),
+            fields=(
+                NodeAppInstallField(
+                    key=AppInstallInput.ADMIN_PASSWORD.value,
+                    label="Admin password",
+                    kind=NodeAppInstallInputKind.PASSWORD,
+                    required=True,
+                ),
+            ),
+        )
+        state = _AppInstallerPageState(node_name="erin")
+        state.apply_catalog(NodeAppInstallCatalog(node="erin", recipes=(cached_recipe,)))
+        state.apply_recipe(cached_recipe)
+        state.inputs[AppInstallInput.ADMIN_PASSWORD] = "retained"
+        state.steam_branch_id = "unavailable"
+        state.release_loading = True
+
+        state.apply_release_recipe(
+            NodeAppInstallRecipe(
+                scope="sevendays",
+                label="7 Days to Die",
+                default_port=26900,
+                default_branch_id="latest_experimental",
+                branches=(
+                    NodeAppInstallBranch(
+                        branch_id="latest_experimental",
+                        label="Latest Experimental",
+                    ),
+                ),
+                fields=(
+                    NodeAppInstallField(
+                        key=AppInstallInput.GAME_SERVER_LOGIN_TOKEN.value,
+                        label="Steam Game Server Login Token (GSLT)",
+                        kind=NodeAppInstallInputKind.PASSWORD,
+                        required=True,
+                    ),
+                ),
+            )
+        )
+
+        self.assertFalse(state.release_loading)
+        self.assertIsNone(state.release_error)
+        self.assertEqual(state.steam_branch_id, "latest_experimental")
+        self.assertEqual(state.inputs, {AppInstallInput.GAME_SERVER_LOGIN_TOKEN: ""})
+        assert state.catalog is not None
+        self.assertEqual(state.catalog.recipes[0].branches[0].label, "Latest Experimental")
+
     def test_app_installer_error_redacts_secret_recipe_values(self) -> None:
         token = "gmod-secret-token"
 
@@ -4242,7 +4366,7 @@ class ModWebTests(unittest.TestCase):
         self.assertIsNotNone(preset)
         assert preset is not None
         self.assertEqual(preset.app_id, 294420)
-        self.assertEqual(preset.default_selected_branch, "latest_experimental")
+        self.assertEqual(preset.default_selected_branch, "public")
 
     def test_details_steam_update_branch_options_fall_back_to_scope_preset(
         self,

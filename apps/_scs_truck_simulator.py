@@ -39,7 +39,7 @@ from apps._settings import (
     Setting_Label,
     StringSettingSpec,
 )
-from apps._steam import SteamGameServerLoginTokenStatus
+from apps._steam import SteamGameServerLoginTokenStatus, normalise_steam_game_server_login_token
 from apps._tailer import Tailer
 from apps._updater import SteamCmd_Update_Manager
 from config import Activity_Manager
@@ -316,15 +316,28 @@ async def prepare_scs_server_installation(
     directory: Path,
     connection_port: int | None,
     profile: ScsTruckSimulatorProfile,
+    game_server_login_token: str | None = None,
 ) -> None:
-    """Initialise a fresh SCS dedicated server home and its selected port pair."""
+    """Initialise an SCS dedicated server home, ports, and optional Steam token."""
 
+    normalised_game_server_login_token = (
+        None
+        if game_server_login_token is None
+        else normalise_steam_game_server_login_token(game_server_login_token)
+    )
     config_path = scs_server_config_path(directory, profile=profile)
     if config_path.exists() and not config_path.is_file():
         raise ValueError(f"{profile.abbreviation} server config path is not a file: {config_path}")
     if not config_path.is_file():
         await _create_scs_server_config(directory=directory, config_path=config_path, profile=profile)
     configure_scs_server_ports(config_path=config_path, connection_port=connection_port, profile=profile)
+    if normalised_game_server_login_token is not None:
+        _write_scs_server_config_field(
+            config_path=config_path,
+            key=_SCS_SERVER_LOGON_TOKEN_FIELD,
+            value_text=_serialise_scs_server_logon_token(normalised_game_server_login_token),
+            profile=profile,
+        )
 
 
 async def _create_scs_server_config(

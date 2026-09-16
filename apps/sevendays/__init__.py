@@ -256,7 +256,7 @@ _SEVENDAYS_DEFAULT_TELNET_PORT: int = 8081
 STEAM_APP_ID: Final[int] = 294420
 STEAM_UPDATE_PRESET: Final[SteamUpdatePreset] = SteamUpdatePreset(
     app_id=STEAM_APP_ID,
-    default_selected_branch="latest_experimental",
+    default_selected_branch="public",
 )
 
 

@@ -10,7 +10,13 @@ from pydantic import ValidationError
 
 from _audit import audit_log
 from _security import Power_Level
-from .app_installer import NodeAppInstallCatalog, NodeAppInstallRequest, NodeAppInstallStatus
+from .app_installer import (
+    NodeAppInstallCatalog,
+    NodeAppInstallPreflight,
+    NodeAppInstallRecipe,
+    NodeAppInstallRequest,
+    NodeAppInstallStatus,
+)
 from .request_auth import NodeRequestContext
 from .route_contracts import HttpExceptionFactory
 from node_auth import NodeApiScope
@@ -20,6 +26,15 @@ class NodeAppInstallerRouteService(Protocol):
     """The small installation interface consumed by the HTTP registrar."""
 
     async def build_catalog(self) -> NodeAppInstallCatalog: ...
+
+    async def build_recipe(self, *, scope: str) -> NodeAppInstallRecipe: ...
+
+    async def preflight_install(
+        self,
+        *,
+        request: NodeAppInstallRequest,
+        actor_user_id: int,
+    ) -> NodeAppInstallPreflight: ...
 
     async def start_install(
         self,
@@ -73,19 +88,26 @@ def register_app_installer_routes(
         auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APP_MANAGE,))
         return (await installer.build_catalog()).to_mapping()
 
+    @nicegui_app.get(f"{api_prefix}/app-installer/apps/{{scope}}")
+    async def _recipe(scope: str, request: Request, access_token: str | None = None) -> dict[str, object]:
+        traffic_log.info(
+            "Node API app installer recipe request: node=%s scope=%s",
+            auth.node_name,
+            scope,
+        )
+        auth.require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APP_MANAGE,))
+        try:
+            return (await installer.build_recipe(scope=scope)).to_mapping()
+        except ValueError as xcp:
+            raise http_exception(404, str(xcp)) from xcp
+
     @nicegui_app.post(f"{api_prefix}/app-installer/jobs")
     async def _start_job(
         request: Request,
         payload: Annotated[object, Body()],
         access_token: str | None = None,
     ) -> dict[str, object]:
-        if not isinstance(payload, dict):
-            raise http_exception(400, "App install request is invalid.")
-        try:
-            install_request = NodeAppInstallRequest.model_validate(payload)
-        except (TypeError, ValidationError):
-            # Pydantic error details retain submitted input, which may be a secret token.
-            raise http_exception(400, "App install request is invalid.") from None
+        install_request = _install_request_from_payload(payload=payload, http_exception=http_exception)
         traffic_log.info(
             "Node API app installer start request: node=%s scope=%s",
             auth.node_name,
@@ -118,6 +140,34 @@ def register_app_installer_routes(
             required_level=Power_Level.sudo.name,
         )
         return status.to_mapping()
+
+    @nicegui_app.post(f"{api_prefix}/app-installer/preflight")
+    async def _preflight(
+        request: Request,
+        payload: Annotated[object, Body()],
+        access_token: str | None = None,
+    ) -> dict[str, str]:
+        install_request = _install_request_from_payload(payload=payload, http_exception=http_exception)
+        traffic_log.info(
+            "Node API app installer preflight request: node=%s scope=%s",
+            auth.node_name,
+            install_request.scope,
+        )
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=None,
+            scopes=(NodeApiScope.APP_MANAGE,),
+        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        try:
+            result = await installer.preflight_install(
+                request=install_request,
+                actor_user_id=actor_user_id,
+            )
+        except ValueError as xcp:
+            raise http_exception(400, str(xcp)) from xcp
+        return result.to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/app-installer/jobs/{{job_id}}")
     async def _job_status(
@@ -161,6 +211,20 @@ def register_app_installer_routes(
             required_level=Power_Level.sudo.name,
         )
         return status.to_mapping()
+
+
+def _install_request_from_payload(
+    *,
+    payload: object,
+    http_exception: HttpExceptionFactory,
+) -> NodeAppInstallRequest:
+    if not isinstance(payload, dict):
+        raise http_exception(400, "App install request is invalid.")
+    try:
+        return NodeAppInstallRequest.model_validate(payload)
+    except (TypeError, ValidationError):
+        # Pydantic error details retain submitted input, which may be a secret token.
+        raise http_exception(400, "App install request is invalid.") from None
 
 
 __all__: tuple[str, ...] = ("register_app_installer_routes",)

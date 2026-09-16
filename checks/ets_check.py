@@ -472,6 +472,59 @@ class ETSVersionDetectionTests(unittest.TestCase):
         self.assertIn("connection_dedicated_port: 31000 // game-server port", data)
         self.assertIn("query_dedicated_port: 31001 // query-server port", data)
 
+    def test_prepare_server_installation_persists_a_normalised_gslt(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = ets_server_config_path(root)
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "connection_dedicated_port: 27015",
+                        "query_dedicated_port: 27016",
+                        'server_logon_token: ""',
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            asyncio.run(
+                prepare_ets_server_installation(
+                    directory=root,
+                    connection_port=None,
+                    game_server_login_token=f"  {token}  ",
+                )
+            )
+            saved = config_path.read_text(encoding="utf-8")
+
+        self.assertIn(f"server_logon_token: {token}", saved)
+
+    def test_prepare_server_installation_validates_gslt_before_changing_config(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = ets_server_config_path(root)
+            config_path.parent.mkdir(parents=True)
+            original = "\n".join(
+                (
+                    "connection_dedicated_port: 27015",
+                    "query_dedicated_port: 27016",
+                    'server_logon_token: ""',
+                )
+            )
+            config_path.write_text(original, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "must not contain whitespace"):
+                asyncio.run(
+                    prepare_ets_server_installation(
+                        directory=root,
+                        connection_port=31000,
+                        game_server_login_token="invalid token",
+                    )
+                )
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
     def test_prepare_fresh_server_config_launches_with_the_isolated_data_home(self) -> None:
         class _InitialisationProcess:
             def __init__(self) -> None:

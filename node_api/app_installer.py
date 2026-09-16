@@ -98,6 +98,20 @@ class NodeAppInstallField:
     kind: NodeAppInstallInputKind
     required: bool
     help_text: str | None = None
+    action_label: str | None = None
+    action_url: str | None = None
+    game_server_login_token_app_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.action_label is None) != (self.action_url is None):
+            raise ValueError("Install field actions require both a label and URL.")
+        app_id = self.game_server_login_token_app_id
+        if app_id is None:
+            return
+        if self.key != AppInstallInput.GAME_SERVER_LOGIN_TOKEN.value:
+            raise ValueError("Only Steam Game Server Login Token fields may define a Steam app ID.")
+        if type(app_id) is not int or app_id <= 0:
+            raise ValueError("Steam Game Server Login Token app ID must be a positive integer.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppInstallField":
@@ -118,6 +132,12 @@ class NodeAppInstallField:
             key=key,
             label=_required_text(payload, "label", label="install field label"),
             help_text=_optional_text(payload.get("help_text"), label="install field help text"),
+            action_label=_optional_text(payload.get("action_label"), label="install field action label"),
+            action_url=_optional_text(payload.get("action_url"), label="install field action URL"),
+            game_server_login_token_app_id=_optional_positive_integer(
+                payload.get("game_server_login_token_app_id"),
+                label="Steam Game Server Login Token app ID",
+            ),
             kind=kind,
             required=raw_required,
         )
@@ -131,6 +151,12 @@ class NodeAppInstallField:
         }
         if self.help_text is not None:
             payload["help_text"] = self.help_text
+        if self.action_label is not None:
+            payload["action_label"] = self.action_label
+        if self.action_url is not None:
+            payload["action_url"] = self.action_url
+        if self.game_server_login_token_app_id is not None:
+            payload["game_server_login_token_app_id"] = self.game_server_login_token_app_id
         return payload
 
 
@@ -381,6 +407,30 @@ class NodeAppInstallStatus:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class NodeAppInstallPreflight:
+    """A non-secret validation result shown before an install starts."""
+
+    node: str
+    scope: str
+    message: str
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppInstallPreflight":
+        return cls(
+            node=_required_text(payload, "node", label="install preflight node"),
+            scope=_required_text(payload, "scope", label="install preflight scope"),
+            message=_required_text(payload, "message", label="install preflight message"),
+        )
+
+    def to_mapping(self) -> dict[str, str]:
+        return {
+            "node": self.node,
+            "scope": self.scope,
+            "message": self.message,
+        }
+
+
 class NodeAppInstallRequest(BaseModel):
     scope: str
     instance_key: str
@@ -429,6 +479,16 @@ class NodeAppInstallRequest(BaseModel):
             if value:
                 inputs[input_key] = value
         return inputs
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedInstallRequest:
+    """All resolved, non-mutating values needed to begin an app install."""
+
+    recipe: AppSteamInstallRecipe
+    request: NodeAppInstallRequest
+    create_request: AppInstanceCreateRequest
+    plan: AppInstanceCreationPlan
 
 
 class NodeAppInstallerManager(Protocol):
@@ -484,8 +544,52 @@ class NodeAppInstallerService:
             node=self._node_name(),
             recipes=tuple(
                 self._catalog_recipe(recipe)
-                for recipe in await self._available_recipes(manager=resolved_manager)
+                for recipe in self._available_recipes(manager=resolved_manager)
             ),
+        )
+
+    async def build_recipe(
+        self,
+        *,
+        scope: str,
+        manager: NodeAppInstallerManager | None = None,
+    ) -> NodeAppInstallRecipe:
+        """Return one install recipe with its current Steam release options.
+
+        The main catalogue intentionally avoids SteamCMD app-info discovery so
+        choosing an app remains responsive. Release discovery happens only
+        after the user has selected a specific app.
+        """
+
+        self._ensure_available()
+        return self._catalog_recipe(
+            await self._recipe_for_scope(
+                manager=self._resolve_manager(manager),
+                scope=scope,
+            )
+        )
+
+    async def preflight_install(
+        self,
+        *,
+        actor_user_id: int,
+        request: NodeAppInstallRequest,
+        manager: NodeAppInstallerManager | None = None,
+        acl: Access_Control | None = None,
+    ) -> NodeAppInstallPreflight:
+        """Validate an install target without creating a job or retaining secrets."""
+
+        self._ensure_available()
+        resolved_manager = self._resolve_manager(manager)
+        await self._resolve_acl(acl).perm_check(actor_user_id, Power_Level.sudo)
+        validated = await self._validated_install_request(
+            manager=resolved_manager,
+            request=request,
+        )
+        return NodeAppInstallPreflight(
+            node=self._node_name(),
+            scope=validated.request.scope,
+            message="Server setup is ready to install.",
         )
 
     async def start_install(
@@ -500,28 +604,22 @@ class NodeAppInstallerService:
         resolved_manager = self._resolve_manager(manager)
         resolved_acl = self._resolve_acl(acl)
         await resolved_acl.perm_check(actor_user_id, Power_Level.sudo)
-        recipe = await self._recipe_for_scope(
-            manager=resolved_manager, scope=request.scope
+        validated = await self._validated_install_request(
+            manager=resolved_manager,
+            request=request,
         )
-        branch = self._recipe_branch(recipe=recipe, branch_id=request.steam_branch_id)
-        normalised_request = request.model_copy(
-            update={"scope": recipe.scope, "steam_branch_id": branch.branch_id}
-        )
-        self._validate_recipe_inputs(recipe=recipe, inputs=normalised_request.inputs)
         secret_values = tuple(
-            value for input_key, value in normalised_request.inputs.items() if input_key.is_secret
+            value
+            for input_key, value in validated.request.inputs.items()
+            if input_key.is_secret
         )
-        create_request = self._create_request(normalised_request)
-        plan = resolved_manager.prepare_instance_creation(create_request)
-        if plan.directory.exists():
-            raise ValueError("Install folder already exists.")
 
-        directory_resource_key, instance_resource_key = self._install_resource_keys(plan)
+        directory_resource_key, instance_resource_key = self._install_resource_keys(validated.plan)
         try:
             operation = self._operations.create(
                 kind=NodeOperationKind.APP_INSTALL,
                 node_name=self._node_name(),
-                subject=plan.scope,
+                subject=validated.plan.scope,
                 requested_by_user_id=actor_user_id,
                 progress=NodeOperationProgress(summary="Queued."),
                 resource_keys=(directory_resource_key, instance_resource_key),
@@ -534,7 +632,9 @@ class NodeAppInstallerService:
             raise RuntimeError("An install resource is already in use.") from xcp
 
         job_id = operation.operation_id
-        staging_directory = plan.directory.with_name(f".{plan.directory.name}.install-{job_id}")
+        staging_directory = validated.plan.directory.with_name(
+            f".{validated.plan.directory.name}.install-{job_id}"
+        )
         task: asyncio.Task[None] | None = None
         try:
             task = asyncio.create_task(
@@ -542,10 +642,12 @@ class NodeAppInstallerService:
                     operation_id=job_id,
                     staging_directory=staging_directory,
                     manager=resolved_manager,
-                    plan=plan,
-                    create_request=create_request,
-                    steam_update=recipe.steam_update.with_selected_branch(branch.branch_id),
-                    post_steam_install=recipe.post_steam_install,
+                    plan=validated.plan,
+                    create_request=validated.create_request,
+                    steam_update=validated.recipe.steam_update.with_selected_branch(
+                        validated.request.steam_branch_id
+                    ),
+                    post_steam_install=validated.recipe.post_steam_install,
                     secret_values=secret_values,
                 ),
                 name=f"app-install-{job_id}",
@@ -794,6 +896,13 @@ class NodeAppInstallerService:
                     key=install_input.value,
                     label=install_input.label,
                     help_text=install_input.help_text,
+                    action_label=install_input.action_label,
+                    action_url=install_input.action_url,
+                    game_server_login_token_app_id=(
+                        recipe.game_server_login_token_app_id
+                        if install_input is AppInstallInput.GAME_SERVER_LOGIN_TOKEN
+                        else None
+                    ),
                     kind=(
                         NodeAppInstallInputKind.PASSWORD
                         if install_input.is_secret
@@ -805,18 +914,44 @@ class NodeAppInstallerService:
             ),
         )
 
-    async def _available_recipes(self, *, manager: NodeAppInstallerManager) -> tuple[AppSteamInstallRecipe, ...]:
+    def _available_recipes(self, *, manager: NodeAppInstallerManager) -> tuple[AppSteamInstallRecipe, ...]:
+        """Return recipes allowed by the node policy without SteamCMD discovery."""
+
         recipes = manager.list_steam_install_recipes()
         policy = self._scope_policy()
-        allowed_recipes = tuple(recipe for recipe in recipes if policy.allows(recipe.scope))
-        return tuple(await asyncio.gather(*(self._with_discovered_branches(recipe) for recipe in allowed_recipes)))
+        return tuple(recipe for recipe in recipes if policy.allows(recipe.scope))
 
     async def _recipe_for_scope(self, *, manager: NodeAppInstallerManager, scope: str) -> AppSteamInstallRecipe:
         scope_key = scope.strip().casefold()
-        for recipe in await self._available_recipes(manager=manager):
+        for recipe in self._available_recipes(manager=manager):
             if recipe.scope.casefold() == scope_key:
-                return recipe
+                return await self._with_discovered_branches(recipe)
         raise ValueError("That app is not available for installation.")
+
+    async def _validated_install_request(
+        self,
+        *,
+        manager: NodeAppInstallerManager,
+        request: NodeAppInstallRequest,
+    ) -> _ValidatedInstallRequest:
+        """Resolve and validate all non-mutating install inputs once."""
+
+        recipe = await self._recipe_for_scope(manager=manager, scope=request.scope)
+        branch = self._recipe_branch(recipe=recipe, branch_id=request.steam_branch_id)
+        normalised_request = request.model_copy(
+            update={"scope": recipe.scope, "steam_branch_id": branch.branch_id}
+        )
+        self._validate_recipe_inputs(recipe=recipe, inputs=normalised_request.inputs)
+        create_request = self._create_request(normalised_request)
+        plan = manager.prepare_instance_creation(create_request)
+        if plan.directory.exists():
+            raise ValueError("Install folder already exists.")
+        return _ValidatedInstallRequest(
+            recipe=recipe,
+            request=normalised_request,
+            create_request=create_request,
+            plan=plan,
+        )
 
     @staticmethod
     async def _with_discovered_branches(recipe: AppSteamInstallRecipe) -> AppSteamInstallRecipe:
@@ -1058,6 +1193,14 @@ def _optional_port(raw: object, *, label: str) -> int | None:
     return raw
 
 
+def _optional_positive_integer(raw: object, *, label: str) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        raise ValueError(f"{label.title()} is invalid.")
+    return raw
+
+
 def _optional_progress(raw: object) -> float | None:
     if raw is None:
         return None
@@ -1109,6 +1252,7 @@ __all__: tuple[str, ...] = (
     "NodeAppInstallCatalog",
     "NodeAppInstallField",
     "NodeAppInstallInputKind",
+    "NodeAppInstallPreflight",
     "NodeAppInstallRecipe",
     "NodeAppInstallRequest",
     "NodeAppInstallScopeOption",

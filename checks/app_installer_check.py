@@ -19,6 +19,10 @@ from _security import Power_Level
 from apps._config import AppVersion, SteamUpdateBranch, SteamUpdateConfig, SteamUpdateLogin
 from node_api.app_installer import (
     NodeAppInstallCatalog,
+    NodeAppInstallBranch,
+    NodeAppInstallField,
+    NodeAppInstallPreflight,
+    NodeAppInstallRecipe,
     NodeAppInstallRequest,
     NodeAppInstallScopeOption,
     NodeAppInstallerService,
@@ -106,11 +110,36 @@ class _RouteService:
 
     def __init__(self) -> None:
         self.start_requests: list[tuple[NodeAppInstallRequest, int]] = []
+        self.preflight_requests: list[tuple[NodeAppInstallRequest, int]] = []
         self.cancel_requests: list[tuple[str, int]] = []
         self.start_error: Exception | None = None
 
     async def build_catalog(self) -> NodeAppInstallCatalog:
         return NodeAppInstallCatalog(node=self.node_name, recipes=())
+
+    async def build_recipe(self, *, scope: str) -> NodeAppInstallRecipe:
+        if scope != "demo":
+            raise ValueError("That app is not available for installation.")
+        return NodeAppInstallRecipe(
+            scope="demo",
+            label="Demo App",
+            default_port=25565,
+            default_branch_id="public",
+            branches=(NodeAppInstallBranch(branch_id="public", label="Stable"),),
+        )
+
+    async def preflight_install(
+        self,
+        *,
+        request: NodeAppInstallRequest,
+        actor_user_id: int,
+    ) -> NodeAppInstallPreflight:
+        self.preflight_requests.append((request, actor_user_id))
+        return NodeAppInstallPreflight(
+            node=self.node_name,
+            scope=request.scope,
+            message="Server setup is ready to install.",
+        )
 
     async def start_install(self, *, request: NodeAppInstallRequest, actor_user_id: int) -> NodeAppInstallStatus:
         if self.start_error is not None:
@@ -256,8 +285,30 @@ class AppInstallerCheck(unittest.TestCase):
         self.assertIn("claiming it in the game client", catalog.recipes[0].fields[0].help_text or "")
         self.assertNotIn("not-disclosed", str(catalog.to_mapping()))
 
-    def test_catalog_fetches_live_branches_and_keeps_configured_overrides(self) -> None:
-        async def _build_catalog() -> tuple[NodeAppInstallCatalog, AsyncMock]:
+    def test_catalog_exposes_the_game_app_id_required_for_gslts(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            manager = _InstallerManager(root=Path(temp_dir))
+            manager.recipe = replace(
+                manager.recipe,
+                steam_update=SteamUpdateConfig(
+                    app_id=4020,
+                    branches=(SteamUpdateBranch(branch_id="public", label="Stable"),),
+                    selected_branch="public",
+                ),
+                inputs=(AppInstallInput.GAME_SERVER_LOGIN_TOKEN,),
+                game_server_login_token_app_id=4000,
+            )
+            service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
+
+            catalog = asyncio.run(service.build_catalog(manager=manager))
+
+        install_field = catalog.recipes[0].fields[0]
+        self.assertEqual(install_field.game_server_login_token_app_id, 4000)
+        self.assertNotEqual(install_field.game_server_login_token_app_id, manager.recipe.steam_update.app_id)
+        self.assertEqual(NodeAppInstallField.from_mapping(install_field.to_mapping()), install_field)
+
+    def test_release_options_fetch_live_branches_without_delaying_the_catalog(self) -> None:
+        async def _build_catalog_and_recipe() -> tuple[NodeAppInstallCatalog, NodeAppInstallRecipe, AsyncMock]:
             with TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
                 manager = _InstallerManager(root=root)
@@ -286,12 +337,18 @@ class AppInstallerCheck(unittest.TestCase):
                     patch("node_api.app_installer.resolve_steamcmd_command_prefix", return_value=("steamcmd",)),
                 ):
                     catalog = await service.build_catalog(manager=manager)
-            return catalog, branch_loader
+                    recipe = await service.build_recipe(scope="sevendays", manager=manager)
+            return catalog, recipe, branch_loader
 
-        catalog, branch_loader = asyncio.run(_build_catalog())
+        catalog, recipe, branch_loader = asyncio.run(_build_catalog_and_recipe())
 
         self.assertEqual(
             [(branch.branch_id, branch.label) for branch in catalog.recipes[0].branches],
+            [("public", "Preferred"), ("private", "private")],
+        )
+
+        self.assertEqual(
+            [(branch.branch_id, branch.label) for branch in recipe.branches],
             [
                 ("public", "Preferred"),
                 ("experimental", "Experimental"),
@@ -328,6 +385,41 @@ class AppInstallerCheck(unittest.TestCase):
                         actor_user_id=42,
                         request=request,
                     )
+
+        asyncio.run(_run())
+
+    def test_preflight_validates_an_install_without_creating_a_job(self) -> None:
+        async def _run() -> None:
+            with TemporaryDirectory() as temp_dir:
+                manager = _InstallerManager(root=Path(temp_dir))
+                acl = Mock()
+                acl.perm_check = AsyncMock()
+                service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
+                request = NodeAppInstallRequest(
+                    scope="demo",
+                    instance_key="alpha",
+                    friendly_name="Demo Alpha",
+                    subfolder="demo-alpha",
+                    steam_branch_id="public",
+                    inputs={AppInstallInput.ADMIN_PASSWORD: "preflight-secret"},
+                )
+
+                result = await service.preflight_install(
+                    manager=manager,
+                    acl=acl,
+                    actor_user_id=42,
+                    request=request,
+                )
+
+                self.assertEqual(result.node, "node-a")
+                self.assertEqual(result.scope, "demo")
+                self.assertEqual(result.message, "Server setup is ready to install.")
+                self.assertEqual(manager.create_requests, [])
+                self.assertEqual(
+                    service._operations.list_records(kind=NodeOperationKind.APP_INSTALL),
+                    (),
+                )
+                acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
 
         asyncio.run(_run())
 
@@ -949,11 +1041,24 @@ class AppInstallerCheck(unittest.TestCase):
             traffic_log=logging.getLogger(__name__),
         )
 
-        async def _request_routes() -> tuple[Response, Response, Response]:
+        async def _request_routes() -> tuple[Response, Response, Response, Response, Response, Response]:
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://testserver") as client:
                 return (
                     await client.get("/api/app-installer"),
+                    await client.get("/api/app-installer/apps/demo"),
+                    await client.get("/api/app-installer/apps/unknown"),
+                    await client.post(
+                        "/api/app-installer/preflight",
+                        json={
+                            "scope": "demo",
+                            "instance_key": "alpha",
+                            "friendly_name": "Demo Alpha",
+                            "subfolder": "demo-alpha",
+                            "steam_branch_id": "public",
+                            "inputs": {"admin_password": "preflight-secret"},
+                        },
+                    ),
                     await client.post(
                         "/api/app-installer/jobs",
                         json={
@@ -969,12 +1074,29 @@ class AppInstallerCheck(unittest.TestCase):
                 )
 
         with patch("node_api.app_installer_routes.audit_log") as audit:
-            catalog_response, start_response, status_response = asyncio.run(_request_routes())
+            (
+                catalog_response,
+                recipe_response,
+                missing_recipe_response,
+                preflight_response,
+                start_response,
+                status_response,
+            ) = asyncio.run(_request_routes())
 
         self.assertEqual(catalog_response.status_code, 200)
+        self.assertEqual(recipe_response.status_code, 200)
+        self.assertEqual(recipe_response.json()["scope"], "demo")
+        self.assertEqual(missing_recipe_response.status_code, 404)
+        self.assertEqual(preflight_response.status_code, 200)
+        self.assertEqual(preflight_response.json()["message"], "Server setup is ready to install.")
         self.assertEqual(start_response.status_code, 200)
         self.assertEqual(status_response.status_code, 200)
-        self.assertEqual(auth.access_requests, [(None, (NodeApiScope.APP_MANAGE,))] * 3)
+        self.assertEqual(auth.access_requests, [(None, (NodeApiScope.APP_MANAGE,))] * 6)
+        self.assertEqual(service.preflight_requests[0][1], 42)
+        self.assertEqual(
+            service.preflight_requests[0][0].inputs,
+            {AppInstallInput.ADMIN_PASSWORD: "preflight-secret"},
+        )
         self.assertEqual(service.start_requests[0][1], 42)
         self.assertEqual(service.start_requests[0][0].inputs, {AppInstallInput.ADMIN_PASSWORD: "secret"})
         audit.assert_called_once_with(
@@ -988,7 +1110,7 @@ class AppInstallerCheck(unittest.TestCase):
             required_level=Power_Level.sudo.name,
         )
 
-    def test_start_route_redacts_invalid_secret_recipe_inputs(self) -> None:
+    def test_preflight_and_start_routes_redact_invalid_secret_recipe_inputs(self) -> None:
         token = "gmod-secret-token"
         app = FastAPI()
         service = _RouteService()
@@ -1002,7 +1124,7 @@ class AppInstallerCheck(unittest.TestCase):
             traffic_log=logging.getLogger(__name__),
         )
 
-        async def _request_routes() -> tuple[Response, Response]:
+        async def _request_routes() -> tuple[Response, Response, Response, Response]:
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://testserver") as client:
                 request_payload = {
@@ -1013,6 +1135,14 @@ class AppInstallerCheck(unittest.TestCase):
                     "steam_branch_id": "public",
                 }
                 return (
+                    await client.post(
+                        "/api/app-installer/preflight",
+                        json={**request_payload, "inputs": {"unsupported": token}},
+                    ),
+                    await client.post(
+                        "/api/app-installer/preflight",
+                        json={**request_payload, "inputs": token},
+                    ),
                     await client.post(
                         "/api/app-installer/jobs",
                         json={**request_payload, "inputs": {"unsupported": token}},
@@ -1030,6 +1160,7 @@ class AppInstallerCheck(unittest.TestCase):
             self.assertEqual(response.json(), {"detail": "App install request is invalid."})
             self.assertNotIn(token, response.text)
         self.assertEqual(service.start_requests, [])
+        self.assertEqual(service.preflight_requests, [])
         self.assertEqual(auth.access_requests, [])
 
     def test_cancel_route_uses_sudo_app_manage_scope(self) -> None:

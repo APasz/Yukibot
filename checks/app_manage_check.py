@@ -19,6 +19,7 @@ import config
 from _discord import App_Bound, DC_Relay
 from _editor_session import EditorSessionNamespace
 from _manager import (
+    AppInstallInput,
     App_Manager,
     AppDetailsUpdate,
     AppInstanceCreateRequest,
@@ -59,7 +60,7 @@ from apps._console import (
     execute_console_action,
 )
 from apps._mod import Mod
-from apps._scs_truck_simulator import ATS_PROFILE
+from apps._scs_truck_simulator import ATS_PROFILE, ETS2_PROFILE
 from apps._settings import ChoiceOption, ChoiceSpec
 from apps.minecraft import Minecraft, Minecraft_Config, MinecraftLoader, MinecraftRuntimeInfo
 from apps.sevendays import SevenDays
@@ -3372,7 +3373,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(instance_name, "sevendays_alpha")
             self.assertEqual(payload["alpha"]["join_port"], 26900)
             self.assertEqual(payload["alpha"]["steam_update"]["app_id"], 294420)
-            self.assertEqual(payload["alpha"]["steam_update"]["selected_branch"], "latest_experimental")
+            self.assertEqual(payload["alpha"]["steam_update"]["selected_branch"], "public")
 
     def test_steam_install_recipe_uses_the_expected_default_port(self) -> None:
         manager = object.__new__(App_Manager)
@@ -3427,6 +3428,9 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recipe.label, "Euro Truck Simulator 2")
         self.assertEqual(recipe.default_port, 27015)
         self.assertEqual(recipe.steam_update.app_id, 1948160)
+        self.assertEqual(recipe.inputs, (AppInstallInput.GAME_SERVER_LOGIN_TOKEN,))
+        self.assertEqual(recipe.game_server_login_token_app_id, ETS2_PROFILE.steam_game_app_id)
+        self.assertNotEqual(recipe.game_server_login_token_app_id, recipe.steam_update.app_id)
         self.assertIsNotNone(recipe.post_steam_install)
 
     async def test_ats_steam_install_recipe_initialises_the_server_before_registration(self) -> None:
@@ -3458,12 +3462,14 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
                         friendly_name="ATS Alpha",
                         subfolder="ats-alpha",
                         port=32000,
+                        steam_game_server_login_token="ats-gslt",
                     ),
                 )
             prepare_install.assert_awaited_once_with(
                 directory=temp_path / "ats-alpha",
                 connection_port=32000,
                 profile=ATS_PROFILE,
+                game_server_login_token="ats-gslt",
             )
 
         self.assertEqual(len(recipes), 1)
@@ -3471,6 +3477,9 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recipe.label, "American Truck Simulator")
         self.assertEqual(recipe.default_port, 27015)
         self.assertEqual(recipe.steam_update.app_id, 2239530)
+        self.assertEqual(recipe.inputs, (AppInstallInput.GAME_SERVER_LOGIN_TOKEN,))
+        self.assertEqual(recipe.game_server_login_token_app_id, ATS_PROFILE.steam_game_app_id)
+        self.assertNotEqual(recipe.game_server_login_token_app_id, recipe.steam_update.app_id)
 
     async def test_load_instance_syncs_initial_instance_metadata(self) -> None:
         manager = object.__new__(App_Manager)
@@ -4161,7 +4170,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.cfg.steam_update.app_id, 294420)
             self.assertEqual(app.cfg.steam_update.selected_branch, "alpha_22")
             branch_ids = [branch.branch_id for branch in app.cfg.steam_update.branches]
-            self.assertIn("latest_experimental", branch_ids)
+            self.assertIn("public", branch_ids)
             self.assertEqual(branch_ids[-2:], ["alpha_21", "alpha_22"])
             self.assertIsNotNone(app.updater)
             self.assertEqual(payload["alpha"]["steam_update"]["app_id"], 294420)

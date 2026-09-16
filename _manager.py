@@ -40,8 +40,13 @@ from apps._scs_truck_simulator import (
     resolve_scs_connection_port,
     scs_server_log_file_template,
 )
-from apps.gmod import GMOD_DEFAULT_PORT, prepare_gmod_server_installation
+from apps.gmod import (
+    GMOD_DEFAULT_PORT,
+    STEAM_GAME_APP_ID as GMOD_STEAM_GAME_APP_ID,
+    prepare_gmod_server_installation,
+)
 from apps._steam import (
+    STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL,
     cached_steam_update_branches,
     merge_steam_update_branches,
     normalise_steam_game_server_login_token,
@@ -121,7 +126,7 @@ class AppInstallInput(enum.StrEnum):
         if self is AppInstallInput.ADMIN_PASSWORD:
             return "Admin password"
         if self is AppInstallInput.GAME_SERVER_LOGIN_TOKEN:
-            return "Steam Game Server Login Token"
+            return "Steam Game Server Login Token (GSLT)"
         raise ValueError(f"Unsupported app installation input: {self}")
 
     @property
@@ -129,12 +134,49 @@ class AppInstallInput(enum.StrEnum):
         if self is AppInstallInput.ADMIN_PASSWORD:
             return "For a new Satisfactory server, use this password when claiming it in the game client."
         if self is AppInstallInput.GAME_SERVER_LOGIN_TOKEN:
-            return "Create a unique token for this server in Steam Game Server Accounts. It is stored write-only."
+            return "Create a unique GSLT for this server in Steam Game Server Accounts. It is stored write-only."
+        raise ValueError(f"Unsupported app installation input: {self}")
+
+    @property
+    def action_label(self) -> str | None:
+        """Optional external action that helps satisfy this requirement."""
+
+        if self is AppInstallInput.ADMIN_PASSWORD:
+            return None
+        if self is AppInstallInput.GAME_SERVER_LOGIN_TOKEN:
+            return "Manage tokens on Steam"
+        raise ValueError(f"Unsupported app installation input: {self}")
+
+    @property
+    def action_url(self) -> str | None:
+        """Optional external action URL that helps satisfy this requirement."""
+
+        if self is AppInstallInput.ADMIN_PASSWORD:
+            return None
+        if self is AppInstallInput.GAME_SERVER_LOGIN_TOKEN:
+            return STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL
         raise ValueError(f"Unsupported app installation input: {self}")
 
     @property
     def is_secret(self) -> bool:
         return self is AppInstallInput.ADMIN_PASSWORD or self is AppInstallInput.GAME_SERVER_LOGIN_TOKEN
+
+
+def _validate_game_server_login_token_app_id(
+    *,
+    install_inputs: tuple[AppInstallInput, ...],
+    game_app_id: int | None,
+    owner: str,
+) -> None:
+    """Ensure recipe metadata identifies the game required to issue a GSLT."""
+
+    requires_game_server_login_token = AppInstallInput.GAME_SERVER_LOGIN_TOKEN in install_inputs
+    if requires_game_server_login_token != (game_app_id is not None):
+        raise ValueError(
+            f"{owner} must define a Steam Game Server Login Token app ID exactly when it requires a token."
+        )
+    if game_app_id is not None and (type(game_app_id) is not int or game_app_id <= 0):
+        raise ValueError("Steam Game Server Login Token app ID must be a positive integer.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +188,15 @@ class AppSteamInstallRecipe:
     default_port: int | None
     steam_update: SteamUpdateConfig
     inputs: tuple[AppInstallInput, ...] = ()
+    game_server_login_token_app_id: int | None = None
     post_steam_install: AppSteamInstallPostProcessor | None = None
+
+    def __post_init__(self) -> None:
+        _validate_game_server_login_token_app_id(
+            install_inputs=self.inputs,
+            game_app_id=self.game_server_login_token_app_id,
+            owner="Steam install recipes",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +242,7 @@ class AppDetailsUpdate:
 class AppInstanceTemplate:
     label: str | None = None
     install_inputs: tuple[AppInstallInput, ...] = ()
+    game_server_login_token_app_id: int | None = None
     mods_dir: str | None = None
     client_mods_dir: str | None = None
     client_overrides_dir: str | None = None
@@ -206,6 +257,11 @@ class AppInstanceTemplate:
     def __post_init__(self) -> None:
         if self.steam_update is not None and self.steam_update_factory is not None:
             raise ValueError("App instance templates may define either a Steam config or a Steam config factory.")
+        _validate_game_server_login_token_app_id(
+            install_inputs=self.install_inputs,
+            game_app_id=self.game_server_login_token_app_id,
+            owner="App instance templates",
+        )
 
     def resolved_steam_update(self) -> SteamUpdateConfig | None:
         """Resolve this template's Steam configuration on demand."""
@@ -263,7 +319,15 @@ async def _prepare_scs_truck_simulator_steam_install(
     profile = SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE.get(request.scope)
     if profile is None:
         raise ValueError(f"SCS truck simulator profile is not defined for scope {request.scope!r}.")
-    await prepare_scs_server_installation(directory=directory, connection_port=request.port, profile=profile)
+    game_server_login_token = request.steam_game_server_login_token
+    if game_server_login_token is None:
+        raise ValueError("Steam Game Server Login Token is required.")
+    await prepare_scs_server_installation(
+        directory=directory,
+        connection_port=request.port,
+        profile=profile,
+        game_server_login_token=game_server_login_token,
+    )
 
 
 async def _prepare_gmod_steam_install(
@@ -283,6 +347,8 @@ def _scs_truck_simulator_instance_template(profile: ScsTruckSimulatorProfile) ->
 
     return AppInstanceTemplate(
         label=profile.display_name,
+        install_inputs=(AppInstallInput.GAME_SERVER_LOGIN_TOKEN,),
+        game_server_login_token_app_id=profile.steam_game_app_id,
         server_log_file=scs_server_log_file_template(profile),
         join_port=SCS_DEFAULT_CONNECTION_PORT,
         steam_update_factory=lambda scope=profile.scope: _required_scope_steam_update_template(scope),
@@ -312,6 +378,7 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
     "gmod": AppInstanceTemplate(
         label="Garry's Mod",
         install_inputs=(AppInstallInput.GAME_SERVER_LOGIN_TOKEN,),
+        game_server_login_token_app_id=GMOD_STEAM_GAME_APP_ID,
         join_port=GMOD_DEFAULT_PORT,
         steam_update_factory=lambda: _required_scope_steam_update_template("gmod"),
         post_steam_install=_prepare_gmod_steam_install,
@@ -1490,6 +1557,7 @@ class App_Manager(metaclass=config.Singleton):
                         template_payload=template_payload,
                     ),
                     inputs=template.install_inputs,
+                    game_server_login_token_app_id=template.game_server_login_token_app_id,
                     post_steam_install=template.post_steam_install,
                 )
             )
@@ -1506,7 +1574,7 @@ class App_Manager(metaclass=config.Singleton):
         scs_profile = SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE.get(scope)
         if scs_profile is not None:
             resolve_scs_connection_port(profile=scs_profile, port=request.port)
-        if scope == "gmod":
+        if scope == "gmod" or scs_profile is not None:
             if request.steam_game_server_login_token is None:
                 raise ValueError("Steam Game Server Login Token is required.")
             normalise_steam_game_server_login_token(request.steam_game_server_login_token)
