@@ -309,6 +309,7 @@ class NodeModService:
             summary=inventory.summary,
             mods=inventory.mods,
             app_stats=app_stats,
+            source_statuses=inventory.source_statuses,
         )
 
     async def _cached_mod_inventory(self, app: App) -> mod_contracts.TimedModInventory:
@@ -351,6 +352,10 @@ class NodeModService:
                     ),
                 ),
                 mods=tuple(self._inventory_entry_to_node_entry(entry) for entry in entries),
+                source_statuses=tuple(
+                    mod_contracts.NodeModSourceStatus.from_source_status(status)
+                    for status in catalog.source_statuses
+                ),
             )
             self._inventory_cache[app_key] = inventory
             return inventory
@@ -1425,9 +1430,15 @@ class NodeModService:
     def _inventory_entry_to_node_entry(entry: ModInventoryEntry) -> mod_contracts.NodeModEntry:
         artifact = entry.artifact
         if artifact is None:
-            raise ValueError("The local-only node mod contract requires a local artifact.")
-        size_bytes = File_Utils.pointer_size(artifact.path)
-        size_text = Utilities.humanise_bytes(size_bytes)
+            size_bytes = 0
+            size_text = "Not local"
+            archive_name = entry.name
+            source_path = f"{entry.reference.source.value}:{entry.reference.source_key}"
+        else:
+            size_bytes = File_Utils.pointer_size(artifact.path)
+            size_text = Utilities.humanise_bytes(size_bytes)
+            archive_name = artifact.archive_name
+            source_path = str(artifact.path)
         return mod_contracts.NodeModEntry(
             name=entry.name,
             friendly=entry.friendly,
@@ -1436,8 +1447,8 @@ class NodeModService:
             placement=entry.placement,
             server_loadable=entry.server_loadable,
             client_pack_eligible=entry.client_pack_eligible,
-            archive_name=artifact.archive_name,
-            source_path=str(artifact.path),
+            archive_name=archive_name,
+            source_path=source_path,
             description=entry.description,
             notes=entry.notes,
             mod_type=entry.mod_type,
@@ -1462,4 +1473,5 @@ class NodeModService:
                 action for action in ModAction if action in entry.available_actions
             ),
             artifact_available=entry.artifact_available,
+            client_required=entry.client_required,
         )

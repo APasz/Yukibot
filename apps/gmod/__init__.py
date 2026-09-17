@@ -36,6 +36,7 @@ from apps._settings import (
 from apps._steam import SteamGameServerLoginTokenStatus, normalise_steam_game_server_login_token
 from apps._updater import SteamCmd_Update_Manager
 from config import Activity_Manager
+from .workshop import GmodWorkshopSource
 
 log = logging.getLogger(__name__)
 
@@ -736,6 +737,7 @@ class Gmod(App[App_Config]):
         self._stdout_capture_started: bool = False
         self._launch_token: str | None = None
         super().__init__(bot, am, cfg, Gmod_Settings(gmod_settings_path(cfg.directory)))
+        self.add_mod_source(GmodWorkshopSource(settings=self._require_settings))
         if cfg.steam_update is not None:
             self.updater = SteamCmd_Update_Manager(self)
             if _gmod_version_needs_manifest_refresh(cfg.version):

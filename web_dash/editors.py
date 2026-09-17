@@ -4035,6 +4035,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 (
                     entry.friendly,
                     entry.name,
+                    entry.id,
+                    entry.source.value,
+                    entry.source.label,
+                    entry.source_key,
                     entry.mod_type.value,
                     entry.placement.value,
                     entry.placement.label,
@@ -4045,6 +4049,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         else "enabled" if entry.enabled else "disabled"
                     ),
                     "downloadable" if entry.downloadable else "blocked",
+                    "client required" if entry.client_required else "",
                     entry.origin,
                     entry.version,
                     entry.size_text,
@@ -4062,7 +4067,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     def _mod_options(cls, mods: tuple[NodeModEntry, ...]) -> tuple[ModWebSearchOption, ...]:
         return tuple[ModWebSearchOption, ...](
             ModWebSearchOption(
-                option_id=entry.name,
+                option_id=entry.id,
                 label=cls._mod_option_label(entry),
                 search_text=cls._mod_search_text(entry),
             )
@@ -4259,7 +4264,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         }
         if not matching_ids and cls._search_query_tokens(search_query):
             return ()
-        return tuple[NodeModEntry, ...](mod for mod in mods if mod.name in matching_ids or not matching_ids)
+        return tuple[NodeModEntry, ...](mod for mod in mods if mod.id in matching_ids or not matching_ids)
 
     @staticmethod
     def _sort_mod_entries(
@@ -4268,7 +4273,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     ) -> tuple[NodeModEntry, ...]:
         alphabetic: list[NodeModEntry] = sorted(
             mods,
-            key=lambda entry: (entry.friendly.casefold(), entry.name.casefold()),
+            key=lambda entry: (entry.friendly.casefold(), entry.name.casefold(), entry.id),
         )
         if order is ModWebModSortOrder.NAME_ASCENDING:
             return tuple(alphabetic)

@@ -37,7 +37,7 @@ from apps._config import (
     normalise_client_pack_changelog,
 )
 from apps._node_api import optional_string, required_bool, required_int, required_string
-from apps._mod_catalog import ModAction, ModReference, ModSourceKind
+from apps._mod_catalog import ModAction, ModReference, ModSourceKind, ModSourceStatus
 from apps.minecraft.pack_export import PackFormat, PackPurpose
 from .app_state import NodeAppRuntimeSummary
 
@@ -112,6 +112,73 @@ class NodeModSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeModSourceStatus:
+    """Source-neutral health information rendered with a mod inventory."""
+
+    source: ModSourceKind
+    label: str
+    healthy: bool = True
+    warning: str | None = None
+    using_cached_entries: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, ModSourceKind):
+            raise TypeError("Node mod source status source must be a ModSourceKind.")
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError("Node mod source status label must be non-empty text.")
+        if not isinstance(self.healthy, bool):
+            raise TypeError("Node mod source status healthy must be a bool.")
+        if self.warning is not None and (not isinstance(self.warning, str) or not self.warning.strip()):
+            raise ValueError("Node mod source status warning must be non-empty text when set.")
+        if not isinstance(self.using_cached_entries, bool):
+            raise TypeError("Node mod source status cached-entry flag must be a bool.")
+        if self.healthy and self.warning is not None:
+            raise ValueError("Healthy node mod sources cannot carry a warning.")
+        if self.healthy and self.using_cached_entries:
+            raise ValueError("Healthy node mod sources cannot report cached fallback entries.")
+        if not self.healthy and self.warning is None:
+            raise ValueError("Unhealthy node mod sources require a warning.")
+
+    @classmethod
+    def from_source_status(cls, status: ModSourceStatus) -> NodeModSourceStatus:
+        return cls(
+            source=status.source,
+            label=status.label,
+            healthy=status.healthy,
+            warning=status.warning,
+            using_cached_entries=status.using_cached_entries,
+        )
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeModSourceStatus:
+        raw_source = required_string(payload, "source")
+        try:
+            source = ModSourceKind(raw_source)
+        except ValueError as xcp:
+            raise ValueError("Node mod source status source is invalid.") from xcp
+        return cls(
+            source=source,
+            label=required_string(payload, "label"),
+            healthy=required_bool(payload, "healthy"),
+            warning=optional_string(payload, "warning"),
+            using_cached_entries=(
+                required_bool(payload, "using_cached_entries")
+                if "using_cached_entries" in payload
+                else False
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "source": self.source.value,
+            "label": self.label,
+            "healthy": self.healthy,
+            "warning": self.warning,
+            "using_cached_entries": self.using_cached_entries,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NodeModEntry:
     name: str
     friendly: str
@@ -142,6 +209,7 @@ class NodeModEntry:
     source_key: str | None = None
     available_actions: tuple[ModAction, ...] = ()
     artifact_available: bool = True
+    client_required: bool = False
 
     def __post_init__(self) -> None:
         # Preserve the compact legacy representation for ordinary local mods.
@@ -149,6 +217,8 @@ class NodeModEntry:
         # needs one beyond its logical filename.
         if self.source is ModSourceKind.LOCAL and self.source_key == self.name:
             object.__setattr__(self, "source_key", None)
+        if not isinstance(self.client_required, bool):
+            raise TypeError("Node mod client-required state must be a bool.")
 
     @property
     def reference(self) -> ModReference:
@@ -160,6 +230,36 @@ class NodeModEntry:
     @property
     def id(self) -> str:
         return self.reference.id
+
+    def supports_action(self, action: ModAction) -> bool:
+        """Return whether this source explicitly permits an entry action.
+
+        Legacy local payloads predate ``available_actions``.  Their fallback
+        preserves the existing local UI while non-local entries remain
+        strictly capability-driven.
+        """
+
+        if action in self.available_actions:
+            return True
+        if self.available_actions or self.source is not ModSourceKind.LOCAL:
+            return False
+        if action is ModAction.DOWNLOAD:
+            return self.downloadable
+        if action is ModAction.DELETE:
+            return True
+        if action is ModAction.UPDATE_NOTES:
+            return True
+        if action is ModAction.UPDATE_PROPERTIES:
+            return self.mod_type is not ModType.BUILTIN
+        if action is ModAction.TOGGLE_COREMOD:
+            return self.mod_type is not ModType.BUILTIN
+        if action is ModAction.TOGGLE_DOWNLOAD_BLOCK:
+            return self.mod_type is not ModType.BUILTIN
+        if action is ModAction.ENABLE:
+            return self.server_loadable and not self.enabled
+        if action is ModAction.DISABLE:
+            return self.server_loadable and self.enabled
+        raise ValueError(f"Unsupported mod action: {action!r}")
 
     @property
     def added_at(self) -> datetime:
@@ -196,6 +296,9 @@ class NodeModEntry:
         raw_artifact_available: object = payload.get("artifact_available", True)
         if not isinstance(raw_artifact_available, bool):
             raise ValueError("Node mod artifact availability is invalid.")
+        raw_client_required: object = payload.get("client_required", False)
+        if not isinstance(raw_client_required, bool):
+            raise ValueError("Node mod client-required state is invalid.")
         client_path: str | None = optional_string(payload, "client_path")
         enabled: bool = required_bool(payload, "enabled")
         coremod: bool = required_bool(payload, "coremod")
@@ -294,6 +397,7 @@ class NodeModEntry:
             source_key=reference.source_key,
             available_actions=available_actions,
             artifact_available=raw_artifact_available,
+            client_required=raw_client_required,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -321,6 +425,7 @@ class NodeModEntry:
             "source": self.source.value,
             "available_actions": [action.value for action in self.available_actions],
             "artifact_available": self.artifact_available,
+            "client_required": self.client_required,
             "description": self.description,
             "notes": self.notes,
             "mod_pages": [page.model_dump(mode="json") for page in self.mod_pages],
@@ -613,6 +718,7 @@ class TimedModInventory:
     captured_at_seconds: float
     summary: NodeModSummary
     mods: tuple[NodeModEntry, ...]
+    source_statuses: tuple[NodeModSourceStatus, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,6 +729,7 @@ class NodeModList:
     summary: NodeModSummary
     mods: tuple[NodeModEntry, ...]
     app_stats: NodeAppRuntimeSummary | None = None
+    source_statuses: tuple[NodeModSourceStatus, ...] = ()
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeModList:
@@ -631,10 +738,13 @@ class NodeModList:
         node = required_string(payload, "node")
         raw_summary = payload.get("summary")
         raw_app_stats = payload.get("app_stats")
+        raw_source_statuses = payload.get("source_statuses", ())
         if not isinstance(raw_summary, Mapping):
             raise ValueError("Node mod list summary is invalid.")
         if raw_app_stats is not None and not isinstance(raw_app_stats, Mapping):
             raise ValueError("Node mod list app_stats are invalid.")
+        if not isinstance(raw_source_statuses, Sequence) or isinstance(raw_source_statuses, (str, bytes)):
+            raise ValueError("Node mod list source statuses are invalid.")
         raw_mods = payload.get("mods")
         if not isinstance(raw_mods, Sequence) or isinstance(raw_mods, (str, bytes)):
             raise ValueError("Node mod list mods are invalid.")
@@ -643,6 +753,15 @@ class NodeModList:
             if not isinstance(raw_mod, Mapping):
                 raise ValueError("Node mod list contains an invalid mod entry.")
             mods.append(NodeModEntry.from_mapping(raw_mod))
+        if len({mod.id for mod in mods}) != len(mods):
+            raise ValueError("Node mod list contains duplicate source-qualified mod IDs.")
+        source_statuses: list[NodeModSourceStatus] = []
+        for raw_status in raw_source_statuses:
+            if not isinstance(raw_status, Mapping):
+                raise ValueError("Node mod list contains an invalid source status.")
+            source_statuses.append(NodeModSourceStatus.from_mapping(raw_status))
+        if len({status.source for status in source_statuses}) != len(source_statuses):
+            raise ValueError("Node mod list source statuses must be unique by source.")
         return cls(
             app_name=app_name,
             app_friendly=app_friendly,
@@ -650,6 +769,7 @@ class NodeModList:
             summary=NodeModSummary.from_mapping(raw_summary),
             mods=tuple(mods),
             app_stats=NodeAppRuntimeSummary.from_mapping(raw_app_stats) if raw_app_stats is not None else None,
+            source_statuses=tuple(source_statuses),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -660,6 +780,7 @@ class NodeModList:
             "summary": self.summary.to_mapping(),
             "mods": [mod.to_mapping() for mod in self.mods],
             "app_stats": self.app_stats.to_mapping() if self.app_stats is not None else None,
+            "source_statuses": [status.to_mapping() for status in self.source_statuses],
         }
 
 

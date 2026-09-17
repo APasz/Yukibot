@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import urlencode
 
+from apps._mod_catalog import ModAction, ModSourceKind
 from node_api.route_contracts import NODE_DISCORD_SERVICE_STATE_HEADER, DiscordServiceState
 
 from .constants import (
@@ -418,9 +419,9 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 mods=mods,
                 app_stats=mods.app_stats,
                 mod_download_urls={
-                    mod.name: f"{app_api_url}/mods/{quote(mod.name, safe='')}/download"
+                    mod.id: f"{app_api_url}/mods/{quote(mod.name, safe='')}/download"
                     for mod in mods.mods
-                    if mod.downloadable
+                    if mod.source is ModSourceKind.LOCAL and mod.supports_action(ModAction.DOWNLOAD)
                 },
             )
         elif normalized_tab_id == "recipes" and isinstance(model, ModWebPageModel):

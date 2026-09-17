@@ -240,6 +240,8 @@ from node_api.mod import (
     NodeDownloadRequest,
     NodeModEntry,
     NodeModList,
+    NodeModSourceStatus,
+    NodeModSummary,
     NodeModMetadataFetchRequest,
     NodeModMetadataResolveRequest,
     NodeModMutationAction,
@@ -5588,6 +5590,79 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(restored.reference, ModReference.local("example.jar"))
         self.assertEqual(restored.available_actions, ())
         self.assertTrue(restored.artifact_available)
+
+    def test_mod_list_keeps_duplicate_local_and_workshop_names_distinct(self) -> None:
+        local = NodeModEntry(
+            name="shared-addon",
+            friendly="Shared addon",
+            enabled=True,
+            mod_type=ModType.REGULAR,
+            coremod=False,
+            downloadable=True,
+            download_block_reason=None,
+            download_block_label=None,
+            origin="Local filesystem",
+            version="1.0.0",
+            added="2026-01-01 00:00:00+00:00",
+            size_bytes=12,
+            size_text="12B",
+            placement=ModPlacement.SERVER_ENABLED,
+            server_loadable=True,
+            client_pack_eligible=True,
+            archive_name="shared-addon.zip",
+            source_path="/mods/shared-addon.zip",
+            available_actions=(ModAction.DOWNLOAD, ModAction.DELETE),
+        )
+        workshop = replace(
+            local,
+            source=ModSourceKind.STEAM_WORKSHOP,
+            source_key="200",
+            downloadable=False,
+            version=None,
+            size_bytes=0,
+            size_text="Not local",
+            client_pack_eligible=False,
+            source_path="steam_workshop:200",
+            client_pack=ClientPackConfig(included_in_client=False),
+            available_actions=(),
+            artifact_available=False,
+            client_required=True,
+        )
+        mod_list = NodeModList(
+            app_name="gmod_alpha",
+            app_friendly="GMod Alpha",
+            node="yuki",
+            summary=NodeModSummary(
+                total_count=2,
+                enabled_count=2,
+                disabled_count=0,
+                coremod_count=0,
+                downloadable_count=1,
+                non_downloadable_count=1,
+            ),
+            mods=(local, workshop),
+            source_statuses=(
+                NodeModSourceStatus(source=ModSourceKind.LOCAL, label="Local"),
+                NodeModSourceStatus(
+                    source=ModSourceKind.STEAM_WORKSHOP,
+                    label="Steam Workshop",
+                    healthy=False,
+                    warning="Steam Workshop unavailable; showing cached data.",
+                    using_cached_entries=True,
+                ),
+            ),
+        )
+
+        restored = NodeModList.from_mapping(mod_list.to_mapping())
+
+        self.assertEqual(tuple(entry.name for entry in restored.mods), ("shared-addon", "shared-addon"))
+        self.assertEqual(tuple(entry.friendly for entry in restored.mods), ("Shared addon", "Shared addon"))
+        self.assertNotEqual(restored.mods[0].id, restored.mods[1].id)
+        self.assertIs(restored.mods[1].source, ModSourceKind.STEAM_WORKSHOP)
+        self.assertTrue(restored.mods[1].client_required)
+        self.assertFalse(restored.mods[1].artifact_available)
+        self.assertFalse(restored.mods[1].supports_action(ModAction.DELETE))
+        self.assertTrue(restored.source_statuses[1].using_cached_entries)
 
     def test_app_can_register_a_catalog_source_without_a_local_mod_manager(self) -> None:
         app = object.__new__(_DummyApp)

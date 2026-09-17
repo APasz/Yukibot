@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO
 
+from apps._mod_catalog import ModAction, ModSourceKind
 from apps._scs_truck_simulator import SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE
 from apps.gmod import GMOD_MANAGE_EMBED_COLOR
 from apps.minecraft import (
@@ -1045,9 +1046,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     download_all_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'false'})}",
                     download_enabled_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'true'})}",
                     mod_download_urls={
-                        mod.name: f"{app_api_url}/mods/{quote(mod.name, safe='')}/download"
+                        mod.id: f"{app_api_url}/mods/{quote(mod.name, safe='')}/download"
                         for mod in mods.mods
-                        if mod.downloadable
+                        if mod.source is ModSourceKind.LOCAL and mod.supports_action(ModAction.DOWNLOAD)
                     },
                     map_api_url=f"{app_api_url}/map" if map_url is not None else None,
                     minecraft_item_icon_api_url=f"{app_api_url}/minecraft/recipes/item-icon",

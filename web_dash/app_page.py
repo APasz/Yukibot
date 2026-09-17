@@ -5,8 +5,9 @@ import hashlib
 from functools import lru_cache
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypedDict
 
+from apps._mod_catalog import ModAction, ModSourceKind
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
     CLIENT_PACK_CHANGELOG_MAX_LENGTH,
@@ -178,9 +179,10 @@ class _ModWebSectionChromeBindings:
 
 
 class _VirtualModRow(TypedDict):
-    name: str
+    id: str
     friendly: str
     file: str
+    source: str
     size: str
     update_available: bool
     placement: str
@@ -194,7 +196,19 @@ class _VirtualModRow(TypedDict):
     show_download_block: bool
     show_placement: bool
     show_policy: bool
+    show_client_required: bool
     state_class: str
+
+
+class _ModActionAvailability(Protocol):
+    """The action mixin contract used by the aggregate mod list."""
+
+    def _available_mod_actions(
+        self,
+        *,
+        user: ModWebUser,
+        entry: NodeModEntry,
+    ) -> tuple[NodeModMutationAction, ...]: ...
 
 
 class _BulkMetadataRow(TypedDict):
@@ -3860,46 +3874,61 @@ class ModWebAppPageMixin(
     def _resolve_client_pack_mod_names(
         *,
         mods: tuple[NodeModEntry, ...],
-        optional_names: frozenset[str],
-        choice_names: dict[str, str],
+        optional_ids: frozenset[str],
+        choice_ids: dict[str, str],
     ) -> tuple[str, ...]:
-        optional_entries: dict[str, NodeModEntry] = {
-            entry.name: entry
+        client_pack_entries = tuple(
+            entry
             for entry in mods
-            if entry.client_pack_eligible and entry.client_pack.policy is ClientPackPolicy.OPTIONAL
+            if entry.source is ModSourceKind.LOCAL and entry.client_pack_eligible
+        )
+        optional_entries: dict[str, NodeModEntry] = {
+            entry.id: entry
+            for entry in client_pack_entries
+            if entry.client_pack.policy is ClientPackPolicy.OPTIONAL
         }
-        unknown_optional_names: frozenset[str] = optional_names.difference(optional_entries)
-        if unknown_optional_names:
-            raise ValueError(f"Unknown optional client-pack mods: {', '.join(sorted(unknown_optional_names))}")
+        unknown_optional_ids: frozenset[str] = optional_ids.difference(optional_entries)
+        if unknown_optional_ids:
+            raise ValueError(f"Unknown optional client-pack mods: {', '.join(sorted(unknown_optional_ids))}")
 
         choice_groups: dict[str, frozenset[str]] = {}
-        for entry in mods:
-            if not entry.client_pack_eligible or entry.client_pack.policy is not ClientPackPolicy.ALTERNATIVE:
+        for entry in client_pack_entries:
+            if entry.client_pack.policy is not ClientPackPolicy.ALTERNATIVE:
                 continue
             group_name: str | None = entry.client_pack.choice_group
             if group_name is None:
                 raise ValueError(f"Alternative client-pack mod {entry.name!r} has no choice group.")
-            choice_groups[group_name] = choice_groups.get(group_name, frozenset()).union({entry.name})
-        if choice_names.keys() != choice_groups.keys():
+            choice_groups[group_name] = choice_groups.get(group_name, frozenset()).union({entry.id})
+        if choice_ids.keys() != choice_groups.keys():
             raise ValueError("Every client-pack choice group requires one selection.")
-        for group_name, selected_name in choice_names.items():
-            if selected_name not in choice_groups[group_name]:
-                raise ValueError(f"Invalid selection {selected_name!r} for client-pack group {group_name!r}.")
+        for group_name, selected_id in choice_ids.items():
+            if selected_id not in choice_groups[group_name]:
+                raise ValueError(f"Invalid selection {selected_id!r} for client-pack group {group_name!r}.")
 
         return tuple(
             entry.name
-            for entry in mods
-            if entry.client_pack_eligible
-            and (
+            for entry in client_pack_entries
+            if (
                 entry.client_pack.policy is ClientPackPolicy.REQUIRED
-                or (entry.client_pack.policy is ClientPackPolicy.OPTIONAL and entry.name in optional_names)
+                or (entry.client_pack.policy is ClientPackPolicy.OPTIONAL and entry.id in optional_ids)
                 or (
                     entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
                     and entry.client_pack.choice_group is not None
-                    and choice_names[entry.client_pack.choice_group] == entry.name
+                    and choice_ids[entry.client_pack.choice_group] == entry.id
                 )
             )
         )
+
+    @staticmethod
+    def _mod_download_url(*, model: ModWebPageModel, entry: NodeModEntry) -> str | None:
+        """Return an ID-keyed local download URL, preserving old local models."""
+
+        if entry.source is not ModSourceKind.LOCAL:
+            return None
+        url = model.mod_download_urls.get(entry.id)
+        if url is not None:
+            return url
+        return model.mod_download_urls.get(entry.name)
 
     @staticmethod
     def _client_pack_format_options(app_scope: str | None) -> dict[str, str]:
@@ -4124,20 +4153,32 @@ class ModWebAppPageMixin(
         show_sort: bool = len(mod_options) > 1
         current_search_query: str = model.search_query
         current_sort_order: ModWebModSortOrder = model.mod_sort_order
-        downloadable_names: tuple[str, ...] = tuple[str, ...](
-            entry.name for entry in model.mods.mods if entry.downloadable
-        )
-        selected_mod_names: set[str] = set()
+        has_legacy_local_source: bool = not model.mods.source_statuses or any(
+            status.source is ModSourceKind.LOCAL for status in model.mods.source_statuses
+        ) or any(entry.source is ModSourceKind.LOCAL for entry in model.mods.mods)
+        downloadable_entries_by_id: dict[str, NodeModEntry] = {
+            entry.id: entry
+            for entry in model.mods.mods
+            if entry.source is ModSourceKind.LOCAL and entry.supports_action(ModAction.DOWNLOAD)
+        }
+        downloadable_ids: tuple[str, ...] = tuple(downloadable_entries_by_id)
+        selected_mod_ids: set[str] = set()
         mod_selection_mode: bool = False
         optional_client_entries: tuple[NodeModEntry, ...] = tuple(
             entry
             for entry in model.mods.mods
-            if entry.client_pack_eligible and entry.client_pack.policy is ClientPackPolicy.OPTIONAL
+            if entry.source is ModSourceKind.LOCAL
+            and entry.client_pack_eligible
+            and entry.client_pack.policy is ClientPackPolicy.OPTIONAL
         )
         client_choice_groups: dict[str, tuple[NodeModEntry, ...]] = {}
         for entry in model.mods.mods:
             client_pack = entry.client_pack
-            if not entry.client_pack_eligible or client_pack.policy is not ClientPackPolicy.ALTERNATIVE:
+            if (
+                entry.source is not ModSourceKind.LOCAL
+                or not entry.client_pack_eligible
+                or client_pack.policy is not ClientPackPolicy.ALTERNATIVE
+            ):
                 continue
             if client_pack.choice_group is None:
                 raise ValueError(f"Alternative client-pack mod {entry.name!r} has no choice group.")
@@ -4153,20 +4194,22 @@ class ModWebAppPageMixin(
                 raise ValueError(
                     f"Client-pack choice group {group_name!r} requires at least two mods and exactly one default."
                 )
-            client_choice_defaults[group_name] = defaults[0].name
-        can_delete_mods: bool = self._user_has_level(user, Power_Level.sudo)
-        deletable_names: tuple[str, ...] = tuple[str, ...](
-            entry.name for entry in model.mods.mods if can_delete_mods and not self._is_builtin_mod(entry)
-        )
-        downloadable_name_set: frozenset[str] = frozenset(downloadable_names)
-        deletable_name_set: frozenset[str] = frozenset(deletable_names)
-        selectable_names: tuple[str, ...] = tuple[str, ...](
-            entry.name
+            client_choice_defaults[group_name] = defaults[0].id
+        deletable_ids: tuple[str, ...] = tuple(
+            entry.id
             for entry in model.mods.mods
-            if entry.name in downloadable_name_set or entry.name in deletable_name_set
+            if NodeModMutationAction.DELETE
+            in cast(_ModActionAvailability, cast(object, self))._available_mod_actions(user=user, entry=entry)
         )
-        selectable_name_set: frozenset[str] = frozenset(selectable_names)
-        can_upload_mod: bool = self._user_has_level(user, Power_Level.user)
+        downloadable_id_set: frozenset[str] = frozenset(downloadable_ids)
+        deletable_id_set: frozenset[str] = frozenset(deletable_ids)
+        selectable_ids: tuple[str, ...] = tuple(
+            entry.id
+            for entry in model.mods.mods
+            if entry.id in downloadable_id_set or entry.id in deletable_id_set
+        )
+        selectable_id_set: frozenset[str] = frozenset(selectable_ids)
+        can_upload_mod: bool = self._user_has_level(user, Power_Level.user) and has_legacy_local_source
         can_install_factorio_mod_link: bool = can_upload_mod and model.app_scope == "factorio"
         selection_button: Button | None = None
         select_all_button: Button | None = None
@@ -4184,8 +4227,11 @@ class ModWebAppPageMixin(
         metadata_operation_kind: NodeOperationKind | None = None
         metadata_cancel_requested = False
         metadata_active_status = ""
-        available_update_mod_names: set[str] = (
-            set(self._cached_mod_update_names(model=model, entries=model.mods.mods))
+        update_check_entries: tuple[NodeModEntry, ...] = tuple(
+            entry for entry in model.mods.mods if entry.source is ModSourceKind.LOCAL
+        )
+        available_update_mod_ids: set[str] = (
+            set(self._cached_mod_update_ids(model=model, entries=update_check_entries))
             if model.app_scope == config.AppScopes.factorio.value and self._user_has_level(user, Power_Level.user)
             else set()
         )
@@ -4398,7 +4444,7 @@ class ModWebAppPageMixin(
                 ui.notify("Mod update checks are already running.", type="warning")
                 return
             checking_all_mod_updates = True
-            total_mod_count = len(model.mods.mods)
+            total_mod_count = len(update_check_entries)
             ui.notify(
                 f"Checking {total_mod_count} mod{'s' if total_mod_count != 1 else ''} for updates…",
                 type="info",
@@ -4406,7 +4452,7 @@ class ModWebAppPageMixin(
             try:
                 batch_result = await self._check_all_mod_updates(
                     model=model,
-                    entries=model.mods.mods,
+                    entries=update_check_entries,
                     user=user,
                     on_checking=set_current_update_check,
                 )
@@ -4422,11 +4468,11 @@ class ModWebAppPageMixin(
             finally:
                 checking_all_mod_updates = False
                 set_current_update_check(None)
-            available_update_mod_names.clear()
-            available_update_mod_names.update(batch_result.update_mod_names)
+            available_update_mod_ids.clear()
+            available_update_mod_ids.update(batch_result.update_mod_ids)
             _mod_download_rows.refresh(current_search_query)
-            available_update_count = len(batch_result.update_mod_names)
-            failure_count = len(batch_result.failed_mod_names)
+            available_update_count = len(batch_result.update_mod_ids)
+            failure_count = len(batch_result.failed_mod_ids)
             message = (
                 f"Checked {batch_result.checked_mod_count} mod"
                 f"{'s' if batch_result.checked_mod_count != 1 else ''}: "
@@ -4439,23 +4485,23 @@ class ModWebAppPageMixin(
                 )
             ui.notify(message, type="warning" if failure_count else "positive")
 
-        def selected_downloadable_mod_names_in_page_order() -> tuple[str, ...]:
-            return tuple[str, ...](
-                entry.name
+        def selected_downloadable_mod_ids_in_page_order() -> tuple[str, ...]:
+            return tuple(
+                entry.id
                 for entry in model.mods.mods
-                if entry.name in selected_mod_names and entry.name in downloadable_name_set
+                if entry.id in selected_mod_ids and entry.id in downloadable_id_set
             )
 
-        def selected_deletable_mod_names_in_page_order() -> tuple[str, ...]:
-            return tuple[str, ...](
-                entry.name
+        def selected_deletable_mod_ids_in_page_order() -> tuple[str, ...]:
+            return tuple(
+                entry.id
                 for entry in model.mods.mods
-                if entry.name in selected_mod_names and entry.name in deletable_name_set
+                if entry.id in selected_mod_ids and entry.id in deletable_id_set
             )
 
         def update_count() -> None:
-            selected_downloadable_count: int = len(selected_downloadable_mod_names_in_page_order())
-            selected_deletable_count: int = len(selected_deletable_mod_names_in_page_order())
+            selected_downloadable_count: int = len(selected_downloadable_mod_ids_in_page_order())
+            selected_deletable_count: int = len(selected_deletable_mod_ids_in_page_order())
             for normal_action_button in normal_action_buttons:
                 normal_action_button.set_visibility(not mod_selection_mode)
             if metadata_status_button is not None:
@@ -4464,10 +4510,10 @@ class ModWebAppPageMixin(
                 )
             if select_all_button is not None:
                 select_all_button.set_visibility(mod_selection_mode)
-                select_all_button.set_enabled(bool(selectable_names))
+                select_all_button.set_enabled(bool(selectable_ids))
             if clear_selection_button is not None:
                 clear_selection_button.set_visibility(mod_selection_mode)
-                clear_selection_button.set_enabled(bool(selected_mod_names))
+                clear_selection_button.set_enabled(bool(selected_mod_ids))
             if selection_button is not None:
                 selection_button.set_visibility(mod_selection_mode)
                 selection_button.set_text("Done")
@@ -4485,20 +4531,20 @@ class ModWebAppPageMixin(
             if delete_control is not None:
                 delete_control.set_enabled(selected_deletable_count > 0)
 
-        def set_selected(mod_name: str, selected: bool) -> None:
+        def set_selected(mod_id: str, selected: bool) -> None:
             if selected:
-                selected_mod_names.add(mod_name)
+                selected_mod_ids.add(mod_id)
             else:
-                selected_mod_names.discard(mod_name)
+                selected_mod_ids.discard(mod_id)
             update_count()
 
         def select_all() -> None:
-            selected_mod_names.update(selectable_names)
+            selected_mod_ids.update(selectable_ids)
             for checkbox in checkboxes.values():
                 checkbox.set_value(True)
             if virtual_mod_table is not None:
                 selected_rows = [
-                    row for row in virtual_mod_rows if row["name"] in selected_mod_names
+                    row for row in virtual_mod_rows if row["id"] in selected_mod_ids
                 ]
                 virtual_mod_table.selected = cast(
                     list[dict[object, object]],
@@ -4508,7 +4554,7 @@ class ModWebAppPageMixin(
             update_count()
 
         def clear_selection() -> None:
-            selected_mod_names.clear()
+            selected_mod_ids.clear()
             for checkbox in checkboxes.values():
                 checkbox.set_value(False)
             if virtual_mod_table is not None:
@@ -4528,9 +4574,10 @@ class ModWebAppPageMixin(
             clear_selection()
             _mod_download_rows.refresh(current_search_query)
 
-        async def download_selected_mods(mod_names: tuple[str, ...]) -> None:
+        async def download_selected_mods(mod_ids: tuple[str, ...]) -> None:
+            mod_names = tuple(downloadable_entries_by_id[mod_id].name for mod_id in mod_ids)
             excluded_names = tuple(
-                mod_name for mod_name in downloadable_names if mod_name not in selected_mod_names
+                entry.name for entry in downloadable_entries_by_id.values() if entry.id not in selected_mod_ids
             )
             selected_query_length = len(urlencode({"mod_name": mod_names}, doseq=True))
             excluded_query_length = len(urlencode({"mod_name": excluded_names}, doseq=True))
@@ -4552,28 +4599,28 @@ class ModWebAppPageMixin(
                 message=self._download_feedback_message(
                     kind=ModDownloadKind.SELECTED,
                     app_friendly=model.app_friendly,
-                    selected_count=len(mod_names),
+                    selected_count=len(mod_ids),
                 ),
                 filenames=(f"{model.app_name}-selected-mods.zip",),
             )
 
         async def download_selected() -> None:
-            mod_names: tuple[str, ...] = selected_downloadable_mod_names_in_page_order()
-            if not mod_names:
+            mod_ids = selected_downloadable_mod_ids_in_page_order()
+            if not mod_ids:
                 ui.notify("Select at least one downloadable mod.", type="warning")
                 return
-            await download_selected_mods(mod_names)
+            await download_selected_mods(mod_ids)
 
         async def _delete_selected() -> None:
-            mod_names: tuple[str, ...] = selected_deletable_mod_names_in_page_order()
-            if not mod_names:
+            mod_ids = selected_deletable_mod_ids_in_page_order()
+            if not mod_ids:
                 ui.notify("Select at least one deletable mod first.", type="warning")
                 return
             try:
-                for mod_name in mod_names:
+                for mod_id in mod_ids:
                     await self._mutate_mod(
                         model=model,
-                        mod_name=mod_name,
+                        entry=next(entry for entry in model.mods.mods if entry.id == mod_id),
                         action=NodeModMutationAction.DELETE,
                         user=user,
                     )
@@ -4581,8 +4628,8 @@ class ModWebAppPageMixin(
                 ui.notify(f"Mod delete failed: {xcp}", type="negative")
                 return
             delete_dialog.close()
-            mod_label: str = "mod" if len(mod_names) == 1 else "mods"
-            ui.notify(f"Deleted {len(mod_names)} {mod_label}.", type="positive")
+            mod_label: str = "mod" if len(mod_ids) == 1 else "mods"
+            ui.notify(f"Deleted {len(mod_ids)} {mod_label}.", type="positive")
             self._guarded_reload(ui=ui)
 
         async def delete_selected() -> None:
@@ -5184,20 +5231,20 @@ class ModWebAppPageMixin(
             )
 
         async def download_configured_client_pack() -> None:
-            optional_names: frozenset[str] = frozenset(
-                mod_name
-                for mod_name, checkbox in optional_client_checkboxes.items()
+            optional_ids: frozenset[str] = frozenset(
+                mod_id
+                for mod_id, checkbox in optional_client_checkboxes.items()
                 if bool(_value_as_object(checkbox))
             )
-            choice_names: dict[str, str] = {}
+            choice_ids: dict[str, str] = {}
             for group_name, select in client_choice_selects.items():
-                selected_name: str = _value_as_text(select)
-                choice_names[group_name] = selected_name
+                selected_id: str = _value_as_text(select)
+                choice_ids[group_name] = selected_id
             try:
                 mod_names: tuple[str, ...] = self._resolve_client_pack_mod_names(
                     mods=model.mods.mods,
-                    optional_names=optional_names,
-                    choice_names=choice_names,
+                    optional_ids=optional_ids,
+                    choice_ids=choice_ids,
                 )
             except ValueError as xcp:
                 ui.notify(str(xcp), type="warning")
@@ -5205,21 +5252,25 @@ class ModWebAppPageMixin(
             if not mod_names:
                 ui.notify("Select at least one mod for the client pack.", type="warning")
                 return
-            explicitly_selected_names = optional_names.union(choice_names.values())
-            selected_choice_names = tuple(
-                mod_name for mod_name in mod_names if mod_name in explicitly_selected_names
+            explicitly_selected_ids = optional_ids.union(choice_ids.values())
+            selected_client_pack_mod_names = tuple(
+                entry.name
+                for entry in model.mods.mods
+                if entry.source is ModSourceKind.LOCAL and entry.id in explicitly_selected_ids
             )
-            await start_client_pack_download(mod_names=selected_choice_names)
+            await start_client_pack_download(mod_names=selected_client_pack_mod_names)
 
         configurable_client_entries: tuple[NodeModEntry, ...] = tuple(
             entry
             for entry in model.mods.mods
-            if entry.client_pack_eligible and not self._is_builtin_mod(entry)
+            if entry.source is ModSourceKind.LOCAL
+            and entry.client_pack_eligible
+            and not self._is_builtin_mod(entry)
         )
         config_policy_selects: dict[str, Select] = {}
         config_group_inputs: dict[str, Input] = {}
         config_group_names: dict[str, str] = {
-            entry.name: entry.client_pack.choice_group or "" for entry in configurable_client_entries
+            entry.id: entry.client_pack.choice_group or "" for entry in configurable_client_entries
         }
         config_default_selects: dict[str, Select] = {}
         config_rows: dict[str, Element] = {}
@@ -5233,8 +5284,8 @@ class ModWebAppPageMixin(
         client_pack_changelog_input: Textarea | None = None
         client_pack_config_save_button: Button | None = None
         client_pack_publish_button: Button | None = None
-        config_default_names: dict[str, str] = {
-            entry.client_pack.choice_group: entry.name
+        config_default_ids: dict[str, str] = {
+            entry.client_pack.choice_group: entry.id
             for entry in configurable_client_entries
             if entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
             and entry.client_pack.choice_group is not None
@@ -5244,10 +5295,10 @@ class ModWebAppPageMixin(
         def configured_choice_groups() -> dict[str, tuple[NodeModEntry, ...]]:
             groups: dict[str, tuple[NodeModEntry, ...]] = {}
             for entry in configurable_client_entries:
-                policy_select = config_policy_selects[entry.name]
+                policy_select = config_policy_selects[entry.id]
                 if ClientPackPolicy(_value_as_text(policy_select)) is not ClientPackPolicy.ALTERNATIVE:
                     continue
-                group_name = config_group_names[entry.name]
+                group_name = config_group_names[entry.id]
                 if not group_name or any(character.isspace() for character in group_name):
                     continue
                 groups[group_name] = (*groups.get(group_name, ()), entry)
@@ -5258,8 +5309,8 @@ class ModWebAppPageMixin(
                 token for token in _event_args_as_text(event).casefold().split() if token
             )
             for entry in configurable_client_entries:
-                search_text = f"{entry.friendly} {entry.name}".casefold()
-                config_rows[entry.name].set_visibility(
+                search_text = f"{entry.friendly} {entry.name} {entry.id}".casefold()
+                config_rows[entry.id].set_visibility(
                     all(token in search_text for token in query_tokens)
                 )
 
@@ -5323,11 +5374,11 @@ class ModWebAppPageMixin(
                 if len(entries) < 2:
                     raise ValueError(f"Choice group {group_name!r} requires at least two mods.")
                 selected_default = _value_as_text(config_default_selects[group_name])
-                config_default_names[group_name] = selected_default
+                config_default_ids[group_name] = selected_default
 
             updates: list[tuple[NodeModEntry, ClientPackConfig]] = []
             for entry in configurable_client_entries:
-                policy = ClientPackPolicy(_value_as_text(config_policy_selects[entry.name]))
+                policy = ClientPackPolicy(_value_as_text(config_policy_selects[entry.id]))
                 if policy is ClientPackPolicy.REQUIRED:
                     client_pack = ClientPackConfig(
                         included_in_client=entry.client_pack.included_in_client,
@@ -5344,14 +5395,14 @@ class ModWebAppPageMixin(
                         ),
                     )
                 else:
-                    group_name = config_group_names[entry.name]
+                    group_name = config_group_names[entry.id]
                     if not group_name:
                         raise ValueError(f"{entry.friendly} requires an alternative group ID.")
                     client_pack = ClientPackConfig(
                         included_in_client=entry.client_pack.included_in_client,
                         policy=policy,
                         choice_group=group_name,
-                        default_choice=config_default_names.get(group_name) == entry.name,
+                        default_choice=config_default_ids.get(group_name) == entry.id,
                     )
                 updates.append((entry, client_pack))
             return tuple(updates)
@@ -5532,12 +5583,12 @@ class ModWebAppPageMixin(
                                                 with ui.row().classes(
                                                     config_option_classes(entry.client_pack.policy)
                                                 ) as config_row:
-                                                    config_rows[entry.name] = config_row
+                                                    config_rows[entry.id] = config_row
                                                     ui.label(entry.friendly).classes("mod-client-pack-option-label")
-                                                    config_group_inputs[entry.name] = (
+                                                    config_group_inputs[entry.id] = (
                                                         ui.input(
                                                             "Group ID",
-                                                            value=config_group_names[entry.name],
+                                                            value=config_group_names[entry.id],
                                                             placeholder="e.g. minimap",
                                                         )
                                                         .props(
@@ -5548,7 +5599,7 @@ class ModWebAppPageMixin(
                                                             "mod-client-pack-config-control mod-client-pack-config-group"
                                                         )
                                                     )
-                                                    config_policy_selects[entry.name] = (
+                                                    config_policy_selects[entry.id] = (
                                                         ui.select(
                                                             {policy.value: policy.label for policy in ClientPackPolicy},
                                                             value=entry.client_pack.policy.value,
@@ -5578,15 +5629,15 @@ class ModWebAppPageMixin(
                                             "mod-client-pack-section-hint mod-subtitle"
                                         )
                                         for group_name, entries in groups.items():
-                                            member_names = {entry.name for entry in entries}
-                                            default_name = config_default_names.get(group_name)
-                                            if default_name not in member_names:
-                                                default_name = entries[0].name
-                                                config_default_names[group_name] = default_name
+                                            member_ids = {entry.id for entry in entries}
+                                            default_id = config_default_ids.get(group_name)
+                                            if default_id not in member_ids:
+                                                default_id = entries[0].id
+                                                config_default_ids[group_name] = default_id
                                             config_default_selects[group_name] = (
                                                 ui.select(
-                                                    {entry.name: entry.friendly for entry in entries},
-                                                    value=default_name,
+                                                    {entry.id: entry.friendly for entry in entries},
+                                                    value=default_id,
                                                     label=group_name,
                                                 )
                                                 .props(
@@ -5739,11 +5790,11 @@ class ModWebAppPageMixin(
 
                         def refresh_config_row(entry: NodeModEntry) -> None:
                             is_alternative = (
-                                ClientPackPolicy(_value_as_text(config_policy_selects[entry.name]))
+                                ClientPackPolicy(_value_as_text(config_policy_selects[entry.id]))
                                 is ClientPackPolicy.ALTERNATIVE
                             )
-                            config_group_inputs[entry.name].set_visibility(is_alternative)
-                            config_rows[entry.name].classes(
+                            config_group_inputs[entry.id].set_visibility(is_alternative)
+                            config_rows[entry.id].classes(
                                 config_option_classes(
                                     ClientPackPolicy.ALTERNATIVE if is_alternative else ClientPackPolicy.REQUIRED
                                 )
@@ -5763,14 +5814,14 @@ class ModWebAppPageMixin(
                         ) -> Callable[[ModWebEventArgumentsContainer], None]:
                             def handle_group_change(event: ModWebEventArgumentsContainer) -> None:
                                 raw_group_name = _event_args_as_text(event)
-                                config_group_names[entry.name] = raw_group_name
+                                config_group_names[entry.id] = raw_group_name
                                 invalid = any(character.isspace() for character in raw_group_name)
                                 if invalid:
-                                    config_group_inputs[entry.name].classes(
+                                    config_group_inputs[entry.id].classes(
                                         add="mod-client-pack-config-invalid"
                                     )
                                 else:
-                                    config_group_inputs[entry.name].classes(
+                                    config_group_inputs[entry.id].classes(
                                         remove="mod-client-pack-config-invalid"
                                     )
                                 render_config_default_choices.refresh()
@@ -5778,15 +5829,15 @@ class ModWebAppPageMixin(
                             return handle_group_change
 
                         for entry in configurable_client_entries:
-                            config_policy_selects[entry.name].on(
+                            config_policy_selects[entry.id].on(
                                 "update:model-value",
                                 create_config_policy_handler(entry),
                             )
-                            config_group_inputs[entry.name].on(
+                            config_group_inputs[entry.id].on(
                                 "update:model-value",
                                 create_config_group_handler(entry),
                             )
-                            config_group_inputs[entry.name].set_visibility(
+                            config_group_inputs[entry.id].set_visibility(
                                 entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
                             )
                         render_config_default_choices()
@@ -5918,7 +5969,9 @@ class ModWebAppPageMixin(
                         required_entries: tuple[NodeModEntry, ...] = tuple(
                             entry
                             for entry in model.mods.mods
-                            if entry.client_pack_eligible and entry.client_pack.policy is ClientPackPolicy.REQUIRED
+                            if entry.source is ModSourceKind.LOCAL
+                            and entry.client_pack_eligible
+                            and entry.client_pack.policy is ClientPackPolicy.REQUIRED
                         )
                         if optional_client_entries:
                             with ui.column().classes("mod-client-pack-section w-full"):
@@ -5928,7 +5981,7 @@ class ModWebAppPageMixin(
                                 )
                                 with ui.column().classes("mod-client-pack-option-list w-full"):
                                     for entry in optional_client_entries:
-                                        optional_client_checkboxes[entry.name] = (
+                                        optional_client_checkboxes[entry.id] = (
                                             ui.checkbox(
                                                 entry.friendly,
                                                 value=entry.client_pack.default_selected,
@@ -5950,7 +6003,7 @@ class ModWebAppPageMixin(
                                         with ui.column().classes("mod-client-pack-choice w-full"):
                                             client_choice_selects[group_name] = (
                                                 ui.select(
-                                                    {entry.name: entry.friendly for entry in choices},
+                                                    {entry.id: entry.friendly for entry in choices},
                                                     value=client_choice_defaults[group_name],
                                                     label=group_label,
                                                 )
@@ -5982,6 +6035,7 @@ class ModWebAppPageMixin(
                                 if len(required_entries) >= _VIRTUALIZED_LIST_MIN_ITEMS:
                                     required_rows: list[dict[object, object]] = [
                                         {
+                                            "id": entry.id,
                                             "name": entry.name,
                                             "friendly": entry.friendly,
                                         }
@@ -6004,7 +6058,7 @@ class ModWebAppPageMixin(
                                                     "align": "left",
                                                 },
                                             ],
-                                            row_key="name",
+                                            row_key="id",
                                             pagination=0,
                                         )
                                         .props(
@@ -6369,7 +6423,7 @@ class ModWebAppPageMixin(
                                         "align": "left",
                                     },
                                 ],
-                                row_key="name",
+                                row_key="id",
                                 selection="multiple",
                                 pagination=0,
                                 on_select=enforce_exact_metadata_selection,
@@ -6541,6 +6595,20 @@ class ModWebAppPageMixin(
                         title="Mods",
                         description=mods_description,
                     )
+                for source_status in model.mods.source_statuses:
+                    if source_status.healthy or source_status.warning is None:
+                        continue
+                    with ui.card().classes("mod-setting-card locked w-full"):
+                        warning = source_status.warning
+                        label_prefix = f"{source_status.label}: "
+                        display_warning = (
+                            warning
+                            if warning.casefold().startswith(source_status.label.casefold())
+                            else f"{label_prefix}{warning}"
+                        )
+                        ui.label(display_warning).classes(
+                            "mod-subtitle text-sm"
+                        )
                 upload_picker_action: Callable[[], None] | None = None
                 if can_upload_mod:
                     upload_picker_action = open_upload_picker
@@ -6570,16 +6638,17 @@ class ModWebAppPageMixin(
                     if len(filtered_mods) >= _VIRTUALIZED_LIST_MIN_ITEMS and callable(
                         getattr(ui, "table", None)
                     ):
-                        mod_by_name: dict[str, NodeModEntry] = {
-                            entry.name: entry for entry in filtered_mods
+                        mod_by_id: dict[str, NodeModEntry] = {
+                            entry.id: entry for entry in filtered_mods
                         }
                         rows: list[_VirtualModRow] = [
                             {
-                                "name": entry.name,
+                                "id": entry.id,
                                 "friendly": entry.friendly,
                                 "file": entry.name,
+                                "source": entry.source.label,
                                 "size": entry.size_text,
-                                "update_available": entry.name in available_update_mod_names,
+                                "update_available": entry.id in available_update_mod_ids,
                                 "placement": entry.placement.label,
                                 "policy": (
                                     ""
@@ -6588,10 +6657,14 @@ class ModWebAppPageMixin(
                                 ),
                                 "type": entry.mod_type.label,
                                 "type_tone": self._mod_type_badge_tone(entry.mod_type),
-                                "downloadable": capabilities.supports_raw_download and entry.downloadable,
+                                "downloadable": (
+                                    capabilities.supports_raw_download
+                                    and self._mod_download_url(model=model, entry=entry) is not None
+                                    and entry.supports_action(ModAction.DOWNLOAD)
+                                ),
                                 "download_block_label": entry.download_block_label or "Not downloadable",
                                 "selection_mode": mod_selection_mode,
-                                "selectable": mod_selection_mode and entry.name in selectable_name_set,
+                                "selectable": mod_selection_mode and entry.id in selectable_id_set,
                                 "show_download_block": not entry.downloadable
                                 and not (
                                     entry.mod_type is ModType.SERVER
@@ -6599,6 +6672,7 @@ class ModWebAppPageMixin(
                                 ),
                                 "show_placement": entry.placement is ModPlacement.CLIENT_ONLY,
                                 "show_policy": entry.client_pack.policy is not ClientPackPolicy.REQUIRED,
+                                "show_client_required": entry.client_required,
                                 "state_class": (
                                     "blocked"
                                     if not entry.downloadable
@@ -6616,28 +6690,28 @@ class ModWebAppPageMixin(
                         ]
 
                         def sync_virtual_selection(event: "TableSelectionEventArguments") -> None:
-                            visible_selectable_names: set[str] = {
-                                row["name"] for row in rows if row["selectable"]
+                            visible_selectable_ids: set[str] = {
+                                row["id"] for row in rows if row["selectable"]
                             }
-                            selected_mod_names.difference_update(visible_selectable_names)
+                            selected_mod_ids.difference_update(visible_selectable_ids)
                             selection_rows: list[object] = cast(
                                 list[object],
                                 cast(object, event.selection),
                             )
                             for raw_row in selection_rows:
                                 row: Mapping[str, object] = cast(Mapping[str, object], raw_row)
-                                mod_name: str = str(row.get("name", ""))
-                                if mod_name in visible_selectable_names:
-                                    selected_mod_names.add(mod_name)
+                                mod_id: str = str(row.get("id", ""))
+                                if mod_id in visible_selectable_ids:
+                                    selected_mod_ids.add(mod_id)
                             update_count()
 
                         opened_dialogs: dict[str, Dialog] = {}
 
-                        def open_virtual_mod(mod_name: str) -> None:
-                            entry: NodeModEntry | None = mod_by_name.get(mod_name)
+                        def open_virtual_mod(mod_id: str) -> None:
+                            entry: NodeModEntry | None = mod_by_id.get(mod_id)
                             if entry is None:
                                 return
-                            dialog = opened_dialogs.get(mod_name)
+                            dialog = opened_dialogs.get(mod_id)
                             if dialog is None:
                                 dialog = self._render_mod_info_dialog(
                                     ui=ui,
@@ -6645,7 +6719,7 @@ class ModWebAppPageMixin(
                                     model=model,
                                     user=user,
                                 )
-                                opened_dialogs[mod_name] = dialog
+                                opened_dialogs[mod_id] = dialog
                             dialog.open()
 
                         async def handle_virtual_mod_action(event: ModWebEventArgumentsContainer) -> None:
@@ -6657,13 +6731,17 @@ class ModWebAppPageMixin(
                             if action_value not in ("details", "download"):
                                 return
                             action: _VirtualModAction = action_value
-                            mod_name: str = str(payload.get("name", "")).strip()
+                            mod_id: str = str(payload.get("id", "")).strip()
                             if action == "details":
-                                open_virtual_mod(mod_name)
+                                open_virtual_mod(mod_id)
                                 return
-                            entry: NodeModEntry | None = mod_by_name.get(mod_name)
-                            download_url: str | None = model.mod_download_urls.get(mod_name)
-                            if entry is None or download_url is None:
+                            entry: NodeModEntry | None = mod_by_id.get(mod_id)
+                            if entry is None:
+                                return
+                            if not entry.supports_action(ModAction.DOWNLOAD):
+                                return
+                            download_url: str | None = self._mod_download_url(model=model, entry=entry)
+                            if download_url is None:
                                 return
                             await self._start_download(
                                 ui=ui,
@@ -6682,7 +6760,7 @@ class ModWebAppPageMixin(
                             ui.table(
                                 rows=cast(list[dict[object, object]], cast(object, rows)),
                                 columns=columns,
-                                row_key="name",
+                                row_key="id",
                                 selection="multiple" if mod_selection_mode else None,
                                 pagination=0,
                                 on_select=sync_virtual_selection,
@@ -6696,7 +6774,7 @@ class ModWebAppPageMixin(
                         virtual_mod_rows = rows
                         if mod_selection_mode:
                             initially_selected_rows = [
-                                row for row in rows if str(row["name"]) in selected_mod_names
+                                row for row in rows if str(row["id"]) in selected_mod_ids
                             ]
                             virtual_mod_table.selected = cast(
                                 list[dict[object, object]],
@@ -6708,7 +6786,7 @@ class ModWebAppPageMixin(
                             <q-tr :props="props" class="mod-virtual-row">
                               <q-td :colspan="props.cols.length + 1" class="mod-virtual-row-cell">
                                 <div :class="['mod-row', 'mod-row-clickable', props.row.state_class]"
-                                     :data-mod-name="props.row.name">
+                                     :data-mod-id="props.row.id">
                                   <q-checkbox v-if="props.row.selection_mode && props.row.selectable"
                                               v-model="props.selected" dense @click.stop
                                               class="mod-row-selection-checkbox" />
@@ -6717,6 +6795,7 @@ class ModWebAppPageMixin(
                                     <div class="mod-row-file">{{ props.row.file }}</div>
                                   </div>
                                   <div class="mod-row-meta">
+                                    <span class="mod-pill">{{ props.row.source }}</span>
                                     <span class="mod-pill size">{{ props.row.size }}</span>
                                     <span v-if="props.row.update_available" class="mod-pill size update">Update</span>
                                     <span v-if="props.row.show_placement" class="mod-pill">
@@ -6724,6 +6803,9 @@ class ModWebAppPageMixin(
                                     </span>
                                     <span v-if="props.row.show_policy" class="mod-pill">
                                       {{ props.row.policy }}
+                                    </span>
+                                    <span v-if="props.row.show_client_required" class="mod-pill">
+                                      Client required
                                     </span>
                                     <span v-if="props.row.show_download_block" class="mod-pill blocked">
                                       {{ props.row.download_block_label }}
@@ -6749,11 +6831,11 @@ class ModWebAppPageMixin(
                             js_handler="""
                             (event) => {
                               const target = event.target instanceof Element ? event.target : null;
-                              const row = target?.closest('[data-mod-name]');
+                              const row = target?.closest('[data-mod-id]');
                               if (!row) return;
                               emit({
                                 action: target.closest('[data-mod-download]') ? 'download' : 'details',
-                                name: row.dataset.modName,
+                                id: row.dataset.modId,
                               });
                             }
                             """,
@@ -6767,9 +6849,9 @@ class ModWebAppPageMixin(
 
                     with ui.column().classes("w-full mod-list"):
 
-                        def _create_mod_selection_handler(mod_name: str) -> Callable[[ModWebValueContainer], None]:
+                        def _create_mod_selection_handler(mod_id: str) -> Callable[[ModWebValueContainer], None]:
                             def _handle_mod_selection_change(event: ModWebValueContainer) -> None:
-                                set_selected(mod_name, bool(_value_as_object(event)))
+                                set_selected(mod_id, bool(_value_as_object(event)))
 
                             return _handle_mod_selection_change
 
@@ -6778,21 +6860,21 @@ class ModWebAppPageMixin(
                                 ui=ui,
                                 entry=entry,
                                 download_url=(
-                                    model.mod_download_urls.get(entry.name)
+                                    self._mod_download_url(model=model, entry=entry)
                                     if capabilities.supports_raw_download
                                     else None
                                 ),
-                                on_change=_create_mod_selection_handler(entry.name),
-                                can_select=entry.name in selectable_name_set,
+                                on_change=_create_mod_selection_handler(entry.id),
+                                can_select=entry.id in selectable_id_set,
                                 show_selection=mod_selection_mode,
                                 app_friendly=model.app_friendly,
                                 model=model,
                                 user=user,
-                                has_update=entry.name in available_update_mod_names,
+                                has_update=entry.id in available_update_mod_ids,
                             )
                             if checkbox is not None:
-                                checkboxes[entry.name] = checkbox
-                                checkbox.set_value(entry.name in selected_mod_names)
+                                checkboxes[entry.id] = checkbox
+                                checkbox.set_value(entry.id in selected_mod_ids)
 
                 def _submit_mod_search(search_input: ModWebValueContainer) -> None:
                     nonlocal current_search_query
@@ -6847,7 +6929,7 @@ class ModWebAppPageMixin(
                     check_all_updates=(
                         check_all_mod_updates
                         if model.app_scope == config.AppScopes.factorio.value
-                        and bool(model.mods.mods)
+                        and bool(update_check_entries)
                         and self._user_has_level(user, Power_Level.user)
                         else None
                     ),

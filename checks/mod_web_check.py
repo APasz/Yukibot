@@ -62,6 +62,7 @@ from apps._config import (
     SteamUpdateBranch,
     is_client_pack_candidate,
 )
+from apps._mod_catalog import ModAction, ModSourceKind
 from apps._steam import SteamGameServerLoginTokenStatus
 from apps._console import ConsoleResponseSource
 from apps._updater import (
@@ -181,6 +182,7 @@ from node_api.console import NodeConsoleActionEntry, NodeConsoleActionParameter
 from node_api.mod import (
     NodeModEntry,
     NodeModList,
+    NodeModSourceStatus,
     NodeModMutationAction,
     NodeModMutationResult,
     NodeModSummary,
@@ -1031,6 +1033,7 @@ class ModWebTests(unittest.TestCase):
         *,
         app_name: str = "minecraft_alpha",
         mods: tuple[NodeModEntry, ...] = (),
+        source_statuses: tuple[NodeModSourceStatus, ...] = (),
     ) -> NodeModList:
         return NodeModList(
             app_name=app_name,
@@ -1046,6 +1049,7 @@ class ModWebTests(unittest.TestCase):
             ),
             mods=mods,
             app_stats=None,
+            source_statuses=source_statuses,
         )
 
     def test_notification_tray_item_validates_progress_range(self) -> None:
@@ -1477,6 +1481,12 @@ class ModWebTests(unittest.TestCase):
         size_text: str = "128B",
         client_pack: ClientPackConfig | None = None,
         placement: ModPlacement | None = None,
+        source: ModSourceKind = ModSourceKind.LOCAL,
+        source_key: str | None = None,
+        available_actions: tuple[ModAction, ...] = (),
+        artifact_available: bool = True,
+        client_required: bool = False,
+        client_pack_eligible: bool | None = None,
     ) -> NodeModEntry:
         resolved_placement = placement or (ModPlacement.SERVER_ENABLED if enabled else ModPlacement.SERVER_DISABLED)
         resolved_client_pack = client_pack or ClientPackConfig(
@@ -1499,12 +1509,25 @@ class ModWebTests(unittest.TestCase):
             size_text=size_text,
             placement=resolved_placement,
             server_loadable=resolved_placement.server_loadable,
-            client_pack_eligible=is_client_pack_candidate(resolved_placement, mod_type.side)
-            and resolved_client_pack.included_in_client
-            and downloadable,
+            client_pack_eligible=(
+                is_client_pack_candidate(resolved_placement, mod_type.side)
+                and resolved_client_pack.included_in_client
+                and downloadable
+                if client_pack_eligible is None
+                else client_pack_eligible
+            ),
             archive_name=name,
-            source_path=f"/mods/{name}",
+            source_path=(
+                f"/mods/{name}"
+                if source is ModSourceKind.LOCAL
+                else f"{source.value}:{source_key if source_key is not None else name}"
+            ),
             client_pack=resolved_client_pack,
+            source=source,
+            source_key=source_key,
+            available_actions=available_actions,
+            artifact_available=artifact_available,
+            client_required=client_required,
         )
 
     def _render_mod_info_dialog_labels(self, entry: NodeModEntry) -> list[str]:
@@ -6103,7 +6126,7 @@ class ModWebTests(unittest.TestCase):
             "/api/node/apps/minecraft%20alpha/mods/download?enabled_only=true",
         )
         self.assertEqual(
-            model.mod_download_urls["Some Mod+1.0.jar"],
+            model.mod_download_urls[mods.mods[0].id],
             "/api/node/apps/minecraft%20alpha/mods/Some%20Mod%2B1.0.jar/download",
         )
 
@@ -11859,8 +11882,8 @@ class ModWebTests(unittest.TestCase):
             )
 
         self.assertEqual(result.checked_mod_count, 3)
-        self.assertEqual(result.update_mod_names, frozenset({"available.zip"}))
-        self.assertEqual(result.failed_mod_names, ("unavailable.zip",))
+        self.assertEqual(result.update_mod_ids, frozenset({entries[0].id}))
+        self.assertEqual(result.failed_mod_ids, (entries[1].id,))
         self.assertEqual(checked_mod_names, [entry.name for entry in entries])
         self.assertEqual(
             [call_args.kwargs["entry"] for call_args in check_update.await_args_list],
@@ -11906,11 +11929,11 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(remote_json.await_count, 1)
         self.assertEqual(
-            service._cached_mod_update_names(model=model, entries=(entry,)),
-            frozenset({entry.name}),
+            service._cached_mod_update_ids(model=model, entries=(entry,)),
+            frozenset({entry.id}),
         )
         self.assertEqual(
-            service._cached_mod_update_names(
+            service._cached_mod_update_ids(
                 model=model,
                 entries=(replace(entry, version="1.1.0"),),
             ),
@@ -11924,8 +11947,8 @@ class ModWebTests(unittest.TestCase):
         )
         service._invalidate_mod_update_cache(model=model, mod_name=entry.name)
         self.assertEqual(
-            service._cached_mod_update_names(model=model, entries=(entry, other_entry)),
-            frozenset({other_entry.name}),
+            service._cached_mod_update_ids(model=model, entries=(entry, other_entry)),
+            frozenset({other_entry.id}),
         )
 
     def test_mod_info_dialog_uses_cached_update_result(self) -> None:
@@ -12041,6 +12064,7 @@ class ModWebTests(unittest.TestCase):
             MagicMock(),
             MagicMock(),
             MagicMock(),
+            MagicMock(),
             update_label,
             MagicMock(),
             MagicMock(),
@@ -12138,7 +12162,19 @@ class ModWebTests(unittest.TestCase):
             app_start_blocked=False,
             settings=None,
             console_actions=None,
-            mods=self._mod_list(app_name="factorio_alpha", mods=mods),
+            mods=self._mod_list(
+                app_name="factorio_alpha",
+                mods=mods,
+                source_statuses=(
+                    NodeModSourceStatus(
+                        source=ModSourceKind.STEAM_WORKSHOP,
+                        label="Steam Workshop",
+                        healthy=False,
+                        warning="Steam Workshop unavailable; showing cached data.",
+                        using_cached_entries=True,
+                    ),
+                ),
+            ),
             download_all_url="/mods/download",
             download_enabled_url="/mods/download?enabled_only=true",
             mod_download_urls={mod.name: f"/mods/{mod.name}" for mod in mods},
@@ -12180,10 +12216,15 @@ class ModWebTests(unittest.TestCase):
         ):
             service._render_mods_section(ui=cast(ModWebUi, ui), model=model, user=user)
             click_handler = table.on.call_args.args[1]
-            asyncio.run(click_handler(SimpleNamespace(args={"action": "details", "name": mods[0].name})))
+            asyncio.run(click_handler(SimpleNamespace(args={"action": "details", "id": mods[0].id})))
 
         ui.table.assert_called_once()
         self.assertEqual(len(ui.table.call_args.kwargs["rows"]), 50)
+        self.assertEqual(ui.table.call_args.kwargs["row_key"], "id")
+        self.assertIn(
+            call("Steam Workshop unavailable; showing cached data."),
+            ui.label.call_args_list,
+        )
         self.assertIn("virtual-scroll", table.props.call_args.args[0])
         self.assertIn("hide-bottom", table.props.call_args.args[0])
         virtual_row_template = table.add_slot.call_args.args[1]
@@ -12191,7 +12232,7 @@ class ModWebTests(unittest.TestCase):
             "['mod-row', 'mod-row-clickable', props.row.state_class]",
             virtual_row_template,
         )
-        self.assertIn(':data-mod-name="props.row.name"', virtual_row_template)
+        self.assertIn(':data-mod-id="props.row.id"', virtual_row_template)
         self.assertIn("data-mod-download", virtual_row_template)
         self.assertNotIn("$parent.$emit", virtual_row_template)
         self.assertIn('class="mod-pill size"', virtual_row_template)
@@ -12318,6 +12359,120 @@ class ModWebTests(unittest.TestCase):
             service._filter_mod_entries(mods=mods, options=options, search_query="missing"),
             (),
         )
+
+    def test_source_qualified_mod_identity_keeps_duplicate_workshop_rows_read_only(self) -> None:
+        service = ModWebService()
+        local = self._mod_entry(name="shared-addon", friendly="Shared addon")
+        workshop = self._mod_entry(
+            name="shared-addon",
+            friendly="Shared addon",
+            downloadable=False,
+            source=ModSourceKind.STEAM_WORKSHOP,
+            source_key="200",
+            artifact_available=False,
+            client_required=True,
+            client_pack=ClientPackConfig(included_in_client=False),
+            client_pack_eligible=False,
+        )
+        mods = (local, workshop)
+        options = service._mod_options(mods)
+        model = cast(ModWebPageModel, cast(object, SimpleNamespace(mods=SimpleNamespace(mods=mods))))
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        self.assertEqual(tuple(option.option_id for option in options), (local.id, workshop.id))
+        self.assertEqual(service._filter_mod_entries(mods=mods, options=options, search_query="shared addon"), mods)
+        self.assertEqual(
+            service._filter_mod_entries(mods=mods, options=options, search_query="steam workshop 200"),
+            (workshop,),
+        )
+        self.assertIs(service._resolve_mod_entry(model=model, mod_name=local.id), local)
+        self.assertIs(service._resolve_mod_entry(model=model, mod_name=workshop.id), workshop)
+        self.assertIs(service._resolve_mod_entry(model=model, mod_name=local.name), local)
+        download_model = cast(
+            ModWebPageModel,
+            cast(
+                object,
+                SimpleNamespace(
+                    mod_download_urls={
+                        local.id: "/mods/shared-addon/download",
+                        workshop.id: "/mods/shared-addon/download",
+                    }
+                ),
+            ),
+        )
+        self.assertEqual(
+            service._mod_download_url(model=download_model, entry=local),
+            "/mods/shared-addon/download",
+        )
+        self.assertIsNone(service._mod_download_url(model=download_model, entry=workshop))
+        with patch.object(service, "_user_has_level", return_value=True):
+            self.assertEqual(service._available_mod_actions(user=user, entry=workshop), ())
+            self.assertEqual(
+                service._available_mod_actions(
+                    user=user,
+                    entry=replace(workshop, available_actions=(ModAction.DELETE,)),
+                ),
+                (),
+            )
+        remote_mutation = AsyncMock()
+        with patch.object(service, "_remote_mod_mutation_async", new=remote_mutation):
+            with self.assertRaisesRegex(PermissionError, "read-only"):
+                asyncio.run(
+                    service._mutate_mod(
+                        model=model,
+                        entry=workshop,
+                        action=NodeModMutationAction.DELETE,
+                        user=user,
+                    )
+                )
+        remote_mutation.assert_not_awaited()
+
+    def test_bulk_mod_update_check_skips_non_local_entries(self) -> None:
+        service = ModWebService()
+        local = self._mod_entry(name="local.zip", friendly="Local")
+        workshop = self._mod_entry(
+            name="200",
+            friendly="Workshop",
+            downloadable=False,
+            source=ModSourceKind.STEAM_WORKSHOP,
+            source_key="200",
+            artifact_available=False,
+            client_pack=ClientPackConfig(included_in_client=False),
+            client_pack_eligible=False,
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="factorio_alpha")),
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        update_result = NodeModUpdateCheckResult(
+            app_name="factorio_alpha",
+            app_friendly="Factorio Alpha",
+            node="yuki",
+            mod_name=local.name,
+            mod_friendly=local.friendly,
+            status=NodeModUpdateStatus.CURRENT,
+            current_version="1.0.0",
+            latest_version="1.0.0",
+            latest_file_name="local_1.0.0.zip",
+            page_url="https://mods.factorio.com/mod/local",
+            message="Current.",
+        )
+        check_update = AsyncMock(return_value=update_result)
+
+        with patch.object(service, "_check_mod_update", new=check_update):
+            result = asyncio.run(
+                service._check_all_mod_updates(
+                    model=model,
+                    entries=(local, workshop),
+                    user=user,
+                )
+            )
+
+        self.assertEqual(result.checked_mod_count, 1)
+        self.assertEqual(result.update_mod_ids, frozenset())
+        self.assertEqual(result.failed_mod_ids, ())
+        check_update.assert_awaited_once_with(model=model, entry=local, user=user)
 
     def test_sort_mod_entries_defaults_can_use_newest_first_and_support_all_orders(
         self,
@@ -12525,8 +12680,8 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             ModWebService._resolve_client_pack_mod_names(
                 mods=(required, optional, default_choice, other_choice),
-                optional_names=frozenset({optional.name}),
-                choice_names={"renderer": other_choice.name},
+                optional_ids=frozenset({optional.id}),
+                choice_ids={"renderer": other_choice.id},
             ),
             (required.name, optional.name, other_choice.name),
         )
@@ -12534,8 +12689,8 @@ class ModWebTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Every client-pack choice group"):
             ModWebService._resolve_client_pack_mod_names(
                 mods=(required, default_choice, other_choice),
-                optional_names=frozenset(),
-                choice_names={},
+                optional_ids=frozenset(),
+                choice_ids={},
             )
 
     def test_client_pack_formats_only_offer_launcher_exports_for_minecraft(

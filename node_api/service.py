@@ -833,7 +833,7 @@ class NodeApiService:
             node=self.node_name,
             running=app.check_running(),
             enabled=app.cfg.enabled,
-            supports_mods=app.mods is not None,
+            supports_mods=getattr(app, "mod_catalog", None) is not None,
             supports_configs=app.supports_config_files,
             scope=app_scope
             if isinstance(app_scope, str)

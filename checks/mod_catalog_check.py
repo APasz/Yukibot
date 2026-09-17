@@ -19,6 +19,8 @@ from apps._mod_catalog import (
     ModInventoryEntry,
     ModReference,
     ModSourceKind,
+    ModSourceRefreshPolicy,
+    ModSourceStatus,
 )
 
 
@@ -27,8 +29,17 @@ class _FileMod(Mod):
         await self._handle_drop(src, atomic)
 
 
-class _StaticSource:
+class _LocalTestSource:
     kind = ModSourceKind.LOCAL
+    label = ModSourceKind.LOCAL.label
+    refresh_policy = ModSourceRefreshPolicy.FAIL_FAST
+
+    @property
+    def status(self) -> ModSourceStatus:
+        return ModSourceStatus.ready(self.kind, label=self.label)
+
+
+class _StaticSource(_LocalTestSource):
 
     def __init__(self, entries: tuple[ModInventoryEntry, ...]) -> None:
         self._entries = entries
@@ -38,6 +49,15 @@ class _StaticSource:
 
     def list_entries(self) -> tuple[ModInventoryEntry, ...]:
         return self._entries
+
+
+class _FailingLocalSource(_LocalTestSource):
+
+    async def refresh(self) -> None:
+        raise RuntimeError("local inventory failure")
+
+    def list_entries(self) -> tuple[ModInventoryEntry, ...]:
+        return ()
 
 
 class ModCatalogTests(unittest.IsolatedAsyncioTestCase):
@@ -143,3 +163,9 @@ class ModCatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(entry.artifact_available)
         self.assertIn(ModAction.DISABLE, entry.available_actions)
         self.assertIn(ModAction.DELETE, entry.available_actions)
+
+    async def test_fail_fast_local_source_error_is_not_silently_retained(self) -> None:
+        catalog = ModCatalog((_FailingLocalSource(),))
+
+        with self.assertRaisesRegex(RuntimeError, "local inventory failure"):
+            await catalog.refresh()

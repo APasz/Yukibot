@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -29,16 +30,101 @@ from apps._config import (
 )
 from apps._mod import Mod, Mod_Manager
 
+log = logging.getLogger(__name__)
+
 
 class ModSourceKind(StrEnum):
     """A backend that supplies managed mods for an app."""
 
     LOCAL = "local"
+    STEAM_WORKSHOP = "steam_workshop"
+
+    @property
+    def label(self) -> str:
+        """Return the concise source name shown to operators."""
+
+        match self:
+            case ModSourceKind.LOCAL:
+                return "Local"
+            case ModSourceKind.STEAM_WORKSHOP:
+                return "Steam Workshop"
+
+
+class ModSourceRefreshPolicy(StrEnum):
+    """How an inventory source handles a known external refresh failure."""
+
+    FAIL_FAST = "fail_fast"
+    RETAIN_LAST_GOOD = "retain_last_good"
+
+
+class ModSourceRefreshError(RuntimeError):
+    """An expected, user-safe failure while refreshing an external source.
+
+    Sources only use this for anticipated external failures such as a timeout,
+    unavailable endpoint, or malformed provider response.  Programming and
+    local filesystem failures deliberately retain their original exception
+    types and remain visible to callers.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ModSourceStatus:
+    """Source-neutral health information for an aggregated mod inventory."""
+
+    source: ModSourceKind
+    label: str
+    healthy: bool = True
+    warning: str | None = None
+    using_cached_entries: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, ModSourceKind):
+            raise TypeError("Mod source status source must be a ModSourceKind.")
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError("Mod source status label must be non-empty text.")
+        if not isinstance(self.healthy, bool):
+            raise TypeError("Mod source status healthy must be a bool.")
+        if self.warning is not None and (not isinstance(self.warning, str) or not self.warning.strip()):
+            raise ValueError("Mod source status warning must be non-empty text when set.")
+        if not isinstance(self.using_cached_entries, bool):
+            raise TypeError("Mod source status cached-entry flag must be a bool.")
+        if self.healthy and self.warning is not None:
+            raise ValueError("Healthy mod sources cannot carry a warning.")
+        if self.healthy and self.using_cached_entries:
+            raise ValueError("Healthy mod sources cannot report cached fallback entries.")
+        if not self.healthy and self.warning is None:
+            raise ValueError("Unhealthy mod sources require a warning.")
+
+    @classmethod
+    def ready(cls, source: ModSourceKind, *, label: str | None = None) -> ModSourceStatus:
+        """Build a healthy status for one configured source."""
+
+        return cls(source=source, label=source.label if label is None else label)
+
+    @classmethod
+    def unavailable(
+        cls,
+        source: ModSourceKind,
+        *,
+        warning: str,
+        label: str | None = None,
+        using_cached_entries: bool = False,
+    ) -> ModSourceStatus:
+        """Build a warning status without naming a provider-specific error type."""
+
+        return cls(
+            source=source,
+            label=source.label if label is None else label,
+            healthy=False,
+            warning=warning,
+            using_cached_entries=using_cached_entries,
+        )
 
 
 class ModAction(StrEnum):
-    """A mutation that a source can support for one inventory entry."""
+    """An action that a source can support for one inventory entry."""
 
+    DOWNLOAD = "download"
     ENABLE = "enable"
     DISABLE = "disable"
     TOGGLE_COREMOD = "toggle_coremod"
@@ -138,6 +224,7 @@ class ModInventoryEntry:
     server_loadable: bool
     client_pack_eligible: bool
     artifact: ModArtifact | None
+    client_required: bool = False
     description: str | None = None
     notes: str | None = None
     client_path: Path | None = None
@@ -153,6 +240,8 @@ class ModInventoryEntry:
             raise ValueError("Mod inventory entry friendly name must be non-empty.")
         if any(not isinstance(action, ModAction) for action in self.available_actions):
             raise TypeError("Mod inventory entry actions must be ModAction values.")
+        if not isinstance(self.client_required, bool):
+            raise TypeError("Mod inventory entry client-required state must be a bool.")
         if self.enabled is not self.placement.enabled:
             raise ValueError("Mod inventory entry enabled state conflicts with placement.")
         if self.server_loadable is not self.placement.server_loadable:
@@ -212,6 +301,8 @@ def _local_available_actions(mod: Mod) -> frozenset[ModAction]:
             actions.add(ModAction.TOGGLE_DOWNLOAD_BLOCK)
     if mod.server_loadable:
         actions.add(ModAction.DISABLE if mod.cfg.enabled else ModAction.ENABLE)
+    if mod.downloadable:
+        actions.add(ModAction.DOWNLOAD)
     return frozenset(actions)
 
 
@@ -220,6 +311,15 @@ class ModInventorySource(Protocol):
 
     @property
     def kind(self) -> ModSourceKind: ...
+
+    @property
+    def label(self) -> str: ...
+
+    @property
+    def refresh_policy(self) -> ModSourceRefreshPolicy: ...
+
+    @property
+    def status(self) -> ModSourceStatus: ...
 
     async def refresh(self) -> None: ...
 
@@ -230,12 +330,18 @@ class LocalModSource:
     """Adapter exposing ``Mod_Manager`` through the source-neutral catalog."""
 
     kind = ModSourceKind.LOCAL
+    label = ModSourceKind.LOCAL.label
+    refresh_policy = ModSourceRefreshPolicy.FAIL_FAST
 
     def __init__(self, manager: Mod_Manager) -> None:
         self._manager = manager
 
     async def refresh(self) -> None:
         await self._manager.reload_mods()
+
+    @property
+    def status(self) -> ModSourceStatus:
+        return ModSourceStatus.ready(self.kind, label=self.label)
 
     def list_entries(self) -> tuple[ModInventoryEntry, ...]:
         return tuple(ModInventoryEntry.from_local_mod(mod) for mod in self._manager.list_mods())
@@ -254,13 +360,41 @@ class ModCatalog:
         if len(source_kinds) != len(set(source_kinds)):
             raise ValueError("Mod catalog source kinds must be unique.")
         self._sources = source_values
+        self._source_snapshots: dict[ModSourceKind, tuple[ModInventoryEntry, ...]] = {}
+        self._source_statuses: dict[ModSourceKind, ModSourceStatus] = {
+            source.kind: self._status_for_source(source) for source in source_values
+        }
 
     @property
     def sources(self) -> tuple[ModInventorySource, ...]:
         return self._sources
 
+    @property
+    def source_statuses(self) -> tuple[ModSourceStatus, ...]:
+        """Return health information in configured-source order."""
+
+        return tuple(self._source_statuses[source.kind] for source in self._sources)
+
     async def refresh(self) -> None:
-        await asyncio.gather(*(source.refresh() for source in self._sources))
+        results = await asyncio.gather(*(source.refresh() for source in self._sources), return_exceptions=True)
+        fatal_errors: list[BaseException] = []
+        for source, result in zip(self._sources, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, BaseException):
+                if (
+                    isinstance(result, ModSourceRefreshError)
+                    and self._refresh_policy_for_source(source) is ModSourceRefreshPolicy.RETAIN_LAST_GOOD
+                ):
+                    self._record_expected_refresh_failure(source=source, error=result)
+                    continue
+                fatal_errors.append(result)
+                continue
+            entries = self._entries_for_source(source)
+            self._source_snapshots[source.kind] = entries
+            self._source_statuses[source.kind] = self._status_for_source(source)
+        if fatal_errors:
+            raise fatal_errors[0]
 
     def list_entries(self) -> tuple[ModInventoryEntry, ...]:
         """Return entries in configured-source order and source-owned entry order."""
@@ -268,11 +402,10 @@ class ModCatalog:
         entries: list[ModInventoryEntry] = []
         references: set[ModReference] = set()
         for source in self._sources:
-            for entry in source.list_entries():
-                if not isinstance(entry, ModInventoryEntry):
-                    raise TypeError("Mod catalog sources must return ModInventoryEntry values.")
-                if entry.reference.source is not source.kind:
-                    raise ValueError("Mod catalog source returned an entry for a different source kind.")
+            source_entries = self._source_snapshots.get(source.kind)
+            if source_entries is None:
+                source_entries = self._entries_for_source(source)
+            for entry in source_entries:
                 if entry.reference in references:
                     raise ValueError("Mod catalog contains duplicate source references.")
                 references.add(entry.reference)
@@ -291,6 +424,60 @@ class ModCatalog:
                 return entry
         raise LookupError(f"No such managed mod: {resolved_reference.id}")
 
+    @staticmethod
+    def _label_for_source(source: ModInventorySource) -> str:
+        raw_label = getattr(source, "label", source.kind.label)
+        if not isinstance(raw_label, str) or not raw_label.strip():
+            raise ValueError("Mod catalog source labels must be non-empty text.")
+        return raw_label
+
+    @staticmethod
+    def _refresh_policy_for_source(source: ModInventorySource) -> ModSourceRefreshPolicy:
+        raw_policy = getattr(source, "refresh_policy", ModSourceRefreshPolicy.FAIL_FAST)
+        if not isinstance(raw_policy, ModSourceRefreshPolicy):
+            raise TypeError("Mod catalog source refresh policies must be ModSourceRefreshPolicy values.")
+        return raw_policy
+
+    def _status_for_source(self, source: ModInventorySource) -> ModSourceStatus:
+        raw_status = getattr(source, "status", None)
+        if raw_status is None:
+            return ModSourceStatus.ready(source.kind, label=self._label_for_source(source))
+        if not isinstance(raw_status, ModSourceStatus):
+            raise TypeError("Mod catalog source status must be a ModSourceStatus value.")
+        if raw_status.source is not source.kind:
+            raise ValueError("Mod catalog source status belongs to a different source kind.")
+        return raw_status
+
+    @staticmethod
+    def _entries_for_source(source: ModInventorySource) -> tuple[ModInventoryEntry, ...]:
+        source_entries = source.list_entries()
+        if not isinstance(source_entries, tuple):
+            raise TypeError("Mod catalog sources must return entries as a tuple.")
+        for entry in source_entries:
+            if not isinstance(entry, ModInventoryEntry):
+                raise TypeError("Mod catalog sources must return ModInventoryEntry values.")
+            if entry.reference.source is not source.kind:
+                raise ValueError("Mod catalog source returned an entry for a different source kind.")
+        return source_entries
+
+    def _record_expected_refresh_failure(
+        self,
+        *,
+        source: ModInventorySource,
+        error: ModSourceRefreshError,
+    ) -> None:
+        has_snapshot = source.kind in self._source_snapshots
+        warning = str(error).strip() or f"{self._label_for_source(source)} unavailable."
+        if has_snapshot:
+            warning = f"{warning.rstrip('.;')}; showing cached data."
+        self._source_statuses[source.kind] = ModSourceStatus.unavailable(
+            source.kind,
+            label=self._label_for_source(source),
+            warning=warning,
+            using_cached_entries=has_snapshot,
+        )
+        log.warning("Mod inventory source refresh failed: source=%s warning=%s", source.kind.value, warning)
+
 
 __all__ = (
     "LocalModSource",
@@ -300,5 +487,8 @@ __all__ = (
     "ModInventoryEntry",
     "ModInventorySource",
     "ModReference",
+    "ModSourceRefreshError",
+    "ModSourceRefreshPolicy",
     "ModSourceKind",
+    "ModSourceStatus",
 )

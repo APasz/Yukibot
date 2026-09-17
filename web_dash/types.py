@@ -393,15 +393,15 @@ class _ModWebModToolbarBindings:
 @dataclass(frozen=True, slots=True)
 class _ModWebModUpdateBatchResult:
     checked_mod_count: int
-    update_mod_names: frozenset[str]
-    failed_mod_names: tuple[str, ...]
+    update_mod_ids: frozenset[str]
+    failed_mod_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class _ModWebModUpdateCacheKey:
     node_name: str
     app_name: str
-    mod_name: str
+    mod_id: str
     installed_version: str | None
 
 

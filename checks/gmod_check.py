@@ -18,6 +18,7 @@ import hikari
 from _manager import AppInstallInput, App_Manager
 from apps._app import AppPortClaim, AppRuntimeFault, AppRuntimeFaultCode, AppRuntimeFaultKind, NetworkProtocol
 from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
+from apps._mod_catalog import ModSourceKind
 from apps._updater import SteamCmd_Update_Manager
 from apps._steam import STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL
 from apps.gmod import (
@@ -502,6 +503,13 @@ class GmodIntegrationTests(unittest.TestCase):
             current_input = settings_manager.current_input_value(setting, actor_user_id=42)
 
         self.assertEqual(current_input, "234567890, 345678901")
+
+    def test_gmod_registers_the_read_only_steam_workshop_mod_source(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            app = self._app(Path(temporary_directory))
+
+        catalog = app.has_mod_catalog
+        self.assertEqual(tuple(source.kind for source in catalog.sources), (ModSourceKind.STEAM_WORKSHOP,))
 
     def test_expired_gslt_exit_has_a_safe_actionable_diagnosis(self) -> None:
         with TemporaryDirectory() as temporary_directory:

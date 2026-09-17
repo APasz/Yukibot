@@ -19,6 +19,7 @@ from apps._config import (
     mod_pages_in_display_order,
     normalise_mod_page_url,
 )
+from apps._mod_catalog import ModAction, ModReference, ModSourceKind
 from apps._launcher_metadata import has_curseforge_api_key, launcher_project_page_url
 from apps.minecraft import MinecraftRecipeMutation
 
@@ -159,11 +160,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
         return _ModWebModUpdateCacheKey(
             node_name=model.node_name.casefold(),
             app_name=model.app_name.casefold(),
-            mod_name=entry.name,
+            mod_id=entry.id,
             installed_version=entry.version,
         )
 
-    def _cached_mod_update_names(
+    def _cached_mod_update_ids(
         self,
         *,
         model: ModWebPageModel,
@@ -172,9 +173,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
         now = time.monotonic()
         with self._mod_update_check_cache_lock:
             return frozenset(
-                entry.name
+                entry.id
                 for entry in entries
-                if (
+                if entry.source is ModSourceKind.LOCAL
+                and (
                     cached := self._cached_mod_update_result_locked(
                         cache_key=self._mod_update_cache_key(model=model, entry=entry),
                         now=now,
@@ -245,7 +247,18 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 del self._mod_update_check_cache[oldest_key]
             self._mod_update_check_cache[cache_key] = cache_entry
 
-    def _invalidate_mod_update_cache(self, *, model: ModWebPageModel, mod_name: str | None = None) -> None:
+    def _invalidate_mod_update_cache(
+        self,
+        *,
+        model: ModWebPageModel,
+        mod_id: str | None = None,
+        mod_name: str | None = None,
+    ) -> None:
+        if mod_id is not None and mod_name is not None:
+            raise ValueError("Specify either a source-qualified mod ID or a legacy local mod name.")
+        resolved_mod_id = mod_id
+        if resolved_mod_id is None and mod_name is not None:
+            resolved_mod_id = ModReference.local(mod_name).id
         node_name = model.node_name.casefold()
         app_name = model.app_name.casefold()
         with self._mod_update_check_cache_lock:
@@ -254,7 +267,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 for key in self._mod_update_check_cache
                 if key.node_name == node_name
                 and key.app_name == app_name
-                and (mod_name is None or key.mod_name == mod_name)
+                and (resolved_mod_id is None or key.mod_id == resolved_mod_id)
             )
             for cache_key in cache_keys:
                 del self._mod_update_check_cache[cache_key]
@@ -356,7 +369,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _mod_download_summary(entry: NodeModEntry) -> str:
-        if entry.downloadable:
+        if entry.supports_action(ModAction.DOWNLOAD):
             return "Available"
         reason = entry.download_block_label or entry.download_block_reason
         return "Blocked" if reason is None else f"Blocked — {reason}"
@@ -367,7 +380,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             return "Excluded — Built-in"
         if entry.placement is ModPlacement.SERVER_DISABLED:
             return "Excluded — Server disabled"
-        if not entry.downloadable:
+        if not entry.supports_action(ModAction.DOWNLOAD):
             return "Excluded — File download blocked"
         if not entry.client_pack.included_in_client:
             return "Not included"
@@ -392,10 +405,36 @@ class ModWebActionsMixin(ModWebServiceSupport):
         return entry.mod_type in {ModType.COREMOD, ModType.BUILTIN}
 
     def _resolve_mod_entry(self, *, model: ModWebPageModel, mod_name: str) -> NodeModEntry:
+        """Resolve a source-qualified UI identity, with a local legacy fallback."""
+
         for entry in model.mods.mods:
-            if entry.name == mod_name:
+            if entry.id == mod_name:
                 return entry
+        local_matches = tuple(
+            entry
+            for entry in model.mods.mods
+            if entry.source is ModSourceKind.LOCAL and entry.name == mod_name
+        )
+        if len(local_matches) == 1:
+            return local_matches[0]
         raise ValueError(f"Unknown mod: {mod_name}")
+
+    @staticmethod
+    def _require_legacy_local_mod_entry(entry: NodeModEntry) -> None:
+        if entry.source is not ModSourceKind.LOCAL:
+            raise PermissionError(f"{entry.source.label} entries are read-only in this view.")
+
+    @staticmethod
+    def _supports_legacy_local_action(entry: NodeModEntry, action: ModAction) -> bool:
+        """Return whether the legacy local routes can safely perform an action."""
+
+        return entry.source is ModSourceKind.LOCAL and entry.supports_action(action)
+
+    @classmethod
+    def _require_local_entry_action(cls, *, entry: NodeModEntry, action: ModAction) -> None:
+        cls._require_legacy_local_mod_entry(entry)
+        if not cls._supports_legacy_local_action(entry, action):
+            raise PermissionError(f"This mod does not support {action.value.replace('_', ' ')}.")
 
     def _user_can_mutate_mod(
         self,
@@ -404,6 +443,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
         entry: NodeModEntry,
         action: NodeModMutationAction,
     ) -> bool:
+        if not self._supports_legacy_local_action(entry, ModAction(action.value)):
+            return False
         if self._is_builtin_mod(entry):
             return False
         required_level = required_mod_mutation_level(action, is_protected=self._is_protected_mod(entry))
@@ -796,19 +837,23 @@ class ModWebActionsMixin(ModWebServiceSupport):
         self,
         *,
         model: ModWebPageModel,
-        mod_name: str,
+        mod_name: str | None = None,
+        entry: NodeModEntry | None = None,
         action: NodeModMutationAction,
         user: ModWebUser,
     ) -> NodeModMutationResult:
-        entry = self._resolve_mod_entry(model=model, mod_name=mod_name)
-        if self._is_builtin_mod(entry):
+        if (mod_name is None) is (entry is None):
+            raise ValueError("Mod mutation requires exactly one mod identity.")
+        resolved_entry = entry if entry is not None else self._resolve_mod_entry(model=model, mod_name=mod_name or "")
+        self._require_local_entry_action(entry=resolved_entry, action=ModAction(action.value))
+        if self._is_builtin_mod(resolved_entry):
             raise PermissionError("Built-in mods cannot be changed from mod web.")
-        required_level = required_mod_mutation_level(action, is_protected=self._is_protected_mod(entry))
+        required_level = required_mod_mutation_level(action, is_protected=self._is_protected_mod(resolved_entry))
         if not self._user_has_level(user, required_level):
             raise PermissionError(f"{required_level.name.title()} access is required for this mod action.")
         node = self._remote_node_link(model.node_name)
-        result = await self._remote_mod_mutation_async(node, model.app_name, mod_name, action, user)
-        self._invalidate_mod_update_cache(model=model, mod_name=mod_name)
+        result = await self._remote_mod_mutation_async(node, model.app_name, resolved_entry.name, action, user)
+        self._invalidate_mod_update_cache(model=model, mod_id=resolved_entry.id)
         return result
 
     async def _remote_mod_mutation_async(
@@ -838,6 +883,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         user: ModWebUser,
         version: str | None = None,
     ) -> NodeModUpdateCheckResult:
+        self._require_legacy_local_mod_entry(entry)
         if model.app_scope != config.AppScopes.factorio.value:
             raise ValueError(f"{model.app_friendly} does not support mod update checks yet.")
         if not self._user_has_level(user, Power_Level.user):
@@ -865,9 +911,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
         user: ModWebUser,
         on_checking: Callable[[NodeModEntry], None] | None = None,
     ) -> _ModWebModUpdateBatchResult:
-        update_mod_names: set[str] = set()
-        failed_mod_names: list[str] = []
-        for entry in entries:
+        update_mod_ids: set[str] = set()
+        failed_mod_ids: list[str] = []
+        update_entries = tuple(entry for entry in entries if entry.source is ModSourceKind.LOCAL)
+        for entry in update_entries:
             if on_checking is not None:
                 on_checking(entry)
             try:
@@ -880,14 +927,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     entry.name,
                     xcp,
                 )
-                failed_mod_names.append(entry.name)
+                failed_mod_ids.append(entry.id)
                 continue
             if result.status is NodeModUpdateStatus.UPDATE_AVAILABLE:
-                update_mod_names.add(entry.name)
+                update_mod_ids.add(entry.id)
         return _ModWebModUpdateBatchResult(
-            checked_mod_count=len(entries),
-            update_mod_names=frozenset(update_mod_names),
-            failed_mod_names=tuple(failed_mod_names),
+            checked_mod_count=len(update_entries),
+            update_mod_ids=frozenset(update_mod_ids),
+            failed_mod_ids=tuple(failed_mod_ids),
         )
 
     async def _mod_versions(
@@ -897,6 +944,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         entry: NodeModEntry,
         user: ModWebUser,
     ) -> NodeModPortalVersionList:
+        self._require_legacy_local_mod_entry(entry)
         if model.app_scope != config.AppScopes.factorio.value:
             raise ValueError(f"{model.app_friendly} does not support mod version discovery yet.")
         if not self._user_has_level(user, Power_Level.user):
@@ -918,6 +966,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         user: ModWebUser,
         version: str | None = None,
     ) -> NodeModUploadBatchResult:
+        self._require_legacy_local_mod_entry(entry)
         if model.app_scope != config.AppScopes.factorio.value:
             raise ValueError(f"{model.app_friendly} does not support mod updates yet.")
         if entry.placement is not ModPlacement.SERVER_ENABLED:
@@ -934,7 +983,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload={"version": version},
         )
         result = NodeModUploadBatchResult.from_mapping(payload)
-        self._invalidate_mod_update_cache(model=model, mod_name=entry.name)
+        self._invalidate_mod_update_cache(model=model, mod_id=entry.id)
         return result
 
     async def _update_mod_properties(
@@ -950,6 +999,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         launcher_urls: LauncherProviderUrls,
         user: ModWebUser,
     ) -> NodeModMutationResult:
+        self._require_local_entry_action(entry=entry, action=ModAction.UPDATE_PROPERTIES)
         if self._is_builtin_mod(entry):
             raise PermissionError("Built-in mod properties cannot be changed from mod web.")
         required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
@@ -974,7 +1024,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             },
         )
         result = NodeModMutationResult.from_mapping(payload)
-        self._invalidate_mod_update_cache(model=model, mod_name=entry.name)
+        self._invalidate_mod_update_cache(model=model, mod_id=entry.id)
         return result
 
     async def _update_mod_notes(
@@ -985,6 +1035,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         notes: str | None,
         user: ModWebUser,
     ) -> NodeModMutationResult:
+        self._require_local_entry_action(entry=entry, action=ModAction.UPDATE_NOTES)
         if not self._user_has_level(user, Power_Level.admin):
             raise PermissionError("Admin access is required to edit mod notes.")
         payload = await self._remote_json_async(
@@ -1007,6 +1058,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         providers: tuple[Provider, ...] | None = None,
         user: ModWebUser,
     ) -> LauncherMetadataResolution:
+        self._require_local_entry_action(entry=entry, action=ModAction.UPDATE_PROPERTIES)
         if self._is_builtin_mod(entry):
             raise PermissionError("Built-in mod metadata cannot be fetched from mod web.")
         required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
@@ -1038,6 +1090,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         providers: tuple[Provider, ...] | None = None,
         user: ModWebUser,
     ) -> LauncherMetadataDiscovery:
+        self._require_local_entry_action(entry=entry, action=ModAction.UPDATE_PROPERTIES)
         if self._is_builtin_mod(entry):
             raise PermissionError("Built-in mod metadata cannot be resolved from mod web.")
         required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
@@ -1070,6 +1123,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         providers: tuple[Provider, ...] | None = None,
         user: ModWebUser,
     ) -> ModPageDiscovery:
+        self._require_local_entry_action(entry=entry, action=ModAction.UPDATE_PROPERTIES)
         if self._is_builtin_mod(entry):
             raise PermissionError("Built-in mod pages cannot be resolved from mod web.")
         required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
@@ -1679,11 +1733,18 @@ class ModWebActionsMixin(ModWebServiceSupport):
         download_text = self._mod_download_summary(entry)
         client_pack_text = self._mod_client_pack_summary(entry)
         available_actions = self._available_mod_actions(user=user, entry=entry)
-        can_edit_properties: bool = not self._is_builtin_mod(entry) and self._user_has_level(
-            user,
-            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+        can_edit_properties: bool = (
+            self._supports_legacy_local_action(entry, ModAction.UPDATE_PROPERTIES)
+            and not self._is_builtin_mod(entry)
+            and self._user_has_level(
+                user,
+                required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+            )
         )
-        can_edit_notes: bool = self._user_has_level(user, Power_Level.admin)
+        can_edit_notes: bool = self._supports_legacy_local_action(
+            entry,
+            ModAction.UPDATE_NOTES,
+        ) and self._user_has_level(user, Power_Level.admin)
         supports_client_pack: bool = mod_capabilities_for_scope(model.app_scope).supports_client_pack
         launcher_metadata_providers = mod_capabilities_for_scope(model.app_scope).launcher_metadata_providers
         launcher_url_inputs: dict[Provider, Input] = {}
@@ -1729,6 +1790,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
             else "Paste the exact provider file page. Leave it blank to bundle the local file."
         )
         can_check_update: bool = (
+            entry.source is ModSourceKind.LOCAL
+            and
             model.app_scope == config.AppScopes.factorio.value
             and entry.placement is ModPlacement.SERVER_ENABLED
             and self._user_has_level(user, Power_Level.user)
@@ -2851,7 +2914,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
         async def run_mod_action(action: NodeModMutationAction) -> None:
             try:
                 result: NodeModMutationResult = await self._mutate_mod(
-                    model=model, mod_name=entry.name, action=action, user=user
+                    model=model,
+                    entry=entry,
+                    action=action,
+                    user=user,
                 )
             except Exception as xcp:
                 log.warning(
@@ -2909,18 +2975,22 @@ class ModWebActionsMixin(ModWebServiceSupport):
             with ui.card().classes(
                 "mod-card mod-dialog-card mod-app-details-dialog-card mod-mod-details-dialog-card"
             ):
-                with ui.column().classes("w-full mod-mod-details-shell"):
-                    with ui.column().classes("w-full gap-0 mod-mod-details-header"):
-                        ui.label(entry.friendly).classes("text-xl font-black mod-title-small")
-                        ui.label(entry.name).classes("mod-subtitle text-sm break-all")
-                    with ui.grid(columns=2).classes("mod-detail-grid mod-mod-details-summary"):
-                        self._render_mod_detail_item(ui=ui, label="Placement", value=entry.placement.label)
+                    with ui.column().classes("w-full mod-mod-details-shell"):
+                        with ui.column().classes("w-full gap-0 mod-mod-details-header"):
+                            ui.label(entry.friendly).classes("text-xl font-black mod-title-small")
+                            ui.label(entry.name).classes("mod-subtitle text-sm break-all")
+                            ui.label(entry.source.label).classes("mod-pill self-start")
+                        with ui.grid(columns=2).classes("mod-detail-grid mod-mod-details-summary"):
+                            self._render_mod_detail_item(ui=ui, label="Source", value=entry.source.label)
+                            self._render_mod_detail_item(ui=ui, label="Placement", value=entry.placement.label)
                         self._render_mod_detail_item(ui=ui, label="Type", value=entry.mod_type.label)
                         self._render_mod_detail_item(ui=ui, label="Version", value=version_text)
                         self._render_mod_detail_item(ui=ui, label="Size", value=entry.size_text)
                         self._render_mod_detail_item(ui=ui, label="Origin", value=entry.origin)
                         self._render_mod_detail_item(ui=ui, label="Added", value=entry.added)
                         self._render_mod_detail_item(ui=ui, label="File download", value=download_text)
+                        if entry.client_required:
+                            self._render_mod_detail_item(ui=ui, label="Client content", value="Required")
                         if supports_client_pack:
                             self._render_mod_detail_item(
                                 ui=ui,
@@ -3411,6 +3481,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.label(entry.friendly).classes("mod-row-title")
                 ui.label(entry.name).classes("mod-row-file")
             with ui.row().classes("mod-row-meta"):
+                ui.label(entry.source.label).classes("mod-pill")
                 ui.label(entry.size_text).classes("mod-pill size")
                 if has_update:
                     ui.label("Update").classes("mod-pill size update")
@@ -3418,13 +3489,15 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     ui.label(entry.placement.label).classes("mod-pill")
                 if entry.client_pack.policy is not ClientPackPolicy.REQUIRED:
                     ui.label(entry.client_pack.policy.label).classes("mod-pill")
+                if entry.client_required:
+                    ui.label("Client required").classes("mod-pill")
                 show_download_block_badge: bool = not entry.downloadable and not (
                     entry.mod_type is ModType.SERVER
                     and entry.download_block_reason == ModDownloadBlockReason.SERVER_ONLY.value
                 )
                 if show_download_block_badge:
                     ui.label(entry.download_block_label or "Not downloadable").classes("mod-pill blocked")
-            if download_url is None:
+            if download_url is None or not entry.supports_action(ModAction.DOWNLOAD):
                 ui.label("Blocked").classes("mod-row-download blocked")
             else:
 
