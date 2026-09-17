@@ -37,6 +37,7 @@ from apps._config import (
     normalise_client_pack_changelog,
 )
 from apps._node_api import optional_string, required_bool, required_int, required_string
+from apps._mod_catalog import ModAction, ModReference, ModSourceKind
 from apps.minecraft.pack_export import PackFormat, PackPurpose
 from .app_state import NodeAppRuntimeSummary
 
@@ -137,6 +138,28 @@ class NodeModEntry:
     metadata_overrides: ModMetadataOverrides = field(default_factory=ModMetadataOverrides)
     client_pack: ClientPackConfig = field(default_factory=ClientPackConfig)
     platforms: ModPlatformMetadata = field(default_factory=ModPlatformMetadata)
+    source: ModSourceKind = ModSourceKind.LOCAL
+    source_key: str | None = None
+    available_actions: tuple[ModAction, ...] = ()
+    artifact_available: bool = True
+
+    def __post_init__(self) -> None:
+        # Preserve the compact legacy representation for ordinary local mods.
+        # A distinct local key remains available for a future local source that
+        # needs one beyond its logical filename.
+        if self.source is ModSourceKind.LOCAL and self.source_key == self.name:
+            object.__setattr__(self, "source_key", None)
+
+    @property
+    def reference(self) -> ModReference:
+        return ModReference(
+            source=self.source,
+            source_key=self.name if self.source_key is None else self.source_key,
+        )
+
+    @property
+    def id(self) -> str:
+        return self.reference.id
 
     @property
     def added_at(self) -> datetime:
@@ -149,6 +172,30 @@ class NodeModEntry:
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeModEntry:
         name: str = required_string(payload, "name")
         friendly: str = required_string(payload, "friendly")
+        raw_source: str | None = optional_string(payload, "source")
+        raw_id: str | None = optional_string(payload, "id")
+        try:
+            reference = ModReference.local(name) if raw_id is None else ModReference.from_id(raw_id)
+        except (TypeError, ValueError) as xcp:
+            raise ValueError("Node mod ID is invalid.") from xcp
+        try:
+            source = reference.source if raw_source is None else ModSourceKind(raw_source)
+        except ValueError as xcp:
+            raise ValueError("Node mod source is invalid.") from xcp
+        if source is not reference.source:
+            raise ValueError("Node mod source conflicts with its ID.")
+        raw_available_actions: object = payload.get("available_actions", ())
+        if isinstance(raw_available_actions, (str, bytes)) or not isinstance(raw_available_actions, Sequence):
+            raise ValueError("Node mod available actions are invalid.")
+        try:
+            available_actions = tuple(ModAction(action) for action in raw_available_actions)
+        except (TypeError, ValueError) as xcp:
+            raise ValueError("Node mod available actions are invalid.") from xcp
+        if len(available_actions) != len(set(available_actions)):
+            raise ValueError("Node mod available actions must be unique.")
+        raw_artifact_available: object = payload.get("artifact_available", True)
+        if not isinstance(raw_artifact_available, bool):
+            raise ValueError("Node mod artifact availability is invalid.")
         client_path: str | None = optional_string(payload, "client_path")
         enabled: bool = required_bool(payload, "enabled")
         coremod: bool = required_bool(payload, "coremod")
@@ -243,6 +290,10 @@ class NodeModEntry:
                 if raw_platforms is None
                 else ModPlatformMetadata.model_validate(dict(raw_platforms))
             ),
+            source=source,
+            source_key=reference.source_key,
+            available_actions=available_actions,
+            artifact_available=raw_artifact_available,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -266,6 +317,10 @@ class NodeModEntry:
             "client_pack_eligible": self.client_pack_eligible,
             "archive_name": self.archive_name,
             "source_path": self.source_path,
+            "id": self.id,
+            "source": self.source.value,
+            "available_actions": [action.value for action in self.available_actions],
+            "artifact_available": self.artifact_available,
             "description": self.description,
             "notes": self.notes,
             "mod_pages": [page.model_dump(mode="json") for page in self.mod_pages],
@@ -276,13 +331,15 @@ class NodeModEntry:
 
 
 class NodeModMutationAction(StrEnum):
-    ENABLE = "enable"
-    DISABLE = "disable"
-    TOGGLE_COREMOD = "toggle_coremod"
-    TOGGLE_DOWNLOAD_BLOCK = "toggle_download_block"
-    UPDATE_PROPERTIES = "update_properties"
-    UPDATE_NOTES = "update_notes"
-    DELETE = "delete"
+    """Local-route mutations, kept distinct from source-specific capabilities."""
+
+    ENABLE = ModAction.ENABLE.value
+    DISABLE = ModAction.DISABLE.value
+    TOGGLE_COREMOD = ModAction.TOGGLE_COREMOD.value
+    TOGGLE_DOWNLOAD_BLOCK = ModAction.TOGGLE_DOWNLOAD_BLOCK.value
+    UPDATE_PROPERTIES = ModAction.UPDATE_PROPERTIES.value
+    UPDATE_NOTES = ModAction.UPDATE_NOTES.value
+    DELETE = ModAction.DELETE.value
 
 
 def required_mod_mutation_level(

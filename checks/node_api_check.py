@@ -78,6 +78,7 @@ from apps._console import (
     ConsoleResponseSource,
 )
 from apps._mod import Mod
+from apps._mod_catalog import LocalModSource, ModAction, ModCatalog, ModReference, ModSourceKind
 from apps._node_api import NodeModUploadSource
 from apps._save_files import (
     AppSaveEntry,
@@ -412,6 +413,7 @@ def _build_app(mod_manager: object) -> _DummyApp:
     app.scope = "minecraft"
     app.directory = Path(".")
     app.mods = cast(Any, mod_manager)
+    app.mod_catalog = ModCatalog((LocalModSource(cast(Any, mod_manager)),))
     app.settings = None
     app.runtime_fault = None
     app.cfg = App_Config(
@@ -5571,6 +5573,30 @@ class NodeApiTests(unittest.TestCase):
             str(client_mod_path),
         )
 
+    def test_node_mod_entry_accepts_legacy_local_inventory_payload(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mods_dir = Path(temp_dir)
+            mod_path = mods_dir / "example.jar"
+            mod_path.write_bytes(b"mod-data")
+            entry = NodeModService._mod_entry(_TestMod(Mod_Config(name=mod_path.name, directory=mods_dir)))
+
+        payload = entry.to_mapping()
+        for key in ("id", "source", "available_actions", "artifact_available"):
+            payload.pop(key)
+        restored = NodeModEntry.from_mapping(payload)
+
+        self.assertEqual(restored.reference, ModReference.local("example.jar"))
+        self.assertEqual(restored.available_actions, ())
+        self.assertTrue(restored.artifact_available)
+
+    def test_app_can_register_a_catalog_source_without_a_local_mod_manager(self) -> None:
+        app = object.__new__(_DummyApp)
+        app.mod_catalog = None
+
+        app.add_mod_source(LocalModSource(cast(Any, Mock())))
+
+        self.assertEqual(len(app.has_mod_catalog.sources), 1)
+
     def test_mod_entry_includes_launcher_description(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -8341,6 +8367,10 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(model.summary.downloadable_count, 1)
         self.assertEqual(model.summary.non_downloadable_count, 0)
         self.assertEqual(model.mods[0].name, "example.jar")
+        self.assertEqual(model.mods[0].reference, ModReference.local("example.jar"))
+        self.assertIs(model.mods[0].source, ModSourceKind.LOCAL)
+        self.assertIn(ModAction.DISABLE, model.mods[0].available_actions)
+        self.assertTrue(model.mods[0].artifact_available)
         self.assertIs(model.mods[0].placement, ModPlacement.SERVER_ENABLED)
         self.assertTrue(model.mods[0].server_loadable)
         self.assertTrue(model.mods[0].client_pack_eligible)

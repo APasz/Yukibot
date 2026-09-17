@@ -44,6 +44,7 @@ from apps._launcher_metadata import (
     resolve_launcher_metadata_resolution,
 )
 from apps._mod import Mod, Mod_Manager
+from apps._mod_catalog import ModAction, ModInventoryEntry
 from apps.factorio import FactorioModPortalCandidate, FactorioVanillaMod
 from apps.factorio.node_api import (
     FactorioModUpdateApplyResult,
@@ -322,21 +323,34 @@ class NodeModService:
             cached = self._inventory_cache.get(app_key)
             if cached is not None and now - cached.captured_at_seconds < _MOD_INVENTORY_CACHE_TTL_SECONDS:
                 return cached
-            await app.has_mod_manager.reload_mods()
-            mods = tuple(app.has_mod_manager.list_mods())
+            catalog = app.has_mod_catalog
+            await catalog.refresh()
+            entries = catalog.list_entries()
             inventory = mod_contracts.TimedModInventory(
                 captured_at_seconds=time.monotonic(),
                 summary=mod_contracts.NodeModSummary(
-                    total_count=len(mods),
-                    enabled_count=sum(1 for mod in mods if mod.cfg.placement is ModPlacement.SERVER_ENABLED),
-                    disabled_count=sum(1 for mod in mods if mod.cfg.placement is ModPlacement.SERVER_DISABLED),
-                    coremod_count=sum(1 for mod in mods if mod.counts_as_coremod),
-                    downloadable_count=sum(1 for mod in mods if mod.downloadable),
-                    non_downloadable_count=sum(1 for mod in mods if not mod.downloadable),
-                    client_only_count=sum(1 for mod in mods if mod.cfg.placement is ModPlacement.CLIENT_ONLY),
-                    client_pack_eligible_count=sum(1 for mod in mods if mod.client_pack_eligible),
+                    total_count=len(entries),
+                    enabled_count=sum(
+                        1 for entry in entries if entry.placement is ModPlacement.SERVER_ENABLED
+                    ),
+                    disabled_count=sum(
+                        1 for entry in entries if entry.placement is ModPlacement.SERVER_DISABLED
+                    ),
+                    coremod_count=sum(
+                        1
+                        for entry in entries
+                        if entry.mod_type in {ModType.COREMOD, ModType.BUILTIN}
+                    ),
+                    downloadable_count=sum(1 for entry in entries if entry.downloadable),
+                    non_downloadable_count=sum(1 for entry in entries if not entry.downloadable),
+                    client_only_count=sum(
+                        1 for entry in entries if entry.placement is ModPlacement.CLIENT_ONLY
+                    ),
+                    client_pack_eligible_count=sum(
+                        1 for entry in entries if entry.client_pack_eligible
+                    ),
                 ),
-                mods=tuple(self._mod_entry(mod) for mod in mods),
+                mods=tuple(self._inventory_entry_to_node_entry(entry) for entry in entries),
             )
             self._inventory_cache[app_key] = inventory
             return inventory
@@ -1405,31 +1419,47 @@ class NodeModService:
 
     @staticmethod
     def _mod_entry(mod: Mod) -> mod_contracts.NodeModEntry:
-        size_bytes = File_Utils.pointer_size(mod.path)
+        return NodeModService._inventory_entry_to_node_entry(ModInventoryEntry.from_local_mod(mod))
+
+    @staticmethod
+    def _inventory_entry_to_node_entry(entry: ModInventoryEntry) -> mod_contracts.NodeModEntry:
+        artifact = entry.artifact
+        if artifact is None:
+            raise ValueError("The local-only node mod contract requires a local artifact.")
+        size_bytes = File_Utils.pointer_size(artifact.path)
+        size_text = Utilities.humanise_bytes(size_bytes)
         return mod_contracts.NodeModEntry(
-            name=mod.name,
-            friendly=mod.friendly,
-            client_path=str(mod.client_path),
-            enabled=mod.cfg.enabled,
-            placement=mod.cfg.placement,
-            server_loadable=mod.server_loadable,
-            client_pack_eligible=mod.client_pack_eligible,
-            archive_name=mod.logical_archive_name,
-            source_path=str(mod.storage_path),
-            description=mod.description,
-            notes=mod.cfg.notes,
-            mod_type=mod.mod_type,
-            coremod=mod.is_coremod_type,
-            downloadable=mod.downloadable,
-            download_block_reason=mod.download_block_reason.value if mod.download_block_reason is not None else None,
-            download_block_label=mod.download_block_label,
-            origin=mod.origin,
-            version=mod.version,
-            added=mod.added.isoformat(sep=" ", timespec="seconds"),
+            name=entry.name,
+            friendly=entry.friendly,
+            client_path=None if entry.client_path is None else str(entry.client_path),
+            enabled=entry.enabled,
+            placement=entry.placement,
+            server_loadable=entry.server_loadable,
+            client_pack_eligible=entry.client_pack_eligible,
+            archive_name=artifact.archive_name,
+            source_path=str(artifact.path),
+            description=entry.description,
+            notes=entry.notes,
+            mod_type=entry.mod_type,
+            coremod=entry.coremod,
+            downloadable=entry.downloadable,
+            download_block_reason=(
+                None if entry.download_block_reason is None else entry.download_block_reason.value
+            ),
+            download_block_label=entry.download_block_label,
+            origin=entry.origin,
+            version=entry.version,
+            added=entry.added.isoformat(sep=" ", timespec="seconds"),
             size_bytes=size_bytes,
-            size_text=Utilities.humanise_bytes(size_bytes),
-            mod_pages=mod.cfg.mod_pages,
-            metadata_overrides=mod.cfg.metadata_overrides,
-            client_pack=mod.cfg.client_pack,
-            platforms=mod.cfg.platforms,
+            size_text=size_text,
+            mod_pages=entry.mod_pages,
+            metadata_overrides=entry.metadata_overrides,
+            client_pack=entry.client_pack,
+            platforms=entry.platforms,
+            source=entry.reference.source,
+            source_key=entry.reference.source_key,
+            available_actions=tuple(
+                action for action in ModAction if action in entry.available_actions
+            ),
+            artifact_available=entry.artifact_available,
         )

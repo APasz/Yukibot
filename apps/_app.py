@@ -54,6 +54,7 @@ from apps._config_files import (
 )
 from apps._console import ConsoleAction, ConsoleResponseSource
 from apps._mod import Mod, Mod_Manager
+from apps._mod_catalog import LocalModSource, ModCatalog, ModInventorySource
 from apps._save_files import AppSaveEntry, AppSaveRoot, list_app_save_files, resolve_app_save_path
 from apps._settings import App_Settings, Settings_Manager
 from apps._steam import SteamGameServerLoginTokenStatus, normalise_steam_game_server_login_token
@@ -344,6 +345,7 @@ class App(Generic[ConfigT], ABC):
     dir_log: Path
     server_log: Path | None
     mods: Mod_Manager | None = None
+    mod_catalog: ModCatalog | None = None
     settings: Settings_Manager | None
     updater: Update_Manager | None = None
     process: subprocess.Popen[Any] | None = None
@@ -420,11 +422,14 @@ class App(Generic[ConfigT], ABC):
         self.file_stdout = self.dir_log.joinpath("stdout.log")
         self.file_errout = self.dir_log.joinpath("errout.log")
 
+        self.mods = None
+        self.mod_catalog = None
         if mod_cls:
             if modcf_cls:
                 self.mods = Mod_Manager(cfg, mod_cls, modcf_cls)
             else:
                 self.mods = Mod_Manager(cfg, mod_cls)
+            self.add_mod_source(LocalModSource(self.mods))
         if stg:
             self.settings = Settings_Manager(cfg, stg)
         else:
@@ -454,13 +459,19 @@ class App(Generic[ConfigT], ABC):
         log.debug(f"{__name__} | {self.cmd_start=} @ {self.cmd_cwd=}")
 
     async def post_init(self) -> None:
-        if self.mods:
-            await self.mods.load_mods()
+        if self.mod_catalog is not None:
+            await self.mod_catalog.refresh()
         log.debug(f"{self.name}.__post_init__")
 
     @property
     def mod_capabilities(self) -> AppModCapabilities:
         return mod_capabilities_for_scope(self.scope)
+
+    def add_mod_source(self, source: ModInventorySource) -> None:
+        """Register an additional mod source during app setup."""
+
+        sources = () if self.mod_catalog is None else self.mod_catalog.sources
+        self.mod_catalog = ModCatalog((*sources, source))
 
     @property
     def published_client_pack_version(self) -> str | None:
@@ -1082,6 +1093,12 @@ class App(Generic[ConfigT], ABC):
             return self.mods
         else:
             raise _errors.UnsupportedModManager(self.friendly)
+
+    @property
+    def has_mod_catalog(self) -> ModCatalog:
+        if self.mod_catalog is not None:
+            return self.mod_catalog
+        raise _errors.UnsupportedModManager(self.friendly)
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
