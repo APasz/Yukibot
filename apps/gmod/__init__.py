@@ -6,9 +6,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import re
+import socket
 import tempfile
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import IO, Any, Final, cast
@@ -21,7 +24,15 @@ from _security import Power_Level
 from apps._app import App, AppPortClaim, AppRuntimeFault, AppRuntimeFaultCode, AppRuntimeFaultKind, NetworkProtocol
 from apps._config import App_Config, AppVersion, SteamUpdatePreset
 from apps._config_files import AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
-from apps._settings import App_Settings, IntSettingSpec, Setting, Setting_Label, StringSettingSpec
+from apps._settings import (
+    App_Settings,
+    BoolSettingSpec,
+    IntSettingSpec,
+    Setting,
+    Setting_Label,
+    SettingSpec,
+    StringSettingSpec,
+)
 from apps._steam import SteamGameServerLoginTokenStatus, normalise_steam_game_server_login_token
 from apps._updater import SteamCmd_Update_Manager
 from config import Activity_Manager
@@ -32,6 +43,7 @@ GMOD_DEFAULT_PORT: Final[int] = 27015
 GMOD_DEFAULT_GAMEMODE: Final[str] = "sandbox"
 GMOD_DEFAULT_STARTUP_MAP: Final[str] = "gm_construct"
 GMOD_DEFAULT_MAX_PLAYERS: Final[int] = 16
+GMOD_DEFAULT_WORKSHOP_AUTO_UPDATE: Final[bool] = True
 GMOD_DEFAULT_INSTALL_SUBFOLDER: Final[str] = "garrymod"
 GMOD_MANAGE_EMBED_COLOR: Final[int] = 0x1194F0
 STEAM_GAME_APP_ID: Final[int] = 4000
@@ -47,11 +59,19 @@ _GMOD_MANAGED_DIRECTORY_NAME: Final[str] = ".yukibot"
 _GMOD_SETTINGS_FILENAME: Final[str] = "gmod-settings.json"
 _GMOD_GSLT_FILENAME: Final[str] = "steam-game-server-login-token"
 _GMOD_SERVER_CONFIG_FILENAME: Final[str] = "server.cfg"
+_GMOD_WORKSHOP_ADDON_DIRECTORY_NAME: Final[str] = "yukibot-workshop"
+_GMOD_WORKSHOP_MANIFEST_FILENAME: Final[str] = "yukibot_workshop_downloads.lua"
 _GMOD_X64_LAUNCHER_NAME: Final[str] = "srcds_run_x64"
 _GMOD_X64_LAUNCH_COMMAND: Final[str] = f"./{_GMOD_X64_LAUNCHER_NAME}"
 _GMOD_X64_BINARY_RELATIVE_PATH: Final[Path] = Path("bin") / "linux64" / "srcds"
 _GMOD_X64_PROCESS_NAME: Final[str] = _GMOD_X64_BINARY_RELATIVE_PATH.name
 _GMOD_LAUNCH_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_GMOD_WORKSHOP_ITEM_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[1-9][0-9]{0,19}$")
+_GMOD_WORKSHOP_ITEM_ID_LIST_SEPARATOR_RE: Final[re.Pattern[str]] = re.compile(r"[\s,]+")
+_GMOD_MAX_WORKSHOP_ITEM_ID: Final[int] = (1 << 64) - 1
+_GMOD_WORKSHOP_COLLECTION_ID_LABEL: Final[str] = "Workshop collection ID"
+_GMOD_CLIENT_CONTENT_WORKSHOP_ITEM_LABEL: Final[str] = "client content Workshop ID"
+_GMOD_CLIENT_CONTENT_WORKSHOP_LIST_LABEL: Final[str] = "client content Workshop IDs"
 _GMOD_STEAM_ACCOUNT_COMMAND_RE: Final[re.Pattern[str]] = re.compile(
     r"\bsv_setsteamaccount(?:\s|$)",
     re.IGNORECASE,
@@ -70,6 +90,20 @@ _GMOD_STEAM_ACCOUNT_VALUE_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 _GMOD_GSLT_REJECTED_RE: Final[re.Pattern[str]] = re.compile(r"\bGSL token expired\b", re.IGNORECASE)
+_GMOD_SOURCE_QUERY_HOST: Final[str] = "127.0.0.1"
+_GMOD_SOURCE_INFO_REQUEST: Final[bytes] = b"\xff\xff\xff\xffTSource Engine Query\x00"
+_GMOD_SOURCE_RESPONSE_HEADER: Final[bytes] = b"\xff\xff\xff\xff"
+_GMOD_SOURCE_INFO_RESPONSE_TYPE: Final[bytes] = b"I"
+_GMOD_SOURCE_CHALLENGE_RESPONSE_TYPE: Final[bytes] = b"A"
+_GMOD_SOURCE_INFO_RESPONSE_PREFIX: Final[bytes] = _GMOD_SOURCE_RESPONSE_HEADER + _GMOD_SOURCE_INFO_RESPONSE_TYPE
+_GMOD_SOURCE_CHALLENGE_RESPONSE_PREFIX: Final[bytes] = (
+    _GMOD_SOURCE_RESPONSE_HEADER + _GMOD_SOURCE_CHALLENGE_RESPONSE_TYPE
+)
+_GMOD_SOURCE_CHALLENGE_SIZE: Final[int] = 4
+_GMOD_SOURCE_QUERY_RESPONSE_SIZE: Final[int] = 4_096
+_GMOD_SERVER_INFO_QUERY_TIMEOUT_SECONDS: Final[float] = 2.0
+_GMOD_STARTUP_READY_TIMEOUT_SECONDS: Final[float] = 900.0
+_GMOD_STARTUP_READY_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
 _GMOD_LEGACY_PLACEHOLDER_VERSION: Final[str] = "0.0"
 _REDACTED_SECRET: Final[str] = "[REDACTED]"
 _GMOD_LEGACY_STEAM_ACCOUNT_WARNING: Final[str] = (
@@ -104,6 +138,21 @@ def gmod_game_server_login_token_path(directory: Path) -> Path:
     """Return the private, write-only Steam Game Server Login Token path."""
 
     return gmod_managed_directory(directory) / _GMOD_GSLT_FILENAME
+
+
+def gmod_workshop_manifest_path(directory: Path) -> Path:
+    """Return Yukibot's server-only Workshop download manifest path."""
+
+    return (
+        directory.absolute()
+        / "garrysmod"
+        / "addons"
+        / _GMOD_WORKSHOP_ADDON_DIRECTORY_NAME
+        / "lua"
+        / "autorun"
+        / "server"
+        / _GMOD_WORKSHOP_MANIFEST_FILENAME
+    )
 
 
 def _require_gmod_x64_installation(directory: Path) -> None:
@@ -143,6 +192,35 @@ def _normalise_gmod_launch_name(raw_value: object, *, label: str) -> str:
     return value
 
 
+def _normalise_gmod_workshop_item_id(raw_value: object, *, label: str) -> str:
+    """Validate one opaque Steam Workshop identifier without treating it as Lua."""
+
+    if not isinstance(raw_value, str):
+        raise TypeError(f"Garry's Mod {label} must be text.")
+    value = raw_value.strip()
+    if _GMOD_WORKSHOP_ITEM_ID_RE.fullmatch(value) is None or int(value) > _GMOD_MAX_WORKSHOP_ITEM_ID:
+        raise ValueError(f"Garry's Mod {label} must be a non-zero decimal Steam Workshop ID.")
+    return value
+
+
+def _normalise_gmod_workshop_item_ids(
+    raw_values: Sequence[object],
+    *,
+    item_label: str,
+    list_label: str,
+) -> tuple[str, ...]:
+    """Validate one ordered Workshop ID list and reject duplicate entries."""
+
+    if isinstance(raw_values, (str, bytes)):
+        raise TypeError(f"Garry's Mod {list_label} must be a list.")
+    item_ids = tuple(
+        _normalise_gmod_workshop_item_id(raw_value, label=item_label) for raw_value in raw_values
+    )
+    if len(set(item_ids)) != len(item_ids):
+        raise ValueError(f"Garry's Mod {list_label} must not contain duplicates.")
+    return item_ids
+
+
 def gmod_start_command(
     *,
     port: int | None,
@@ -150,6 +228,8 @@ def gmod_start_command(
     gamemode: str,
     startup_map: str,
     game_server_login_token: str,
+    workshop_collection_id: str | None = None,
+    workshop_auto_update: bool = GMOD_DEFAULT_WORKSHOP_AUTO_UPDATE,
 ) -> list[str]:
     """Build the Linux dedicated-server command from persisted launch values."""
 
@@ -161,7 +241,14 @@ def gmod_start_command(
     resolved_gamemode = _normalise_gmod_launch_name(gamemode, label="gamemode")
     resolved_map = _normalise_gmod_launch_name(startup_map, label="startup map")
     token = normalise_steam_game_server_login_token(game_server_login_token)
-    return [
+    if not isinstance(workshop_auto_update, bool):
+        raise TypeError("Garry's Mod Workshop auto-update setting must be a bool.")
+    collection_id = (
+        None
+        if workshop_collection_id is None
+        else _normalise_gmod_workshop_item_id(workshop_collection_id, label=_GMOD_WORKSHOP_COLLECTION_ID_LABEL)
+    )
+    command = [
         _GMOD_X64_LAUNCH_COMMAND,
         "-game",
         "garrysmod",
@@ -169,13 +256,27 @@ def gmod_start_command(
         str(resolved_port),
         "+maxplayers",
         str(max_players),
-        "+gamemode",
-        resolved_gamemode,
-        "+map",
-        resolved_map,
-        "+sv_setsteamaccount",
-        token,
     ]
+    if collection_id is not None:
+        command.extend(
+            (
+                "+host_workshop_collection",
+                collection_id,
+                "+host_workshop_autoupdate",
+                "1" if workshop_auto_update else "0",
+            )
+        )
+    command.extend(
+        (
+            "+gamemode",
+            resolved_gamemode,
+            "+map",
+            resolved_map,
+            "+sv_setsteamaccount",
+            token,
+        )
+    )
+    return command
 
 
 def ensure_gmod_managed_files(directory: Path) -> tuple[Path, ...]:
@@ -199,6 +300,9 @@ def ensure_gmod_managed_files(directory: Path) -> tuple[Path, ...]:
                     "startup_map": GMOD_DEFAULT_STARTUP_MAP,
                     "gamemode": GMOD_DEFAULT_GAMEMODE,
                     "max_players": GMOD_DEFAULT_MAX_PLAYERS,
+                    "workshop_collection_id": "",
+                    "workshop_auto_update": GMOD_DEFAULT_WORKSHOP_AUTO_UPDATE,
+                    "client_content_workshop_ids": [],
                 },
                 indent=4,
             )
@@ -207,6 +311,107 @@ def ensure_gmod_managed_files(directory: Path) -> tuple[Path, ...]:
         )
         created.append(settings)
     return tuple(created)
+
+
+def render_gmod_workshop_manifest(workshop_item_ids: tuple[str, ...]) -> str:
+    """Render the server-only Lua manifest for explicitly configured client content."""
+
+    normalised_ids = _normalise_gmod_workshop_item_ids(
+        workshop_item_ids,
+        item_label=_GMOD_CLIENT_CONTENT_WORKSHOP_ITEM_LABEL,
+        list_label=_GMOD_CLIENT_CONTENT_WORKSHOP_LIST_LABEL,
+    )
+    lines = [
+        "-- Generated by Yukibot. Configure client content Workshop IDs in Yukibot; do not edit this file.",
+        "if not SERVER then return end",
+        "",
+        *(f'resource.AddWorkshop("{workshop_item_id}")' for workshop_item_id in normalised_ids),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def sync_gmod_workshop_manifest(directory: Path, workshop_item_ids: tuple[str, ...]) -> Path:
+    """Synchronise Yukibot's owned Workshop download manifest for one instance."""
+
+    manifest_path = gmod_workshop_manifest_path(directory)
+    content = render_gmod_workshop_manifest(workshop_item_ids)
+    try:
+        previous_content = manifest_path.read_text(config.STR_ENCODE)
+    except FileNotFoundError:
+        previous_content = None
+    if previous_content != content:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(content, config.STR_ENCODE)
+    return manifest_path
+
+
+async def _receive_gmod_source_query_response(
+    sock: socket.socket,
+    *,
+    deadline: float,
+) -> bytes | None:
+    """Receive one local Source query packet before an absolute loop-time deadline."""
+
+    loop = asyncio.get_running_loop()
+    remaining_seconds = deadline - loop.time()
+    if remaining_seconds <= 0:
+        return None
+    try:
+        response = await asyncio.wait_for(
+            loop.sock_recv(sock, _GMOD_SOURCE_QUERY_RESPONSE_SIZE),
+            timeout=remaining_seconds,
+        )
+    except (OSError, TimeoutError):
+        return None
+    return response
+
+
+def _is_gmod_source_info_response(response: bytes) -> bool:
+    return len(response) > len(_GMOD_SOURCE_INFO_RESPONSE_PREFIX) and response.startswith(
+        _GMOD_SOURCE_INFO_RESPONSE_PREFIX
+    )
+
+
+async def gmod_server_info_responds(
+    *,
+    port: int,
+    timeout_seconds: float | int = _GMOD_SERVER_INFO_QUERY_TIMEOUT_SECONDS,
+) -> bool:
+    """Return whether the local server answers a Source A2S_INFO query within the timeout."""
+
+    resolved_port = resolve_gmod_game_port(port)
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+        raise TypeError("Garry's Mod server-info query timeout must be a number.")
+    try:
+        resolved_timeout_seconds = float(timeout_seconds)
+    except OverflowError as xcp:
+        raise ValueError("Garry's Mod server-info query timeout must be a positive finite number.") from xcp
+    if not math.isfinite(resolved_timeout_seconds) or resolved_timeout_seconds <= 0:
+        raise ValueError("Garry's Mod server-info query timeout must be a positive finite number.")
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + resolved_timeout_seconds
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setblocking(False)
+            await loop.sock_connect(sock, (_GMOD_SOURCE_QUERY_HOST, resolved_port))
+            await loop.sock_sendall(sock, _GMOD_SOURCE_INFO_REQUEST)
+            response = await _receive_gmod_source_query_response(sock, deadline=deadline)
+            if response is None:
+                return False
+            if _is_gmod_source_info_response(response):
+                return True
+            if not response.startswith(_GMOD_SOURCE_CHALLENGE_RESPONSE_PREFIX):
+                return False
+            challenge_start = len(_GMOD_SOURCE_CHALLENGE_RESPONSE_PREFIX)
+            challenge_end = challenge_start + _GMOD_SOURCE_CHALLENGE_SIZE
+            if len(response) < challenge_end:
+                return False
+            await loop.sock_sendall(sock, _GMOD_SOURCE_INFO_REQUEST + response[challenge_start:challenge_end])
+            response = await _receive_gmod_source_query_response(sock, deadline=deadline)
+            return response is not None and _is_gmod_source_info_response(response)
+    except OSError:
+        return False
 
 
 def _read_gmod_game_server_login_token(directory: Path) -> str | None:
@@ -278,8 +483,53 @@ def _gmod_version_needs_manifest_refresh(version: AppVersion | None) -> bool:
     return version is None or version.main is None or version.main == _GMOD_LEGACY_PLACEHOLDER_VERSION
 
 
+class _GmodWorkshopCollectionSettingSpec(StringSettingSpec):
+    """Persist one optional, validated Workshop collection identifier."""
+
+    def __init__(self) -> None:
+        super().__init__(allow_blank=True)
+
+    def parse(self, raw_value: str) -> str:
+        if not raw_value.strip():
+            return ""
+        return _normalise_gmod_workshop_item_id(raw_value, label=_GMOD_WORKSHOP_COLLECTION_ID_LABEL)
+
+
+class _GmodWorkshopItemListSettingSpec(SettingSpec[tuple[str, ...]]):
+    """Parse a user-editable list of Workshop IDs into safe Lua data values."""
+
+    def __init__(self) -> None:
+        super().__init__(tuple)
+
+    def parse(self, raw_value: str) -> tuple[str, ...]:
+        value = raw_value.strip()
+        if not value:
+            return ()
+        return _normalise_gmod_workshop_item_ids(
+            _GMOD_WORKSHOP_ITEM_ID_LIST_SEPARATOR_RE.split(value),
+            item_label=_GMOD_CLIENT_CONTENT_WORKSHOP_ITEM_LABEL,
+            list_label=_GMOD_CLIENT_CONTENT_WORKSHOP_LIST_LABEL,
+        )
+
+    def serialise_value(self, value: object) -> str:
+        if isinstance(value, hikari.UndefinedType):
+            return ""
+        if not isinstance(value, (list, tuple)):
+            raise TypeError("Client content Workshop IDs must be a list or tuple.")
+        item_ids = _normalise_gmod_workshop_item_ids(
+            value,
+            item_label=_GMOD_CLIENT_CONTENT_WORKSHOP_ITEM_LABEL,
+            list_label=_GMOD_CLIENT_CONTENT_WORKSHOP_LIST_LABEL,
+        )
+        return ", ".join(item_ids)
+
+    def display_value(self, value: tuple[str, ...] | hikari.UndefinedType) -> str:
+        serialised_value = self.serialise_value(value)
+        return serialised_value or "None"
+
+
 class Gmod_Settings(App_Settings):
-    """Yukibot-owned startup settings that are applied as Source launch arguments."""
+    """Yukibot-owned startup and Workshop content-delivery settings."""
 
     def __init__(self, pointer: Path) -> None:
         launch_name = StringSettingSpec(raw_validator=lambda value: _GMOD_LAUNCH_NAME_RE.fullmatch(value) is not None)
@@ -313,6 +563,36 @@ class Gmod_Settings(App_Settings):
                     power_level=Power_Level.sudo,
                     desc="Maximum player slots when the server next starts.",
                 ),
+                Setting[str](
+                    _GmodWorkshopCollectionSettingSpec(),
+                    "Workshop Collection",
+                    "workshop_collection_id",
+                    (),
+                    default="",
+                    power_level=Power_Level.sudo,
+                    desc="Public or unlisted Workshop collection to mount on the next start; leave blank to disable.",
+                ),
+                Setting[bool](
+                    BoolSettingSpec(),
+                    "Workshop Auto-update",
+                    "workshop_auto_update",
+                    (),
+                    default=GMOD_DEFAULT_WORKSHOP_AUTO_UPDATE,
+                    power_level=Power_Level.sudo,
+                    desc="Update the configured Workshop collection when the server next starts.",
+                ),
+                Setting[tuple[str, ...]](
+                    _GmodWorkshopItemListSettingSpec(),
+                    "Client Content Workshop IDs",
+                    "client_content_workshop_ids",
+                    (),
+                    default=(),
+                    power_level=Power_Level.sudo,
+                    desc=(
+                        "Comma- or whitespace-separated Workshop item IDs to require clients to download on the "
+                        "next server start; do not include Lua-only addons."
+                    ),
+                ),
             ],
         )
 
@@ -342,6 +622,27 @@ class Gmod_Settings(App_Settings):
         if setting is None or not isinstance(setting.value, int):
             raise TypeError("Garry's Mod max players setting is unavailable.")
         return setting.value
+
+    @property
+    def workshop_collection_id(self) -> str | None:
+        return self._string_setting_value("workshop_collection_id") or None
+
+    @property
+    def workshop_auto_update(self) -> bool:
+        setting = self.get_setting("workshop_auto_update")
+        if setting is None or not isinstance(setting.value, bool):
+            raise TypeError("Garry's Mod Workshop auto-update setting is unavailable.")
+        return setting.value
+
+    @property
+    def client_content_workshop_ids(self) -> tuple[str, ...]:
+        setting = self.get_setting("client_content_workshop_ids")
+        if setting is None:
+            raise TypeError("Garry's Mod client content Workshop IDs setting is unavailable.")
+        value = cast(object, setting.value)
+        if not isinstance(value, tuple) or not all(isinstance(workshop_item_id, str) for workshop_item_id in value):
+            raise TypeError("Garry's Mod client content Workshop IDs setting is unavailable.")
+        return cast(tuple[str, ...], value)
 
     def _string_setting_value(self, key: str) -> str:
         setting = self.get_setting(key)
@@ -504,17 +805,30 @@ class Gmod(App[App_Config]):
             raise ValueError("sv_setsteamaccount is managed through the Steam Game Server Login Token setting.")
         return super().write_config_file(file_id, content)
 
-    def _launch_command(self, token: str) -> list[str]:
+    def _require_settings(self) -> Gmod_Settings:
+        """Return this instance's typed settings or fail before launch work begins."""
+
         settings = self.settings
         if settings is None or not isinstance(settings.app, Gmod_Settings):
             raise RuntimeError("Garry's Mod launch settings are unavailable.")
+        return settings.app
+
+    def _launch_command(self, token: str) -> list[str]:
+        settings = self._require_settings()
         return gmod_start_command(
             port=self.cfg.join_port,
-            max_players=settings.app.max_players,
-            gamemode=settings.app.gamemode,
-            startup_map=settings.app.startup_map,
+            max_players=settings.max_players,
+            gamemode=settings.gamemode,
+            startup_map=settings.startup_map,
             game_server_login_token=token,
+            workshop_collection_id=settings.workshop_collection_id,
+            workshop_auto_update=settings.workshop_auto_update,
         )
+
+    def _sync_workshop_manifest(self) -> Path:
+        """Write the server-only content manifest from the current saved settings."""
+
+        return sync_gmod_workshop_manifest(self.directory, self._require_settings().client_content_workshop_ids)
 
     def _clear_launch_token(self) -> None:
         """Remove the raw token from transient command state after a launch attempt."""
@@ -608,6 +922,23 @@ class Gmod(App[App_Config]):
             )
         )
 
+    async def _cleanup_failed_startup(self, *, terminate_process: bool) -> None:
+        """Dispose of launch state when this start attempt cannot become ready."""
+
+        self._running = False
+        if terminate_process and self.check_running():
+            await self._terminate_runtime()
+            return
+        try:
+            await self._drain_stdout_task()
+        finally:
+            try:
+                await self._drain_stderr_task()
+            except Exception as xcp:
+                log.warning("%s stderr reader failed during startup cleanup: error_type=%s", self.name, type(xcp).__name__)
+            finally:
+                self._clear_launch_token()
+
     async def start(self) -> bool:
         self.clear_runtime_fault()
         _require_gmod_x64_installation(self.directory)
@@ -619,33 +950,60 @@ class Gmod(App[App_Config]):
         except (TypeError, ValueError) as xcp:
             raise ValueError("The configured Steam Game Server Login Token is invalid.") from xcp
 
-        self._launch_token = token
-        self.cmd_start = self._launch_command(token)
+        try:
+            self._sync_workshop_manifest()
+            self._launch_token = token
+            self.cmd_start = self._launch_command(token)
+        except Exception:
+            self._clear_launch_token()
+            raise
         try:
             await self._std_launch()
+        except asyncio.CancelledError:
+            await self._cleanup_failed_startup(terminate_process=True)
+            raise
         except Exception:
-            try:
-                await self._drain_stderr_task()
-            except Exception as xcp:
-                log.warning("%s stderr reader failed during launch: error_type=%s", self.name, type(xcp).__name__)
-            finally:
-                self._clear_launch_token()
+            await self._cleanup_failed_startup(terminate_process=True)
             raise RuntimeError("Garry's Mod could not be launched.") from None
         process = self.process
         if process is None or process.stdout is None or not self.check_running():
-            try:
-                if process is not None and process.stdout is not None:
-                    self._start_stdout_capture(process.stdout, redaction_token=token)
-                    await self._drain_stdout_task()
-            finally:
-                try:
-                    await self._drain_stderr_task()
-                finally:
-                    self._clear_launch_token()
+            if process is not None and process.stdout is not None:
+                self._start_stdout_capture(process.stdout, redaction_token=token)
+            await self._cleanup_failed_startup(terminate_process=True)
             raise RuntimeError("Garry's Mod exited before startup completed.")
         self._start_stdout_capture(process.stdout, redaction_token=token)
+        try:
+            await self._wait_for_startup_ready()
+        except (Exception, asyncio.CancelledError):
+            await self._cleanup_failed_startup(terminate_process=True)
+            raise
         self._running = True
         return True
+
+    async def _wait_for_startup_ready(self) -> None:
+        """Wait until the local Source server can answer a server-info query."""
+
+        game_port = resolve_gmod_game_port(self.cfg.join_port)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _GMOD_STARTUP_READY_TIMEOUT_SECONDS
+        while True:
+            if not self.check_running():
+                raise RuntimeError("Garry's Mod stopped before its server query endpoint became ready.")
+            remaining_seconds = deadline - loop.time()
+            if remaining_seconds <= 0:
+                raise TimeoutError(
+                    f"Garry's Mod did not answer a server-info query within "
+                    f"{_GMOD_STARTUP_READY_TIMEOUT_SECONDS:.0f}s."
+                )
+            if await gmod_server_info_responds(
+                port=game_port,
+                timeout_seconds=min(_GMOD_SERVER_INFO_QUERY_TIMEOUT_SECONDS, remaining_seconds),
+            ):
+                log.info("%s answered a local Source server-info query.", self.name)
+                return
+            remaining_seconds = deadline - loop.time()
+            if remaining_seconds > 0:
+                await asyncio.sleep(min(_GMOD_STARTUP_READY_PROBE_INTERVAL_SECONDS, remaining_seconds))
 
     async def stop(self) -> bool:
         return await self._terminate_runtime()

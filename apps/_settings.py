@@ -862,7 +862,7 @@ class Settings_Manager:
             return label
         if isinstance(value, hikari.UndefinedType):
             return ""
-        return str(value)
+        return setting.spec.serialise_value(value)
 
     def display_value(self, setting: Setting[T], actor_user_id: int) -> str:
         return setting.spec.display_value(self.value_for(setting, actor_user_id))

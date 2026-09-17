@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import math
 import os
 import subprocess
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Callable, cast
 from unittest.mock import AsyncMock, Mock, patch
 
 from _manager import AppInstallInput, App_Manager
@@ -22,6 +23,7 @@ from apps.gmod import (
     GMOD_DEFAULT_MAX_PLAYERS,
     GMOD_DEFAULT_PORT,
     GMOD_DEFAULT_STARTUP_MAP,
+    GMOD_DEFAULT_WORKSHOP_AUTO_UPDATE,
     GMOD_DEFAULT_INSTALL_SUBFOLDER,
     GMOD_MANAGE_EMBED_COLOR,
     GMOD_X64_STEAM_BRANCH,
@@ -33,10 +35,14 @@ from apps.gmod import (
     _read_gmod_game_server_login_token,
     ensure_gmod_managed_files,
     gmod_game_server_login_token_path,
+    gmod_server_info_responds,
     gmod_server_config_path,
     gmod_settings_path,
     gmod_start_command,
+    gmod_workshop_manifest_path,
+    render_gmod_workshop_manifest,
     resolve_gmod_game_port,
+    sync_gmod_workshop_manifest,
 )
 from node_api.app_installer import NodeAppInstallInputKind, NodeAppInstallRequest, NodeAppInstallerService
 from node_api.service import NodeApiService
@@ -80,6 +86,37 @@ def _write_gmod_x64_runtime(directory: Path) -> None:
     binary.write_text("binary\n", encoding="utf-8")
 
 
+_SourceQueryResponder = Callable[[bytes, int], bytes | None]
+
+
+class _SourceQueryProtocol(asyncio.DatagramProtocol):
+    def __init__(self, responder: _SourceQueryResponder) -> None:
+        self._responder = responder
+        self.requests: list[bytes] = []
+        self.transport: asyncio.DatagramTransport | None = None
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self.transport = cast(asyncio.DatagramTransport, transport)
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        self.requests.append(data)
+        response = self._responder(data, len(self.requests))
+        if response is not None and self.transport is not None:
+            self.transport.sendto(response, addr)
+
+
+async def _create_source_query_responder(
+    responder: _SourceQueryResponder,
+) -> tuple[asyncio.DatagramTransport, _SourceQueryProtocol, int]:
+    loop = asyncio.get_running_loop()
+    transport, protocol = await loop.create_datagram_endpoint(
+        lambda: _SourceQueryProtocol(responder),
+        local_addr=("127.0.0.1", 0),
+    )
+    server_address = cast(tuple[str, int], transport.get_extra_info("sockname"))
+    return cast(asyncio.DatagramTransport, transport), cast(_SourceQueryProtocol, protocol), server_address[1]
+
+
 class GmodSettingsTests(unittest.TestCase):
     def test_default_launch_settings_are_persisted_with_sensible_values(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -91,6 +128,9 @@ class GmodSettingsTests(unittest.TestCase):
             self.assertEqual(settings.startup_map, GMOD_DEFAULT_STARTUP_MAP)
             self.assertEqual(settings.gamemode, GMOD_DEFAULT_GAMEMODE)
             self.assertEqual(settings.max_players, GMOD_DEFAULT_MAX_PLAYERS)
+            self.assertIsNone(settings.workshop_collection_id)
+            self.assertEqual(settings.workshop_auto_update, GMOD_DEFAULT_WORKSHOP_AUTO_UPDATE)
+            self.assertEqual(settings.client_content_workshop_ids, ())
             self.assertTrue(gmod_server_config_path(directory).is_file())
 
     def test_custom_launch_settings_drive_the_generated_command(self) -> None:
@@ -144,6 +184,168 @@ class GmodSettingsTests(unittest.TestCase):
                 settings_by_key["startup_map"].update("gm construct")
             with self.assertRaisesRegex(ValueError, "not valid"):
                 settings_by_key["gamemode"].update("sandbox; quit")
+
+    def test_existing_launch_settings_load_workshop_defaults(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            ensure_gmod_managed_files(directory)
+            gmod_settings_path(directory).write_text(
+                json.dumps(
+                    {
+                        "startup_map": "gm_flatgrass",
+                        "gamemode": "darkrp",
+                        "max_players": 32,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            settings = Gmod_Settings(gmod_settings_path(directory))
+            settings.save()
+            persisted = cast(
+                dict[str, object],
+                json.loads(gmod_settings_path(directory).read_text(encoding="utf-8")),
+            )
+
+        self.assertEqual(settings.startup_map, "gm_flatgrass")
+        self.assertEqual(settings.gamemode, "darkrp")
+        self.assertEqual(settings.max_players, 32)
+        self.assertIsNone(settings.workshop_collection_id)
+        self.assertTrue(settings.workshop_auto_update)
+        self.assertEqual(settings.client_content_workshop_ids, ())
+        self.assertEqual(persisted["workshop_collection_id"], "")
+        self.assertTrue(persisted["workshop_auto_update"])
+        self.assertEqual(persisted["client_content_workshop_ids"], [])
+
+    def test_workshop_settings_generate_safe_launch_and_client_download_manifest(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            ensure_gmod_managed_files(directory)
+            settings = Gmod_Settings(gmod_settings_path(directory))
+            settings_by_key = {setting.key: setting for setting in settings.options}
+            settings_by_key["workshop_collection_id"].update(" 123456789 ")
+            settings_by_key["workshop_auto_update"].update("false")
+            settings_by_key["client_content_workshop_ids"].update("234567890, 345678901\n456789012")
+            settings.save()
+
+            persisted = cast(
+                dict[str, object],
+                json.loads(gmod_settings_path(directory).read_text(encoding="utf-8")),
+            )
+            reloaded = Gmod_Settings(gmod_settings_path(directory))
+            command = gmod_start_command(
+                port=27030,
+                max_players=reloaded.max_players,
+                gamemode=reloaded.gamemode,
+                startup_map=reloaded.startup_map,
+                game_server_login_token=token,
+                workshop_collection_id=reloaded.workshop_collection_id,
+                workshop_auto_update=reloaded.workshop_auto_update,
+            )
+            manifest_path = sync_gmod_workshop_manifest(directory, reloaded.client_content_workshop_ids)
+            manifest = manifest_path.read_text(encoding="utf-8")
+
+        self.assertEqual(persisted["workshop_collection_id"], "123456789")
+        self.assertFalse(persisted["workshop_auto_update"])
+        self.assertEqual(
+            persisted["client_content_workshop_ids"],
+            ["234567890", "345678901", "456789012"],
+        )
+        self.assertEqual(reloaded.workshop_collection_id, "123456789")
+        self.assertFalse(reloaded.workshop_auto_update)
+        self.assertEqual(reloaded.client_content_workshop_ids, ("234567890", "345678901", "456789012"))
+        self.assertEqual(
+            command,
+            [
+                "./srcds_run_x64",
+                "-game",
+                "garrysmod",
+                "+port",
+                "27030",
+                "+maxplayers",
+                "16",
+                "+host_workshop_collection",
+                "123456789",
+                "+host_workshop_autoupdate",
+                "0",
+                "+gamemode",
+                "sandbox",
+                "+map",
+                "gm_construct",
+                "+sv_setsteamaccount",
+                token,
+            ],
+        )
+        self.assertEqual(manifest_path, gmod_workshop_manifest_path(directory))
+        self.assertEqual(
+            manifest,
+            "-- Generated by Yukibot. Configure client content Workshop IDs in Yukibot; do not edit this file.\n"
+            "if not SERVER then return end\n"
+            "\n"
+            'resource.AddWorkshop("234567890")\n'
+            'resource.AddWorkshop("345678901")\n'
+            'resource.AddWorkshop("456789012")\n',
+        )
+
+    def test_workshop_ids_reject_injection_and_duplicates(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            ensure_gmod_managed_files(directory)
+            settings = Gmod_Settings(gmod_settings_path(directory))
+            settings_by_key = {setting.key: setting for setting in settings.options}
+
+            with self.assertRaisesRegex(ValueError, "Workshop ID"):
+                settings_by_key["workshop_collection_id"].update("123; quit")
+            with self.assertRaisesRegex(ValueError, "duplicates"):
+                settings_by_key["client_content_workshop_ids"].update("123456789, 123456789")
+            with self.assertRaisesRegex(ValueError, "Workshop ID"):
+                render_gmod_workshop_manifest(('123456789"); RunString("bad")',))
+
+
+class GmodReadinessTests(unittest.TestCase):
+    def test_source_info_probe_handles_a_challenge_response(self) -> None:
+        challenge = b"\x01\x02\x03\x04"
+
+        def respond(_request: bytes, request_count: int) -> bytes:
+            if request_count == 1:
+                return b"\xff\xff\xff\xffA" + challenge
+            return b"\xff\xff\xff\xffI\x11"
+
+        async def query() -> tuple[bool, _SourceQueryProtocol]:
+            transport, protocol, port = await _create_source_query_responder(respond)
+            try:
+                responding = await gmod_server_info_responds(port=port, timeout_seconds=0.5)
+                return responding, protocol
+            finally:
+                transport.close()
+
+        responding, protocol = asyncio.run(query())
+
+        self.assertTrue(responding)
+        self.assertEqual(len(protocol.requests), 2)
+        self.assertTrue(protocol.requests[1].endswith(challenge))
+
+    def test_source_info_probe_rejects_a_truncated_response(self) -> None:
+        def respond(_request: bytes, _request_count: int) -> bytes:
+            return b"\xff\xff\xff\xffI"
+
+        async def query() -> bool:
+            transport, _, port = await _create_source_query_responder(respond)
+            try:
+                return await gmod_server_info_responds(port=port, timeout_seconds=0.5)
+            finally:
+                transport.close()
+
+        self.assertFalse(asyncio.run(query()))
+
+    def test_source_info_probe_rejects_non_finite_timeouts(self) -> None:
+        async def query() -> None:
+            for timeout_seconds in (math.nan, math.inf, -math.inf):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    await gmod_server_info_responds(port=GMOD_DEFAULT_PORT, timeout_seconds=timeout_seconds)
+
+        asyncio.run(query())
 
 
 class GmodIntegrationTests(unittest.TestCase):
@@ -276,6 +478,24 @@ class GmodIntegrationTests(unittest.TestCase):
 
         self.assertEqual(GMOD_MANAGE_EMBED_COLOR, 0x1194F0)
         self.assertEqual(app.manage_embed_color, GMOD_MANAGE_EMBED_COLOR)
+
+    def test_workshop_ids_use_a_valid_settings_input_representation(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            app = self._app(Path(temporary_directory))
+            settings_manager = app.settings
+            assert settings_manager is not None
+            setting = settings_manager.app.get_setting("client_content_workshop_ids")
+            assert setting is not None
+
+            settings_manager.update_setting(
+                actor_user_id=42,
+                setting=setting,
+                value="234567890 345678901",
+            )
+
+            current_input = settings_manager.current_input_value(setting, actor_user_id=42)
+
+        self.assertEqual(current_input, "234567890, 345678901")
 
     def test_expired_gslt_exit_has_a_safe_actionable_diagnosis(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -612,6 +832,185 @@ class GmodIntegrationTests(unittest.TestCase):
         self.assertEqual(str(error), "Garry's Mod could not be launched.")
         self.assertNotIn(token, app.cmd_start)
         self.assertIsNone(app._launch_token)
+
+    def test_manifest_sync_failure_does_not_retain_the_gslt(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            _write_gmod_x64_runtime(directory)
+            app = self._app(directory)
+            app.set_steam_game_server_login_token(token)
+
+            with patch.object(app, "_sync_workshop_manifest", side_effect=OSError("read-only")):
+                with self.assertRaisesRegex(OSError, "read-only"):
+                    asyncio.run(app.start())
+
+        self.assertNotIn(token, app.cmd_start)
+        self.assertIsNone(app._launch_token)
+
+    def test_start_waits_for_source_query_and_cleans_up_a_failed_readiness_check(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+
+        class _RunningProcess:
+            def __init__(self) -> None:
+                self.stdout = io.StringIO()
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        async def run() -> tuple[bool, AsyncMock]:
+            with TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                _write_gmod_x64_runtime(directory)
+                app = self._app(directory)
+                app.set_steam_game_server_login_token(token)
+                process = _RunningProcess()
+
+                async def launch() -> None:
+                    app.process = cast(subprocess.Popen[str], cast(object, process))
+
+                cleanup = AsyncMock(return_value=True)
+                with (
+                    patch.object(app, "_std_launch", new=launch),
+                    patch.object(
+                        app,
+                        "_wait_for_startup_ready",
+                        new=AsyncMock(side_effect=RuntimeError("query unavailable")),
+                    ),
+                    patch.object(app, "_terminate_runtime", new=cleanup),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "query unavailable"):
+                        await app.start()
+                return app.is_started, cleanup
+
+        is_started, cleanup = asyncio.run(run())
+
+        self.assertFalse(is_started)
+        cleanup.assert_awaited_once()
+
+    def test_start_marks_ready_after_a_source_info_response(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+
+        class _RunningProcess:
+            def __init__(self) -> None:
+                self.exit_code: int | None = None
+                self.stdout = io.StringIO()
+
+            def poll(self) -> int | None:
+                return self.exit_code
+
+        def respond(_request: bytes, _request_count: int) -> bytes:
+            return b"\xff\xff\xff\xffI\x11"
+
+        async def run() -> tuple[bool, bool, bool, bool, str | None]:
+            transport, protocol, port = await _create_source_query_responder(respond)
+            try:
+                with TemporaryDirectory() as temporary_directory:
+                    directory = Path(temporary_directory)
+                    _write_gmod_x64_runtime(directory)
+                    app = self._app(directory, port=port)
+                    app.set_steam_game_server_login_token(token)
+                    process = _RunningProcess()
+
+                    async def launch() -> None:
+                        app.process = cast(subprocess.Popen[str], cast(object, process))
+
+                    with patch.object(app, "_std_launch", new=launch):
+                        started = await app.start()
+                    is_started = app.is_started
+                    manifest_exists = gmod_workshop_manifest_path(directory).is_file()
+                    process.exit_code = 0
+                    await app.handle_unexpected_stop()
+                    saw_info_query = protocol.requests == [b"\xff\xff\xff\xffTSource Engine Query\x00"]
+                    return started, is_started, saw_info_query, manifest_exists, app._launch_token
+            finally:
+                transport.close()
+
+        started, is_started, saw_info_query, manifest_exists, launch_token = asyncio.run(run())
+
+        self.assertTrue(started)
+        self.assertTrue(is_started)
+        self.assertTrue(saw_info_query)
+        self.assertTrue(manifest_exists)
+        self.assertIsNone(launch_token)
+
+    def test_launch_cancellation_runs_startup_cleanup(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+
+        class _RunningProcess:
+            def __init__(self) -> None:
+                self.stdout = io.StringIO()
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        async def run() -> tuple[AsyncMock, bool]:
+            with TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                _write_gmod_x64_runtime(directory)
+                app = self._app(directory)
+                app.set_steam_game_server_login_token(token)
+                process = _RunningProcess()
+                launch_started = asyncio.Event()
+                wait_forever = asyncio.Event()
+
+                async def launch() -> None:
+                    app.process = cast(subprocess.Popen[str], cast(object, process))
+                    launch_started.set()
+                    await wait_forever.wait()
+
+                termination = AsyncMock(return_value=True)
+                with (
+                    patch.object(app, "_std_launch", new=launch),
+                    patch.object(app, "_terminate_runtime", new=termination),
+                ):
+                    start_task = asyncio.create_task(app.start())
+                    await launch_started.wait()
+                    start_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await start_task
+                return termination, app.is_started
+
+        termination, is_started = asyncio.run(run())
+
+        self.assertFalse(is_started)
+        termination.assert_awaited_once()
+
+    def test_start_cleans_up_a_running_process_without_stdout(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+
+        class _RunningProcess:
+            stdout = None
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        async def run() -> AsyncMock:
+            with TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                _write_gmod_x64_runtime(directory)
+                app = self._app(directory)
+                app.set_steam_game_server_login_token(token)
+                process = _RunningProcess()
+
+                async def launch() -> None:
+                    app.process = cast(subprocess.Popen[str], cast(object, process))
+
+                cleanup = AsyncMock(return_value=True)
+                with (
+                    patch.object(app, "_std_launch", new=launch),
+                    patch.object(app, "_terminate_runtime", new=cleanup),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "exited before startup completed"):
+                        await app.start()
+                return cleanup
+
+        cleanup = asyncio.run(run())
+
+        cleanup.assert_awaited_once()
 
     def test_process_detection_only_matches_this_instance_directory(self) -> None:
         with TemporaryDirectory() as temporary_directory:
