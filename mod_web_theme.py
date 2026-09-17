@@ -561,6 +561,29 @@ class ModWebTheme:
                 .mod-app-hero-status-value-purple {{ color: var(--mod-accent-text) !important; }}
                 .mod-app-hero-status-value-warn {{ color: #fbbf24 !important; }}
                 .mod-app-hero-status-value-red {{ color: #f87171 !important; }}
+                .mod-app-runtime-fault {{
+                    border-left: 3px solid #f87171;
+                    background: linear-gradient(90deg, rgba(127, 29, 29, 0.32), rgba(69, 10, 10, 0.12));
+                    padding: 0.78rem 0.95rem;
+                }}
+                .mod-app-runtime-fault-title {{
+                    color: #fca5a5 !important;
+                    font-size: 0.82rem;
+                    font-weight: 900;
+                    letter-spacing: 0.08em;
+                    text-transform: uppercase;
+                }}
+                .mod-app-runtime-fault-summary {{
+                    color: rgba(254, 226, 226, 0.96) !important;
+                    font-size: 0.96rem;
+                    font-weight: 700;
+                    line-height: 1.35;
+                }}
+                .mod-app-runtime-fault-remediation {{
+                    color: rgba(254, 226, 226, 0.76) !important;
+                    font-size: 0.83rem;
+                    line-height: 1.4;
+                }}
                 .mod-app-hero-join-addresses {{
                     max-width: min(32rem, 100%);
                     margin-top: 0.2rem;

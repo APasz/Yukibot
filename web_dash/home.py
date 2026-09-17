@@ -3756,20 +3756,30 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         tone=runtime_badge.tone,
                         extra_classes=runtime_badge_classes,
                     )
-                    runtime_badge_tooltip_html: str | None = self._player_count_tooltip_html(
-                        connected_player_names=app.connected_player_names,
-                        fallback_text=(
-                            runtime_badge.text
-                            if runtime_badge.text
-                            == self._player_count_snapshot_text(
-                                player_count=app.player_count,
-                                player_capacity=app.player_capacity,
-                            )
-                            else None
-                        ),
-                    )
-                    if runtime_badge_tooltip_html is not None:
-                        self._attach_html_tooltip(ui=ui, target=runtime_badge_label, html=runtime_badge_tooltip_html)
+                    if app.runtime_fault is not None:
+                        fault_lines = [app.runtime_fault.summary or app.runtime_fault.status_label]
+                        if app.runtime_fault.remediation is not None:
+                            fault_lines.append(f"Next step: {app.runtime_fault.remediation}")
+                        self._attach_text_tooltip(
+                            ui=ui,
+                            target=runtime_badge_label,
+                            text="\n".join(fault_lines),
+                        )
+                    else:
+                        runtime_badge_tooltip_html: str | None = self._player_count_tooltip_html(
+                            connected_player_names=app.connected_player_names,
+                            fallback_text=(
+                                runtime_badge.text
+                                if runtime_badge.text
+                                == self._player_count_snapshot_text(
+                                    player_count=app.player_count,
+                                    player_capacity=app.player_capacity,
+                                )
+                                else None
+                            ),
+                        )
+                        if runtime_badge_tooltip_html is not None:
+                            self._attach_html_tooltip(ui=ui, target=runtime_badge_label, html=runtime_badge_tooltip_html)
                 with ui.row().classes("mod-app-card-badges items-center gap-3 flex-wrap"):
                     for badge in self._app_card_badges(app):
                         badge_target: str | None = self._app_card_badge_target(
@@ -3918,7 +3928,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         if not app.enabled:
             return _ModWebBadgeSpec(text="Disabled", tone="red")
         if app.runtime_fault is not None:
-            return _ModWebBadgeSpec(text="Crashed", tone="red")
+            return _ModWebBadgeSpec(text=app.runtime_fault.status_label, tone="red")
         return None
 
     @staticmethod

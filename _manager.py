@@ -18,7 +18,7 @@ import config
 from _async_utils import run_blocking
 from _discord import App_Bound, DC_Bound, DC_Relay, RelayEmbedPayload
 from _utils import format_player_capacity
-from apps._app import App, AppPortClaim, AppRuntimeFaultKind, NetworkProtocol
+from apps._app import App, AppPortClaim, AppRuntimeFault, AppRuntimeFaultKind, NetworkProtocol
 from apps._config import (
     App_Config,
     AppVersion,
@@ -787,13 +787,36 @@ class App_Manager(metaclass=config.Singleton):
         started_at = app.lifecycle_started_at
         uptime = datetime.now(timezone.utc) - started_at if started_at is not None else None
         was_manager_initiated_shutdown = app.name.casefold() in self._managed_shutdown_name_keys()
+        process = app.process
+        has_stop_context = started_at is not None or process is not None
+        exit_code: int | None = None
+        if process is not None:
+            try:
+                exit_code = process.poll()
+            except Exception:
+                log.exception("Failed to read inactive app exit code: %s", app.name)
         try:
             await app.handle_unexpected_stop()
         except Exception:
             log.exception("Failed to finalise inactive app: %s", app.name)
+        if not was_manager_initiated_shutdown and has_stop_context and app.runtime_fault is None:
+            diagnosis: AppRuntimeFault | None = None
+            try:
+                diagnosis = app.diagnose_unexpected_stop()
+            except Exception:
+                log.exception("Failed to diagnose unexpected app stop: %s", app.name)
+            if diagnosis is None and exit_code is not None and exit_code != 0:
+                diagnosis = app.fallback_unexpected_stop_fault()
+            if diagnosis is not None:
+                app.record_runtime_fault(
+                    kind=diagnosis.kind,
+                    summary=diagnosis.summary,
+                    code=diagnosis.code,
+                    remediation=diagnosis.remediation,
+                )
         runtime_fault = app.runtime_fault
-        if runtime_fault is not None and runtime_fault.kind is AppRuntimeFaultKind.CRASH:
-            self._notify_app_crash(app, summary=runtime_fault.summary, uptime=uptime)
+        if runtime_fault is not None and not was_manager_initiated_shutdown:
+            self._notify_app_runtime_fault(app, fault=runtime_fault, uptime=uptime)
         elif started_at is not None and not was_manager_initiated_shutdown:
             self._notify_app_lifecycle(app, started=False, uptime=uptime)
         app.lifecycle_started_at = None
@@ -908,6 +931,7 @@ class App_Manager(metaclass=config.Singleton):
         try:
             self._claim_listening_ports(app)
             start_attempted = True
+            app.clear_runtime_fault()
             await app.start()
             app.lifecycle_started_at = datetime.now(timezone.utc)
             app.verify_published_client_pack()
@@ -1054,11 +1078,11 @@ class App_Manager(metaclass=config.Singleton):
             )
         )
 
-    def _notify_app_crash(
+    def _notify_app_runtime_fault(
         self,
         app: ManagedApp,
         *,
-        summary: str | None,
+        fault: AppRuntimeFault,
         uptime: timedelta | None = None,
     ) -> None:
         if not self._app_can_emit_lifecycle_notice(app):
@@ -1067,11 +1091,18 @@ class App_Manager(metaclass=config.Singleton):
             return
         uptime_seconds = None if uptime is None else max(0, round(uptime.total_seconds()))
         notice = AppLifecycleNotice(
-            state=AppLifecycleState.CRASHED,
+            state=(
+                AppLifecycleState.CRASHED
+                if fault.kind is AppRuntimeFaultKind.CRASH
+                else AppLifecycleState.UNEXPECTED_STOP
+            ),
             source=RelayNoticeSource.APP_MANAGER,
             severity=RelayNoticeSeverity.ERROR,
             uptime_seconds=uptime_seconds,
-            summary=summary,
+            summary=fault.summary,
+            detail_lines=()
+            if fault.remediation is None
+            else (f"Next step: {fault.remediation}",),
         )
         embed_spec = notice_embed_spec(notice, app_name=app.friendly, author_name="System")
         relay_embed = (
@@ -1086,7 +1117,7 @@ class App_Manager(metaclass=config.Singleton):
         DC_Relay.add(
             DC_Bound(
                 app,
-                "Crashed",
+                fault.status_label,
                 "System",
                 relay_embed=relay_embed,
                 notice=notice,

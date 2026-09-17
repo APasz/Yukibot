@@ -637,7 +637,7 @@ class ModWebAppPageMixin(
             status_text = "Disabled"
             status_tone = "red"
         elif app_stats.runtime_fault is not None:
-            status_text = "Crashed"
+            status_text = app_stats.runtime_fault.status_label
             status_tone = "red"
         elif app_stats.enabled:
             status_text = "Stopped"
@@ -1194,6 +1194,11 @@ class ModWebAppPageMixin(
                     )
                     for index, activity_badge in enumerate(activity_badges)
                 )
+            with ui.element("div").classes("mod-app-runtime-fault w-full") as runtime_fault_panel:
+                with ui.column().classes("w-full gap-1"):
+                    runtime_fault_title = ui.label("").classes("mod-app-runtime-fault-title")
+                    runtime_fault_summary = ui.label("").classes("mod-app-runtime-fault-summary")
+                    runtime_fault_remediation = ui.label("").classes("mod-app-runtime-fault-remediation")
 
         current_runtime_details: _ModWebAppHeroRuntimeDetails = initial_runtime_details
 
@@ -1212,6 +1217,16 @@ class ModWebAppPageMixin(
             )
             if status_changed:
                 self._pulse_live_value(status_value_label)
+            runtime_fault = None if app_stats is None else app_stats.runtime_fault
+            if runtime_fault is None:
+                self._set_element_visibility(runtime_fault_panel, visible=False)
+            else:
+                runtime_fault_title.set_text(runtime_fault.status_label)
+                runtime_fault_summary.set_text(runtime_fault.summary or "No diagnostic summary is available.")
+                self._set_element_visibility(runtime_fault_remediation, visible=runtime_fault.remediation is not None)
+                if runtime_fault.remediation is not None:
+                    runtime_fault_remediation.set_text(f"Next step: {runtime_fault.remediation}")
+                self._set_element_visibility(runtime_fault_panel, visible=True)
             self._set_optional_badge_state(player_badge, runtime_details.player_count_badge)
             self._set_html_tooltip_state(
                 player_badge_tooltip,
@@ -7515,7 +7530,7 @@ class ModWebAppPageMixin(
                                 label="Stopped", value=model.lifecycle_notice_stopped
                             )
                             lifecycle_crashed_checkbox = _properties_toggle(
-                                label="Crash", value=model.lifecycle_notice_crashed
+                                label="Crash / Unexpected Stop", value=model.lifecycle_notice_crashed
                             )
                             if model.relay_notice_player_session is not None:
                                 relay_notice_player_session_checkbox = _properties_toggle(

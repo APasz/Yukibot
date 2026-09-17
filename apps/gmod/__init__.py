@@ -18,7 +18,7 @@ import hikari
 import config
 from _async_utils import run_blocking
 from _security import Power_Level
-from apps._app import App, AppPortClaim, NetworkProtocol
+from apps._app import App, AppPortClaim, AppRuntimeFault, AppRuntimeFaultCode, AppRuntimeFaultKind, NetworkProtocol
 from apps._config import App_Config, AppVersion, SteamUpdatePreset
 from apps._config_files import AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
 from apps._settings import App_Settings, IntSettingSpec, Setting, Setting_Label, StringSettingSpec
@@ -69,11 +69,16 @@ _GMOD_STEAM_ACCOUNT_VALUE_RE: Final[re.Pattern[str]] = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_GMOD_GSLT_REJECTED_RE: Final[re.Pattern[str]] = re.compile(r"\bGSL token expired\b", re.IGNORECASE)
 _GMOD_LEGACY_PLACEHOLDER_VERSION: Final[str] = "0.0"
 _REDACTED_SECRET: Final[str] = "[REDACTED]"
 _GMOD_LEGACY_STEAM_ACCOUNT_WARNING: Final[str] = (
     "server.cfg contains legacy/manual sv_setsteamaccount configuration. Remove it and use "
     "Yukibot's dedicated Steam Game Server Login Token (GSLT) setting instead."
+)
+_GMOD_GSLT_REJECTED_SUMMARY: Final[str] = "Steam rejected the configured Game Server Login Token."
+_GMOD_GSLT_REJECTED_REMEDIATION: Final[str] = (
+    f"Create a fresh GSLT for Garry's Mod (App ID {STEAM_GAME_APP_ID}), replace it in Properties, then restart."
 )
 
 
@@ -580,7 +585,31 @@ class Gmod(App[App_Config]):
             finally:
                 self._clear_launch_token()
 
+    def diagnose_unexpected_stop(self) -> AppRuntimeFault | None:
+        """Recognise safe, actionable GMod fatal errors after stdout has drained."""
+
+        stdout_tail = self.read_stdout_tail()
+        if not any(_GMOD_GSLT_REJECTED_RE.search(line) is not None for line in stdout_tail.lines):
+            return None
+        return AppRuntimeFault(
+            kind=AppRuntimeFaultKind.CRASH,
+            code=AppRuntimeFaultCode.GMOD_STEAM_GAME_SERVER_LOGIN_TOKEN_REJECTED,
+            summary=_GMOD_GSLT_REJECTED_SUMMARY,
+            remediation=_GMOD_GSLT_REJECTED_REMEDIATION,
+        )
+
+    def _start_stdout_capture(self, stream: IO[str], *, redaction_token: str) -> None:
+        self._stdout_task = asyncio.create_task(
+            self._tee(
+                stream,
+                self.file_stdout,
+                "STDOUT",
+                redaction_token=redaction_token,
+            )
+        )
+
     async def start(self) -> bool:
+        self.clear_runtime_fault()
         _require_gmod_x64_installation(self.directory)
         token = _read_gmod_game_server_login_token(self.directory)
         if token is None:
@@ -605,18 +634,16 @@ class Gmod(App[App_Config]):
         process = self.process
         if process is None or process.stdout is None or not self.check_running():
             try:
-                await self._drain_stderr_task()
+                if process is not None and process.stdout is not None:
+                    self._start_stdout_capture(process.stdout, redaction_token=token)
+                    await self._drain_stdout_task()
             finally:
-                self._clear_launch_token()
+                try:
+                    await self._drain_stderr_task()
+                finally:
+                    self._clear_launch_token()
             raise RuntimeError("Garry's Mod exited before startup completed.")
-        self._stdout_task = asyncio.create_task(
-            self._tee(
-                process.stdout,
-                self.file_stdout,
-                "STDOUT",
-                redaction_token=token,
-            )
-        )
+        self._start_stdout_capture(process.stdout, redaction_token=token)
         self._running = True
         return True
 

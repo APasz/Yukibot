@@ -4381,7 +4381,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if not app_stats.enabled:
             return _ModWebBadgeSpec(text="Disabled", tone="red")
         if app_stats.runtime_fault is not None:
-            return _ModWebBadgeSpec(text="Crashed", tone="red")
+            return _ModWebBadgeSpec(text=app_stats.runtime_fault.status_label, tone="red")
         return _ModWebBadgeSpec(text="Stopped", tone="warn")
 
     @staticmethod
@@ -4432,7 +4432,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if not app_stats.enabled:
             return f"{app_friendly} is disabled."
         if app_stats.runtime_fault is not None:
-            return f"{app_friendly} crashed. Restart it before using this action."
+            return f"{app_friendly} {app_stats.runtime_fault.status_label.casefold()}. Restart it before using this action."
         return f"{app_friendly} must be running before this action can be used."
 
     @staticmethod

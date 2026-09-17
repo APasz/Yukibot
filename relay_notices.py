@@ -52,6 +52,7 @@ class RelayNoticeSeverity(StrEnum):
 class AppLifecycleState(StrEnum):
     STARTED = "started"
     STOPPED = "stopped"
+    UNEXPECTED_STOP = "unexpected_stop"
     CRASHED = "crashed"
 
 
@@ -645,6 +646,12 @@ def render_notice_body(notice: RelayNotice, *, app_name: str) -> str:
             if notice.uptime_seconds is not None:
                 return f"{app_name} stopped after {_format_duration_seconds(notice.uptime_seconds)}"
             return f"{app_name} stopped"
+        if notice.state is AppLifecycleState.UNEXPECTED_STOP:
+            if notice.summary is not None:
+                return f"{app_name} stopped unexpectedly: {notice.summary}"
+            if notice.uptime_seconds is not None:
+                return f"{app_name} stopped unexpectedly after {_format_duration_seconds(notice.uptime_seconds)}"
+            return f"{app_name} stopped unexpectedly"
         if notice.summary is not None:
             return f"{app_name} crashed: {notice.summary}"
         if notice.uptime_seconds is not None:
@@ -684,6 +691,8 @@ def notice_badge_spec(notice: RelayNotice) -> RelayNoticeBadgeSpec | None:
             return RelayNoticeBadgeSpec(text="Started", tone="purple")
         if notice.state is AppLifecycleState.STOPPED:
             return RelayNoticeBadgeSpec(text="Ended", tone="grey")
+        if notice.state is AppLifecycleState.UNEXPECTED_STOP:
+            return RelayNoticeBadgeSpec(text="Stopped Unexpectedly", tone="red")
         return RelayNoticeBadgeSpec(text="Crashed", tone="red")
     if isinstance(notice, MaintenanceNotice):
         if notice.stage is MaintenanceStage.WARNING:
@@ -719,6 +728,8 @@ def relay_notice_badge_spec_from_label(label: str) -> RelayNoticeBadgeSpec | Non
     lower = text.casefold()
     if "started" in lower:
         return RelayNoticeBadgeSpec(text=text, tone="purple")
+    if "unexpected" in lower:
+        return RelayNoticeBadgeSpec(text=text, tone="red")
     if "stopped" in lower or "ended" in lower:
         return RelayNoticeBadgeSpec(text=text, tone="grey")
     if "crashed" in lower:
@@ -767,6 +778,18 @@ def notice_embed_spec(notice: RelayNotice, *, app_name: str, author_name: str) -
             if not description_lines:
                 description_lines.append("Stopped.")
             return RelayNoticeEmbedSpec(title=f"{app_name} Ended", description="\n".join(description_lines))
+        if notice.state is AppLifecycleState.UNEXPECTED_STOP:
+            if notice.summary is not None:
+                description_lines.append(notice.summary)
+            if notice.uptime_seconds is not None:
+                description_lines.append(f"Uptime: `{_format_duration_seconds(notice.uptime_seconds)}`")
+            description_lines.extend(notice.detail_lines)
+            if not description_lines:
+                description_lines.append("Stopped unexpectedly.")
+            return RelayNoticeEmbedSpec(
+                title=f"{app_name} Stopped Unexpectedly",
+                description="\n".join(description_lines),
+            )
         if notice.summary is not None:
             description_lines.append(notice.summary)
         if notice.uptime_seconds is not None:

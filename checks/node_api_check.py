@@ -32,6 +32,7 @@ from apps._app import (
     AppActivityProvider,
     AppActivityProviderMetadata,
     AppRuntimeFault,
+    AppRuntimeFaultCode,
     AppRuntimeFaultKind,
     AppVersionSource,
     ChatRelaySupport,
@@ -2010,7 +2011,9 @@ class NodeApiTests(unittest.TestCase):
             footprint_bytes=None,
             runtime_fault=AppRuntimeFault(
                 kind=AppRuntimeFaultKind.CRASH,
-                summary="Failed to start the minecraft server",
+                code=AppRuntimeFaultCode.GMOD_STEAM_GAME_SERVER_LOGIN_TOKEN_REJECTED,
+                summary="Steam rejected the configured Game Server Login Token.",
+                remediation="Replace the token, then restart.",
             ),
             transition_state=NodeAppTransitionState.NONE,
             connected_player_names=("Yoko", "Bea"),
@@ -2051,6 +2054,11 @@ class NodeApiTests(unittest.TestCase):
         mapped = event.to_mapping()
         restored = NodeAppStateStreamEvent.from_mapping(mapped)
 
+        self.assertEqual(
+            mapped["app_stats"]["runtime_fault"]["code"],
+            AppRuntimeFaultCode.GMOD_STEAM_GAME_SERVER_LOGIN_TOKEN_REJECTED.value,
+        )
+        self.assertEqual(mapped["app_stats"]["runtime_fault"]["remediation"], "Replace the token, then restart.")
         self.assertEqual(restored, event)
 
     def test_node_state_stream_event_round_trips_mapping(self) -> None:

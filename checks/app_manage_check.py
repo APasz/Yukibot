@@ -2861,6 +2861,28 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         app.handle_unexpected_stop.assert_awaited_once()
         self.assertIsNone(app.lifecycle_started_at)
 
+    async def test_launch_clears_a_previous_runtime_fault_before_starting(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = None
+        manager.end = AsyncMock(return_value=set())
+        app = _build_dummy_app(join_port=25565)
+        app.runtime_fault = AppRuntimeFault(
+            kind=AppRuntimeFaultKind.CRASH,
+            summary="Previous startup failure",
+        )
+        fault_seen_by_start: list[AppRuntimeFault | None] = []
+
+        async def _start() -> bool:
+            fault_seen_by_start.append(app.runtime_fault)
+            return True
+
+        app.start = _start  # type: ignore[method-assign]
+
+        with patch("_manager.DC_Relay.add"):
+            await manager.launch(app)
+
+        self.assertEqual(fault_seen_by_start, [None])
+
     async def test_end_emits_lifecycle_stop_embed_with_uptime(self) -> None:
         manager = object.__new__(App_Manager)
         manager.current = "dummy"
@@ -2913,11 +2935,17 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             config.ResourcePointSet(cpu_points=0, ram_points=0),
         )
 
-    async def test_handle_inactive_app_emits_lifecycle_stop_embed_for_unmanaged_shutdown(self) -> None:
+    async def test_handle_inactive_app_emits_unexpected_stop_embed_for_unmanaged_shutdown(self) -> None:
+        class _FailedProcess:
+            @staticmethod
+            def poll() -> int:
+                return 1
+
         manager = object.__new__(App_Manager)
         manager.current = "dummy"
         app = _build_dummy_app(join_port=25565)
         app.chat_channel = hikari.Snowflake(123)
+        app.process = cast(Any, _FailedProcess())
         app.lifecycle_started_at = datetime.now(timezone.utc) - timedelta(hours=1, minutes=2, seconds=3)
         app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
@@ -2927,12 +2955,133 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         add_mock.assert_called_once()
         relayed_message = add_mock.call_args.args[0]
         self.assertEqual(relayed_message.player, "System")
+        self.assertEqual(relayed_message.content, "Stopped unexpectedly")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Stopped Unexpectedly")
+        self.assertEqual(
+            relayed_message.relay_embed.description,
+            "The server process stopped unexpectedly.\n"
+            "Uptime: `1h 2m 3s`\n"
+            "Next step: Review the console output, then try starting the server again.",
+        )
+        self.assertIsNotNone(app.runtime_fault)
+        assert app.runtime_fault is not None
+        self.assertIs(app.runtime_fault.kind, AppRuntimeFaultKind.UNEXPECTED_EXIT)
+        app.handle_unexpected_stop.assert_awaited_once()
+        self.assertIsNone(app.lifecycle_started_at)
+
+    async def test_handle_inactive_app_marks_a_nonzero_startup_exit_as_unexpected(self) -> None:
+        class _FailedProcess:
+            @staticmethod
+            def poll() -> int:
+                return 1
+
+        manager = object.__new__(App_Manager)
+        manager.current = "dummy"
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.process = cast(Any, _FailedProcess())
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager._handle_inactive_app(app)
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.content, "Stopped unexpectedly")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Stopped Unexpectedly")
+        self.assertEqual(
+            relayed_message.relay_embed.description,
+            "The server process stopped unexpectedly.\n"
+            "Next step: Review the console output, then try starting the server again.",
+        )
+        self.assertEqual(
+            app.runtime_fault,
+            AppRuntimeFault(
+                kind=AppRuntimeFaultKind.UNEXPECTED_EXIT,
+                summary="The server process stopped unexpectedly.",
+                remediation="Review the console output, then try starting the server again.",
+            ),
+        )
+
+    async def test_handle_inactive_app_does_not_reuse_a_diagnosis_without_stop_context(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = "dummy"
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        app.diagnose_unexpected_stop = Mock(  # type: ignore[method-assign]
+            return_value=AppRuntimeFault(
+                kind=AppRuntimeFaultKind.CRASH,
+                summary="A stale diagnosis must not be reused.",
+            )
+        )
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager._handle_inactive_app(app)
+
+        app.diagnose_unexpected_stop.assert_not_called()
+        add_mock.assert_not_called()
+        self.assertIsNone(app.runtime_fault)
+
+    async def test_handle_inactive_app_keeps_a_clean_unmanaged_exit_stopped(self) -> None:
+        class _CleanlyExitedProcess:
+            @staticmethod
+            def poll() -> int:
+                return 0
+
+        manager = object.__new__(App_Manager)
+        manager.current = "dummy"
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.process = cast(Any, _CleanlyExitedProcess())
+        app.lifecycle_started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager._handle_inactive_app(app)
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
         self.assertEqual(relayed_message.content, "Stopped")
         assert relayed_message.relay_embed is not None
         self.assertEqual(relayed_message.relay_embed.title, "Dummy Ended")
-        self.assertEqual(relayed_message.relay_embed.description, "Uptime: `1h 2m 3s`")
-        app.handle_unexpected_stop.assert_awaited_once()
-        self.assertIsNone(app.lifecycle_started_at)
+        self.assertEqual(relayed_message.relay_embed.description, "Uptime: `5s`")
+        self.assertIsNone(app.runtime_fault)
+
+    async def test_handle_inactive_app_uses_a_recognised_diagnosis_before_the_fallback(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = "dummy"
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.lifecycle_started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        app.diagnose_unexpected_stop = Mock(  # type: ignore[method-assign]
+            return_value=AppRuntimeFault(
+                kind=AppRuntimeFaultKind.CRASH,
+                summary="Steam rejected the configured Game Server Login Token.",
+                remediation="Replace the token, then restart.",
+            )
+        )
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager._handle_inactive_app(app)
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.content, "Crashed")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Crashed")
+        self.assertEqual(
+            relayed_message.relay_embed.description,
+            "Steam rejected the configured Game Server Login Token.\n"
+            "Uptime: `5s`\n"
+            "Next step: Replace the token, then restart.",
+        )
+        self.assertIsNotNone(app.runtime_fault)
+        assert app.runtime_fault is not None
+        self.assertEqual(app.runtime_fault.remediation, "Replace the token, then restart.")
 
     async def test_active_resource_point_usage_drops_after_app_crash(self) -> None:
         manager = object.__new__(App_Manager)

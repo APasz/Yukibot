@@ -13,7 +13,7 @@ from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 from _manager import AppInstallInput, App_Manager
-from apps._app import AppPortClaim, NetworkProtocol
+from apps._app import AppPortClaim, AppRuntimeFault, AppRuntimeFaultCode, AppRuntimeFaultKind, NetworkProtocol
 from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
 from apps._updater import SteamCmd_Update_Manager
 from apps._steam import STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL
@@ -276,6 +276,72 @@ class GmodIntegrationTests(unittest.TestCase):
 
         self.assertEqual(GMOD_MANAGE_EMBED_COLOR, 0x1194F0)
         self.assertEqual(app.manage_embed_color, GMOD_MANAGE_EMBED_COLOR)
+
+    def test_expired_gslt_exit_has_a_safe_actionable_diagnosis(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            app.file_stdout = directory / "stdout.log"
+            app.file_stdout.write_text(
+                "\x1b[38;2;255;90;90mCould not establish connection to Steam servers. (GSL token expired)\n",
+                encoding="utf-8",
+            )
+
+            fault = app.diagnose_unexpected_stop()
+
+        self.assertIsNotNone(fault)
+        assert fault is not None
+        self.assertIs(fault.kind, AppRuntimeFaultKind.CRASH)
+        self.assertIs(fault.code, AppRuntimeFaultCode.GMOD_STEAM_GAME_SERVER_LOGIN_TOKEN_REJECTED)
+        self.assertEqual(fault.summary, "Steam rejected the configured Game Server Login Token.")
+        self.assertEqual(
+            fault.remediation,
+            "Create a fresh GSLT for Garry's Mod (App ID 4000), replace it in Properties, then restart.",
+        )
+
+    def test_unrelated_gmod_exit_does_not_claim_a_known_diagnosis(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            app.file_stdout = directory / "stdout.log"
+            app.file_stdout.write_text("Server quit after receiving a shutdown command.\n", encoding="utf-8")
+
+            fault = app.diagnose_unexpected_stop()
+
+        self.assertIsNone(fault)
+
+    def test_immediate_gslt_exit_is_written_before_the_startup_error(self) -> None:
+        class _ExitedProcess:
+            def __init__(self) -> None:
+                self.stdout = io.StringIO("FATAL ERROR: GSL token expired\n")
+
+            @staticmethod
+            def poll() -> int:
+                return 1
+
+        async def _start() -> tuple[RuntimeError, AppRuntimeFault | None]:
+            with TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                _write_gmod_x64_runtime(directory)
+                app = self._app(directory)
+                app.file_stdout = directory / "stdout.log"
+                app.set_steam_game_server_login_token("A0B1C2D3E4F5G6H7I8J9K0L1M2")
+                process = _ExitedProcess()
+
+                async def _launch() -> None:
+                    app.process = cast(subprocess.Popen[str], cast(object, process))
+
+                with self.assertRaises(RuntimeError) as raised:
+                    with patch.object(app, "_std_launch", new=_launch):
+                        await app.start()
+                return raised.exception, app.diagnose_unexpected_stop()
+
+        error, fault = asyncio.run(_start())
+
+        self.assertEqual(str(error), "Garry's Mod exited before startup completed.")
+        self.assertIsNotNone(fault)
+        assert fault is not None
+        self.assertIs(fault.code, AppRuntimeFaultCode.GMOD_STEAM_GAME_SERVER_LOGIN_TOKEN_REJECTED)
 
     def test_gslt_is_write_only_and_redacted_from_config_and_runtime_output(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"

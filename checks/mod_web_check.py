@@ -7471,6 +7471,9 @@ class ModWebTests(unittest.TestCase):
                 "play.example.test:25565",
                 "203.0.113.10:25565",
                 "",
+                "",
+                "",
+                "",
             ],
         )
         self.assertEqual(ui.labels[2].class_value, "mod-app-hero-join-address")
@@ -7490,6 +7493,9 @@ class ModWebTests(unittest.TestCase):
                 "Running",
                 "play.example.test:25565",
                 "203.0.113.10:25565",
+                "",
+                "",
+                "",
                 "",
             ],
         )
@@ -15474,6 +15480,29 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(details.status_text, "Crashed")
         self.assertEqual(details.status_tone, "red")
 
+    def test_app_hero_runtime_details_show_unexpected_exit_status(self) -> None:
+        stats = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version="1.20.4",
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.BIDIRECTIONAL,
+            storage_percent=58,
+            storage_free_bytes=120 * 1024**3,
+            storage_total_bytes=256 * 1024**3,
+            footprint_bytes=12 * 1024**3,
+            runtime_fault=AppRuntimeFault(
+                kind=AppRuntimeFaultKind.UNEXPECTED_EXIT,
+                summary="The server process stopped unexpectedly.",
+            ),
+        )
+
+        details = ModWebService()._app_hero_runtime_details(stats)
+
+        self.assertEqual(details.status_text, "Stopped unexpectedly")
+        self.assertEqual(details.status_tone, "red")
+
     def test_app_page_hero_badges_keep_only_resource_point_badges(self) -> None:
         service = ModWebService()
         model = ModWebPageModel(
@@ -20380,7 +20409,7 @@ class ModWebTests(unittest.TestCase):
             [
                 ("Started", False),
                 ("Stopped", True),
-                ("Crash", False),
+                ("Crash / Unexpected Stop", False),
                 ("Player Join/Leave", False),
                 ("Death", False),
                 ("Research", False),

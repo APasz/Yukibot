@@ -3327,7 +3327,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 status_value = "Disabled"
                 status_tone = "red"
             elif app_stats.runtime_fault is not None:
-                status_value = "Crashed"
+                status_value = app_stats.runtime_fault.status_label
                 status_tone = "red"
             else:
                 status_value = "Stopped"

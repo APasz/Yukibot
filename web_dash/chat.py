@@ -2844,7 +2844,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         if not app_stats.enabled:
             return "Disabled", "red"
         if app_stats.runtime_fault is not None:
-            return "Crashed", "red"
+            return app_stats.runtime_fault.status_label, "red"
         return "Stopped", "grey"
 
     def _chat_event_source_label(self, event: ChatEvent, *, room_id: str | None = None) -> str:

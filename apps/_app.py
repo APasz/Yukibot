@@ -172,35 +172,82 @@ class RelayAdvancementTerms:
 
 class AppRuntimeFaultKind(enum.StrEnum):
     CRASH = "crash"
+    UNEXPECTED_EXIT = "unexpected_exit"
+
+
+class AppRuntimeFaultCode(enum.StrEnum):
+    """Stable identifiers for recognised, user-actionable app runtime faults."""
+
+    GMOD_STEAM_GAME_SERVER_LOGIN_TOKEN_REJECTED = "gmod_steam_game_server_login_token_rejected"
 
 
 @dataclass(frozen=True, slots=True)
 class AppRuntimeFault:
     kind: AppRuntimeFaultKind
     summary: str | None = None
+    code: AppRuntimeFaultCode | None = None
+    remediation: str | None = None
 
     def __post_init__(self) -> None:
-        if self.summary is not None and not self.summary.strip():
-            raise ValueError("App runtime fault summary must not be blank.")
+        if not isinstance(self.kind, AppRuntimeFaultKind):
+            raise TypeError("App runtime fault kind must be an AppRuntimeFaultKind.")
+        if self.code is not None and not isinstance(self.code, AppRuntimeFaultCode):
+            raise TypeError("App runtime fault code must be an AppRuntimeFaultCode.")
+        if self.summary is not None:
+            if not isinstance(self.summary, str):
+                raise TypeError("App runtime fault summary must be text.")
+            summary = self.summary.strip()
+            if not summary:
+                raise ValueError("App runtime fault summary must not be blank.")
+            object.__setattr__(self, "summary", summary)
+        if self.remediation is not None:
+            if not isinstance(self.remediation, str):
+                raise TypeError("App runtime fault remediation must be text.")
+            remediation = self.remediation.strip()
+            if not remediation:
+                raise ValueError("App runtime fault remediation must not be blank.")
+            object.__setattr__(self, "remediation", remediation)
+        if self.code is not None and self.summary is None:
+            raise ValueError("A recognised app runtime fault must include a summary.")
+
+    @property
+    def status_label(self) -> str:
+        """Return the concise user-facing state represented by this fault."""
+
+        if self.kind is AppRuntimeFaultKind.CRASH:
+            return "Crashed"
+        return "Stopped unexpectedly"
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "AppRuntimeFault":
         raw_kind: object | None = payload.get("kind")
         raw_summary: object | None = payload.get("summary")
+        raw_code: object | None = payload.get("code")
+        raw_remediation: object | None = payload.get("remediation")
         if not isinstance(raw_kind, str):
             raise ValueError("App runtime fault kind is invalid.")
         if raw_summary is not None and not isinstance(raw_summary, str):
             raise ValueError("App runtime fault summary is invalid.")
+        if raw_code is not None and not isinstance(raw_code, str):
+            raise ValueError("App runtime fault code is invalid.")
+        if raw_remediation is not None and not isinstance(raw_remediation, str):
+            raise ValueError("App runtime fault remediation is invalid.")
         try:
             kind: AppRuntimeFaultKind = AppRuntimeFaultKind(raw_kind)
         except ValueError as xcp:
             raise ValueError("App runtime fault kind is invalid.") from xcp
-        return cls(kind=kind, summary=raw_summary)
+        try:
+            code = AppRuntimeFaultCode(raw_code) if raw_code is not None else None
+        except ValueError as xcp:
+            raise ValueError("App runtime fault code is invalid.") from xcp
+        return cls(kind=kind, summary=raw_summary, code=code, remediation=raw_remediation)
 
     def to_mapping(self) -> dict[str, object]:
         return {
             "kind": self.kind.value,
             "summary": self.summary,
+            "code": None if self.code is None else self.code.value,
+            "remediation": self.remediation,
         }
 
 
@@ -943,14 +990,15 @@ class App(Generic[ConfigT], ABC):
         *,
         kind: AppRuntimeFaultKind,
         summary: str | None = None,
+        code: AppRuntimeFaultCode | None = None,
+        remediation: str | None = None,
     ) -> bool:
-        normalised_summary: str | None
-        if summary is None:
-            normalised_summary = None
-        else:
-            stripped_summary = summary.strip()
-            normalised_summary = stripped_summary or None
-        next_fault = AppRuntimeFault(kind=kind, summary=normalised_summary)
+        next_fault = AppRuntimeFault(
+            kind=kind,
+            summary=summary,
+            code=code,
+            remediation=remediation,
+        )
         if self.runtime_fault == next_fault:
             return False
         self.runtime_fault = next_fault
@@ -1337,6 +1385,20 @@ class App(Generic[ConfigT], ABC):
         if process is not None and process.poll() is not None:
             await self._drain_stderr_task()
             self.process = None
+
+    def diagnose_unexpected_stop(self) -> AppRuntimeFault | None:
+        """Return a recognised, safe diagnosis after output has been fully drained."""
+
+        return None
+
+    def fallback_unexpected_stop_fault(self) -> AppRuntimeFault:
+        """Return the safe generic fault used for an unrecognised external exit."""
+
+        return AppRuntimeFault(
+            kind=AppRuntimeFaultKind.UNEXPECTED_EXIT,
+            summary="The server process stopped unexpectedly.",
+            remediation="Review the console output, then try starting the server again.",
+        )
 
     async def player_count(self) -> tuple[int, int] | None:
         return None
