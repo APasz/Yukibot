@@ -499,6 +499,7 @@ class App_Manager(metaclass=config.Singleton):
         self._lookup: dict[str, str] = {}
         self._managed_shutdown_names: set[str] = set()
         self._pending_start_names: set[str] = set()
+        self._notified_runtime_fault_names: set[str] = set()
         self._reserved_port_claims_by_app_name: dict[str, tuple[AppPortClaim, ...]] = {}
         self.default_chat_channels: tuple[hikari.Snowflake, ...] = ()
         self.default_chat_channel: hikari.Snowflake | None = None
@@ -520,6 +521,13 @@ class App_Manager(metaclass=config.Singleton):
         except AttributeError:
             self._pending_start_names = set()
             return self._pending_start_names
+
+    def _notified_runtime_fault_name_keys(self) -> set[str]:
+        try:
+            return self._notified_runtime_fault_names
+        except AttributeError:
+            self._notified_runtime_fault_names = set()
+            return self._notified_runtime_fault_names
 
     def _reserved_port_claims_by_name(self) -> dict[str, tuple[AppPortClaim, ...]]:
         try:
@@ -783,12 +791,12 @@ class App_Manager(metaclass=config.Singleton):
                     await self._handle_inactive_app(app)
             await asyncio.sleep(1)
 
-    async def _handle_inactive_app(self, app: ManagedApp) -> None:
+    async def _handle_inactive_app(self, app: ManagedApp, *, start_attempted: bool = False) -> None:
         started_at = app.lifecycle_started_at
         uptime = datetime.now(timezone.utc) - started_at if started_at is not None else None
         was_manager_initiated_shutdown = app.name.casefold() in self._managed_shutdown_name_keys()
         process = app.process
-        has_stop_context = started_at is not None or process is not None
+        has_stop_context = start_attempted or started_at is not None or process is not None
         exit_code: int | None = None
         if process is not None:
             try:
@@ -799,6 +807,9 @@ class App_Manager(metaclass=config.Singleton):
             await app.handle_unexpected_stop()
         except Exception:
             log.exception("Failed to finalise inactive app: %s", app.name)
+        captured_exit_code = app.consume_unexpected_stop_exit_code()
+        if exit_code is None:
+            exit_code = captured_exit_code
         if not was_manager_initiated_shutdown and has_stop_context and app.runtime_fault is None:
             diagnosis: AppRuntimeFault | None = None
             try:
@@ -816,7 +827,11 @@ class App_Manager(metaclass=config.Singleton):
                 )
         runtime_fault = app.runtime_fault
         if runtime_fault is not None and not was_manager_initiated_shutdown:
-            self._notify_app_runtime_fault(app, fault=runtime_fault, uptime=uptime)
+            notified_fault_names = self._notified_runtime_fault_name_keys()
+            app_name_key = app.name.casefold()
+            if app_name_key not in notified_fault_names:
+                self._notify_app_runtime_fault(app, fault=runtime_fault, uptime=uptime)
+                notified_fault_names.add(app_name_key)
         elif started_at is not None and not was_manager_initiated_shutdown:
             self._notify_app_lifecycle(app, started=False, uptime=uptime)
         app.lifecycle_started_at = None
@@ -834,6 +849,7 @@ class App_Manager(metaclass=config.Singleton):
         base_path = Path("apps")
         self.startup_disabled_instances = []
         self._reserved_port_claims_by_name().clear()
+        self._notified_runtime_fault_name_keys().clear()
         for app in self.apps.values():
             DC_Relay.unregister_app(app)
         self._lookup = {}
@@ -930,15 +946,17 @@ class App_Manager(metaclass=config.Singleton):
         start_attempted = False
         try:
             self._claim_listening_ports(app)
-            start_attempted = True
+            self._notified_runtime_fault_name_keys().discard(app.name.casefold())
+            app.clear_unexpected_stop_exit_code()
             app.clear_runtime_fault()
+            start_attempted = True
             await app.start()
             app.lifecycle_started_at = datetime.now(timezone.utc)
             app.verify_published_client_pack()
             self._notify_app_lifecycle(app, started=True)
         except Exception:
             if start_attempted and not app.check_running():
-                await self._handle_inactive_app(app)
+                await self._handle_inactive_app(app, start_attempted=True)
             raise
         finally:
             pending_names.discard(app.name.casefold())
@@ -1883,6 +1901,7 @@ class App_Manager(metaclass=config.Singleton):
         self._unregister_lookup_aliases(app)
         self._managed_shutdown_name_keys().discard(app.name.casefold())
         self._pending_start_name_keys().discard(app.name.casefold())
+        self._notified_runtime_fault_name_keys().discard(app.name.casefold())
         self._release_listening_ports(app)
         self._remove_restart_auto_start_app(app.name)
         self.dump_enabled()

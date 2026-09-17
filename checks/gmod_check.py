@@ -10,8 +10,10 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Callable, cast
+from typing import Any, Callable, cast
 from unittest.mock import AsyncMock, Mock, patch
+
+import hikari
 
 from _manager import AppInstallInput, App_Manager
 from apps._app import AppPortClaim, AppRuntimeFault, AppRuntimeFaultCode, AppRuntimeFaultKind, NetworkProtocol
@@ -154,10 +156,12 @@ class GmodSettingsTests(unittest.TestCase):
                 game_server_login_token=token,
             )
 
+        self.assertIn("-norestart", command)
         self.assertEqual(
             command,
             [
                 "./srcds_run_x64",
+                "-norestart",
                 "-game",
                 "garrysmod",
                 "+port",
@@ -255,10 +259,12 @@ class GmodSettingsTests(unittest.TestCase):
         self.assertEqual(reloaded.workshop_collection_id, "123456789")
         self.assertFalse(reloaded.workshop_auto_update)
         self.assertEqual(reloaded.client_content_workshop_ids, ("234567890", "345678901", "456789012"))
+        self.assertIn("-norestart", command)
         self.assertEqual(
             command,
             [
                 "./srcds_run_x64",
+                "-norestart",
                 "-game",
                 "garrysmod",
                 "+port",
@@ -506,6 +512,7 @@ class GmodIntegrationTests(unittest.TestCase):
                 "\x1b[38;2;255;90;90mCould not establish connection to Steam servers. (GSL token expired)\n",
                 encoding="utf-8",
             )
+            app._stdout_capture_started = True
 
             fault = app.diagnose_unexpected_stop()
 
@@ -525,6 +532,7 @@ class GmodIntegrationTests(unittest.TestCase):
             app = self._app(directory)
             app.file_stdout = directory / "stdout.log"
             app.file_stdout.write_text("Server quit after receiving a shutdown command.\n", encoding="utf-8")
+            app._stdout_capture_started = True
 
             fault = app.diagnose_unexpected_stop()
 
@@ -539,7 +547,7 @@ class GmodIntegrationTests(unittest.TestCase):
             def poll() -> int:
                 return 1
 
-        async def _start() -> tuple[RuntimeError, AppRuntimeFault | None]:
+        async def _start() -> tuple[RuntimeError, AppRuntimeFault | None, bool]:
             with TemporaryDirectory() as temporary_directory:
                 directory = Path(temporary_directory)
                 _write_gmod_x64_runtime(directory)
@@ -554,14 +562,134 @@ class GmodIntegrationTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as raised:
                     with patch.object(app, "_std_launch", new=_launch):
                         await app.start()
-                return raised.exception, app.diagnose_unexpected_stop()
+                return raised.exception, app.diagnose_unexpected_stop(), app.process is None
 
-        error, fault = asyncio.run(_start())
+        error, fault, process_cleared = asyncio.run(_start())
 
         self.assertEqual(str(error), "Garry's Mod exited before startup completed.")
+        self.assertTrue(process_cleared)
         self.assertIsNotNone(fault)
         assert fault is not None
         self.assertIs(fault.code, AppRuntimeFaultCode.GMOD_STEAM_GAME_SERVER_LOGIN_TOKEN_REJECTED)
+
+    def _run_manager_failed_initial_startup(
+        self,
+        *,
+        stdout: str,
+        exit_code: int,
+    ) -> tuple[AppRuntimeFault | None, tuple[str, ...], bool, bool, int]:
+        class _ExitedProcess:
+            def __init__(self) -> None:
+                self.stdout = io.StringIO(stdout)
+
+            def poll(self) -> int:
+                return exit_code
+
+        async def run() -> tuple[AppRuntimeFault | None, tuple[str, ...], bool, bool, int]:
+            with TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                _write_gmod_x64_runtime(directory)
+                app = self._app(directory)
+                app.file_stdout = directory / "stdout.log"
+                app.chat_channel = hikari.Snowflake(123)
+                app.set_steam_game_server_login_token("A0B1C2D3E4F5G6H7I8J9K0L1M2")
+                process = _ExitedProcess()
+                manager = object.__new__(App_Manager)
+                manager.apps = {app.name: app}
+                manager.current = None
+                notices: list[str] = []
+
+                async def launch() -> None:
+                    app.process = cast(subprocess.Popen[str], cast(object, process))
+
+                def capture_notice(bound: object) -> None:
+                    notices.append(cast(Any, bound).content)
+
+                with (
+                    patch.object(app, "_std_launch", new=launch),
+                    patch.object(app, "diagnose_unexpected_stop", wraps=app.diagnose_unexpected_stop) as diagnose_mock,
+                    patch("_manager.DC_Relay.add", side_effect=capture_notice),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "exited before startup completed"):
+                        await manager.launch(app)
+                    should_monitor = App_Manager._should_monitor_app(app)
+                    # A monitor/launch handoff can invoke inactive handling twice; it must
+                    # not relay the same fault twice.
+                    await manager._handle_inactive_app(app, start_attempted=True)
+                return app.runtime_fault, tuple(notices), app.process is None, should_monitor, diagnose_mock.call_count
+
+        return asyncio.run(run())
+
+    def test_manager_diagnoses_gslt_from_a_failed_initial_startup_without_duplicate_notice(self) -> None:
+        fault, notices, process_cleared, should_monitor, diagnosis_calls = self._run_manager_failed_initial_startup(
+            stdout="FATAL ERROR: GSL token expired\n",
+            exit_code=1,
+        )
+
+        self.assertEqual(notices, ("Crashed",))
+        self.assertTrue(process_cleared)
+        self.assertFalse(should_monitor)
+        self.assertEqual(diagnosis_calls, 1)
+        self.assertIsNotNone(fault)
+        assert fault is not None
+        self.assertIs(fault.kind, AppRuntimeFaultKind.CRASH)
+        self.assertIs(fault.code, AppRuntimeFaultCode.GMOD_STEAM_GAME_SERVER_LOGIN_TOKEN_REJECTED)
+        self.assertEqual(
+            fault.remediation,
+            "Create a fresh GSLT for Garry's Mod (App ID 4000), replace it in Properties, then restart.",
+        )
+
+    def test_manager_uses_generic_fault_for_an_unrecognised_failed_initial_exit(self) -> None:
+        fault, notices, process_cleared, should_monitor, diagnosis_calls = self._run_manager_failed_initial_startup(
+            stdout="FATAL ERROR: unexpected engine failure\n",
+            exit_code=42,
+        )
+
+        self.assertEqual(notices, ("Stopped unexpectedly",))
+        self.assertTrue(process_cleared)
+        self.assertFalse(should_monitor)
+        self.assertEqual(diagnosis_calls, 1)
+        self.assertEqual(
+            fault,
+            AppRuntimeFault(
+                kind=AppRuntimeFaultKind.UNEXPECTED_EXIT,
+                summary="The server process stopped unexpectedly.",
+                remediation="Review the console output, then try starting the server again.",
+            ),
+        )
+
+    def test_manager_does_not_diagnose_stale_stdout_when_gmod_never_launches(self) -> None:
+        token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
+
+        async def run() -> tuple[AppRuntimeFault | None, tuple[str, ...]]:
+            with TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                _write_gmod_x64_runtime(directory)
+                app = self._app(directory)
+                app.file_stdout = directory / "stdout.log"
+                app.file_stdout.write_text("FATAL ERROR: GSL token expired\n", encoding="utf-8")
+                app.chat_channel = hikari.Snowflake(123)
+                app.set_steam_game_server_login_token(token)
+                manager = object.__new__(App_Manager)
+                manager.apps = {app.name: app}
+                manager.current = None
+                notices: list[str] = []
+
+                def capture_notice(bound: object) -> None:
+                    notices.append(cast(Any, bound).content)
+
+                with (
+                    patch.object(app, "_std_launch", new=AsyncMock(side_effect=OSError("launch failed"))),
+                    patch("_manager.DC_Relay.add", side_effect=capture_notice),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "could not be launched"):
+                        await manager.launch(app)
+                return app.runtime_fault, tuple(notices)
+
+        fault, notices = asyncio.run(run())
+
+        self.assertIsNone(fault)
+        self.assertEqual(notices, ())
 
     def test_gslt_is_write_only_and_redacted_from_config_and_runtime_output(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"

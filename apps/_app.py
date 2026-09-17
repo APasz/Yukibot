@@ -376,6 +376,7 @@ class App(Generic[ConfigT], ABC):
     _instance_config_change_handler: Callable[["App"], None] | None = None
     lifecycle_started_at: datetime | None = None
     runtime_fault: AppRuntimeFault | None = None
+    _unexpected_stop_exit_code: int | None = None
     config_file_read_level_override: Power_Level | None = None
     config_file_write_level_override: Power_Level | None = None
     save_file_write_level_override: Power_Level | None = None
@@ -433,6 +434,7 @@ class App(Generic[ConfigT], ABC):
         self.providers = []
         self.lifecycle_started_at = None
         self.runtime_fault = None
+        self._unexpected_stop_exit_code = None
         try:
             self.proc_name = self.proc_name
         except AttributeError:
@@ -985,6 +987,30 @@ class App(Generic[ConfigT], ABC):
         self.runtime_fault = None
         return True
 
+    def clear_unexpected_stop_exit_code(self) -> None:
+        """Discard exit context retained from a previous launch attempt."""
+
+        self._unexpected_stop_exit_code = None
+
+    def _capture_unexpected_stop_exit_code(self, process: subprocess.Popen[Any]) -> int | None:
+        """Retain a completed process's exit code without retaining the process itself."""
+
+        try:
+            exit_code = process.poll()
+        except Exception:
+            log.exception("Failed to read inactive app exit code: %s", self.name)
+            return None
+        if exit_code is not None:
+            self._unexpected_stop_exit_code = exit_code
+        return exit_code
+
+    def consume_unexpected_stop_exit_code(self) -> int | None:
+        """Return and clear exit context collected during failed-start cleanup."""
+
+        exit_code = self._unexpected_stop_exit_code
+        self._unexpected_stop_exit_code = None
+        return exit_code
+
     def record_runtime_fault(
         self,
         *,
@@ -1382,9 +1408,12 @@ class App(Generic[ConfigT], ABC):
     async def handle_unexpected_stop(self) -> None:
         self._running = False
         process = self.process
-        if process is not None and process.poll() is not None:
-            await self._drain_stderr_task()
-            self.process = None
+        if process is not None and self._capture_unexpected_stop_exit_code(process) is not None:
+            try:
+                await self._drain_stderr_task()
+            finally:
+                if self.process is process:
+                    self.process = None
 
     def diagnose_unexpected_stop(self) -> AppRuntimeFault | None:
         """Return a recognised, safe diagnosis after output has been fully drained."""

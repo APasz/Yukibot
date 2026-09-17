@@ -2600,6 +2600,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         app = _build_dummy_app()
         app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
         app.start = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        app.diagnose_unexpected_stop = Mock()  # type: ignore[method-assign]
         manager.apps = {app.name: app}
         manager._claim_listening_ports = Mock(side_effect=RuntimeError("UDP port 34197 is already reserved"))  # type: ignore[method-assign]
 
@@ -2608,6 +2609,8 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         app.start.assert_not_awaited()
         app.handle_unexpected_stop.assert_not_awaited()
+        app.diagnose_unexpected_stop.assert_not_called()
+        self.assertIsNone(app.runtime_fault)
 
     def test_start_blocker_counts_pending_listening_port_claims(self) -> None:
         manager = object.__new__(App_Manager)
@@ -2906,6 +2909,38 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Uptime: `1h 2m 3s`")
         self.assertIsNone(app.lifecycle_started_at)
 
+    async def test_manager_stop_and_kill_do_not_emit_runtime_fault_notices(self) -> None:
+        manager = object.__new__(App_Manager)
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.process = cast(Any, _RunningProcess())
+        app.lifecycle_started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        manager.apps = {app.name: app}
+        manager._lookup = {app.name: app.name, app.name.lower(): app.name}
+
+        async def stop() -> bool:
+            app.process = None
+            return True
+
+        async def kill() -> bool:
+            app.process = None
+            return True
+
+        app.stop = stop  # type: ignore[method-assign]
+        app.kill = kill  # type: ignore[method-assign]
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager.end(app.name)
+            app.process = cast(Any, _RunningProcess())
+            app.lifecycle_started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+            await manager.kill(app.name)
+
+        self.assertEqual(
+            tuple(call.args[0].content for call in add_mock.call_args_list),
+            ("Stopped", "Stopped"),
+        )
+        self.assertIsNone(app.runtime_fault)
+
     async def test_active_resource_point_usage_drops_after_app_stop(self) -> None:
         manager = object.__new__(App_Manager)
         manager.current = "dummy"
@@ -3082,6 +3117,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(app.runtime_fault)
         assert app.runtime_fault is not None
         self.assertEqual(app.runtime_fault.remediation, "Replace the token, then restart.")
+        app.diagnose_unexpected_stop.assert_called_once()
 
     async def test_active_resource_point_usage_drops_after_app_crash(self) -> None:
         manager = object.__new__(App_Manager)
@@ -3118,12 +3154,15 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         app.chat_channel = hikari.Snowflake(123)
         app.lifecycle_started_at = datetime.now(timezone.utc) - timedelta(hours=1, minutes=2, seconds=3)
         app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        app.diagnose_unexpected_stop = Mock()  # type: ignore[method-assign]
 
         with patch("_manager.DC_Relay.add") as add_mock:
             await manager._handle_inactive_app(app)
 
         add_mock.assert_not_called()
         app.handle_unexpected_stop.assert_awaited_once()
+        app.diagnose_unexpected_stop.assert_not_called()
+        self.assertIsNone(app.runtime_fault)
         self.assertIsNone(app.lifecycle_started_at)
 
     async def test_notify_running_app_relays_targets_only_running_inbound_apps(self) -> None:

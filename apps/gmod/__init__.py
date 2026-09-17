@@ -63,6 +63,7 @@ _GMOD_WORKSHOP_ADDON_DIRECTORY_NAME: Final[str] = "yukibot-workshop"
 _GMOD_WORKSHOP_MANIFEST_FILENAME: Final[str] = "yukibot_workshop_downloads.lua"
 _GMOD_X64_LAUNCHER_NAME: Final[str] = "srcds_run_x64"
 _GMOD_X64_LAUNCH_COMMAND: Final[str] = f"./{_GMOD_X64_LAUNCHER_NAME}"
+_GMOD_NO_RESTART_ARGUMENT: Final[str] = "-norestart"
 _GMOD_X64_BINARY_RELATIVE_PATH: Final[Path] = Path("bin") / "linux64" / "srcds"
 _GMOD_X64_PROCESS_NAME: Final[str] = _GMOD_X64_BINARY_RELATIVE_PATH.name
 _GMOD_LAUNCH_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -250,6 +251,7 @@ def gmod_start_command(
     )
     command = [
         _GMOD_X64_LAUNCH_COMMAND,
+        _GMOD_NO_RESTART_ARGUMENT,
         "-game",
         "garrysmod",
         "+port",
@@ -717,7 +719,7 @@ class Gmod(App[App_Config]):
     def _base_launch_command() -> list[str]:
         """Return the non-secret portion safe to retain outside an active launch."""
 
-        return [_GMOD_X64_LAUNCH_COMMAND, "-game", "garrysmod"]
+        return [_GMOD_X64_LAUNCH_COMMAND, _GMOD_NO_RESTART_ARGUMENT, "-game", "garrysmod"]
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = GMOD_MANAGE_EMBED_COLOR
@@ -731,6 +733,7 @@ class Gmod(App[App_Config]):
         self.cmd_start = self._base_launch_command()
         self.process = None
         self._stdout_task: asyncio.Task[None] | None = None
+        self._stdout_capture_started: bool = False
         self._launch_token: str | None = None
         super().__init__(bot, am, cfg, Gmod_Settings(gmod_settings_path(cfg.directory)))
         if cfg.steam_update is not None:
@@ -902,6 +905,8 @@ class Gmod(App[App_Config]):
     def diagnose_unexpected_stop(self) -> AppRuntimeFault | None:
         """Recognise safe, actionable GMod fatal errors after stdout has drained."""
 
+        if not self._stdout_capture_started:
+            return None
         stdout_tail = self.read_stdout_tail()
         if not any(_GMOD_GSLT_REJECTED_RE.search(line) is not None for line in stdout_tail.lines):
             return None
@@ -913,6 +918,7 @@ class Gmod(App[App_Config]):
         )
 
     def _start_stdout_capture(self, stream: IO[str], *, redaction_token: str) -> None:
+        self._stdout_capture_started = True
         self._stdout_task = asyncio.create_task(
             self._tee(
                 stream,
@@ -930,7 +936,7 @@ class Gmod(App[App_Config]):
             await self._terminate_runtime()
             return
         try:
-            await self._drain_stdout_task()
+            await self.handle_unexpected_stop()
         finally:
             try:
                 await self._drain_stderr_task()
@@ -940,6 +946,7 @@ class Gmod(App[App_Config]):
                 self._clear_launch_token()
 
     async def start(self) -> bool:
+        self._stdout_capture_started = False
         self.clear_runtime_fault()
         _require_gmod_x64_installation(self.directory)
         token = _read_gmod_game_server_login_token(self.directory)
