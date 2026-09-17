@@ -65,6 +65,10 @@ _GMOD_WORKSHOP_MANIFEST_FILENAME: Final[str] = "yukibot_workshop_downloads.lua"
 _GMOD_X64_LAUNCHER_NAME: Final[str] = "srcds_run_x64"
 _GMOD_X64_LAUNCH_COMMAND: Final[str] = f"./{_GMOD_X64_LAUNCHER_NAME}"
 _GMOD_NO_RESTART_ARGUMENT: Final[str] = "-norestart"
+_GMOD_CONSOLE_ARGUMENT: Final[str] = "-console"
+_GMOD_BIND_ADDRESS: Final[str] = "0.0.0.0"
+_GMOD_IP_ARGUMENT: Final[str] = "-ip"
+_GMOD_PORT_ARGUMENT: Final[str] = "-port"
 _GMOD_X64_BINARY_RELATIVE_PATH: Final[Path] = Path("bin") / "linux64" / "srcds"
 _GMOD_X64_PROCESS_NAME: Final[str] = _GMOD_X64_BINARY_RELATIVE_PATH.name
 _GMOD_LAUNCH_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -253,9 +257,12 @@ def gmod_start_command(
     command = [
         _GMOD_X64_LAUNCH_COMMAND,
         _GMOD_NO_RESTART_ARGUMENT,
+        _GMOD_CONSOLE_ARGUMENT,
         "-game",
         "garrysmod",
-        "+port",
+        _GMOD_IP_ARGUMENT,
+        _GMOD_BIND_ADDRESS,
+        _GMOD_PORT_ARGUMENT,
         str(resolved_port),
         "+maxplayers",
         str(max_players),
@@ -720,7 +727,13 @@ class Gmod(App[App_Config]):
     def _base_launch_command() -> list[str]:
         """Return the non-secret portion safe to retain outside an active launch."""
 
-        return [_GMOD_X64_LAUNCH_COMMAND, _GMOD_NO_RESTART_ARGUMENT, "-game", "garrysmod"]
+        return [
+            _GMOD_X64_LAUNCH_COMMAND,
+            _GMOD_NO_RESTART_ARGUMENT,
+            _GMOD_CONSOLE_ARGUMENT,
+            "-game",
+            "garrysmod",
+        ]
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = GMOD_MANAGE_EMBED_COLOR
