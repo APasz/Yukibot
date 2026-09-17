@@ -35,6 +35,8 @@ from apps.gmod import (
     STEAM_UPDATE_PRESET,
     Gmod,
     Gmod_Settings,
+    _GmodStartupStatusPhase,
+    _advance_gmod_startup_status_phase,
     _read_gmod_game_server_login_token,
     ensure_gmod_managed_files,
     gmod_game_server_login_token_path,
@@ -317,6 +319,22 @@ class GmodSettingsTests(unittest.TestCase):
 
 
 class GmodReadinessTests(unittest.TestCase):
+    def test_console_status_probe_requires_a_complete_dedicated_server_status(self) -> None:
+        phase = _GmodStartupStatusPhase.WAITING_FOR_HOSTNAME
+        phase = _advance_gmod_startup_status_phase(phase, "players : 0 humans, 0 bots (16 max)\n")
+        self.assertIs(phase, _GmodStartupStatusPhase.WAITING_FOR_HOSTNAME)
+
+        for line in (
+            "\x1b[32mhostname: GMod Alpha\x1b[0m\n",
+            "version : 2026.09 secure\n",
+            "udp/ip  : 0.0.0.0:27015 (public ip: 51.79.162.4)\n",
+            "map     : gm_construct at: 0 x, 0 y, 0 z\n",
+            "players : 0 humans, 0 bots (16 max)\n",
+        ):
+            phase = _advance_gmod_startup_status_phase(phase, line)
+
+        self.assertIs(phase, _GmodStartupStatusPhase.READY)
+
     def test_source_info_probe_handles_a_challenge_response(self) -> None:
         challenge = b"\x01\x02\x03\x04"
 
@@ -975,6 +993,31 @@ class GmodIntegrationTests(unittest.TestCase):
         self.assertNotIn(token, app.cmd_start)
         self.assertIsNone(app._launch_token)
 
+    def test_stdout_capture_marks_a_complete_console_status_ready(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            app._reset_startup_status_probe()
+
+            asyncio.run(
+                app._tee(
+                    io.StringIO(
+                        "hostname: GMod Alpha\n"
+                        "udp/ip  : 0.0.0.0:27015\n"
+                        "map     : gm_construct\n"
+                        "players : 0 humans, 0 bots (16 max)\n"
+                    ),
+                    directory / "stdout.log",
+                    "STDOUT",
+                )
+            )
+
+            ready_event = app._startup_status_ready_event
+
+        self.assertIsNotNone(ready_event)
+        assert ready_event is not None
+        self.assertTrue(ready_event.is_set())
+
     def test_manifest_sync_failure_does_not_retain_the_gslt(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
         with TemporaryDirectory() as temporary_directory:
@@ -1076,6 +1119,48 @@ class GmodIntegrationTests(unittest.TestCase):
         self.assertTrue(saw_info_query)
         self.assertTrue(manifest_exists)
         self.assertIsNone(launch_token)
+
+    def test_startup_status_command_marks_ready_when_source_query_is_unavailable(self) -> None:
+        class _RunningProcess:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        async def run() -> tuple[str, AsyncMock]:
+            with TemporaryDirectory() as temporary_directory:
+                app = self._app(Path(temporary_directory))
+                process = _RunningProcess()
+                app.process = cast(subprocess.Popen[str], cast(object, process))
+                app._reset_startup_status_probe()
+                send_status = app._request_startup_console_status
+
+                async def request_status() -> bool:
+                    sent = await send_status()
+                    for line in (
+                        "hostname: GMod Alpha\n",
+                        "udp/ip  : 0.0.0.0:27015\n",
+                        "map     : gm_construct\n",
+                        "players : 0 humans, 0 bots (16 max)\n",
+                    ):
+                        app._observe_startup_console_line(line)
+                    return sent
+
+                request = AsyncMock(side_effect=request_status)
+                with (
+                    patch("apps.gmod.gmod_server_info_responds", new=AsyncMock(return_value=False)),
+                    patch.object(app, "_request_startup_console_status", new=request),
+                    patch("apps.gmod._GMOD_STARTUP_STATUS_PROBE_INITIAL_DELAY_SECONDS", 0.0),
+                ):
+                    await app._wait_for_startup_ready()
+                return process.stdin.getvalue(), request
+
+        command, request = asyncio.run(run())
+
+        self.assertEqual(command, "status\n")
+        request.assert_awaited_once()
 
     def test_launch_cancellation_runs_startup_cleanup(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"

@@ -13,6 +13,7 @@ import socket
 import tempfile
 from collections.abc import Sequence
 from dataclasses import replace
+from enum import Enum, auto
 from pathlib import Path
 from typing import IO, Any, Final, cast
 
@@ -96,6 +97,11 @@ _GMOD_STEAM_ACCOUNT_VALUE_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 _GMOD_GSLT_REJECTED_RE: Final[re.Pattern[str]] = re.compile(r"\bGSL token expired\b", re.IGNORECASE)
+_GMOD_CONSOLE_ANSI_ESCAPE_RE: Final[re.Pattern[str]] = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+_GMOD_CONSOLE_STATUS_HOSTNAME_RE: Final[re.Pattern[str]] = re.compile(r"^\s*hostname\s*:", re.IGNORECASE)
+_GMOD_CONSOLE_STATUS_UDP_ENDPOINT_RE: Final[re.Pattern[str]] = re.compile(r"^\s*udp\s*/\s*ip\s*:", re.IGNORECASE)
+_GMOD_CONSOLE_STATUS_MAP_RE: Final[re.Pattern[str]] = re.compile(r"^\s*map\s*:", re.IGNORECASE)
+_GMOD_CONSOLE_STATUS_PLAYERS_RE: Final[re.Pattern[str]] = re.compile(r"^\s*players\s*:", re.IGNORECASE)
 _GMOD_SOURCE_QUERY_HOST: Final[str] = "127.0.0.1"
 _GMOD_SOURCE_INFO_REQUEST: Final[bytes] = b"\xff\xff\xff\xffTSource Engine Query\x00"
 _GMOD_SOURCE_RESPONSE_HEADER: Final[bytes] = b"\xff\xff\xff\xff"
@@ -110,6 +116,9 @@ _GMOD_SOURCE_QUERY_RESPONSE_SIZE: Final[int] = 4_096
 _GMOD_SERVER_INFO_QUERY_TIMEOUT_SECONDS: Final[float] = 2.0
 _GMOD_STARTUP_READY_TIMEOUT_SECONDS: Final[float] = 900.0
 _GMOD_STARTUP_READY_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
+_GMOD_STARTUP_STATUS_PROBE_INITIAL_DELAY_SECONDS: Final[float] = 15.0
+_GMOD_STARTUP_STATUS_PROBE_INTERVAL_SECONDS: Final[float] = 10.0
+_GMOD_CONSOLE_STATUS_COMMAND: Final[str] = "status\n"
 _GMOD_LEGACY_PLACEHOLDER_VERSION: Final[str] = "0.0"
 _REDACTED_SECRET: Final[str] = "[REDACTED]"
 _GMOD_LEGACY_STEAM_ACCOUNT_WARNING: Final[str] = (
@@ -120,6 +129,16 @@ _GMOD_GSLT_REJECTED_SUMMARY: Final[str] = "Steam rejected the configured Game Se
 _GMOD_GSLT_REJECTED_REMEDIATION: Final[str] = (
     f"Create a fresh GSLT for Garry's Mod (App ID {STEAM_GAME_APP_ID}), replace it in Properties, then restart."
 )
+
+
+class _GmodStartupStatusPhase(Enum):
+    """Ordered fields expected from the dedicated-server ``status`` command."""
+
+    WAITING_FOR_HOSTNAME = auto()
+    WAITING_FOR_UDP_ENDPOINT = auto()
+    WAITING_FOR_MAP = auto()
+    WAITING_FOR_PLAYERS = auto()
+    READY = auto()
 
 
 def gmod_server_config_path(directory: Path) -> Path:
@@ -380,6 +399,40 @@ def _is_gmod_source_info_response(response: bytes) -> bool:
     return len(response) > len(_GMOD_SOURCE_INFO_RESPONSE_PREFIX) and response.startswith(
         _GMOD_SOURCE_INFO_RESPONSE_PREFIX
     )
+
+
+def _advance_gmod_startup_status_phase(
+    phase: _GmodStartupStatusPhase,
+    line: str,
+) -> _GmodStartupStatusPhase:
+    """Advance a parsed dedicated-server status response by one console line."""
+
+    cleaned_line = _GMOD_CONSOLE_ANSI_ESCAPE_RE.sub("", line)
+    if _GMOD_CONSOLE_STATUS_HOSTNAME_RE.match(cleaned_line) is not None:
+        return _GmodStartupStatusPhase.WAITING_FOR_UDP_ENDPOINT
+    if (
+        phase is _GmodStartupStatusPhase.WAITING_FOR_UDP_ENDPOINT
+        and _GMOD_CONSOLE_STATUS_UDP_ENDPOINT_RE.match(cleaned_line) is not None
+    ):
+        return _GmodStartupStatusPhase.WAITING_FOR_MAP
+    if (
+        phase is _GmodStartupStatusPhase.WAITING_FOR_MAP
+        and _GMOD_CONSOLE_STATUS_MAP_RE.match(cleaned_line) is not None
+    ):
+        return _GmodStartupStatusPhase.WAITING_FOR_PLAYERS
+    if (
+        phase is _GmodStartupStatusPhase.WAITING_FOR_PLAYERS
+        and _GMOD_CONSOLE_STATUS_PLAYERS_RE.match(cleaned_line) is not None
+    ):
+        return _GmodStartupStatusPhase.READY
+    return phase
+
+
+def _write_gmod_console_status(stream: IO[str]) -> None:
+    """Request the current Source dedicated-server status through a trusted command."""
+
+    stream.write(_GMOD_CONSOLE_STATUS_COMMAND)
+    stream.flush()
 
 
 async def gmod_server_info_responds(
@@ -749,6 +802,8 @@ class Gmod(App[App_Config]):
         self._stdout_task: asyncio.Task[None] | None = None
         self._stdout_capture_started: bool = False
         self._launch_token: str | None = None
+        self._startup_status_phase = _GmodStartupStatusPhase.WAITING_FOR_HOSTNAME
+        self._startup_status_ready_event: asyncio.Event | None = None
         super().__init__(bot, am, cfg, Gmod_Settings(gmod_settings_path(cfg.directory)))
         self.add_mod_source(GmodWorkshopSource(settings=self._require_settings))
         if cfg.steam_update is not None:
@@ -853,6 +908,14 @@ class Gmod(App[App_Config]):
 
         self.cmd_start = self._base_launch_command()
         self._launch_token = None
+        self._startup_status_phase = _GmodStartupStatusPhase.WAITING_FOR_HOSTNAME
+        self._startup_status_ready_event = None
+
+    def _reset_startup_status_probe(self) -> None:
+        """Prepare a fresh, local console-status readiness probe for one launch."""
+
+        self._startup_status_phase = _GmodStartupStatusPhase.WAITING_FOR_HOSTNAME
+        self._startup_status_ready_event = asyncio.Event()
 
     def log_launch_context(self) -> None:
         command = [
@@ -868,6 +931,28 @@ class Gmod(App[App_Config]):
             self.cfg.join_host,
             self.cfg.join_port,
         )
+
+    def _observe_startup_console_line(self, line: str) -> None:
+        """Record one captured console line for the active status readiness probe."""
+
+        ready_event = self._startup_status_ready_event
+        if ready_event is None or ready_event.is_set():
+            return
+        self._startup_status_phase = _advance_gmod_startup_status_phase(self._startup_status_phase, line)
+        if self._startup_status_phase is _GmodStartupStatusPhase.READY:
+            ready_event.set()
+
+    async def _request_startup_console_status(self) -> bool:
+        """Ask the local dedicated-server console for a complete status response."""
+
+        process = self.process
+        if process is None or process.stdin is None or not self.check_running():
+            return False
+        try:
+            await run_blocking(_write_gmod_console_status, process.stdin)
+        except (BrokenPipeError, OSError, ValueError):
+            return False
+        return True
 
     async def _tee(
         self,
@@ -885,6 +970,7 @@ class Gmod(App[App_Config]):
                 redacted_line = redact_gmod_game_server_login_token(line, token=token)
                 output.write(redacted_line)
                 output.flush()
+                self._observe_startup_console_line(redacted_line)
                 if not config.SILENT_DEBUG:
                     log.debug("%s: %s", label, redacted_line.strip())
 
@@ -972,6 +1058,7 @@ class Gmod(App[App_Config]):
         except (TypeError, ValueError) as xcp:
             raise ValueError("The configured Steam Game Server Login Token is invalid.") from xcp
 
+        self._reset_startup_status_probe()
         try:
             self._sync_workshop_manifest()
             self._launch_token = token
@@ -1003,18 +1090,25 @@ class Gmod(App[App_Config]):
         return True
 
     async def _wait_for_startup_ready(self) -> None:
-        """Wait until the local Source server can answer a server-info query."""
+        """Wait for a Source query or console status, as playable GMod servers may decline A2S."""
 
+        status_ready_event = self._startup_status_ready_event
+        if status_ready_event is None:
+            raise RuntimeError("Garry's Mod startup status probe was not initialised.")
         game_port = resolve_gmod_game_port(self.cfg.join_port)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _GMOD_STARTUP_READY_TIMEOUT_SECONDS
+        next_status_probe_at = loop.time() + _GMOD_STARTUP_STATUS_PROBE_INITIAL_DELAY_SECONDS
         while True:
             if not self.check_running():
-                raise RuntimeError("Garry's Mod stopped before its server query endpoint became ready.")
+                raise RuntimeError("Garry's Mod stopped before its readiness checks completed.")
+            if status_ready_event.is_set():
+                log.info("%s completed a local dedicated-server console status check.", self.name)
+                return
             remaining_seconds = deadline - loop.time()
             if remaining_seconds <= 0:
                 raise TimeoutError(
-                    f"Garry's Mod did not answer a server-info query within "
+                    f"Garry's Mod did not answer a server-info query or complete a local status command within "
                     f"{_GMOD_STARTUP_READY_TIMEOUT_SECONDS:.0f}s."
                 )
             if await gmod_server_info_responds(
@@ -1023,9 +1117,24 @@ class Gmod(App[App_Config]):
             ):
                 log.info("%s answered a local Source server-info query.", self.name)
                 return
+            if status_ready_event.is_set():
+                log.info("%s completed a local dedicated-server console status check.", self.name)
+                return
+            now = loop.time()
+            if now >= next_status_probe_at:
+                if await self._request_startup_console_status():
+                    log.debug("Requested local dedicated-server status for %s startup readiness.", self.name)
+                next_status_probe_at = now + _GMOD_STARTUP_STATUS_PROBE_INTERVAL_SECONDS
             remaining_seconds = deadline - loop.time()
             if remaining_seconds > 0:
-                await asyncio.sleep(min(_GMOD_STARTUP_READY_PROBE_INTERVAL_SECONDS, remaining_seconds))
+                until_next_status_probe = max(0.0, next_status_probe_at - loop.time())
+                await asyncio.sleep(
+                    min(
+                        _GMOD_STARTUP_READY_PROBE_INTERVAL_SECONDS,
+                        remaining_seconds,
+                        until_next_status_probe,
+                    )
+                )
 
     async def stop(self) -> bool:
         return await self._terminate_runtime()
