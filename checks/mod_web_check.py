@@ -12628,6 +12628,10 @@ class ModWebTests(unittest.TestCase):
         self.assertIn(call("200 (200)"), ui.label.call_args_list)
         self.assertIn(call("300 (300)"), ui.label.call_args_list)
         self.assertIs(ui.switch.call_args.kwargs["value"], False)
+        self.assertEqual(
+            [call.args[0] for call in ui.input.return_value.classes.call_args_list],
+            ["w-full mod-config-input", "w-full mod-config-input"],
+        )
 
     def test_gmod_workshop_source_panel_saves_collection_auto_update(self) -> None:
         service = ModWebService()

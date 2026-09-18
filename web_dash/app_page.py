@@ -7181,7 +7181,7 @@ class ModWebAppPageMixin(
                                     collection_input = ui.input(
                                         "Collection ID",
                                         value="" if collection_id is None else collection_id,
-                                    ).classes("w-full")
+                                    ).classes("w-full mod-config-input")
 
                                     async def submit_collection() -> None:
                                         await save_collection(_value_as_text(collection_input))
@@ -7239,7 +7239,7 @@ class ModWebAppPageMixin(
                                     add_input = ui.input(
                                         "Workshop IDs",
                                         placeholder="Separate multiple IDs with spaces or commas",
-                                    ).classes("w-full")
+                                    ).classes("w-full mod-config-input")
 
                                     async def add_client_content() -> None:
                                         submitted_ids = tuple(
