@@ -1067,7 +1067,7 @@ def build_settings_view(
     if app.settings is None:
         raise _errors.UnsupportedSettings(f"{app.friendly} does not support settings")
 
-    all_settings: Sequence[Setting] = tuple(app.settings.app.options)
+    all_settings: Sequence[Setting] = tuple(app.settings.app.settings_page_options)
     settings = _paginate(all_settings, state.page)
     selected_setting_slot = None
     selected_setting = None

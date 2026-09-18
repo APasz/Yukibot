@@ -62,7 +62,14 @@ from apps._config import (
     SteamUpdateBranch,
     is_client_pack_candidate,
 )
-from apps._mod_catalog import ModAction, ModSourceKind
+from apps._mod_catalog import (
+    ModAction,
+    ModSourceAction,
+    ModSourceConfiguration,
+    ModSourceConfigurationField,
+    ModSourceConfigurationKey,
+    ModSourceKind,
+)
 from apps._steam import SteamGameServerLoginTokenStatus
 from apps._console import ConsoleResponseSource
 from apps._updater import (
@@ -1483,6 +1490,7 @@ class ModWebTests(unittest.TestCase):
         placement: ModPlacement | None = None,
         source: ModSourceKind = ModSourceKind.LOCAL,
         source_key: str | None = None,
+        mod_pages: tuple[ModPageLink, ...] = (),
         available_actions: tuple[ModAction, ...] = (),
         artifact_available: bool = True,
         client_required: bool = False,
@@ -1522,6 +1530,7 @@ class ModWebTests(unittest.TestCase):
                 if source is ModSourceKind.LOCAL
                 else f"{source.value}:{source_key if source_key is not None else name}"
             ),
+            mod_pages=mod_pages,
             client_pack=resolved_client_pack,
             source=source,
             source_key=source_key,
@@ -10166,7 +10175,14 @@ class ModWebTests(unittest.TestCase):
                     downloadable_count=4,
                     non_downloadable_count=2,
                 ),
-                mods=(),
+                mods=(
+                    self._mod_entry(name="one.jar", coremod=True),
+                    self._mod_entry(name="two.jar", coremod=True),
+                    self._mod_entry(name="three.jar"),
+                    self._mod_entry(name="four.jar", enabled=False),
+                    self._mod_entry(name="five.jar", downloadable=False),
+                    self._mod_entry(name="six.jar", downloadable=False),
+                ),
             ),
             download_all_url="/mods/download",
             download_enabled_url="/mods/download?enabled_only=true",
@@ -12105,6 +12121,69 @@ class ModWebTests(unittest.TestCase):
 
         ui.checkbox.assert_not_called()
 
+    def test_mod_download_unavailable_label_distinguishes_remote_and_local_rows(self) -> None:
+        local = self._mod_entry(name="local.jar")
+        blocked = replace(
+            local,
+            downloadable=False,
+            download_block_label="Artifact unavailable",
+        )
+        workshop = replace(
+            local,
+            name="200",
+            source=ModSourceKind.STEAM_WORKSHOP,
+            source_key="200",
+            downloadable=False,
+            artifact_available=False,
+            available_actions=(),
+        )
+
+        self.assertEqual(ModWebService._mod_download_unavailable_label(local), "Unavailable")
+        self.assertEqual(ModWebService._mod_download_unavailable_label(blocked), "Blocked")
+        self.assertEqual(ModWebService._mod_download_unavailable_label(workshop), "Remote")
+
+    def test_remote_mod_row_links_to_its_source_page(self) -> None:
+        service = ModWebService()
+        ui = MagicMock()
+        source_link = MagicMock()
+        source_link.classes.return_value = source_link
+        ui.link.return_value = source_link
+        workshop_url = "https://steamcommunity.com/sharedfiles/filedetails/?id=200"
+        workshop = self._mod_entry(
+            name="200",
+            friendly="Workshop addon",
+            downloadable=False,
+            size_text="Remote",
+            source=ModSourceKind.STEAM_WORKSHOP,
+            source_key="200",
+            mod_pages=(ModPageLink(name="Workshop", url=workshop_url),),
+            artifact_available=False,
+            available_actions=(),
+        )
+
+        service._render_mod_download_row(
+            ui=cast(ModWebUi, ui),
+            entry=workshop,
+            download_url=None,
+            on_change=Mock(),
+            can_select=False,
+            show_selection=False,
+            app_friendly="GMod Alpha",
+            model=cast(ModWebPageModel, object()),
+            user=cast(ModWebUser, object()),
+        )
+
+        self.assertIn(call("Remote"), ui.label.call_args_list)
+        self.assertNotIn(call("Not local"), ui.label.call_args_list)
+        self.assertNotIn(call("Steam Workshop"), ui.label.call_args_list)
+        ui.link.assert_called_once_with("Workshop", workshop_url, new_tab=True)
+        source_link.classes.assert_called_once_with("mod-row-download")
+        source_link.props.assert_called_once_with('rel="noopener noreferrer"')
+        source_link.on.assert_called_once_with(
+            "click",
+            js_handler="(event) => event.stopPropagation()",
+        )
+
     def test_mod_download_row_client_mod_uses_default_row_border_classes(self) -> None:
         service = ModWebService()
         ui = MagicMock()
@@ -12135,9 +12214,20 @@ class ModWebTests(unittest.TestCase):
 
     def test_large_mod_list_uses_virtual_scroll_table(self) -> None:
         service = ModWebService()
-        mods = tuple(
-            self._mod_entry(name=f"mod-{index}.jar", friendly=f"Mod {index}")
-            for index in range(50)
+        workshop_url = "https://steamcommunity.com/sharedfiles/filedetails/?id=200"
+        mods = (
+            self._mod_entry(
+                name="200",
+                friendly="Workshop addon",
+                downloadable=False,
+                size_text="Remote",
+                source=ModSourceKind.STEAM_WORKSHOP,
+                source_key="200",
+                mod_pages=(ModPageLink(name="Workshop", url=workshop_url),),
+                artifact_available=False,
+                available_actions=(),
+            ),
+            *(self._mod_entry(name=f"mod-{index}.jar", friendly=f"Mod {index}") for index in range(1, 50)),
         )
         model = ModWebPageModel(
             node_name="yuki",
@@ -12219,7 +12309,8 @@ class ModWebTests(unittest.TestCase):
             asyncio.run(click_handler(SimpleNamespace(args={"action": "details", "id": mods[0].id})))
 
         ui.table.assert_called_once()
-        self.assertEqual(len(ui.table.call_args.kwargs["rows"]), 50)
+        rows = cast(list[dict[str, object]], ui.table.call_args.kwargs["rows"])
+        self.assertEqual(len(rows), 50)
         self.assertEqual(ui.table.call_args.kwargs["row_key"], "id")
         self.assertIn(
             call("Steam Workshop unavailable; showing cached data."),
@@ -12234,10 +12325,17 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertIn(':data-mod-id="props.row.id"', virtual_row_template)
         self.assertIn("data-mod-download", virtual_row_template)
+        self.assertIn('v-else-if="props.row.source_page_url"', virtual_row_template)
+        self.assertIn('v-if="props.row.show_source"', virtual_row_template)
+        self.assertIn("@click.stop", virtual_row_template)
         self.assertNotIn("$parent.$emit", virtual_row_template)
         self.assertIn('class="mod-pill size"', virtual_row_template)
         self.assertIn("props.row.update_available", virtual_row_template)
-        self.assertTrue(all(row["update_available"] is False for row in ui.table.call_args.kwargs["rows"]))
+        self.assertTrue(all(row["update_available"] is False for row in rows))
+        workshop_row = next(row for row in rows if row["id"] == mods[0].id)
+        self.assertEqual(workshop_row["source_page_label"], "Workshop")
+        self.assertEqual(workshop_row["source_page_url"], workshop_url)
+        self.assertFalse(workshop_row["show_source"])
         self.assertIn("'mod-setting-badge', 'mod-mod-type-badge'", virtual_row_template)
         table.on.assert_called_once()
         self.assertEqual(table.on.call_args.args[0], "click")
@@ -12426,6 +12524,272 @@ class ModWebTests(unittest.TestCase):
                     )
                 )
         remote_mutation.assert_not_awaited()
+
+    def test_gmod_workshop_source_panel_links_configured_collection(self) -> None:
+        service = ModWebService()
+        collection_id = "3803451508"
+        collection_title = "Example collection"
+        source_status = NodeModSourceStatus(
+            source=ModSourceKind.STEAM_WORKSHOP,
+            label="Steam Workshop",
+            configuration=ModSourceConfiguration(
+                source=ModSourceKind.STEAM_WORKSHOP,
+                fields=(
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.COLLECTION_ID,
+                        label="Collection",
+                        value=collection_id,
+                    ),
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.COLLECTION_TITLE,
+                        label="Collection title",
+                        value=collection_title,
+                    ),
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.SERVER_MOUNTED_COUNT,
+                        label="Server-mounted",
+                        value="3",
+                    ),
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT,
+                        label="Client entries",
+                        value="2",
+                    ),
+                ),
+                actions=(),
+            ),
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(mods=SimpleNamespace(mods=()))),
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        ui = MagicMock()
+
+        with patch.object(service, "_user_has_level", return_value=False):
+            service._render_gmod_workshop_source_panel(
+                ui=cast(ModWebUi, ui),
+                model=model,
+                user=user,
+                source_status=source_status,
+            )
+
+        ui.link.assert_called_once_with(
+            f"Collection: {collection_title} ({collection_id})",
+            f"https://steamcommunity.com/sharedfiles/filedetails/?id={collection_id}",
+            new_tab=True,
+        )
+        ui.link.return_value.classes.assert_called_once_with("mod-subtitle text-sm underline")
+        ui.link.return_value.props.assert_called_once_with('rel="noopener noreferrer"')
+        self.assertIn(call("Steam Workshop"), ui.label.call_args_list)
+        self.assertNotIn(call("Healthy"), ui.label.call_args_list)
+        self.assertNotIn(call(collection_title), ui.label.call_args_list)
+
+    def test_gmod_workshop_source_panel_omits_irrelevant_empty_collection_controls(self) -> None:
+        service = ModWebService()
+        source_status = NodeModSourceStatus(
+            source=ModSourceKind.STEAM_WORKSHOP,
+            label="Steam Workshop",
+            configuration=ModSourceConfiguration(
+                source=ModSourceKind.STEAM_WORKSHOP,
+                fields=(
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.COLLECTION_ID,
+                        label="Collection",
+                        value="Disabled",
+                    ),
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.AUTO_UPDATE,
+                        label="Auto-update",
+                        value="Enabled",
+                    ),
+                ),
+                actions=(ModSourceAction.SET_AUTO_UPDATE,),
+            ),
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(mods=SimpleNamespace(mods=()))),
+        )
+        ui = MagicMock()
+
+        with patch.object(service, "_user_has_level", return_value=False):
+            service._render_gmod_workshop_source_panel(
+                ui=cast(ModWebUi, ui),
+                model=model,
+                user=ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None),
+                source_status=source_status,
+            )
+
+        ui.link.assert_not_called()
+        ui.switch.assert_not_called()
+        self.assertIn(call("Collection: Disabled"), ui.label.call_args_list)
+        self.assertIn(call("No Workshop content configured."), ui.label.call_args_list)
+
+    def test_gmod_workshop_source_panel_saves_collection_auto_update(self) -> None:
+        service = ModWebService()
+        source_status = NodeModSourceStatus(
+            source=ModSourceKind.STEAM_WORKSHOP,
+            label="Steam Workshop",
+            configuration=ModSourceConfiguration(
+                source=ModSourceKind.STEAM_WORKSHOP,
+                fields=(
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.COLLECTION_ID,
+                        label="Collection",
+                        value="3803451508",
+                    ),
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.AUTO_UPDATE,
+                        label="Auto-update",
+                        value="Enabled",
+                    ),
+                ),
+                actions=(ModSourceAction.SET_AUTO_UPDATE,),
+            ),
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(mods=SimpleNamespace(mods=()))),
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        ui = MagicMock()
+        update_auto_update = AsyncMock()
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_update_gmod_workshop_auto_update", new=update_auto_update),
+            patch.object(service, "_guarded_reload") as guarded_reload,
+        ):
+            service._render_gmod_workshop_source_panel(
+                ui=cast(ModWebUi, ui),
+                model=model,
+                user=user,
+                source_status=source_status,
+            )
+            on_change = ui.switch.call_args.kwargs["on_change"]
+            asyncio.run(on_change(SimpleNamespace(value=False)))
+
+        update_auto_update.assert_awaited_once_with(
+            model=model,
+            enabled=False,
+            user=user,
+        )
+        self.assertEqual(
+            [call.args[0] for call in ui.row.return_value.classes.call_args_list],
+            [
+                "items-center gap-3 flex-wrap",
+                "items-center gap-2 flex-wrap",
+            ],
+        )
+        ui.notify.assert_called_with("Auto-update saved; applies on next start.", type="positive")
+        guarded_reload.assert_called_once_with(ui=ui)
+
+    def test_gmod_workshop_source_panel_hides_counts_while_unhealthy(self) -> None:
+        service = ModWebService()
+        warning = "Steam Workshop metadata is unavailable for 1 configured item."
+        source_status = NodeModSourceStatus(
+            source=ModSourceKind.STEAM_WORKSHOP,
+            label="Steam Workshop",
+            healthy=False,
+            warning=warning,
+            using_cached_entries=False,
+            configuration=ModSourceConfiguration(
+                source=ModSourceKind.STEAM_WORKSHOP,
+                fields=(
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.COLLECTION_ID,
+                        label="Collection",
+                        value="3803451508",
+                    ),
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.SERVER_MOUNTED_COUNT,
+                        label="Server-mounted",
+                        value="3",
+                    ),
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT,
+                        label="Client entries",
+                        value="2",
+                    ),
+                ),
+                actions=(),
+            ),
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(mods=SimpleNamespace(mods=()))),
+        )
+        ui = MagicMock()
+
+        with patch.object(service, "_user_has_level", return_value=False):
+            service._render_gmod_workshop_source_panel(
+                ui=cast(ModWebUi, ui),
+                model=model,
+                user=ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None),
+                source_status=source_status,
+            )
+
+        self.assertIn(call(warning), ui.label.call_args_list)
+        self.assertNotIn(call("3 mounted"), ui.label.call_args_list)
+        self.assertNotIn(call("2 client entries"), ui.label.call_args_list)
+
+    def test_gmod_workshop_source_controls_require_sudo(self) -> None:
+        service = ModWebService()
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="gmod_alpha")),
+        )
+        user = ModWebUser(discord_id=42, username="user", global_name=None, avatar_hash=None)
+        refresh = AsyncMock()
+        update_collection = AsyncMock()
+        update_auto_update = AsyncMock()
+        update_client_content = AsyncMock()
+
+        with (
+            patch.object(service, "_user_has_level", return_value=False),
+            patch.object(service, "_remote_mod_source_refresh_async", new=refresh),
+            patch.object(service, "_remote_gmod_workshop_collection_update_async", new=update_collection),
+            patch.object(service, "_remote_gmod_workshop_auto_update_async", new=update_auto_update),
+            patch.object(service, "_remote_gmod_workshop_client_content_update_async", new=update_client_content),
+        ):
+            with self.assertRaisesRegex(PermissionError, "Sudo"):
+                asyncio.run(
+                    service._refresh_mod_source(
+                        model=model,
+                        source=ModSourceKind.STEAM_WORKSHOP,
+                        user=user,
+                    )
+                )
+            with self.assertRaisesRegex(PermissionError, "Sudo"):
+                asyncio.run(
+                    service._update_gmod_workshop_collection(
+                        model=model,
+                        collection_id="100",
+                        user=user,
+                    )
+                )
+            with self.assertRaisesRegex(PermissionError, "Sudo"):
+                asyncio.run(
+                    service._update_gmod_workshop_auto_update(
+                        model=model,
+                        enabled=False,
+                        user=user,
+                    )
+                )
+            with self.assertRaisesRegex(PermissionError, "Sudo"):
+                asyncio.run(
+                    service._update_gmod_workshop_client_content(
+                        model=model,
+                        item_ids=("200",),
+                        user=user,
+                    )
+                )
+
+        refresh.assert_not_awaited()
+        update_collection.assert_not_awaited()
+        update_auto_update.assert_not_awaited()
+        update_client_content.assert_not_awaited()
 
     def test_bulk_mod_update_check_skips_non_local_entries(self) -> None:
         service = ModWebService()
@@ -17209,6 +17573,22 @@ class ModWebTests(unittest.TestCase):
             "Excluded — File download blocked",
         )
 
+        workshop = replace(
+            entry,
+            downloadable=False,
+            download_block_reason=None,
+            download_block_label=None,
+            source=ModSourceKind.STEAM_WORKSHOP,
+            source_key="200",
+            available_actions=(),
+            artifact_available=False,
+            client_pack=ClientPackConfig(included_in_client=False),
+            client_pack_eligible=False,
+        )
+        self.assertFalse(workshop.download_is_policy_blocked)
+        self.assertEqual(ModWebService._mod_download_summary(workshop), "Remote")
+        self.assertEqual(ModWebService._mod_client_pack_summary(workshop), "Not applicable — Remote")
+
         optional = replace(
             entry,
             client_pack=ClientPackConfig(
@@ -17572,6 +17952,12 @@ class ModWebTests(unittest.TestCase):
         )
 
     def test_mods_header_badges_surface_download_and_block_summary(self) -> None:
+        mods = (
+            self._mod_entry(name="one.jar"),
+            self._mod_entry(name="two.jar"),
+            self._mod_entry(name="three.jar", downloadable=False),
+            self._mod_entry(name="four.jar", downloadable=False),
+        )
         badges = ModWebService._mods_header_badges(
             NodeModSummary(
                 total_count=4,
@@ -17581,6 +17967,7 @@ class ModWebTests(unittest.TestCase):
                 downloadable_count=2,
                 non_downloadable_count=2,
             ),
+            mods=mods,
             client_pack_version="2026-07-04",
         )
 
@@ -17594,6 +17981,44 @@ class ModWebTests(unittest.TestCase):
                 _ModWebBadgeSpec(text="1 coremod", tone="red"),
             ),
         )
+
+    def test_mods_header_badges_distinguish_remote_inventory_sources(self) -> None:
+        blocked = self._mod_entry(
+            name="blocked.jar",
+            downloadable=False,
+            download_block_reason=ModDownloadBlockReason.ARTIFACT.value,
+            download_block_label=ModDownloadBlockReason.ARTIFACT.label,
+        )
+        workshop = self._mod_entry(
+            name="200",
+            source=ModSourceKind.STEAM_WORKSHOP,
+            source_key="200",
+            downloadable=False,
+            artifact_available=False,
+        )
+        summary = NodeModSummary(
+            total_count=2,
+            enabled_count=2,
+            disabled_count=0,
+            coremod_count=0,
+            downloadable_count=0,
+            non_downloadable_count=2,
+        )
+
+        badges = ModWebService._mods_header_badges(summary, mods=(blocked, workshop))
+
+        self.assertEqual(
+            badges,
+            (
+                _ModWebBadgeSpec(text="2 mods", tone="black"),
+                _ModWebBadgeSpec(text="1 blocked", tone="warn"),
+                _ModWebBadgeSpec(text="1 remote", tone="grey"),
+            ),
+        )
+        search_text = ModWebService._mod_search_text(workshop)
+        self.assertIn("remote", search_text)
+        self.assertNotIn("not local", search_text)
+        self.assertNotIn("blocked", search_text)
 
     def test_app_page_hero_mod_badge_uses_compact_enabled_over_total_format(
         self,

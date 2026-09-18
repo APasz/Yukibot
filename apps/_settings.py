@@ -373,6 +373,7 @@ class Setting(Generic[T]):
     min_app_version: AppVersion | None
     max_app_version: AppVersion | None
     forced_state_rules: tuple[SettingStateForceRule, ...]
+    show_in_settings: bool
     _recent_inputs: list[str]
 
     def __init__(
@@ -391,6 +392,7 @@ class Setting(Generic[T]):
         min_app_version: AppVersion | str | None = None,
         max_app_version: AppVersion | str | None = None,
         forced_state_rules: Sequence[SettingStateForceRule] = (),
+        show_in_settings: bool = True,
     ) -> None:
         self.spec = value_type
         self.path = tuple(path)
@@ -412,6 +414,9 @@ class Setting(Generic[T]):
         self.min_app_version = normalise_app_version(min_app_version)
         self.max_app_version = normalise_app_version(max_app_version)
         self.forced_state_rules = tuple(forced_state_rules)
+        if not isinstance(show_in_settings, bool):
+            raise TypeError("Setting show_in_settings must be a bool.")
+        self.show_in_settings = show_in_settings
         if (
             self.min_app_version is not None
             and self.max_app_version is not None
@@ -613,6 +618,12 @@ class App_Settings:
     def options(self) -> list[Setting[Any]]:
         app_version = self.app_version
         return [setting for setting in self._options if setting.supports_app_version(app_version)]
+
+    @property
+    def settings_page_options(self) -> list[Setting[Any]]:
+        """Return settings intentionally exposed on the ordinary Settings page."""
+
+        return [setting for setting in self.options if setting.show_in_settings]
 
     def load(self):
         raise NotImplementedError

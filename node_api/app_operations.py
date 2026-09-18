@@ -300,7 +300,7 @@ class NodeAppOperationsService:
 
     def _settings_for_app(self, app: App) -> tuple[Setting[object], ...]:
         settings_manager = self.require_settings_manager(app)
-        return tuple(cast(Sequence[Setting[object]], settings_manager.app.options))
+        return tuple(cast(Sequence[Setting[object]], settings_manager.app.settings_page_options))
 
     def resolve_setting(self, *, app: App, setting_key: str) -> Setting[object]:
         setting = self._setting_lookup(app).get(setting_key.casefold())

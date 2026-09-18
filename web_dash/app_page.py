@@ -7,7 +7,13 @@ from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypedDict
 
-from apps._mod_catalog import ModAction, ModSourceKind
+from apps._mod_catalog import (
+    ModAction,
+    ModSourceAction,
+    ModSourceConfiguration,
+    ModSourceConfigurationKey,
+    ModSourceKind,
+)
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
     CLIENT_PACK_CHANGELOG_MAX_LENGTH,
@@ -97,6 +103,7 @@ from .runtime_imports import (
     NodeModDependencyEntry,
     NodeModDependencyResolutionResult,
     NodeModEntry,
+    NodeModSourceStatus,
     NodeModMutationAction,
     NodeModPortalVersionEntry,
     NodeModPortalVersionList,
@@ -191,6 +198,11 @@ class _VirtualModRow(TypedDict):
     type_tone: str
     downloadable: bool
     download_block_label: str
+    download_status: str
+    download_status_blocked: bool
+    source_page_label: str
+    source_page_url: str | None
+    show_source: bool
     selection_mode: bool
     selectable: bool
     show_download_block: bool
@@ -1342,6 +1354,7 @@ class ModWebAppPageMixin(
                     raise TypeError("The Mods section requires a full mod page model.")
                 return self._mods_header_badges(
                     model.mods.summary,
+                    mods=model.mods.mods,
                     client_pack_version=self._supported_client_pack_version(model),
                 )
             case ModWebAppSectionKind.CONFIGS:
@@ -6596,7 +6609,25 @@ class ModWebAppPageMixin(
                         description=mods_description,
                     )
                 for source_status in model.mods.source_statuses:
-                    if source_status.healthy or source_status.warning is None:
+                    if (
+                        source_status.source is ModSourceKind.STEAM_WORKSHOP
+                        and source_status.configuration is not None
+                    ):
+                        self._render_gmod_workshop_source_panel(
+                            ui=ui,
+                            model=model,
+                            user=user,
+                            source_status=source_status,
+                        )
+                for source_status in model.mods.source_statuses:
+                    if (
+                        source_status.healthy
+                        or source_status.warning is None
+                        or (
+                            source_status.source is ModSourceKind.STEAM_WORKSHOP
+                            and source_status.configuration is not None
+                        )
+                    ):
                         continue
                     with ui.card().classes("mod-setting-card locked w-full"):
                         warning = source_status.warning
@@ -6641,8 +6672,27 @@ class ModWebAppPageMixin(
                         mod_by_id: dict[str, NodeModEntry] = {
                             entry.id: entry for entry in filtered_mods
                         }
-                        rows: list[_VirtualModRow] = [
-                            {
+
+                        def virtual_row(entry: NodeModEntry) -> _VirtualModRow:
+                            source_page = self._mod_source_page(entry)
+                            downloadable = (
+                                capabilities.supports_raw_download
+                                and self._mod_download_url(model=model, entry=entry) is not None
+                                and entry.supports_action(ModAction.DOWNLOAD)
+                            )
+                            show_source_page_link = (
+                                source_page is not None
+                                and not entry.download_is_policy_blocked
+                                and not downloadable
+                            )
+                            if show_source_page_link:
+                                assert source_page is not None
+                                source_page_label = source_page.name
+                                source_page_url: str | None = source_page.url
+                            else:
+                                source_page_label = ""
+                                source_page_url = None
+                            return {
                                 "id": entry.id,
                                 "friendly": entry.friendly,
                                 "file": entry.name,
@@ -6657,15 +6707,16 @@ class ModWebAppPageMixin(
                                 ),
                                 "type": entry.mod_type.label,
                                 "type_tone": self._mod_type_badge_tone(entry.mod_type),
-                                "downloadable": (
-                                    capabilities.supports_raw_download
-                                    and self._mod_download_url(model=model, entry=entry) is not None
-                                    and entry.supports_action(ModAction.DOWNLOAD)
-                                ),
+                                "downloadable": downloadable,
                                 "download_block_label": entry.download_block_label or "Not downloadable",
+                                "download_status": self._mod_download_unavailable_label(entry),
+                                "download_status_blocked": entry.download_is_policy_blocked,
+                                "source_page_label": source_page_label,
+                                "source_page_url": source_page_url,
+                                "show_source": not show_source_page_link,
                                 "selection_mode": mod_selection_mode,
                                 "selectable": mod_selection_mode and entry.id in selectable_id_set,
-                                "show_download_block": not entry.downloadable
+                                "show_download_block": entry.download_is_policy_blocked
                                 and not (
                                     entry.mod_type is ModType.SERVER
                                     and entry.download_block_reason == ModDownloadBlockReason.SERVER_ONLY.value
@@ -6675,7 +6726,7 @@ class ModWebAppPageMixin(
                                 "show_client_required": entry.client_required,
                                 "state_class": (
                                     "blocked"
-                                    if not entry.downloadable
+                                    if entry.download_is_policy_blocked
                                     else (
                                         "mod-row-disabled"
                                         if entry.placement is ModPlacement.SERVER_DISABLED
@@ -6683,8 +6734,8 @@ class ModWebAppPageMixin(
                                     )
                                 ),
                             }
-                            for entry in filtered_mods
-                        ]
+
+                        rows: list[_VirtualModRow] = [virtual_row(entry) for entry in filtered_mods]
                         columns: list[dict[str, object]] = [
                             {"name": "friendly", "label": "Mod", "field": "friendly", "align": "left"},
                         ]
@@ -6795,7 +6846,7 @@ class ModWebAppPageMixin(
                                     <div class="mod-row-file">{{ props.row.file }}</div>
                                   </div>
                                   <div class="mod-row-meta">
-                                    <span class="mod-pill">{{ props.row.source }}</span>
+                                    <span v-if="props.row.show_source" class="mod-pill">{{ props.row.source }}</span>
                                     <span class="mod-pill size">{{ props.row.size }}</span>
                                     <span v-if="props.row.update_available" class="mod-pill size update">Update</span>
                                     <span v-if="props.row.show_placement" class="mod-pill">
@@ -6813,7 +6864,13 @@ class ModWebAppPageMixin(
                                   </div>
                                   <q-btn v-if="props.row.downloadable" flat dense no-caps label="Download"
                                          class="mod-row-download" data-mod-download />
-                                  <span v-else class="mod-row-download blocked">Blocked</span>
+                                  <a v-else-if="props.row.source_page_url" :href="props.row.source_page_url"
+                                     target="_blank" rel="noopener noreferrer" @click.stop class="mod-row-download">
+                                    {{ props.row.source_page_label }}
+                                  </a>
+                                  <span v-else :class="['mod-row-download', {
+                                      'blocked': props.row.download_status_blocked
+                                    }]">{{ props.row.download_status }}</span>
                                   <div class="mod-setting-badge-rail mod-mod-type-badge-rail">
                                     <span :class="['mod-badge', props.row.type_tone,
                                                    'mod-setting-badge', 'mod-mod-type-badge']">
@@ -6984,6 +7041,267 @@ class ModWebAppPageMixin(
                 else:
                     _mod_download_rows(current_search_query)
         return
+
+    def _render_gmod_workshop_source_panel(
+        self,
+        *,
+        ui: ModWebUi,
+        model: ModWebPageModel,
+        user: ModWebUser,
+        source_status: NodeModSourceStatus,
+    ) -> None:
+        """Render GMod's source-owned Workshop controls above its mod rows."""
+
+        configuration: ModSourceConfiguration | None = source_status.configuration
+        if configuration is None or configuration.source is not ModSourceKind.STEAM_WORKSHOP:
+            return
+        field_values: dict[ModSourceConfigurationKey, str] = {
+            field.key: field.value for field in configuration.fields
+        }
+        collection_id = field_values.get(ModSourceConfigurationKey.COLLECTION_ID, "Disabled")
+        collection_title = field_values.get(ModSourceConfigurationKey.COLLECTION_TITLE)
+        collection_is_configured = collection_id != "Disabled"
+        collection_label = (
+            f"Collection: {collection_id}"
+            if collection_title is None
+            else f"Collection: {collection_title} ({collection_id})"
+        )
+        server_mounted_count = field_values.get(ModSourceConfigurationKey.SERVER_MOUNTED_COUNT, "0")
+        auto_update_enabled = field_values.get(ModSourceConfigurationKey.AUTO_UPDATE) == "Enabled"
+        client_content_ids = tuple(
+            item_id.strip()
+            for item_id in field_values.get(ModSourceConfigurationKey.CLIENT_CONTENT_IDS, "").split(",")
+            if item_id.strip()
+        )
+        client_required_count = field_values.get(
+            ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT,
+            str(len(client_content_ids)),
+        )
+        available_actions = frozenset(configuration.actions)
+        can_manage = self._user_has_level(user, Power_Level.sudo)
+        workshop_entries_by_id = {
+            entry.source_key: entry
+            for entry in model.mods.mods
+            if entry.source is ModSourceKind.STEAM_WORKSHOP and entry.source_key is not None
+        }
+        has_source_controls = (
+            collection_is_configured and ModSourceAction.SET_AUTO_UPDATE in available_actions
+        ) or any(
+            action in available_actions
+            for action in (
+                ModSourceAction.CHANGE_COLLECTION,
+                ModSourceAction.MANAGE_CLIENT_CONTENT,
+                ModSourceAction.REFRESH,
+            )
+        )
+
+        async def apply_refresh() -> None:
+            try:
+                await self._refresh_mod_source(
+                    model=model,
+                    source=ModSourceKind.STEAM_WORKSHOP,
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"Steam Workshop refresh failed: {xcp}", type="negative")
+                return
+            ui.notify("Steam Workshop refreshed.", type="positive")
+            self._guarded_reload(ui=ui)
+
+        async def save_collection(collection_value: str) -> None:
+            try:
+                await self._update_gmod_workshop_collection(
+                    model=model,
+                    collection_id=collection_value,
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"Workshop collection update failed: {xcp}", type="negative")
+                return
+            ui.notify("Collection saved; applies on next start.", type="positive")
+            self._guarded_reload(ui=ui)
+
+        async def save_client_content(item_ids: tuple[str, ...]) -> None:
+            try:
+                await self._update_gmod_workshop_client_content(
+                    model=model,
+                    item_ids=item_ids,
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"Workshop client content update failed: {xcp}", type="negative")
+                return
+            ui.notify("Client content saved; manifest regenerated.", type="positive")
+            self._guarded_reload(ui=ui)
+
+        with ui.card().classes("mod-setting-card w-full"):
+            with ui.column().classes("w-full flex-wrap gap-3").style(
+                "flex-direction: row; align-items: center; justify-content: space-between;"
+            ):
+                with ui.row().classes("items-center gap-3 flex-wrap"):
+                    ui.label("Steam Workshop").classes("text-lg font-black mod-title-small")
+                    if not source_status.healthy:
+                        ui.label("Warning").classes("mod-pill blocked")
+                    if collection_is_configured:
+                        collection_link = ui.link(
+                            collection_label,
+                            "https://steamcommunity.com/sharedfiles/filedetails/"
+                            f"?{urlencode({'id': collection_id})}",
+                            new_tab=True,
+                        )
+                        collection_link.classes("mod-subtitle text-sm underline")
+                        collection_link.props('rel="noopener noreferrer"')
+                    else:
+                        ui.label(collection_label).classes("mod-subtitle text-sm")
+                    if source_status.healthy:
+                        if server_mounted_count != "0":
+                            ui.label(f"{server_mounted_count} mounted").classes("mod-pill")
+                        if client_required_count != "0":
+                            ui.label(f"{client_required_count} client entries").classes("mod-pill")
+                        if server_mounted_count == "0" and client_required_count == "0":
+                            ui.label("No Workshop content configured.").classes("mod-subtitle text-sm")
+
+                if has_source_controls:
+                    with ui.row().classes("items-center gap-2 flex-wrap"):
+                        if collection_is_configured and ModSourceAction.SET_AUTO_UPDATE in available_actions:
+
+                            async def update_auto_update(event: object) -> None:
+                                enabled = _value_as_object(event)
+                                if not isinstance(enabled, bool):
+                                    raise TypeError("Workshop auto-update control returned an invalid value.")
+                                try:
+                                    await self._update_gmod_workshop_auto_update(
+                                        model=model,
+                                        enabled=enabled,
+                                        user=user,
+                                    )
+                                except Exception as xcp:
+                                    ui.notify(f"Workshop auto-update update failed: {xcp}", type="negative")
+                                    return
+                                ui.notify("Auto-update saved; applies on next start.", type="positive")
+                                self._guarded_reload(ui=ui)
+
+                            auto_update_control = ui.switch(
+                                "Auto-update Workshop collection",
+                                value=auto_update_enabled,
+                                on_change=update_auto_update,
+                            ).classes("mod-app-details-toggle")
+                            if not can_manage:
+                                auto_update_control.disable()
+
+                        if ModSourceAction.CHANGE_COLLECTION in available_actions:
+                            with ui.dialog() as collection_dialog:
+                                with ui.card().classes("mod-card mod-dialog-card"):
+                                    with ui.column().classes("w-full gap-4 p-5"):
+                                        ui.label("Edit Workshop Collection").classes(
+                                            "text-xl font-black mod-title-small"
+                                        )
+                                        ui.label("Leave blank to disable the collection.").classes(
+                                            "mod-subtitle text-sm"
+                                        )
+                                        collection_input = ui.input(
+                                            "Collection ID",
+                                            value="" if collection_id == "Disabled" else collection_id,
+                                        ).classes("w-full")
+
+                                        async def submit_collection() -> None:
+                                            await save_collection(_value_as_text(collection_input))
+
+                                        with ui.row().classes("w-full justify-end gap-2"):
+                                            ui.button("Cancel", on_click=collection_dialog.close).classes(
+                                                "mod-list-button secondary"
+                                            )
+                                            collection_save_button = ui.button(
+                                                "Save collection",
+                                                on_click=submit_collection,
+                                            ).classes("mod-list-button")
+                                            if not can_manage:
+                                                collection_save_button.disable()
+                            collection_button = ui.button(
+                                "Edit collection" if collection_is_configured else "Set collection",
+                                on_click=collection_dialog.open,
+                            ).classes("mod-list-button secondary")
+                            if not can_manage:
+                                collection_button.disable()
+
+                        if ModSourceAction.MANAGE_CLIENT_CONTENT in available_actions:
+                            with ui.dialog() as client_content_dialog:
+                                with ui.card().classes("mod-card mod-dialog-card"):
+                                    with ui.column().classes("w-full gap-4 p-5"):
+                                        ui.label("Workshop Client Content").classes(
+                                            "text-xl font-black mod-title-small"
+                                        )
+                                        ui.label(
+                                            "Explicit client content; does not alter the collection."
+                                        ).classes("mod-subtitle text-sm")
+                                        if client_content_ids:
+                                            for item_id in client_content_ids:
+                                                entry = workshop_entries_by_id.get(item_id)
+                                                title = item_id if entry is None else entry.friendly
+                                                with ui.row().classes("w-full items-center justify-between gap-2"):
+                                                    ui.label(f"{title} ({item_id})").classes("mod-subtitle text-sm")
+
+                                                    async def remove_client_content(
+                                                        item_id_to_remove: str = item_id,
+                                                    ) -> None:
+                                                        await save_client_content(
+                                                            tuple(
+                                                                configured_item_id
+                                                                for configured_item_id in client_content_ids
+                                                                if configured_item_id != item_id_to_remove
+                                                            )
+                                                        )
+
+                                                    remove_button = ui.button(
+                                                        "Remove",
+                                                        on_click=remove_client_content,
+                                                    ).classes("mod-list-button danger")
+                                                    if not can_manage:
+                                                        remove_button.disable()
+                                        add_input = ui.input(
+                                            "Workshop IDs",
+                                            placeholder="Separate multiple IDs with spaces or commas",
+                                        ).classes("w-full")
+
+                                        async def add_client_content() -> None:
+                                            submitted_ids = tuple(
+                                                item_id
+                                                for item_id in _value_as_text(add_input).replace(",", " ").split()
+                                                if item_id
+                                            )
+                                            if not submitted_ids:
+                                                ui.notify("Enter at least one Workshop ID.", type="warning")
+                                                return
+                                            deduplicated_ids = tuple(dict.fromkeys((*client_content_ids, *submitted_ids)))
+                                            await save_client_content(deduplicated_ids)
+
+                                        with ui.row().classes("w-full justify-end gap-2"):
+                                            ui.button("Close", on_click=client_content_dialog.close).classes(
+                                                "mod-list-button secondary"
+                                            )
+                                            add_button = ui.button(
+                                                "Add",
+                                                on_click=add_client_content,
+                                            ).classes("mod-list-button")
+                                            if not can_manage:
+                                                add_button.disable()
+                            client_content_button = ui.button(
+                                "Client content",
+                                on_click=client_content_dialog.open,
+                            ).classes("mod-list-button secondary")
+                            if not can_manage:
+                                client_content_button.disable()
+
+                        if ModSourceAction.REFRESH in available_actions:
+                            refresh_button = ui.button("Refresh", on_click=apply_refresh).classes("mod-list-button")
+                            if not can_manage:
+                                refresh_button.disable()
+                if source_status.warning is not None:
+                    ui.label(source_status.warning).classes("w-full mod-subtitle text-sm")
+                if not can_manage and has_source_controls:
+                    ui.label("Sudo access is required to manage Workshop content.").classes(
+                        "w-full mod-subtitle text-sm"
+                    )
 
     @staticmethod
     def _restore_virtual_mod_scroll_position(
@@ -8177,6 +8495,7 @@ class ModWebAppPageMixin(
     def _mods_header_badges(
         summary: NodeModSummary,
         *,
+        mods: tuple[NodeModEntry, ...],
         client_pack_version: str | None = None,
     ) -> tuple[_ModWebBadgeSpec, ...]:
         mod_label = "mod" if summary.total_count == 1 else "mods"
@@ -8184,8 +8503,17 @@ class ModWebAppPageMixin(
         badges: list[_ModWebBadgeSpec] = [_ModWebBadgeSpec(text=f"{summary.total_count} {mod_label}", tone="black")]
         if client_pack_version is not None:
             badges.append(_ModWebBadgeSpec(text=f"pack {client_pack_version}", tone="grey"))
-        if summary.non_downloadable_count > 0:
-            badges.append(_ModWebBadgeSpec(text=f"{summary.non_downloadable_count} blocked", tone="warn"))
+        blocked_count = sum(entry.download_is_policy_blocked for entry in mods)
+        remote_count = sum(
+            entry.source is not ModSourceKind.LOCAL
+            and not entry.downloadable
+            and not entry.download_is_policy_blocked
+            for entry in mods
+        )
+        if blocked_count > 0:
+            badges.append(_ModWebBadgeSpec(text=f"{blocked_count} blocked", tone="warn"))
+        if remote_count > 0:
+            badges.append(_ModWebBadgeSpec(text=f"{remote_count} remote", tone="grey"))
         if summary.downloadable_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{summary.downloadable_count} downloadable", tone="purple"))
         if summary.client_only_count > 0:

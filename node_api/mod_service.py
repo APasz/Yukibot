@@ -44,8 +44,9 @@ from apps._launcher_metadata import (
     resolve_launcher_metadata_resolution,
 )
 from apps._mod import Mod, Mod_Manager
-from apps._mod_catalog import ModAction, ModInventoryEntry
+from apps._mod_catalog import ModAction, ModCatalog, ModInventoryEntry, ModSourceKind
 from apps.factorio import FactorioModPortalCandidate, FactorioVanillaMod
+from apps.gmod import Gmod
 from apps.factorio.node_api import (
     FactorioModUpdateApplyResult,
     NodeModDependencyResolutionResult,
@@ -122,6 +123,68 @@ class NodeModService:
 
     def invalidate_inventory(self, app_name: str) -> None:
         self._inventory_cache.pop(app_name.casefold(), None)
+
+    async def refresh_inventory_source(
+        self,
+        *,
+        app: App,
+        source: ModSourceKind,
+        actor_user_id: int,
+    ) -> mod_contracts.NodeModList:
+        """Refresh one source and return its updated aggregate Mods view."""
+
+        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
+        try:
+            app.has_mod_catalog.source(source)
+        except LookupError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        self._invalidate_mod_inventory(app.name)
+        return await self._refresh_source_inventory(app=app, source=source)
+
+    async def update_gmod_workshop_collection(
+        self,
+        *,
+        app: App,
+        update: mod_contracts.NodeGmodWorkshopCollectionUpdateRequest,
+        actor_user_id: int,
+    ) -> mod_contracts.NodeModList:
+        """Persist a GMod collection source setting, then refresh only that source."""
+
+        return await self._mutate_gmod_workshop_source(
+            app=app,
+            actor_user_id=actor_user_id,
+            mutation=lambda gmod: gmod.update_workshop_collection(update.collection_id or None),
+        )
+
+    async def update_gmod_workshop_auto_update(
+        self,
+        *,
+        app: App,
+        update: mod_contracts.NodeGmodWorkshopAutoUpdateRequest,
+        actor_user_id: int,
+    ) -> mod_contracts.NodeModList:
+        """Persist source-level auto-update state, then refresh its inventory view."""
+
+        return await self._mutate_gmod_workshop_source(
+            app=app,
+            actor_user_id=actor_user_id,
+            mutation=lambda gmod: gmod.update_workshop_auto_update(update.enabled),
+        )
+
+    async def update_gmod_workshop_client_content(
+        self,
+        *,
+        app: App,
+        update: mod_contracts.NodeGmodWorkshopClientContentUpdateRequest,
+        actor_user_id: int,
+    ) -> mod_contracts.NodeModList:
+        """Persist explicit client content, synchronise Lua, and refresh the source."""
+
+        return await self._mutate_gmod_workshop_source(
+            app=app,
+            actor_user_id=actor_user_id,
+            mutation=lambda gmod: gmod.update_client_content_workshop_ids(update.item_ids),
+        )
 
     async def start_bulk_metadata_discovery(
         self,
@@ -302,6 +365,15 @@ class NodeModService:
             app.name,
             len(inventory.mods),
         )
+        return self._mod_list_from_inventory(app=app, inventory=inventory, app_stats=app_stats)
+
+    def _mod_list_from_inventory(
+        self,
+        *,
+        app: App,
+        inventory: mod_contracts.TimedModInventory,
+        app_stats: NodeAppRuntimeSummary,
+    ) -> mod_contracts.NodeModList:
         return mod_contracts.NodeModList(
             app_name=app.name,
             app_friendly=app.friendly,
@@ -311,6 +383,45 @@ class NodeModService:
             app_stats=app_stats,
             source_statuses=inventory.source_statuses,
         )
+
+    async def _refresh_source_inventory(
+        self,
+        *,
+        app: App,
+        source: ModSourceKind,
+    ) -> mod_contracts.NodeModList:
+        """Refresh and cache one source without reloading unrelated sources."""
+
+        app_key = app.name.casefold()
+        lock = self._inventory_cache_locks.setdefault(app_key, asyncio.Lock())
+        async with lock:
+            catalog = app.has_mod_catalog
+            try:
+                await catalog.refresh_source(source, invalidate=True)
+            except LookupError as xcp:
+                raise _http_exception(404, str(xcp)) from xcp
+            inventory = self._inventory_from_catalog(catalog)
+            self._inventory_cache[app_key] = inventory
+        app_stats = await self._build_runtime_summary(app)
+        return self._mod_list_from_inventory(app=app, inventory=inventory, app_stats=app_stats)
+
+    async def _mutate_gmod_workshop_source(
+        self,
+        *,
+        app: App,
+        actor_user_id: int,
+        mutation: Callable[[Gmod], object],
+    ) -> mod_contracts.NodeModList:
+        """Apply one sudo-only GMod source mutation and refresh its inventory."""
+
+        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
+        gmod = self._require_gmod_workshop_app(app)
+        self._invalidate_mod_inventory(app.name)
+        try:
+            mutation(gmod)
+        except (TypeError, ValueError) as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        return await self._refresh_source_inventory(app=app, source=ModSourceKind.STEAM_WORKSHOP)
 
     async def _cached_mod_inventory(self, app: App) -> mod_contracts.TimedModInventory:
         app_key = app.name.casefold()
@@ -326,39 +437,48 @@ class NodeModService:
                 return cached
             catalog = app.has_mod_catalog
             await catalog.refresh()
-            entries = catalog.list_entries()
-            inventory = mod_contracts.TimedModInventory(
-                captured_at_seconds=time.monotonic(),
-                summary=mod_contracts.NodeModSummary(
-                    total_count=len(entries),
-                    enabled_count=sum(
-                        1 for entry in entries if entry.placement is ModPlacement.SERVER_ENABLED
-                    ),
-                    disabled_count=sum(
-                        1 for entry in entries if entry.placement is ModPlacement.SERVER_DISABLED
-                    ),
-                    coremod_count=sum(
-                        1
-                        for entry in entries
-                        if entry.mod_type in {ModType.COREMOD, ModType.BUILTIN}
-                    ),
-                    downloadable_count=sum(1 for entry in entries if entry.downloadable),
-                    non_downloadable_count=sum(1 for entry in entries if not entry.downloadable),
-                    client_only_count=sum(
-                        1 for entry in entries if entry.placement is ModPlacement.CLIENT_ONLY
-                    ),
-                    client_pack_eligible_count=sum(
-                        1 for entry in entries if entry.client_pack_eligible
-                    ),
-                ),
-                mods=tuple(self._inventory_entry_to_node_entry(entry) for entry in entries),
-                source_statuses=tuple(
-                    mod_contracts.NodeModSourceStatus.from_source_status(status)
-                    for status in catalog.source_statuses
-                ),
-            )
+            inventory = self._inventory_from_catalog(catalog)
             self._inventory_cache[app_key] = inventory
             return inventory
+
+    def _inventory_from_catalog(self, catalog: ModCatalog) -> mod_contracts.TimedModInventory:
+        """Materialise a node inventory from an already refreshed catalog."""
+
+        entries = catalog.list_entries()
+        return mod_contracts.TimedModInventory(
+            captured_at_seconds=time.monotonic(),
+            summary=mod_contracts.NodeModSummary(
+                total_count=len(entries),
+                enabled_count=sum(
+                    1 for entry in entries if entry.placement is ModPlacement.SERVER_ENABLED
+                ),
+                disabled_count=sum(
+                    1 for entry in entries if entry.placement is ModPlacement.SERVER_DISABLED
+                ),
+                coremod_count=sum(
+                    1 for entry in entries if entry.mod_type in {ModType.COREMOD, ModType.BUILTIN}
+                ),
+                downloadable_count=sum(1 for entry in entries if entry.downloadable),
+                non_downloadable_count=sum(1 for entry in entries if not entry.downloadable),
+                client_only_count=sum(
+                    1 for entry in entries if entry.placement is ModPlacement.CLIENT_ONLY
+                ),
+                client_pack_eligible_count=sum(
+                    1 for entry in entries if entry.client_pack_eligible
+                ),
+            ),
+            mods=tuple(self._inventory_entry_to_node_entry(entry) for entry in entries),
+            source_statuses=tuple(
+                mod_contracts.NodeModSourceStatus.from_source_status(status)
+                for status in catalog.source_statuses
+            ),
+        )
+
+    @staticmethod
+    def _require_gmod_workshop_app(app: App) -> Gmod:
+        if not isinstance(app, Gmod):
+            raise _http_exception(404, f"{app.friendly} does not expose a GMod Workshop source.")
+        return app
 
     async def upload_mod_file(
         self,
@@ -1431,7 +1551,7 @@ class NodeModService:
         artifact = entry.artifact
         if artifact is None:
             size_bytes = 0
-            size_text = "Not local"
+            size_text = "Remote"
             archive_name = entry.name
             source_path = f"{entry.reference.source.value}:{entry.reference.source_key}"
         else:

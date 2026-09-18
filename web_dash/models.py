@@ -1346,6 +1346,80 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeModList.from_mapping(payload)
 
+    async def _remote_mod_source_refresh_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        source: ModSourceKind,
+        user: ModWebUser,
+    ) -> NodeModList:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=(
+                f"/apps/{quote(app_name, safe='')}/mods/sources/"
+                f"{quote(source.value, safe='')}/refresh"
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+        )
+        return NodeModList.from_mapping(payload)
+
+    async def _remote_gmod_workshop_collection_update_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        collection_id: str,
+        user: ModWebUser,
+    ) -> NodeModList:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/mods/sources/steam_workshop/collection",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="PUT",
+            json_payload={"collection_id": collection_id},
+        )
+        return NodeModList.from_mapping(payload)
+
+    async def _remote_gmod_workshop_auto_update_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        enabled: bool,
+        user: ModWebUser,
+    ) -> NodeModList:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/mods/sources/steam_workshop/auto-update",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="PUT",
+            json_payload={"enabled": enabled},
+        )
+        return NodeModList.from_mapping(payload)
+
+    async def _remote_gmod_workshop_client_content_update_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        item_ids: tuple[str, ...],
+        user: ModWebUser,
+    ) -> NodeModList:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/mods/sources/steam_workshop/client-content",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="PUT",
+            json_payload={"item_ids": list(item_ids)},
+        )
+        return NodeModList.from_mapping(payload)
+
     async def _remote_minecraft_recipe_summaries_async(
         self,
         node: ModWebNodeLink,

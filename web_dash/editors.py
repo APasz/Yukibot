@@ -4048,7 +4048,11 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         if entry.placement is ModPlacement.CLIENT_ONLY
                         else "enabled" if entry.enabled else "disabled"
                     ),
-                    "downloadable" if entry.downloadable else "blocked",
+                    (
+                        "downloadable"
+                        if entry.downloadable
+                        else ModWebServiceSupport._mod_download_unavailable_label(entry).casefold()
+                    ),
                     "client required" if entry.client_required else "",
                     entry.origin,
                     entry.version,

@@ -49,6 +49,8 @@ from apps.gmod import (
     resolve_gmod_game_port,
     sync_gmod_workshop_manifest,
 )
+from cmd_app_manage import AppManageMode, AppManageState
+from cmd_app_manage_render import build_settings_view
 from node_api.app_installer import NodeAppInstallInputKind, NodeAppInstallRequest, NodeAppInstallerService
 from node_api.service import NodeApiService
 
@@ -534,6 +536,64 @@ class GmodIntegrationTests(unittest.TestCase):
 
         catalog = app.has_mod_catalog
         self.assertEqual(tuple(source.kind for source in catalog.sources), (ModSourceKind.STEAM_WORKSHOP,))
+
+    def test_workshop_settings_are_not_exposed_on_the_ordinary_settings_surface(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            app = self._app(Path(temporary_directory))
+            settings_manager = app.settings
+            assert settings_manager is not None
+
+            setting_keys = tuple(setting.key for setting in settings_manager.app.settings_page_options)
+            management_view = build_settings_view(
+                app=app,
+                state=AppManageState(mode=AppManageMode.SETTINGS, page=0, app_name=app.name),
+                acl=cast(Any, Mock()),
+                actor_user_id=42,
+            )
+            management_setting_keys = tuple(setting.key for setting in management_view.settings.visible)
+
+        self.assertNotIn("workshop_collection_id", setting_keys)
+        self.assertNotIn("workshop_auto_update", setting_keys)
+        self.assertNotIn("client_content_workshop_ids", setting_keys)
+        self.assertNotIn("workshop_collection_id", management_setting_keys)
+        self.assertNotIn("workshop_auto_update", management_setting_keys)
+        self.assertNotIn("client_content_workshop_ids", management_setting_keys)
+
+    def test_workshop_source_mutations_persist_and_regenerate_client_manifest(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            with patch.object(app.workshop_source, "invalidate", wraps=app.workshop_source.invalidate) as invalidate:
+                app.update_workshop_collection("123456789")
+                app.update_workshop_auto_update(False)
+                manifest_path = app.update_client_content_workshop_ids(
+                    (" 234567890 ", "345678901", "234567890")
+                )
+
+            persisted = cast(
+                dict[str, object],
+                json.loads(gmod_settings_path(directory).read_text(encoding="utf-8")),
+            )
+            manifest = manifest_path.read_text(encoding="utf-8")
+            app.update_workshop_collection(None)
+            app.update_client_content_workshop_ids(("345678901",))
+
+            updated = cast(
+                dict[str, object],
+                json.loads(gmod_settings_path(directory).read_text(encoding="utf-8")),
+            )
+            updated_manifest = gmod_workshop_manifest_path(directory).read_text(encoding="utf-8")
+
+        self.assertEqual(persisted["workshop_collection_id"], "123456789")
+        self.assertFalse(persisted["workshop_auto_update"])
+        self.assertEqual(persisted["client_content_workshop_ids"], ["234567890", "345678901"])
+        self.assertIn('resource.AddWorkshop("234567890")', manifest)
+        self.assertIn('resource.AddWorkshop("345678901")', manifest)
+        self.assertEqual(updated["workshop_collection_id"], "")
+        self.assertEqual(updated["client_content_workshop_ids"], ["345678901"])
+        self.assertNotIn('resource.AddWorkshop("234567890")', updated_manifest)
+        self.assertIn('resource.AddWorkshop("345678901")', updated_manifest)
+        self.assertEqual(invalidate.call_count, 3)
 
     def test_expired_gslt_exit_has_a_safe_actionable_diagnosis(self) -> None:
         with TemporaryDirectory() as temporary_directory:

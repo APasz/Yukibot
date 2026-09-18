@@ -3540,7 +3540,7 @@ class AppManageService:
     ) -> Setting | None:
         if app.settings is None or state.selected_setting_index is None:
             return None
-        options = tuple(app.settings.app.options)
+        options = tuple(app.settings.app.settings_page_options)
         if state.selected_setting_index >= len(options):
             return None
         return options[state.selected_setting_index]
@@ -3569,9 +3569,13 @@ class AppManageService:
                         actor_user_id=actor_user_id,
                     )
             else:
-                resolved_page = _page_for_setting_key(app.settings.app.options, setting.key)
+                resolved_page = _page_for_setting_key(app.settings.app.settings_page_options, setting.key)
         selected_setting_index = next(
-            (index for index, candidate in enumerate(app.settings.app.options) if candidate.key == setting.key),
+            (
+                index
+                for index, candidate in enumerate(app.settings.app.settings_page_options)
+                if candidate.key == setting.key
+            ),
             None,
         )
         if selected_setting_index is None:

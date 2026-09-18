@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -57,6 +57,132 @@ class ModSourceRefreshPolicy(StrEnum):
     RETAIN_LAST_GOOD = "retain_last_good"
 
 
+class ModSourceAction(StrEnum):
+    """A control that belongs to an inventory source rather than one mod row."""
+
+    REFRESH = "refresh"
+    CHANGE_COLLECTION = "change_collection"
+    SET_AUTO_UPDATE = "set_auto_update"
+    MANAGE_CLIENT_CONTENT = "manage_client_content"
+
+
+class ModSourceConfigurationKey(StrEnum):
+    """Stable field identifiers for source configuration shown in the Mods UI."""
+
+    COLLECTION_ID = "collection_id"
+    COLLECTION_TITLE = "collection_title"
+    SERVER_MOUNTED_COUNT = "server_mounted_count"
+    AUTO_UPDATE = "auto_update"
+    CLIENT_CONTENT_IDS = "client_content_ids"
+    CLIENT_REQUIRED_COUNT = "client_required_count"
+
+
+@dataclass(frozen=True, slots=True)
+class ModSourceConfigurationField:
+    """One read-only source-configuration value for inventory clients."""
+
+    key: ModSourceConfigurationKey
+    label: str
+    value: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, ModSourceConfigurationKey):
+            raise TypeError("Mod source configuration field key must be a ModSourceConfigurationKey.")
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError("Mod source configuration field label must be non-empty text.")
+        if not isinstance(self.value, str):
+            raise TypeError("Mod source configuration field value must be text.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> ModSourceConfigurationField:
+        raw_key = payload.get("key")
+        raw_label = payload.get("label")
+        raw_value = payload.get("value")
+        if not isinstance(raw_key, str):
+            raise ValueError("Mod source configuration field key is invalid.")
+        if not isinstance(raw_label, str):
+            raise ValueError("Mod source configuration field label is invalid.")
+        if not isinstance(raw_value, str):
+            raise ValueError("Mod source configuration field value is invalid.")
+        try:
+            key = ModSourceConfigurationKey(raw_key)
+        except ValueError as xcp:
+            raise ValueError("Mod source configuration field key is invalid.") from xcp
+        return cls(key=key, label=raw_label, value=raw_value)
+
+    def to_mapping(self) -> dict[str, str]:
+        return {"key": self.key.value, "label": self.label, "value": self.value}
+
+
+@dataclass(frozen=True, slots=True)
+class ModSourceConfiguration:
+    """Small, source-owned configuration metadata for the aggregate Mods UI.
+
+    This deliberately models source controls separately from :class:`ModAction`:
+    a collection is source configuration, never an inventory entry action.
+    """
+
+    source: ModSourceKind
+    fields: tuple[ModSourceConfigurationField, ...]
+    actions: tuple[ModSourceAction, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, ModSourceKind):
+            raise TypeError("Mod source configuration source must be a ModSourceKind.")
+        if not isinstance(self.fields, tuple):
+            raise TypeError("Mod source configuration fields must be a tuple.")
+        if not self.fields:
+            raise ValueError("Mod source configuration requires at least one field.")
+        if any(not isinstance(configuration_field, ModSourceConfigurationField) for configuration_field in self.fields):
+            raise TypeError("Mod source configuration fields must be ModSourceConfigurationField values.")
+        if len({field.key for field in self.fields}) != len(self.fields):
+            raise ValueError("Mod source configuration field keys must be unique.")
+        if not isinstance(self.actions, tuple):
+            raise TypeError("Mod source configuration actions must be a tuple.")
+        if any(not isinstance(action, ModSourceAction) for action in self.actions):
+            raise TypeError("Mod source configuration actions must be ModSourceAction values.")
+        if len(set(self.actions)) != len(self.actions):
+            raise ValueError("Mod source configuration actions must be unique.")
+
+    def field_value(self, key: ModSourceConfigurationKey) -> str | None:
+        """Return one configured display value when the source exposes it."""
+
+        for configuration_field in self.fields:
+            if configuration_field.key is key:
+                return configuration_field.value
+        return None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> ModSourceConfiguration:
+        raw_source = payload.get("source")
+        raw_fields = payload.get("fields")
+        raw_actions = payload.get("actions")
+        if not isinstance(raw_source, str):
+            raise ValueError("Mod source configuration source is invalid.")
+        if not isinstance(raw_fields, Sequence) or isinstance(raw_fields, (str, bytes)):
+            raise ValueError("Mod source configuration fields are invalid.")
+        if not isinstance(raw_actions, Sequence) or isinstance(raw_actions, (str, bytes)):
+            raise ValueError("Mod source configuration actions are invalid.")
+        try:
+            source = ModSourceKind(raw_source)
+            actions = tuple(ModSourceAction(raw_action) for raw_action in raw_actions)
+        except (TypeError, ValueError) as xcp:
+            raise ValueError("Mod source configuration actions are invalid.") from xcp
+        fields: list[ModSourceConfigurationField] = []
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, Mapping):
+                raise ValueError("Mod source configuration fields are invalid.")
+            fields.append(ModSourceConfigurationField.from_mapping(raw_field))
+        return cls(source=source, fields=tuple(fields), actions=actions)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "source": self.source.value,
+            "fields": [field.to_mapping() for field in self.fields],
+            "actions": [action.value for action in self.actions],
+        }
+
+
 class ModSourceRefreshError(RuntimeError):
     """An expected, user-safe failure while refreshing an external source.
 
@@ -76,6 +202,7 @@ class ModSourceStatus:
     healthy: bool = True
     warning: str | None = None
     using_cached_entries: bool = False
+    configuration: ModSourceConfiguration | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, ModSourceKind):
@@ -88,6 +215,11 @@ class ModSourceStatus:
             raise ValueError("Mod source status warning must be non-empty text when set.")
         if not isinstance(self.using_cached_entries, bool):
             raise TypeError("Mod source status cached-entry flag must be a bool.")
+        if self.configuration is not None:
+            if not isinstance(self.configuration, ModSourceConfiguration):
+                raise TypeError("Mod source status configuration must be a ModSourceConfiguration.")
+            if self.configuration.source is not self.source:
+                raise ValueError("Mod source status configuration belongs to a different source.")
         if self.healthy and self.warning is not None:
             raise ValueError("Healthy mod sources cannot carry a warning.")
         if self.healthy and self.using_cached_entries:
@@ -96,10 +228,20 @@ class ModSourceStatus:
             raise ValueError("Unhealthy mod sources require a warning.")
 
     @classmethod
-    def ready(cls, source: ModSourceKind, *, label: str | None = None) -> ModSourceStatus:
+    def ready(
+        cls,
+        source: ModSourceKind,
+        *,
+        label: str | None = None,
+        configuration: ModSourceConfiguration | None = None,
+    ) -> ModSourceStatus:
         """Build a healthy status for one configured source."""
 
-        return cls(source=source, label=source.label if label is None else label)
+        return cls(
+            source=source,
+            label=source.label if label is None else label,
+            configuration=configuration,
+        )
 
     @classmethod
     def unavailable(
@@ -109,6 +251,7 @@ class ModSourceStatus:
         warning: str,
         label: str | None = None,
         using_cached_entries: bool = False,
+        configuration: ModSourceConfiguration | None = None,
     ) -> ModSourceStatus:
         """Build a warning status without naming a provider-specific error type."""
 
@@ -118,6 +261,7 @@ class ModSourceStatus:
             healthy=False,
             warning=warning,
             using_cached_entries=using_cached_entries,
+            configuration=configuration,
         )
 
 
@@ -339,6 +483,9 @@ class LocalModSource:
     async def refresh(self) -> None:
         await self._manager.reload_mods()
 
+    def invalidate(self) -> None:
+        """Local inventory has no source-specific cache to invalidate."""
+
     @property
     def status(self) -> ModSourceStatus:
         return ModSourceStatus.ready(self.kind, label=self.label)
@@ -396,6 +543,52 @@ class ModCatalog:
         if fatal_errors:
             raise fatal_errors[0]
 
+    def source(self, kind: ModSourceKind) -> ModInventorySource:
+        """Return one configured source by its stable kind."""
+
+        if not isinstance(kind, ModSourceKind):
+            raise TypeError("Mod catalog source kind must be a ModSourceKind.")
+        for source in self._sources:
+            if source.kind is kind:
+                return source
+        raise LookupError(f"Mod catalog has no {kind.label} source.")
+
+    def invalidate_source(self, kind: ModSourceKind, *, discard_snapshot: bool = False) -> None:
+        """Invalidate one source cache and optionally discard its old entry snapshot."""
+
+        if not isinstance(discard_snapshot, bool):
+            raise TypeError("Mod catalog source snapshot discard flag must be a bool.")
+        source = self.source(kind)
+        self._invalidate_source(source)
+        if discard_snapshot:
+            # Keep an explicit empty snapshot so ``list_entries`` does not
+            # fall back to the source's old in-memory entries before it can
+            # resolve the newly configured source.
+            self._source_snapshots[kind] = ()
+
+    async def refresh_source(self, kind: ModSourceKind, *, invalidate: bool = False) -> None:
+        """Refresh one source without touching unrelated inventory providers.
+
+        ``invalidate`` is intentionally source-level.  It lets a source bypass
+        its own TTL without introducing a catalog-wide polling policy.
+        """
+
+        source = self.source(kind)
+        if invalidate:
+            self._invalidate_source(source)
+        try:
+            await source.refresh()
+        except asyncio.CancelledError:
+            raise
+        except ModSourceRefreshError as xcp:
+            if self._refresh_policy_for_source(source) is not ModSourceRefreshPolicy.RETAIN_LAST_GOOD:
+                raise
+            self._record_expected_refresh_failure(source=source, error=xcp)
+            return
+        entries = self._entries_for_source(source)
+        self._source_snapshots[source.kind] = entries
+        self._source_statuses[source.kind] = self._status_for_source(source)
+
     def list_entries(self) -> tuple[ModInventoryEntry, ...]:
         """Return entries in configured-source order and source-owned entry order."""
 
@@ -449,6 +642,15 @@ class ModCatalog:
         return raw_status
 
     @staticmethod
+    def _invalidate_source(source: ModInventorySource) -> None:
+        source_invalidator = getattr(source, "invalidate", None)
+        if source_invalidator is None:
+            return
+        if not callable(source_invalidator):
+            raise TypeError("Mod catalog source invalidator must be callable.")
+        source_invalidator()
+
+    @staticmethod
     def _entries_for_source(source: ModInventorySource) -> tuple[ModInventoryEntry, ...]:
         source_entries = source.list_entries()
         if not isinstance(source_entries, tuple):
@@ -466,7 +668,8 @@ class ModCatalog:
         source: ModInventorySource,
         error: ModSourceRefreshError,
     ) -> None:
-        has_snapshot = source.kind in self._source_snapshots
+        source_status = self._status_for_source(source)
+        has_snapshot = bool(self._source_snapshots.get(source.kind, ()))
         warning = str(error).strip() or f"{self._label_for_source(source)} unavailable."
         if has_snapshot:
             warning = f"{warning.rstrip('.;')}; showing cached data."
@@ -475,6 +678,7 @@ class ModCatalog:
             label=self._label_for_source(source),
             warning=warning,
             using_cached_entries=has_snapshot,
+            configuration=source_status.configuration,
         )
         log.warning("Mod inventory source refresh failed: source=%s warning=%s", source.kind.value, warning)
 
@@ -484,6 +688,10 @@ __all__ = (
     "ModAction",
     "ModArtifact",
     "ModCatalog",
+    "ModSourceAction",
+    "ModSourceConfiguration",
+    "ModSourceConfigurationField",
+    "ModSourceConfigurationKey",
     "ModInventoryEntry",
     "ModInventorySource",
     "ModReference",

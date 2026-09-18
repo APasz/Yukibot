@@ -70,6 +70,7 @@ from .runtime_imports import (
     NodeMinecraftRecipeMutationAction,
     NodeMinecraftRecipeMutationResult,
     NodeModEntry,
+    NodeModList,
     NodeModMutationAction,
     NodeModMutationResult,
     NodeModPortalVersionEntry,
@@ -371,6 +372,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
     def _mod_download_summary(entry: NodeModEntry) -> str:
         if entry.supports_action(ModAction.DOWNLOAD):
             return "Available"
+        if not entry.download_is_policy_blocked:
+            return ModWebServiceSupport._mod_download_unavailable_label(entry)
         reason = entry.download_block_label or entry.download_block_reason
         return "Blocked" if reason is None else f"Blocked — {reason}"
 
@@ -381,6 +384,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
         if entry.placement is ModPlacement.SERVER_DISABLED:
             return "Excluded — Server disabled"
         if not entry.supports_action(ModAction.DOWNLOAD):
+            if not entry.download_is_policy_blocked:
+                return f"Not applicable — {ModWebServiceSupport._mod_download_unavailable_label(entry)}"
             return "Excluded — File download blocked"
         if not entry.client_pack.included_in_client:
             return "Not included"
@@ -856,6 +861,70 @@ class ModWebActionsMixin(ModWebServiceSupport):
         self._invalidate_mod_update_cache(model=model, mod_id=resolved_entry.id)
         return result
 
+    async def _refresh_mod_source(
+        self,
+        *,
+        model: ModWebPageModel,
+        source: ModSourceKind,
+        user: ModWebUser,
+    ) -> NodeModList:
+        if not self._user_has_level(user, Power_Level.sudo):
+            raise PermissionError("Sudo access is required to refresh a mod source.")
+        return await self._remote_mod_source_refresh_async(
+            self._remote_node_link(model.node_name),
+            model.app_name,
+            source,
+            user,
+        )
+
+    async def _update_gmod_workshop_collection(
+        self,
+        *,
+        model: ModWebPageModel,
+        collection_id: str,
+        user: ModWebUser,
+    ) -> NodeModList:
+        if not self._user_has_level(user, Power_Level.sudo):
+            raise PermissionError("Sudo access is required to change the Workshop collection.")
+        return await self._remote_gmod_workshop_collection_update_async(
+            self._remote_node_link(model.node_name),
+            model.app_name,
+            collection_id,
+            user,
+        )
+
+    async def _update_gmod_workshop_auto_update(
+        self,
+        *,
+        model: ModWebPageModel,
+        enabled: bool,
+        user: ModWebUser,
+    ) -> NodeModList:
+        if not self._user_has_level(user, Power_Level.sudo):
+            raise PermissionError("Sudo access is required to change Workshop auto-update.")
+        return await self._remote_gmod_workshop_auto_update_async(
+            self._remote_node_link(model.node_name),
+            model.app_name,
+            enabled,
+            user,
+        )
+
+    async def _update_gmod_workshop_client_content(
+        self,
+        *,
+        model: ModWebPageModel,
+        item_ids: tuple[str, ...],
+        user: ModWebUser,
+    ) -> NodeModList:
+        if not self._user_has_level(user, Power_Level.sudo):
+            raise PermissionError("Sudo access is required to manage Workshop client content.")
+        return await self._remote_gmod_workshop_client_content_update_async(
+            self._remote_node_link(model.node_name),
+            model.app_name,
+            item_ids,
+            user,
+        )
+
     async def _remote_mod_mutation_async(
         self,
         node: ModWebNodeLink,
@@ -1326,7 +1395,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             case NodeModMutationAction.TOGGLE_COREMOD:
                 return "Coremod"
             case NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
-                return "Unblock" if not entry.downloadable else "Block"
+                return "Unblock" if entry.download_is_policy_blocked else "Block"
             case NodeModMutationAction.UPDATE_PROPERTIES:
                 return "Save Properties"
             case NodeModMutationAction.UPDATE_NOTES:
@@ -1346,7 +1415,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
             case NodeModMutationAction.TOGGLE_COREMOD:
                 return "mod-list-button state-core-on" if entry.coremod else "mod-list-button state-core-off"
             case NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
-                return "mod-list-button state-blocked" if not entry.downloadable else "mod-list-button state-open"
+                return (
+                    "mod-list-button state-blocked"
+                    if entry.download_is_policy_blocked
+                    else "mod-list-button state-open"
+                )
             case NodeModMutationAction.UPDATE_PROPERTIES:
                 return "mod-list-button"
             case NodeModMutationAction.UPDATE_NOTES:
@@ -3449,7 +3522,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         has_update: bool = False,
     ) -> Checkbox | None:
         row_classes = ["mod-row", "w-full"]
-        if not entry.downloadable:
+        if entry.download_is_policy_blocked:
             row_classes.append("blocked")
         elif entry.placement is ModPlacement.SERVER_DISABLED:
             row_classes.append("mod-row-disabled")
@@ -3466,6 +3539,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 )
             dialog.open()
 
+        source_page = self._mod_source_page(entry)
+        show_source_page_link = (
+            source_page is not None
+            and not entry.download_is_policy_blocked
+            and (download_url is None or not entry.supports_action(ModAction.DOWNLOAD))
+        )
         row = ui.row().classes(" ".join((*row_classes, "mod-row-clickable")))
         row.on("click", open_mod_info_dialog)
         with row:
@@ -3481,7 +3560,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.label(entry.friendly).classes("mod-row-title")
                 ui.label(entry.name).classes("mod-row-file")
             with ui.row().classes("mod-row-meta"):
-                ui.label(entry.source.label).classes("mod-pill")
+                if not show_source_page_link:
+                    ui.label(entry.source.label).classes("mod-pill")
                 ui.label(entry.size_text).classes("mod-pill size")
                 if has_update:
                     ui.label("Update").classes("mod-pill size update")
@@ -3491,14 +3571,22 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     ui.label(entry.client_pack.policy.label).classes("mod-pill")
                 if entry.client_required:
                     ui.label("Client required").classes("mod-pill")
-                show_download_block_badge: bool = not entry.downloadable and not (
+                show_download_block_badge: bool = entry.download_is_policy_blocked and not (
                     entry.mod_type is ModType.SERVER
                     and entry.download_block_reason == ModDownloadBlockReason.SERVER_ONLY.value
                 )
                 if show_download_block_badge:
                     ui.label(entry.download_block_label or "Not downloadable").classes("mod-pill blocked")
             if download_url is None or not entry.supports_action(ModAction.DOWNLOAD):
-                ui.label("Blocked").classes("mod-row-download blocked")
+                unavailable_label = self._mod_download_unavailable_label(entry)
+                unavailable_classes = "mod-row-download blocked" if entry.download_is_policy_blocked else "mod-row-download"
+                if not show_source_page_link:
+                    ui.label(unavailable_label).classes(unavailable_classes)
+                else:
+                    assert source_page is not None
+                    source_link = ui.link(source_page.name, source_page.url, new_tab=True).classes(unavailable_classes)
+                    source_link.props('rel="noopener noreferrer"')
+                    source_link.on("click", js_handler="(event) => event.stopPropagation()")
             else:
 
                 async def download_single() -> None:

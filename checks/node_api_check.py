@@ -78,7 +78,17 @@ from apps._console import (
     ConsoleResponseSource,
 )
 from apps._mod import Mod
-from apps._mod_catalog import LocalModSource, ModAction, ModCatalog, ModReference, ModSourceKind
+from apps._mod_catalog import (
+    LocalModSource,
+    ModAction,
+    ModCatalog,
+    ModReference,
+    ModSourceAction,
+    ModSourceConfiguration,
+    ModSourceConfigurationField,
+    ModSourceConfigurationKey,
+    ModSourceKind,
+)
 from apps._node_api import NodeModUploadSource
 from apps._save_files import (
     AppSaveEntry,
@@ -238,6 +248,7 @@ from node_api.mod import (
     NodeClientPackModConfigUpdate,
     NodeClientPackPublishRequest,
     NodeDownloadRequest,
+    NodeGmodWorkshopClientContentUpdateRequest,
     NodeModEntry,
     NodeModList,
     NodeModSourceStatus,
@@ -1678,6 +1689,10 @@ class NodeApiTests(unittest.TestCase):
         route = handlers["/api/node/apps/{app_name}/mods/{mod_name}/download"]
         hints = get_type_hints(route)
         self.assertIs(hints["request"], Request)
+        self.assertIn("/api/node/apps/{app_name}/mods/sources/{source}/refresh", handlers)
+        self.assertIn("/api/node/apps/{app_name}/mods/sources/steam_workshop/collection", handlers)
+        self.assertIn("/api/node/apps/{app_name}/mods/sources/steam_workshop/auto-update", handlers)
+        self.assertIn("/api/node/apps/{app_name}/mods/sources/steam_workshop/client-content", handlers)
         self.assertIn("/api/node/ping", handlers)
         self.assertIn("/api/node/presence/stream", handlers)
         self.assertIn("/api/node/system/restart-schedules", handlers)
@@ -2229,6 +2244,35 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.settings[1].recent_inputs, ("Beta",))
         self.assertEqual(result.settings[1].group_id, "computercraft")
         self.assertEqual(result.settings[1].group_label, "ComputerCraft")
+
+    def test_build_setting_list_omits_source_owned_settings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings_pointer = root / "settings.json"
+            settings_pointer.write_text("{}", encoding="utf-8")
+            app = _build_app(Mock())
+            visible_setting = _setting(str, "Map", "startup_map", value="gm_flatgrass")
+            hidden_setting = Setting(
+                StringSettingSpec(),
+                "Workshop Collection",
+                "workshop_collection_id",
+                (),
+                default="",
+                show_in_settings=False,
+            )
+            settings_app = _DummySettingsApp(settings_pointer, [visible_setting, hidden_setting])
+            _attach_settings(app, settings_app)
+            users_pointer = root / "users.json"
+            users_pointer.write_text('{"sudo": [42]}', encoding="utf-8")
+            service = NodeApiService()
+            service.set_acl(Access_Control(users_pointer))
+
+            result = service.build_setting_list(app=app, actor_user_id=42)
+            with self.assertRaises(HTTPException) as raised:
+                service._app_operations.resolve_setting(app=app, setting_key="workshop_collection_id")
+
+        self.assertEqual(tuple(setting.key for setting in result.settings), ("startup_map",))
+        self.assertEqual(raised.exception.status_code, 404)
 
     def test_build_setting_list_shows_restricted_values_when_hide_policy_is_disabled(
         self,
@@ -5592,6 +5636,17 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(restored.artifact_available)
 
     def test_mod_list_keeps_duplicate_local_and_workshop_names_distinct(self) -> None:
+        workshop_configuration = ModSourceConfiguration(
+            source=ModSourceKind.STEAM_WORKSHOP,
+            fields=(
+                ModSourceConfigurationField(
+                    key=ModSourceConfigurationKey.COLLECTION_ID,
+                    label="Collection",
+                    value="100",
+                ),
+            ),
+            actions=(ModSourceAction.REFRESH,),
+        )
         local = NodeModEntry(
             name="shared-addon",
             friendly="Shared addon",
@@ -5620,7 +5675,7 @@ class NodeApiTests(unittest.TestCase):
             downloadable=False,
             version=None,
             size_bytes=0,
-            size_text="Not local",
+            size_text="Remote",
             client_pack_eligible=False,
             source_path="steam_workshop:200",
             client_pack=ClientPackConfig(included_in_client=False),
@@ -5649,6 +5704,7 @@ class NodeApiTests(unittest.TestCase):
                     healthy=False,
                     warning="Steam Workshop unavailable; showing cached data.",
                     using_cached_entries=True,
+                    configuration=workshop_configuration,
                 ),
             ),
         )
@@ -5663,6 +5719,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertFalse(restored.mods[1].artifact_available)
         self.assertFalse(restored.mods[1].supports_action(ModAction.DELETE))
         self.assertTrue(restored.source_statuses[1].using_cached_entries)
+        self.assertEqual(restored.source_statuses[1].configuration, workshop_configuration)
 
     def test_app_can_register_a_catalog_source_without_a_local_mod_manager(self) -> None:
         app = object.__new__(_DummyApp)
@@ -8463,6 +8520,78 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(model.app_stats.relay_support.value, "bidirectional")
         self.assertEqual(model.app_stats.storage_percent, 42)
         self.assertEqual(model.app_stats.footprint_bytes, 8)
+
+    def test_gmod_workshop_mutation_invalidates_inventory_before_manifest_failure(self) -> None:
+        app = _build_app(Mock())
+        app.name = "gmod_alpha"
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        invalidate_inventory = Mock()
+        service = NodeModService(
+            node_name=lambda: "yuki",
+            require_acl=lambda: cast(Any, acl),
+            build_runtime_summary=AsyncMock(),
+            invalidate_client_pack_content=Mock(),
+            invalidate_mod_inventory=invalidate_inventory,
+            upload_mod_paths=AsyncMock(),
+            operations=cast(Any, Mock()),
+        )
+        gmod = Mock()
+        refresh_source = AsyncMock()
+        observed_invalidation_counts: list[int] = []
+
+        def update_client_content(_item_ids: tuple[str, ...]) -> None:
+            observed_invalidation_counts.append(invalidate_inventory.call_count)
+            raise OSError("manifest is read-only")
+
+        gmod.update_client_content_workshop_ids.side_effect = update_client_content
+        request = NodeGmodWorkshopClientContentUpdateRequest(item_ids=("200",))
+
+        with (
+            patch.object(NodeModService, "_require_gmod_workshop_app", return_value=gmod),
+            patch.object(service, "_refresh_source_inventory", new=refresh_source),
+            self.assertRaisesRegex(OSError, "manifest is read-only"),
+        ):
+            asyncio.run(
+                service.update_gmod_workshop_client_content(
+                    app=app,
+                    update=request,
+                    actor_user_id=42,
+                )
+            )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        invalidate_inventory.assert_called_once_with("gmod_alpha")
+        self.assertEqual(observed_invalidation_counts, [1])
+        refresh_source.assert_not_awaited()
+
+    def test_unknown_mod_source_refresh_does_not_invalidate_inventory(self) -> None:
+        app = _build_app(Mock())
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        invalidate_inventory = Mock()
+        service = NodeModService(
+            node_name=lambda: "yuki",
+            require_acl=lambda: cast(Any, acl),
+            build_runtime_summary=AsyncMock(),
+            invalidate_client_pack_content=Mock(),
+            invalidate_mod_inventory=invalidate_inventory,
+            upload_mod_paths=AsyncMock(),
+            operations=cast(Any, Mock()),
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(
+                service.refresh_inventory_source(
+                    app=app,
+                    source=ModSourceKind.STEAM_WORKSHOP,
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 404)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        invalidate_inventory.assert_not_called()
 
     def test_cached_runtime_summary_single_flights_concurrent_requests(self) -> None:
         app = _build_app(Mock())

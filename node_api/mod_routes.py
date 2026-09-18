@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from _audit import audit_log
 from _security import Power_Level
 from apps._app import App
+from apps._mod_catalog import ModSourceKind
 from apps._config import (
     ModPlacement,
 )
@@ -26,6 +27,9 @@ from .mod import (
     NodeClientPackConfigUpdateRequest,
     NodeClientPackPublishRequest,
     NodeDownloadRequest,
+    NodeGmodWorkshopAutoUpdateRequest,
+    NodeGmodWorkshopClientContentUpdateRequest,
+    NodeGmodWorkshopCollectionUpdateRequest,
     NodeModMetadataFetchRequest,
     NodeModMetadataResolveRequest,
     NodeModMutationRequest,
@@ -53,6 +57,125 @@ def register_mod_routes(
     traffic_log: logging.Logger,
 ) -> None:
     """Register all app-scoped mod and client-pack endpoints."""
+
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/sources/{{source}}/refresh")
+    async def _refresh_mod_source(
+        app_name: str,
+        source: ModSourceKind,
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        traffic_log.info(
+            "Node API mod source refresh request: node=%s app=%s source=%s",
+            auth.node_name,
+            app_name,
+            source.value,
+        )
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = await mod_service.refresh_inventory_source(
+            app=resolve_app(app_name),
+            source=source,
+            actor_user_id=actor_user_id,
+        )
+        audit_log(
+            "mod.source_refreshed",
+            actor_user_id=actor_user_id,
+            node_name=auth.node_name,
+            app_name=app_name,
+            mod_name=source.value,
+            required_level=Power_Level.sudo.name,
+        )
+        return result.to_mapping()
+
+    @nicegui_app.put(f"{api_prefix}/apps/{{app_name}}/mods/sources/steam_workshop/collection")
+    async def _update_gmod_workshop_collection(
+        app_name: str,
+        payload: dict[str, object],
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = await mod_service.update_gmod_workshop_collection(
+            app=resolve_app(app_name),
+            update=NodeGmodWorkshopCollectionUpdateRequest.model_validate(payload),
+            actor_user_id=actor_user_id,
+        )
+        audit_log(
+            "gmod.workshop_collection_updated",
+            actor_user_id=actor_user_id,
+            node_name=auth.node_name,
+            app_name=app_name,
+            required_level=Power_Level.sudo.name,
+        )
+        return result.to_mapping()
+
+    @nicegui_app.put(f"{api_prefix}/apps/{{app_name}}/mods/sources/steam_workshop/auto-update")
+    async def _update_gmod_workshop_auto_update(
+        app_name: str,
+        payload: dict[str, object],
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = await mod_service.update_gmod_workshop_auto_update(
+            app=resolve_app(app_name),
+            update=NodeGmodWorkshopAutoUpdateRequest.model_validate(payload),
+            actor_user_id=actor_user_id,
+        )
+        audit_log(
+            "gmod.workshop_auto_update_updated",
+            actor_user_id=actor_user_id,
+            node_name=auth.node_name,
+            app_name=app_name,
+            required_level=Power_Level.sudo.name,
+        )
+        return result.to_mapping()
+
+    @nicegui_app.put(f"{api_prefix}/apps/{{app_name}}/mods/sources/steam_workshop/client-content")
+    async def _update_gmod_workshop_client_content(
+        app_name: str,
+        payload: dict[str, object],
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = await mod_service.update_gmod_workshop_client_content(
+            app=resolve_app(app_name),
+            update=NodeGmodWorkshopClientContentUpdateRequest.model_validate(payload),
+            actor_user_id=actor_user_id,
+        )
+        audit_log(
+            "gmod.workshop_client_content_updated",
+            actor_user_id=actor_user_id,
+            node_name=auth.node_name,
+            app_name=app_name,
+            required_level=Power_Level.sudo.name,
+        )
+        return result.to_mapping()
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/mods/download")
     async def _download_mods(

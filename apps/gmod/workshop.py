@@ -9,20 +9,19 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import time
 from typing import Final, Protocol
 
 import aiohttp
 
-from apps._config import (
-    ClientPackConfig,
-    ModDownloadBlockReason,
-    ModPageLink,
-    ModPlacement,
-    ModType,
-)
+from apps._config import ClientPackConfig, ModPageLink, ModPlacement, ModType
 from apps._mod_catalog import (
     ModInventoryEntry,
     ModReference,
+    ModSourceAction,
+    ModSourceConfiguration,
+    ModSourceConfigurationField,
+    ModSourceConfigurationKey,
     ModSourceKind,
     ModSourceRefreshError,
     ModSourceRefreshPolicy,
@@ -42,7 +41,8 @@ _STEAM_WORKSHOP_READ_TIMEOUT_SECONDS: Final[float] = 8.0
 _STEAM_WORKSHOP_MAX_ITEM_ID: Final[int] = (1 << 64) - 1
 _STEAM_WORKSHOP_MAX_ITEM_ID_TEXT: Final[str] = str(_STEAM_WORKSHOP_MAX_ITEM_ID)
 _STEAM_WORKSHOP_ORIGIN: Final[str] = "Steam Workshop"
-_STEAM_WORKSHOP_DOWNLOAD_BLOCK_LABEL: Final[str] = "Steam Workshop item"
+_STEAM_WORKSHOP_METADATA_CACHE_TTL_SECONDS: Final[float] = 10 * 60
+_STEAM_WORKSHOP_FAILURE_CACHE_TTL_SECONDS: Final[float] = 30.0
 
 
 class GmodWorkshopSettings(Protocol):
@@ -50,6 +50,9 @@ class GmodWorkshopSettings(Protocol):
 
     @property
     def workshop_collection_id(self) -> str | None: ...
+
+    @property
+    def workshop_auto_update(self) -> bool: ...
 
     @property
     def client_content_workshop_ids(self) -> tuple[str, ...]: ...
@@ -61,6 +64,10 @@ class _WorkshopSessionFactory(Protocol):
 
 class _SteamWorkshopResponseError(ValueError):
     """A malformed or unavailable public Steam response."""
+
+
+class _SteamWorkshopCollectionUnavailableError(_SteamWorkshopResponseError):
+    """The configured public Steam Workshop collection cannot be resolved."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +96,17 @@ class _WorkshopItemMetadata:
     revision: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ConfiguredWorkshopContent:
+    collection_id: str | None
+    client_item_ids: tuple[str, ...]
+    auto_update: bool
+
+    @property
+    def cache_key(self) -> tuple[str | None, tuple[str, ...], bool]:
+        return (self.collection_id, self.client_item_ids, self.auto_update)
+
+
 class GmodWorkshopSource:
     """Resolve configured GMod Workshop content through public Steam endpoints."""
 
@@ -102,85 +120,271 @@ class GmodWorkshopSource:
         settings: Callable[[], GmodWorkshopSettings],
         session_factory: _WorkshopSessionFactory = aiohttp.ClientSession,
         now: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
         self._session_factory = session_factory
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._monotonic = monotonic
         self._entries: tuple[ModInventoryEntry, ...] = ()
-        self._status = ModSourceStatus.ready(self.kind, label=self.label)
+        self._metadata_by_item_id: dict[str, _WorkshopItemMetadata] = {}
+        self._collection_titles_by_id: dict[str, str] = {}
+        self._last_successful_refresh_at_seconds: float | None = None
+        self._last_successful_configuration: tuple[str | None, tuple[str, ...], bool] | None = None
+        self._last_failed_refresh_at_seconds: float | None = None
+        self._last_failed_configuration: tuple[str | None, tuple[str, ...], bool] | None = None
+        self._status = ModSourceStatus.ready(
+            self.kind,
+            label=self.label,
+            configuration=self._configuration_for(self._configured_content(self._settings())),
+        )
 
     @property
     def status(self) -> ModSourceStatus:
         return self._status
 
+    def invalidate(self) -> None:
+        """Force the next refresh to bypass this source's metadata TTL."""
+
+        self._last_successful_refresh_at_seconds = None
+        self._last_failed_refresh_at_seconds = None
+        self._last_failed_configuration = None
+
     async def refresh(self) -> None:
-        """Replace this source's snapshot only after a complete public lookup."""
+        """Refresh configured Workshop metadata while retaining the last good snapshot.
 
-        settings = self._settings()
-        collection_id = settings.workshop_collection_id
-        client_item_ids = settings.client_content_workshop_ids
-        if collection_id is None and not client_item_ids:
-            self._entries = ()
-            self._status = ModSourceStatus.ready(self.kind, label=self.label)
-            return
+        Successful responses are source-cached independently of the short-lived
+        aggregate mod-list cache.  This keeps ordinary Mods-page refreshes from
+        turning into repeated public Steam requests. Recent failures are also
+        briefly throttled; explicit invalidation always retries immediately.
+        """
 
+        configured: _ConfiguredWorkshopContent | None = None
         try:
+            configured = self._configured_content(self._settings())
+            if self._snapshot_is_current(configured):
+                return
+            if self._failure_is_current(configured):
+                warning = self._status.warning or f"{self.label} unavailable."
+                raise ModSourceRefreshError(warning)
+            if configured.collection_id is None and not configured.client_item_ids:
+                self._entries = ()
+                self._record_success(configured=configured, unavailable_item_ids=frozenset())
+                return
+
             roles_by_item_id: dict[str, _WorkshopRoles] = {}
-            configured_collection_id = (
-                None if collection_id is None else self._workshop_id(collection_id)
-            )
             timeout = aiohttp.ClientTimeout(
                 total=_STEAM_WORKSHOP_REQUEST_TIMEOUT_SECONDS,
                 connect=_STEAM_WORKSHOP_CONNECT_TIMEOUT_SECONDS,
                 sock_read=_STEAM_WORKSHOP_READ_TIMEOUT_SECONDS,
             )
             async with self._session_factory(timeout=timeout) as session:
-                if configured_collection_id is not None:
-                    for item_id in await self._collection_item_ids(session, configured_collection_id):
-                        if item_id == configured_collection_id:
+                if configured.collection_id is not None:
+                    for item_id in await self._collection_item_ids(session, configured.collection_id):
+                        if item_id == configured.collection_id:
                             continue
                         self._merge_role(roles_by_item_id, item_id=item_id, server_mounted=True)
-                for item_id in client_item_ids:
-                    if self._workshop_id(item_id) == configured_collection_id:
+                for item_id in configured.client_item_ids:
+                    if item_id == configured.collection_id:
                         continue
                     self._merge_role(roles_by_item_id, item_id=item_id, client_required=True)
-                if not roles_by_item_id:
-                    self._entries = ()
-                    self._status = ModSourceStatus.ready(self.kind, label=self.label)
-                    return
-
+                metadata_item_ids = tuple(roles_by_item_id)
+                if configured.collection_id is not None:
+                    # A collection is source configuration rather than a mod
+                    # row, but PublishedFileDetails is where Steam exposes its
+                    # display title.  Resolve it with the normal batch without
+                    # treating a missing title as an inventory failure.
+                    metadata_item_ids = (*metadata_item_ids, configured.collection_id)
                 metadata_by_item_id, unavailable_item_ids = await self._item_metadata(
                     session,
-                    tuple(roles_by_item_id),
+                    metadata_item_ids,
                 )
         except _SteamWorkshopResponseError as xcp:
-            raise ModSourceRefreshError(f"{self.label} unavailable.") from xcp
-        except (aiohttp.ClientError, OSError, TimeoutError) as xcp:
-            raise ModSourceRefreshError(f"{self.label} unavailable.") from xcp
-
-        if not metadata_by_item_id:
-            raise ModSourceRefreshError(f"{self.label} metadata is unavailable.")
-
-        self._entries = tuple(
-            self._entry_for_item(metadata=metadata_by_item_id[item_id], roles=roles)
-            for item_id, roles in roles_by_item_id.items()
-            if item_id in metadata_by_item_id
-        )
-        if unavailable_item_ids:
-            item_label = "item" if len(unavailable_item_ids) == 1 else "items"
-            self._status = ModSourceStatus.unavailable(
-                self.kind,
-                label=self.label,
-                warning=(
-                    f"{self.label} metadata is unavailable for "
-                    f"{len(unavailable_item_ids)} configured {item_label}."
-                ),
+            warning = (
+                f"{self.label} collection is unavailable."
+                if isinstance(xcp, _SteamWorkshopCollectionUnavailableError)
+                else f"{self.label} unavailable."
             )
-        else:
-            self._status = ModSourceStatus.ready(self.kind, label=self.label)
+            self._record_failure(configured=configured, warning=warning)
+            raise ModSourceRefreshError(warning) from xcp
+        except (aiohttp.ClientError, OSError, TimeoutError) as xcp:
+            warning = f"{self.label} unavailable."
+            self._record_failure(configured=configured, warning=warning)
+            raise ModSourceRefreshError(warning) from xcp
+
+        if configured.collection_id is not None:
+            collection_metadata = metadata_by_item_id.pop(configured.collection_id, None)
+            if collection_metadata is not None:
+                self._collection_titles_by_id[configured.collection_id] = collection_metadata.title
+            unavailable_item_ids = unavailable_item_ids.difference({configured.collection_id})
+        self._metadata_by_item_id.update(metadata_by_item_id)
+        self._entries = tuple(
+            self._entry_for_item(
+                metadata=(
+                    metadata_by_item_id.get(item_id)
+                    or self._metadata_by_item_id.get(item_id)
+                    or self._placeholder_metadata(item_id)
+                ),
+                roles=roles,
+            )
+            for item_id, roles in roles_by_item_id.items()
+        )
+        self._record_success(configured=configured, unavailable_item_ids=unavailable_item_ids)
 
     def list_entries(self) -> tuple[ModInventoryEntry, ...]:
         return self._entries
+
+    def _configured_content(self, settings: GmodWorkshopSettings) -> _ConfiguredWorkshopContent:
+        raw_collection_id = settings.workshop_collection_id
+        collection_id = None if raw_collection_id is None else self._workshop_id(raw_collection_id)
+        raw_client_item_ids = settings.client_content_workshop_ids
+        if not isinstance(raw_client_item_ids, tuple):
+            raise _SteamWorkshopResponseError("Configured client Workshop IDs are invalid.")
+        client_item_ids = tuple(self._workshop_id(item_id) for item_id in raw_client_item_ids)
+        # The source predates this source-panel field. Keep existing in-process
+        # adapters readable while the persisted Gmod_Settings contract remains
+        # authoritative in production.
+        raw_auto_update = getattr(settings, "workshop_auto_update", True)
+        if not isinstance(raw_auto_update, bool):
+            raise _SteamWorkshopResponseError("Configured Workshop auto-update is invalid.")
+        return _ConfiguredWorkshopContent(
+            collection_id=collection_id,
+            client_item_ids=client_item_ids,
+            auto_update=raw_auto_update,
+        )
+
+    def _snapshot_is_current(self, configured: _ConfiguredWorkshopContent) -> bool:
+        refreshed_at_seconds = self._last_successful_refresh_at_seconds
+        if refreshed_at_seconds is None or self._last_successful_configuration != configured.cache_key:
+            return False
+        elapsed_seconds = self._monotonic() - refreshed_at_seconds
+        return 0.0 <= elapsed_seconds < _STEAM_WORKSHOP_METADATA_CACHE_TTL_SECONDS
+
+    def _failure_is_current(self, configured: _ConfiguredWorkshopContent) -> bool:
+        failed_at_seconds = self._last_failed_refresh_at_seconds
+        if failed_at_seconds is None or self._last_failed_configuration != configured.cache_key:
+            return False
+        elapsed_seconds = self._monotonic() - failed_at_seconds
+        return 0.0 <= elapsed_seconds < _STEAM_WORKSHOP_FAILURE_CACHE_TTL_SECONDS
+
+    def _record_success(
+        self,
+        *,
+        configured: _ConfiguredWorkshopContent,
+        unavailable_item_ids: frozenset[str],
+    ) -> None:
+        self._last_successful_refresh_at_seconds = self._monotonic()
+        self._last_successful_configuration = configured.cache_key
+        self._last_failed_refresh_at_seconds = None
+        self._last_failed_configuration = None
+        configuration = self._configuration_for(configured)
+        if not unavailable_item_ids:
+            self._status = ModSourceStatus.ready(
+                self.kind,
+                label=self.label,
+                configuration=configuration,
+            )
+            return
+        item_label = "item" if len(unavailable_item_ids) == 1 else "items"
+        self._status = ModSourceStatus.unavailable(
+            self.kind,
+            label=self.label,
+            warning=(
+                f"{self.label} metadata is unavailable for "
+                f"{len(unavailable_item_ids)} configured {item_label}."
+            ),
+            configuration=configuration,
+        )
+
+    def _record_failure(
+        self,
+        *,
+        configured: _ConfiguredWorkshopContent | None,
+        warning: str,
+    ) -> None:
+        if configured is None:
+            self._last_failed_refresh_at_seconds = None
+            self._last_failed_configuration = None
+        else:
+            self._last_failed_refresh_at_seconds = self._monotonic()
+            self._last_failed_configuration = configured.cache_key
+        configuration = (
+            self._status.configuration
+            if configured is None
+            else self._configuration_for(configured)
+        )
+        self._status = ModSourceStatus.unavailable(
+            self.kind,
+            label=self.label,
+            warning=warning,
+            using_cached_entries=bool(self._entries),
+            configuration=configuration,
+        )
+
+    def _configuration_for(
+        self,
+        configured: _ConfiguredWorkshopContent,
+    ) -> ModSourceConfiguration:
+        fields: list[ModSourceConfigurationField] = [
+            ModSourceConfigurationField(
+                key=ModSourceConfigurationKey.COLLECTION_ID,
+                label="Collection",
+                value=configured.collection_id or "Disabled",
+            ),
+        ]
+        if configured.collection_id is not None:
+            collection_title = self._collection_titles_by_id.get(configured.collection_id)
+            if collection_title is not None:
+                fields.append(
+                    ModSourceConfigurationField(
+                        key=ModSourceConfigurationKey.COLLECTION_TITLE,
+                        label="Collection title",
+                        value=collection_title,
+                    )
+                )
+        fields.extend(
+            (
+                ModSourceConfigurationField(
+                    key=ModSourceConfigurationKey.SERVER_MOUNTED_COUNT,
+                    label="Server-mounted items",
+                    value=str(sum(entry.server_loadable for entry in self._entries)),
+                ),
+                ModSourceConfigurationField(
+                    key=ModSourceConfigurationKey.AUTO_UPDATE,
+                    label="Auto-update",
+                    value="Enabled" if configured.auto_update else "Disabled",
+                ),
+                ModSourceConfigurationField(
+                    key=ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT,
+                    label="Explicit client content",
+                    value=str(len(configured.client_item_ids)),
+                ),
+                ModSourceConfigurationField(
+                    key=ModSourceConfigurationKey.CLIENT_CONTENT_IDS,
+                    label="Client content IDs",
+                    value=", ".join(configured.client_item_ids),
+                ),
+            )
+        )
+        return ModSourceConfiguration(
+            source=self.kind,
+            fields=tuple(fields),
+            actions=(
+                ModSourceAction.CHANGE_COLLECTION,
+                ModSourceAction.SET_AUTO_UPDATE,
+                ModSourceAction.MANAGE_CLIENT_CONTENT,
+                ModSourceAction.REFRESH,
+            ),
+        )
+
+    def _placeholder_metadata(self, item_id: str) -> _WorkshopItemMetadata:
+        return _WorkshopItemMetadata(
+            item_id=item_id,
+            title=f"Workshop item {item_id}",
+            description="Steam Workshop metadata is currently unavailable.",
+            added=self._now(),
+            revision=None,
+        )
 
     async def _collection_item_ids(
         self,
@@ -207,7 +411,10 @@ class GmodWorkshopSource:
             None,
         )
         if collection is None or self._result_code(collection) != 1:
-            raise _SteamWorkshopResponseError("Configured collection is unavailable.")
+            raise _SteamWorkshopCollectionUnavailableError("Configured collection is unavailable.")
+        raw_title = collection.get("title")
+        if isinstance(raw_title, str) and (title := raw_title.strip()):
+            self._collection_titles_by_id[collection_id] = title
         children = self._mapping_sequence(collection.get("children", ()), label="collection children")
         item_ids: list[str] = []
         seen_item_ids: set[str] = set()
@@ -305,8 +512,10 @@ class GmodWorkshopSource:
             mod_type=mod_type,
             coremod=False,
             downloadable=False,
-            download_block_reason=ModDownloadBlockReason.OTHER,
-            download_block_label=_STEAM_WORKSHOP_DOWNLOAD_BLOCK_LABEL,
+            # Workshop metadata describes configured remote content.  It does
+            # not expose a local archive, but that is not a policy block.
+            download_block_reason=None,
+            download_block_label=None,
             origin=_STEAM_WORKSHOP_ORIGIN,
             version=metadata.revision,
             added=metadata.added,
@@ -318,7 +527,7 @@ class GmodWorkshopSource:
             description=metadata.description,
             mod_pages=(
                 ModPageLink(
-                    name="Steam Workshop",
+                    name="Workshop",
                     url=(
                         "https://steamcommunity.com/sharedfiles/filedetails/"
                         f"?id={metadata.item_id}"

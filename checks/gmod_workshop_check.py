@@ -22,7 +22,9 @@ from apps._mod_catalog import (
     ModCatalog,
     ModInventoryEntry,
     ModReference,
+    ModSourceConfigurationKey,
     ModSourceKind,
+    ModSourceRefreshError,
     ModSourceRefreshPolicy,
     ModSourceStatus,
 )
@@ -36,6 +38,22 @@ _DETAILS_ENDPOINT = "https://api.steampowered.com/ISteamRemoteStorage/GetPublish
 class _WorkshopSettings:
     workshop_collection_id: str | None
     client_content_workshop_ids: tuple[str, ...]
+    workshop_auto_update: bool = True
+
+
+@dataclass(slots=True)
+class _MutableWorkshopSettings:
+    workshop_collection_id: str | None
+    client_content_workshop_ids: tuple[str, ...]
+    workshop_auto_update: bool = True
+
+
+@dataclass(slots=True)
+class _MonotonicClock:
+    seconds: float = 0.0
+
+    def __call__(self) -> float:
+        return self.seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +252,11 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(shared.friendly, "Shared addon")
         self.assertEqual(shared.origin, "Steam Workshop")
         self.assertEqual(shared.version, "Steam revision 37")
+        self.assertEqual(shared.mod_pages[0].name, "Workshop")
+        self.assertEqual(
+            shared.mod_pages[0].url,
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=200",
+        )
         self.assertTrue(shared.enabled)
         self.assertTrue(shared.server_loadable)
         self.assertTrue(shared.client_required)
@@ -274,8 +297,47 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tuple(entry.reference.source_key for entry in source.list_entries()), ("200",))
         self.assertTrue(source.list_entries()[0].client_required)
-        self.assertEqual(transport.requests[1].data["itemcount"], "1")
+        self.assertEqual(transport.requests[1].data["itemcount"], "2")
         self.assertEqual(transport.requests[1].data["publishedfileids[0]"], "200")
+        self.assertEqual(transport.requests[1].data["publishedfileids[1]"], "100")
+
+    async def test_collection_metadata_populates_source_configuration_without_a_collection_row(self) -> None:
+        def responder(url: str, _data: Mapping[str, str]) -> object:
+            if url == _COLLECTION_ENDPOINT:
+                return _collection_payload("100", ("200",))
+            if url == _DETAILS_ENDPOINT:
+                return _details_payload(
+                    _detail("200", title="Mounted addon"),
+                    _detail("100", title="My server collection"),
+                )
+            raise AssertionError(f"Unexpected Steam endpoint: {url}")
+
+        source = GmodWorkshopSource(
+            settings=lambda: _WorkshopSettings("100", ("200", "300"), workshop_auto_update=False),
+            session_factory=_FakeSessionFactory(_SteamTransport(responder)),
+        )
+
+        await source.refresh()
+
+        configuration = source.status.configuration
+        assert configuration is not None
+        self.assertEqual(
+            configuration.field_value(ModSourceConfigurationKey.COLLECTION_TITLE),
+            "My server collection",
+        )
+        self.assertEqual(
+            configuration.field_value(ModSourceConfigurationKey.SERVER_MOUNTED_COUNT),
+            "1",
+        )
+        self.assertEqual(
+            configuration.field_value(ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT),
+            "2",
+        )
+        self.assertEqual(
+            configuration.field_value(ModSourceConfigurationKey.AUTO_UPDATE),
+            "Disabled",
+        )
+        self.assertNotIn("100", tuple(entry.name for entry in source.list_entries()))
 
     async def test_no_configured_workshop_content_does_not_call_steam(self) -> None:
         transport = _SteamTransport(lambda _url, _data: AssertionError("Steam should not be called"))
@@ -312,7 +374,7 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([request.data["itemcount"] for request in transport.requests], ["100", "1"])
         self.assertEqual(len(source.list_entries()), len(item_ids))
 
-    async def test_private_or_missing_metadata_preserves_local_entries_and_source_identity(self) -> None:
+    async def test_private_metadata_uses_a_placeholder_without_losing_source_identity(self) -> None:
         def responder(url: str, _data: Mapping[str, str]) -> object:
             self.assertEqual(url, _DETAILS_ENDPOINT)
             return _details_payload(
@@ -331,12 +393,16 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         await catalog.refresh()
 
         entries = catalog.list_entries()
-        self.assertEqual(len(entries), 2)
-        self.assertEqual(tuple(entry.name for entry in entries), ("300", "300"))
-        self.assertEqual(tuple(entry.friendly for entry in entries), ("Duplicated title", "Duplicated title"))
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(tuple(entry.name for entry in entries), ("300", "200", "300"))
+        self.assertEqual(
+            tuple(entry.friendly for entry in entries),
+            ("Duplicated title", "Workshop item 200", "Duplicated title"),
+        )
         self.assertNotEqual(entries[0].reference.id, entries[1].reference.id)
         self.assertIs(entries[0].reference.source, ModSourceKind.LOCAL)
         self.assertIs(entries[1].reference.source, ModSourceKind.STEAM_WORKSHOP)
+        self.assertTrue(entries[1].client_required)
         workshop_status = catalog.source_statuses[1]
         self.assertFalse(workshop_status.healthy)
         self.assertFalse(workshop_status.using_cached_entries)
@@ -362,7 +428,7 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(workshop_status.using_cached_entries)
         self.assertIn("Steam Workshop unavailable", workshop_status.warning or "")
 
-    async def test_oversized_malformed_workshop_id_does_not_break_the_local_inventory(self) -> None:
+    async def test_unresolved_workshop_metadata_becomes_a_placeholder(self) -> None:
         def responder(url: str, _data: Mapping[str, str]) -> object:
             self.assertEqual(url, _DETAILS_ENDPOINT)
             return _details_payload(_detail("9" * 5_000, title="Malformed addon"))
@@ -376,7 +442,10 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
 
         await catalog.refresh()
 
-        self.assertEqual(catalog.list_entries(), (local,))
+        entries = catalog.list_entries()
+        self.assertEqual(entries[0], local)
+        self.assertEqual(entries[1].friendly, "Workshop item 200")
+        self.assertTrue(entries[1].client_required)
         workshop_status = catalog.source_statuses[1]
         self.assertFalse(workshop_status.healthy)
         self.assertFalse(workshop_status.using_cached_entries)
@@ -400,6 +469,33 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(workshop_status.using_cached_entries)
         self.assertIn("Steam Workshop unavailable", workshop_status.warning or "")
 
+    async def test_unavailable_collection_has_a_specific_source_warning(self) -> None:
+        def responder(url: str, _data: Mapping[str, str]) -> object:
+            self.assertEqual(url, _COLLECTION_ENDPOINT)
+            return {
+                "response": {
+                    "collectiondetails": [
+                        {
+                            "publishedfileid": "100",
+                            "result": 9,
+                        }
+                    ]
+                }
+            }
+
+        workshop = GmodWorkshopSource(
+            settings=lambda: _WorkshopSettings("100", ()),
+            session_factory=_FakeSessionFactory(_SteamTransport(responder)),
+        )
+        catalog = ModCatalog((workshop,))
+
+        await catalog.refresh()
+
+        self.assertEqual(catalog.list_entries(), ())
+        workshop_status = catalog.source_statuses[0]
+        self.assertFalse(workshop_status.healthy)
+        self.assertEqual(workshop_status.warning, "Steam Workshop collection is unavailable.")
+
     async def test_transient_steam_failure_retains_the_last_good_workshop_snapshot(self) -> None:
         def responder(url: str, _data: Mapping[str, str]) -> object:
             self.assertEqual(url, _DETAILS_ENDPOINT)
@@ -416,6 +512,7 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         await catalog.refresh()
         expected_entries = catalog.list_entries()
         transport.failure = aiohttp.ClientConnectionError("offline")
+        workshop.invalidate()
 
         await catalog.refresh()
 
@@ -424,3 +521,170 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(workshop_status.healthy)
         self.assertTrue(workshop_status.using_cached_entries)
         self.assertEqual(workshop_status.warning, "Steam Workshop unavailable; showing cached data.")
+
+    async def test_successful_workshop_refresh_uses_a_source_ttl(self) -> None:
+        def responder(url: str, _data: Mapping[str, str]) -> object:
+            self.assertEqual(url, _DETAILS_ENDPOINT)
+            return _details_payload(_detail("200", title="Cached addon"))
+
+        clock = _MonotonicClock()
+        transport = _SteamTransport(responder)
+        source = GmodWorkshopSource(
+            settings=lambda: _WorkshopSettings(None, ("200",)),
+            session_factory=_FakeSessionFactory(transport),
+            monotonic=clock,
+        )
+
+        await source.refresh()
+        clock.seconds = 599.0
+        await source.refresh()
+
+        self.assertEqual([request.url for request in transport.requests], [_DETAILS_ENDPOINT])
+        self.assertEqual(source.list_entries()[0].friendly, "Cached addon")
+
+    async def test_explicit_invalidation_bypasses_workshop_ttl(self) -> None:
+        def responder(url: str, _data: Mapping[str, str]) -> object:
+            self.assertEqual(url, _DETAILS_ENDPOINT)
+            return _details_payload(_detail("200", title="Cached addon"))
+
+        clock = _MonotonicClock()
+        transport = _SteamTransport(responder)
+        source = GmodWorkshopSource(
+            settings=lambda: _WorkshopSettings(None, ("200",)),
+            session_factory=_FakeSessionFactory(transport),
+            monotonic=clock,
+        )
+
+        await source.refresh()
+        source.invalidate()
+        await source.refresh()
+
+        self.assertEqual([request.url for request in transport.requests], [_DETAILS_ENDPOINT, _DETAILS_ENDPOINT])
+
+    async def test_failed_workshop_refresh_is_throttled_until_invalidated(self) -> None:
+        clock = _MonotonicClock()
+        transport = _SteamTransport(lambda _url, _data: AssertionError("Steam should be unavailable"))
+        transport.failure = aiohttp.ClientConnectionError("offline")
+        source = GmodWorkshopSource(
+            settings=lambda: _WorkshopSettings(None, ("200",)),
+            session_factory=_FakeSessionFactory(transport),
+            monotonic=clock,
+        )
+
+        with self.assertRaises(ModSourceRefreshError):
+            await source.refresh()
+        clock.seconds = 29.0
+        with self.assertRaises(ModSourceRefreshError):
+            await source.refresh()
+        source.invalidate()
+        with self.assertRaises(ModSourceRefreshError):
+            await source.refresh()
+
+        self.assertEqual([request.url for request in transport.requests], [_DETAILS_ENDPOINT, _DETAILS_ENDPOINT])
+
+    async def test_settings_change_bypasses_the_workshop_ttl(self) -> None:
+        def responder(url: str, data: Mapping[str, str]) -> object:
+            self.assertEqual(url, _DETAILS_ENDPOINT)
+            item_id = data["publishedfileids[0]"]
+            return _details_payload(_detail(item_id, title=f"Addon {item_id}"))
+
+        settings = _MutableWorkshopSettings(None, ("200",))
+        clock = _MonotonicClock()
+        transport = _SteamTransport(responder)
+        source = GmodWorkshopSource(
+            settings=lambda: settings,
+            session_factory=_FakeSessionFactory(transport),
+            monotonic=clock,
+        )
+
+        await source.refresh()
+        settings.client_content_workshop_ids = ("300",)
+        await source.refresh()
+
+        self.assertEqual(
+            [request.data["publishedfileids[0]"] for request in transport.requests],
+            ["200", "300"],
+        )
+        self.assertEqual(tuple(entry.name for entry in source.list_entries()), ("300",))
+
+    async def test_partial_metadata_reuses_previous_item_metadata(self) -> None:
+        responses = [
+            _details_payload(
+                _detail("200", title="Known addon", revision="10"),
+                _detail("300", title="Fresh addon"),
+            ),
+            _details_payload(_detail("300", title="Fresh addon v2")),
+        ]
+
+        def responder(url: str, _data: Mapping[str, str]) -> object:
+            self.assertEqual(url, _DETAILS_ENDPOINT)
+            return responses.pop(0)
+
+        source = GmodWorkshopSource(
+            settings=lambda: _WorkshopSettings(None, ("200", "300")),
+            session_factory=_FakeSessionFactory(_SteamTransport(responder)),
+        )
+
+        await source.refresh()
+        source.invalidate()
+        await source.refresh()
+
+        entries_by_id = {entry.name: entry for entry in source.list_entries()}
+        self.assertEqual(entries_by_id["200"].friendly, "Known addon")
+        self.assertEqual(entries_by_id["200"].version, "Steam revision 10")
+        self.assertEqual(entries_by_id["300"].friendly, "Fresh addon v2")
+        self.assertFalse(source.status.healthy)
+        self.assertIn("metadata is unavailable", source.status.warning or "")
+
+    async def test_manual_refresh_failure_keeps_rows_and_sets_a_source_warning(self) -> None:
+        def responder(url: str, _data: Mapping[str, str]) -> object:
+            self.assertEqual(url, _DETAILS_ENDPOINT)
+            return _details_payload(_detail("200", title="Cached addon"))
+
+        transport = _SteamTransport(responder)
+        workshop = GmodWorkshopSource(
+            settings=lambda: _WorkshopSettings(None, ("200",)),
+            session_factory=_FakeSessionFactory(transport),
+        )
+        catalog = ModCatalog((_StaticLocalSource(()), workshop))
+        await catalog.refresh()
+        expected_entries = catalog.list_entries()
+        transport.failure = aiohttp.ClientConnectionError("offline")
+
+        await catalog.refresh_source(ModSourceKind.STEAM_WORKSHOP, invalidate=True)
+
+        self.assertEqual(catalog.list_entries(), expected_entries)
+        source_status = catalog.source_statuses[1]
+        self.assertFalse(source_status.healthy)
+        self.assertTrue(source_status.using_cached_entries)
+        self.assertIn("showing cached data", source_status.warning or "")
+
+    async def test_failed_configuration_change_does_not_show_previous_workshop_rows(self) -> None:
+        def responder(url: str, _data: Mapping[str, str]) -> object:
+            self.assertEqual(url, _DETAILS_ENDPOINT)
+            return _details_payload(_detail("200", title="Previous addon"))
+
+        settings = _MutableWorkshopSettings(None, ("200",))
+        transport = _SteamTransport(responder)
+        workshop = GmodWorkshopSource(
+            settings=lambda: settings,
+            session_factory=_FakeSessionFactory(transport),
+        )
+        catalog = ModCatalog((workshop,))
+        await catalog.refresh()
+        settings.client_content_workshop_ids = ("300",)
+        catalog.invalidate_source(ModSourceKind.STEAM_WORKSHOP, discard_snapshot=True)
+        transport.failure = aiohttp.ClientConnectionError("offline")
+
+        await catalog.refresh_source(ModSourceKind.STEAM_WORKSHOP, invalidate=True)
+
+        self.assertEqual(catalog.list_entries(), ())
+        source_status = catalog.source_statuses[0]
+        self.assertFalse(source_status.healthy)
+        self.assertFalse(source_status.using_cached_entries)
+        self.assertEqual(source_status.warning, "Steam Workshop unavailable.")
+        assert source_status.configuration is not None
+        self.assertEqual(
+            source_status.configuration.field_value(ModSourceConfigurationKey.CLIENT_CONTENT_IDS),
+            "300",
+        )

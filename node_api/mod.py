@@ -37,7 +37,13 @@ from apps._config import (
     normalise_client_pack_changelog,
 )
 from apps._node_api import optional_string, required_bool, required_int, required_string
-from apps._mod_catalog import ModAction, ModReference, ModSourceKind, ModSourceStatus
+from apps._mod_catalog import (
+    ModAction,
+    ModReference,
+    ModSourceConfiguration,
+    ModSourceKind,
+    ModSourceStatus,
+)
 from apps.minecraft.pack_export import PackFormat, PackPurpose
 from .app_state import NodeAppRuntimeSummary
 
@@ -120,6 +126,7 @@ class NodeModSourceStatus:
     healthy: bool = True
     warning: str | None = None
     using_cached_entries: bool = False
+    configuration: ModSourceConfiguration | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, ModSourceKind):
@@ -132,6 +139,11 @@ class NodeModSourceStatus:
             raise ValueError("Node mod source status warning must be non-empty text when set.")
         if not isinstance(self.using_cached_entries, bool):
             raise TypeError("Node mod source status cached-entry flag must be a bool.")
+        if self.configuration is not None:
+            if not isinstance(self.configuration, ModSourceConfiguration):
+                raise TypeError("Node mod source status configuration must be a ModSourceConfiguration.")
+            if self.configuration.source is not self.source:
+                raise ValueError("Node mod source status configuration belongs to a different source.")
         if self.healthy and self.warning is not None:
             raise ValueError("Healthy node mod sources cannot carry a warning.")
         if self.healthy and self.using_cached_entries:
@@ -147,6 +159,7 @@ class NodeModSourceStatus:
             healthy=status.healthy,
             warning=status.warning,
             using_cached_entries=status.using_cached_entries,
+            configuration=status.configuration,
         )
 
     @classmethod
@@ -156,6 +169,14 @@ class NodeModSourceStatus:
             source = ModSourceKind(raw_source)
         except ValueError as xcp:
             raise ValueError("Node mod source status source is invalid.") from xcp
+        raw_configuration = payload.get("configuration")
+        if raw_configuration is not None and not isinstance(raw_configuration, Mapping):
+            raise ValueError("Node mod source status configuration is invalid.")
+        configuration = (
+            None
+            if raw_configuration is None
+            else ModSourceConfiguration.from_mapping(raw_configuration)
+        )
         return cls(
             source=source,
             label=required_string(payload, "label"),
@@ -166,6 +187,7 @@ class NodeModSourceStatus:
                 if "using_cached_entries" in payload
                 else False
             ),
+            configuration=configuration,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -175,6 +197,7 @@ class NodeModSourceStatus:
             "healthy": self.healthy,
             "warning": self.warning,
             "using_cached_entries": self.using_cached_entries,
+            "configuration": None if self.configuration is None else self.configuration.to_mapping(),
         }
 
 
@@ -260,6 +283,21 @@ class NodeModEntry:
         if action is ModAction.DISABLE:
             return self.server_loadable and self.enabled
         raise ValueError(f"Unsupported mod action: {action!r}")
+
+    @property
+    def download_is_policy_blocked(self) -> bool:
+        """Return whether download is explicitly blocked rather than unavailable.
+
+        Remote inventory sources can intentionally expose no local artifact.
+        Legacy local entries retain their historical non-downloadable treatment
+        even when old payloads omitted a detailed block reason.
+        """
+
+        return not self.downloadable and (
+            self.source is ModSourceKind.LOCAL
+            or self.download_block_reason is not None
+            or self.download_block_label is not None
+        )
 
     @property
     def added_at(self) -> datetime:
@@ -468,6 +506,30 @@ def required_mod_mutation_level(
 
 class NodeModMutationRequest(BaseModel):
     action: NodeModMutationAction
+
+
+class NodeGmodWorkshopCollectionUpdateRequest(BaseModel):
+    """A source-level GMod Workshop collection mutation, not a mod-row action."""
+
+    collection_id: str
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+
+class NodeGmodWorkshopAutoUpdateRequest(BaseModel):
+    """A source-level next-start auto-update mutation."""
+
+    enabled: bool
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class NodeGmodWorkshopClientContentUpdateRequest(BaseModel):
+    """The full explicit resource.AddWorkshop ID set after an edit."""
+
+    item_ids: tuple[str, ...]
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
 
 
 class NodeModPropertiesUpdateRequest(BaseModel):

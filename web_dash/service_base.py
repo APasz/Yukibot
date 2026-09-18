@@ -5,6 +5,9 @@ from typing import TYPE_CHECKING, overload
 from mirror_service import MirrorService
 from node_api.app_installer import NodeAppInstallStatus
 
+from apps._config import KnownModPageProvider, ModPageLink, known_mod_page_provider_for_url
+from apps._mod_catalog import ModSourceKind
+
 from .backend import ModWebDashboardBackend
 from .nicegui_protocols import AsyncRefresh, ModWebFastApiApp, ModWebRouteUi, WebChatRelayPublisher
 from .runtime_imports import (
@@ -170,6 +173,34 @@ class ModWebServiceSupport:
     _console_stdout_broker: SharedAsyncStreamBroker[
         ConsoleStreamKey, NodeConsoleStdoutSnapshot
     ] = cast(SharedAsyncStreamBroker[ConsoleStreamKey, NodeConsoleStdoutSnapshot], cast(object, None))
+
+    @staticmethod
+    def _mod_download_unavailable_label(entry: NodeModEntry) -> str:
+        """Return the concise row label when a mod cannot be downloaded here."""
+
+        if entry.download_is_policy_blocked:
+            return "Blocked"
+        if entry.source is not ModSourceKind.LOCAL:
+            return "Remote"
+        return "Unavailable"
+
+    @staticmethod
+    def _mod_source_page(entry: NodeModEntry) -> ModPageLink | None:
+        """Return the canonical external page for a remote mod entry."""
+
+        if entry.source is ModSourceKind.LOCAL:
+            return None
+        if entry.source is ModSourceKind.STEAM_WORKSHOP:
+            return next(
+                (
+                    page
+                    for page in entry.mod_pages
+                    if known_mod_page_provider_for_url(page.url)
+                    is KnownModPageProvider.STEAM_WORKSHOP
+                ),
+                None,
+            )
+        raise ValueError(f"Unsupported mod source: {entry.source!r}")
 
     @overload
     def __getattr__(
@@ -806,6 +837,44 @@ class ModWebServiceSupport:
     @overload
     def __getattr__(
         self, name: Literal["_remote_mod_list_async"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_mod_source_refresh_async"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_gmod_workshop_collection_update_async"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_gmod_workshop_auto_update_async"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_gmod_workshop_client_content_update_async"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_refresh_mod_source"]) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_update_gmod_workshop_collection"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_update_gmod_workshop_auto_update"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_update_gmod_workshop_client_content"]
     ) -> Callable[..., Awaitable[NodeModList]]: ...
 
     @overload

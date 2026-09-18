@@ -233,8 +233,9 @@ def _normalise_gmod_workshop_item_ids(
     *,
     item_label: str,
     list_label: str,
+    deduplicate: bool = False,
 ) -> tuple[str, ...]:
-    """Validate one ordered Workshop ID list and reject duplicate entries."""
+    """Validate one ordered Workshop ID list, optionally preserving first occurrences."""
 
     if isinstance(raw_values, (str, bytes)):
         raise TypeError(f"Garry's Mod {list_label} must be a list.")
@@ -242,6 +243,8 @@ def _normalise_gmod_workshop_item_ids(
         _normalise_gmod_workshop_item_id(raw_value, label=item_label) for raw_value in raw_values
     )
     if len(set(item_ids)) != len(item_ids):
+        if deduplicate:
+            return tuple(dict.fromkeys(item_ids))
         raise ValueError(f"Garry's Mod {list_label} must not contain duplicates.")
     return item_ids
 
@@ -633,6 +636,7 @@ class Gmod_Settings(App_Settings):
                     (),
                     default="",
                     power_level=Power_Level.sudo,
+                    show_in_settings=False,
                     desc="Public or unlisted Workshop collection to mount on the next start; leave blank to disable.",
                 ),
                 Setting[bool](
@@ -642,6 +646,7 @@ class Gmod_Settings(App_Settings):
                     (),
                     default=GMOD_DEFAULT_WORKSHOP_AUTO_UPDATE,
                     power_level=Power_Level.sudo,
+                    show_in_settings=False,
                     desc="Update the configured Workshop collection when the server next starts.",
                 ),
                 Setting[tuple[str, ...]](
@@ -651,6 +656,7 @@ class Gmod_Settings(App_Settings):
                     (),
                     default=(),
                     power_level=Power_Level.sudo,
+                    show_in_settings=False,
                     desc=(
                         "Comma- or whitespace-separated Workshop item IDs to require clients to download on the "
                         "next server start; do not include Lua-only addons."
@@ -805,7 +811,8 @@ class Gmod(App[App_Config]):
         self._startup_status_phase = _GmodStartupStatusPhase.WAITING_FOR_HOSTNAME
         self._startup_status_ready_event: asyncio.Event | None = None
         super().__init__(bot, am, cfg, Gmod_Settings(gmod_settings_path(cfg.directory)))
-        self.add_mod_source(GmodWorkshopSource(settings=self._require_settings))
+        self._workshop_source = GmodWorkshopSource(settings=self._require_settings)
+        self.add_mod_source(self._workshop_source)
         if cfg.steam_update is not None:
             self.updater = SteamCmd_Update_Manager(self)
             if _gmod_version_needs_manifest_refresh(cfg.version):
@@ -885,6 +892,66 @@ class Gmod(App[App_Config]):
         if settings is None or not isinstance(settings.app, Gmod_Settings):
             raise RuntimeError("Garry's Mod launch settings are unavailable.")
         return settings.app
+
+    @property
+    def workshop_source(self) -> GmodWorkshopSource:
+        """Return the read-only Workshop source owned by this GMod instance."""
+
+        return self._workshop_source
+
+    def update_workshop_collection(self, collection_id: str | None) -> None:
+        """Persist one validated collection ID and invalidate its source snapshot."""
+
+        self._update_workshop_setting(
+            key="workshop_collection_id",
+            value="" if collection_id is None else collection_id,
+            discard_source_snapshot=True,
+        )
+
+    def update_workshop_auto_update(self, enabled: bool) -> None:
+        """Persist the next-start collection auto-update setting."""
+
+        if not isinstance(enabled, bool):
+            raise TypeError("Workshop auto-update enabled state must be a bool.")
+        self._update_workshop_setting(
+            key="workshop_auto_update",
+            value="true" if enabled else "false",
+            discard_source_snapshot=False,
+        )
+
+    def update_client_content_workshop_ids(self, item_ids: Sequence[str]) -> Path:
+        """Persist explicit resource.AddWorkshop IDs and synchronise their manifest."""
+
+        deduplicated_item_ids = _normalise_gmod_workshop_item_ids(
+            item_ids,
+            item_label=_GMOD_CLIENT_CONTENT_WORKSHOP_ITEM_LABEL,
+            list_label=_GMOD_CLIENT_CONTENT_WORKSHOP_LIST_LABEL,
+            deduplicate=True,
+        )
+        self._update_workshop_setting(
+            key="client_content_workshop_ids",
+            value=", ".join(deduplicated_item_ids),
+            discard_source_snapshot=True,
+        )
+        return self._sync_workshop_manifest()
+
+    def _update_workshop_setting(
+        self,
+        *,
+        key: str,
+        value: str,
+        discard_source_snapshot: bool,
+    ) -> None:
+        settings = self._require_settings()
+        setting = settings.get_setting(key)
+        if setting is None:
+            raise RuntimeError(f"Garry's Mod Workshop setting {key!r} is unavailable.")
+        setting.update(value)
+        settings.save()
+        self.has_mod_catalog.invalidate_source(
+            self._workshop_source.kind,
+            discard_snapshot=discard_source_snapshot,
+        )
 
     def _launch_command(self, token: str) -> list[str]:
         settings = self._require_settings()
