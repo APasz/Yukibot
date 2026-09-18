@@ -18,10 +18,6 @@ from apps._config import ClientPackConfig, ModPageLink, ModPlacement, ModType
 from apps._mod_catalog import (
     ModInventoryEntry,
     ModReference,
-    ModSourceAction,
-    ModSourceConfiguration,
-    ModSourceConfigurationField,
-    ModSourceConfigurationKey,
     ModSourceKind,
     ModSourceRefreshError,
     ModSourceRefreshPolicy,
@@ -107,6 +103,48 @@ class _ConfiguredWorkshopContent:
         return (self.collection_id, self.client_item_ids, self.auto_update)
 
 
+@dataclass(frozen=True, slots=True)
+class GmodWorkshopSourceState:
+    """Typed GMod Workshop state exposed alongside generic source health."""
+
+    collection_id: str | None
+    collection_title: str | None
+    auto_update: bool
+    server_mounted_count: int
+    client_content_ids: tuple[str, ...]
+    client_required_count: int
+
+    def __post_init__(self) -> None:
+        if self.collection_id is not None and (not isinstance(self.collection_id, str) or not self.collection_id):
+            raise ValueError("GMod Workshop collection ID must be non-empty text when set.")
+        if self.collection_title is not None and (
+            not isinstance(self.collection_title, str) or not self.collection_title
+        ):
+            raise ValueError("GMod Workshop collection title must be non-empty text when set.")
+        if self.collection_id is None and self.collection_title is not None:
+            raise ValueError("GMod Workshop collection title requires a collection ID.")
+        if not isinstance(self.auto_update, bool):
+            raise TypeError("GMod Workshop auto-update state must be a bool.")
+        for value, label in (
+            (self.server_mounted_count, "server-mounted count"),
+            (self.client_required_count, "client-required count"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"GMod Workshop {label} must be an integer.")
+            if value < 0:
+                raise ValueError(f"GMod Workshop {label} cannot be negative.")
+        if not isinstance(self.client_content_ids, tuple):
+            raise TypeError("GMod Workshop client content IDs must be a tuple.")
+        if any(not isinstance(item_id, str) or not item_id for item_id in self.client_content_ids):
+            raise ValueError("GMod Workshop client content IDs must be non-empty text.")
+        if len(set(self.client_content_ids)) != len(self.client_content_ids):
+            raise ValueError("GMod Workshop client content IDs must be unique.")
+        if self.collection_id is not None and self.collection_id in self.client_content_ids:
+            raise ValueError("GMod Workshop client content cannot include its configured collection ID.")
+        if self.client_required_count != len(self.client_content_ids):
+            raise ValueError("GMod Workshop client-required count must match explicit client content IDs.")
+
+
 class GmodWorkshopSource:
     """Resolve configured GMod Workshop content through public Steam endpoints."""
 
@@ -133,15 +171,17 @@ class GmodWorkshopSource:
         self._last_successful_configuration: tuple[str | None, tuple[str, ...], bool] | None = None
         self._last_failed_refresh_at_seconds: float | None = None
         self._last_failed_configuration: tuple[str | None, tuple[str, ...], bool] | None = None
-        self._status = ModSourceStatus.ready(
-            self.kind,
-            label=self.label,
-            configuration=self._configuration_for(self._configured_content(self._settings())),
-        )
+        self._status = ModSourceStatus.ready(self.kind, label=self.label)
 
     @property
     def status(self) -> ModSourceStatus:
         return self._status
+
+    @property
+    def source_state(self) -> GmodWorkshopSourceState:
+        """Return the current typed GMod-specific state without display formatting."""
+
+        return self._source_state_for(self._configured_content(self._settings()))
 
     def invalidate(self) -> None:
         """Force the next refresh to bypass this source's metadata TTL."""
@@ -241,6 +281,11 @@ class GmodWorkshopSource:
         if not isinstance(raw_client_item_ids, tuple):
             raise _SteamWorkshopResponseError("Configured client Workshop IDs are invalid.")
         client_item_ids = tuple(self._workshop_id(item_id) for item_id in raw_client_item_ids)
+        if collection_id is not None:
+            # Older persisted settings may have duplicated the collection in
+            # resource.AddWorkshop content. Treat it as collection-only while
+            # exposing a valid state and never re-emitting it in a manifest.
+            client_item_ids = tuple(item_id for item_id in client_item_ids if item_id != collection_id)
         # The source predates this source-panel field. Keep existing in-process
         # adapters readable while the persisted Gmod_Settings contract remains
         # authoritative in production.
@@ -277,13 +322,8 @@ class GmodWorkshopSource:
         self._last_successful_configuration = configured.cache_key
         self._last_failed_refresh_at_seconds = None
         self._last_failed_configuration = None
-        configuration = self._configuration_for(configured)
         if not unavailable_item_ids:
-            self._status = ModSourceStatus.ready(
-                self.kind,
-                label=self.label,
-                configuration=configuration,
-            )
+            self._status = ModSourceStatus.ready(self.kind, label=self.label)
             return
         item_label = "item" if len(unavailable_item_ids) == 1 else "items"
         self._status = ModSourceStatus.unavailable(
@@ -293,7 +333,6 @@ class GmodWorkshopSource:
                 f"{self.label} metadata is unavailable for "
                 f"{len(unavailable_item_ids)} configured {item_label}."
             ),
-            configuration=configuration,
         )
 
     def _record_failure(
@@ -308,73 +347,28 @@ class GmodWorkshopSource:
         else:
             self._last_failed_refresh_at_seconds = self._monotonic()
             self._last_failed_configuration = configured.cache_key
-        configuration = (
-            self._status.configuration
-            if configured is None
-            else self._configuration_for(configured)
-        )
         self._status = ModSourceStatus.unavailable(
             self.kind,
             label=self.label,
             warning=warning,
             using_cached_entries=bool(self._entries),
-            configuration=configuration,
         )
 
-    def _configuration_for(
+    def _source_state_for(
         self,
         configured: _ConfiguredWorkshopContent,
-    ) -> ModSourceConfiguration:
-        fields: list[ModSourceConfigurationField] = [
-            ModSourceConfigurationField(
-                key=ModSourceConfigurationKey.COLLECTION_ID,
-                label="Collection",
-                value=configured.collection_id or "Disabled",
+    ) -> GmodWorkshopSourceState:
+        return GmodWorkshopSourceState(
+            collection_id=configured.collection_id,
+            collection_title=(
+                None
+                if configured.collection_id is None
+                else self._collection_titles_by_id.get(configured.collection_id)
             ),
-        ]
-        if configured.collection_id is not None:
-            collection_title = self._collection_titles_by_id.get(configured.collection_id)
-            if collection_title is not None:
-                fields.append(
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.COLLECTION_TITLE,
-                        label="Collection title",
-                        value=collection_title,
-                    )
-                )
-        fields.extend(
-            (
-                ModSourceConfigurationField(
-                    key=ModSourceConfigurationKey.SERVER_MOUNTED_COUNT,
-                    label="Server-mounted items",
-                    value=str(sum(entry.server_loadable for entry in self._entries)),
-                ),
-                ModSourceConfigurationField(
-                    key=ModSourceConfigurationKey.AUTO_UPDATE,
-                    label="Auto-update",
-                    value="Enabled" if configured.auto_update else "Disabled",
-                ),
-                ModSourceConfigurationField(
-                    key=ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT,
-                    label="Explicit client content",
-                    value=str(len(configured.client_item_ids)),
-                ),
-                ModSourceConfigurationField(
-                    key=ModSourceConfigurationKey.CLIENT_CONTENT_IDS,
-                    label="Client content IDs",
-                    value=", ".join(configured.client_item_ids),
-                ),
-            )
-        )
-        return ModSourceConfiguration(
-            source=self.kind,
-            fields=tuple(fields),
-            actions=(
-                ModSourceAction.CHANGE_COLLECTION,
-                ModSourceAction.SET_AUTO_UPDATE,
-                ModSourceAction.MANAGE_CLIENT_CONTENT,
-                ModSourceAction.REFRESH,
-            ),
+            auto_update=configured.auto_update,
+            server_mounted_count=sum(entry.server_loadable for entry in self._entries),
+            client_content_ids=configured.client_item_ids,
+            client_required_count=len(configured.client_item_ids),
         )
 
     def _placeholder_metadata(self, item_id: str) -> _WorkshopItemMetadata:

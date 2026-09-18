@@ -22,7 +22,6 @@ from apps._mod_catalog import (
     ModCatalog,
     ModInventoryEntry,
     ModReference,
-    ModSourceConfigurationKey,
     ModSourceKind,
     ModSourceRefreshError,
     ModSourceRefreshPolicy,
@@ -301,7 +300,7 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.requests[1].data["publishedfileids[0]"], "200")
         self.assertEqual(transport.requests[1].data["publishedfileids[1]"], "100")
 
-    async def test_collection_metadata_populates_source_configuration_without_a_collection_row(self) -> None:
+    async def test_collection_metadata_populates_typed_source_state_without_a_collection_row(self) -> None:
         def responder(url: str, _data: Mapping[str, str]) -> object:
             if url == _COLLECTION_ENDPOINT:
                 return _collection_payload("100", ("200",))
@@ -319,24 +318,13 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
 
         await source.refresh()
 
-        configuration = source.status.configuration
-        assert configuration is not None
-        self.assertEqual(
-            configuration.field_value(ModSourceConfigurationKey.COLLECTION_TITLE),
-            "My server collection",
-        )
-        self.assertEqual(
-            configuration.field_value(ModSourceConfigurationKey.SERVER_MOUNTED_COUNT),
-            "1",
-        )
-        self.assertEqual(
-            configuration.field_value(ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT),
-            "2",
-        )
-        self.assertEqual(
-            configuration.field_value(ModSourceConfigurationKey.AUTO_UPDATE),
-            "Disabled",
-        )
+        state = source.source_state
+        self.assertEqual(state.collection_id, "100")
+        self.assertEqual(state.collection_title, "My server collection")
+        self.assertEqual(state.server_mounted_count, 1)
+        self.assertEqual(state.client_content_ids, ("200", "300"))
+        self.assertEqual(state.client_required_count, 2)
+        self.assertFalse(state.auto_update)
         self.assertNotIn("100", tuple(entry.name for entry in source.list_entries()))
 
     async def test_no_configured_workshop_content_does_not_call_steam(self) -> None:
@@ -683,8 +671,4 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(source_status.healthy)
         self.assertFalse(source_status.using_cached_entries)
         self.assertEqual(source_status.warning, "Steam Workshop unavailable.")
-        assert source_status.configuration is not None
-        self.assertEqual(
-            source_status.configuration.field_value(ModSourceConfigurationKey.CLIENT_CONTENT_IDS),
-            "300",
-        )
+        self.assertEqual(workshop.source_state.client_content_ids, ("300",))

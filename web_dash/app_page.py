@@ -9,9 +9,6 @@ from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypedDict
 
 from apps._mod_catalog import (
     ModAction,
-    ModSourceAction,
-    ModSourceConfiguration,
-    ModSourceConfigurationKey,
     ModSourceKind,
 )
 from apps._config import (
@@ -6611,7 +6608,7 @@ class ModWebAppPageMixin(
                 for source_status in model.mods.source_statuses:
                     if (
                         source_status.source is ModSourceKind.STEAM_WORKSHOP
-                        and source_status.configuration is not None
+                        and source_status.gmod_workshop_state is not None
                     ):
                         self._render_gmod_workshop_source_panel(
                             ui=ui,
@@ -6625,7 +6622,7 @@ class ModWebAppPageMixin(
                         or source_status.warning is None
                         or (
                             source_status.source is ModSourceKind.STEAM_WORKSHOP
-                            and source_status.configuration is not None
+                            and source_status.gmod_workshop_state is not None
                         )
                     ):
                         continue
@@ -7052,48 +7049,31 @@ class ModWebAppPageMixin(
     ) -> None:
         """Render GMod's source-owned Workshop controls above its mod rows."""
 
-        configuration: ModSourceConfiguration | None = source_status.configuration
-        if configuration is None or configuration.source is not ModSourceKind.STEAM_WORKSHOP:
+        workshop_state = source_status.gmod_workshop_state
+        if source_status.source is not ModSourceKind.STEAM_WORKSHOP or workshop_state is None:
             return
-        field_values: dict[ModSourceConfigurationKey, str] = {
-            field.key: field.value for field in configuration.fields
-        }
-        collection_id = field_values.get(ModSourceConfigurationKey.COLLECTION_ID, "Disabled")
-        collection_title = field_values.get(ModSourceConfigurationKey.COLLECTION_TITLE)
-        collection_is_configured = collection_id != "Disabled"
+        collection_id = workshop_state.collection_id
+        collection_title = workshop_state.collection_title
+        collection_is_configured = collection_id is not None
         collection_label = (
-            f"Collection: {collection_id}"
-            if collection_title is None
-            else f"Collection: {collection_title} ({collection_id})"
+            "Collection: Disabled"
+            if collection_id is None
+            else (
+                f"Collection: {collection_id}"
+                if collection_title is None
+                else f"Collection: {collection_title} ({collection_id})"
+            )
         )
-        server_mounted_count = field_values.get(ModSourceConfigurationKey.SERVER_MOUNTED_COUNT, "0")
-        auto_update_enabled = field_values.get(ModSourceConfigurationKey.AUTO_UPDATE) == "Enabled"
-        client_content_ids = tuple(
-            item_id.strip()
-            for item_id in field_values.get(ModSourceConfigurationKey.CLIENT_CONTENT_IDS, "").split(",")
-            if item_id.strip()
-        )
-        client_required_count = field_values.get(
-            ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT,
-            str(len(client_content_ids)),
-        )
-        available_actions = frozenset(configuration.actions)
+        server_mounted_count = workshop_state.server_mounted_count
+        auto_update_enabled = workshop_state.auto_update
+        client_content_ids = workshop_state.client_content_ids
+        client_required_count = workshop_state.client_required_count
         can_manage = self._user_has_level(user, Power_Level.sudo)
         workshop_entries_by_id = {
             entry.source_key: entry
             for entry in model.mods.mods
             if entry.source is ModSourceKind.STEAM_WORKSHOP and entry.source_key is not None
         }
-        has_source_controls = (
-            collection_is_configured and ModSourceAction.SET_AUTO_UPDATE in available_actions
-        ) or any(
-            action in available_actions
-            for action in (
-                ModSourceAction.CHANGE_COLLECTION,
-                ModSourceAction.MANAGE_CLIENT_CONTENT,
-                ModSourceAction.REFRESH,
-            )
-        )
 
         async def apply_refresh() -> None:
             try:
@@ -7154,16 +7134,16 @@ class ModWebAppPageMixin(
                     else:
                         ui.label(collection_label).classes("mod-subtitle text-sm")
                     if source_status.healthy:
-                        if server_mounted_count != "0":
+                        if server_mounted_count:
                             ui.label(f"{server_mounted_count} mounted").classes("mod-pill")
-                        if client_required_count != "0":
+                        if client_required_count:
                             ui.label(f"{client_required_count} client entries").classes("mod-pill")
-                        if server_mounted_count == "0" and client_required_count == "0":
+                        if not server_mounted_count and not client_required_count:
                             ui.label("No Workshop content configured.").classes("mod-subtitle text-sm")
 
-                if has_source_controls:
+                if source_status.gmod_workshop_state is not None:
                     with ui.row().classes("items-center gap-2 flex-wrap"):
-                        if collection_is_configured and ModSourceAction.SET_AUTO_UPDATE in available_actions:
+                        if collection_is_configured:
 
                             async def update_auto_update(event: object) -> None:
                                 enabled = _value_as_object(event)
@@ -7189,116 +7169,113 @@ class ModWebAppPageMixin(
                             if not can_manage:
                                 auto_update_control.disable()
 
-                        if ModSourceAction.CHANGE_COLLECTION in available_actions:
-                            with ui.dialog() as collection_dialog:
-                                with ui.card().classes("mod-card mod-dialog-card"):
-                                    with ui.column().classes("w-full gap-4 p-5"):
-                                        ui.label("Edit Workshop Collection").classes(
-                                            "text-xl font-black mod-title-small"
+                        with ui.dialog() as collection_dialog:
+                            with ui.card().classes("mod-card mod-dialog-card"):
+                                with ui.column().classes("w-full gap-4 p-5"):
+                                    ui.label("Edit Workshop Collection").classes(
+                                        "text-xl font-black mod-title-small"
+                                    )
+                                    ui.label("Leave blank to disable the collection.").classes(
+                                        "mod-subtitle text-sm"
+                                    )
+                                    collection_input = ui.input(
+                                        "Collection ID",
+                                        value="" if collection_id is None else collection_id,
+                                    ).classes("w-full")
+
+                                    async def submit_collection() -> None:
+                                        await save_collection(_value_as_text(collection_input))
+
+                                    with ui.row().classes("w-full justify-end gap-2"):
+                                        ui.button("Cancel", on_click=collection_dialog.close).classes(
+                                            "mod-list-button secondary"
                                         )
-                                        ui.label("Leave blank to disable the collection.").classes(
-                                            "mod-subtitle text-sm"
-                                        )
-                                        collection_input = ui.input(
-                                            "Collection ID",
-                                            value="" if collection_id == "Disabled" else collection_id,
-                                        ).classes("w-full")
+                                        collection_save_button = ui.button(
+                                            "Save collection",
+                                            on_click=submit_collection,
+                                        ).classes("mod-list-button")
+                                        if not can_manage:
+                                            collection_save_button.disable()
+                        collection_button = ui.button(
+                            "Edit collection" if collection_is_configured else "Set collection",
+                            on_click=collection_dialog.open,
+                        ).classes("mod-list-button secondary")
+                        if not can_manage:
+                            collection_button.disable()
 
-                                        async def submit_collection() -> None:
-                                            await save_collection(_value_as_text(collection_input))
+                        with ui.dialog() as client_content_dialog:
+                            with ui.card().classes("mod-card mod-dialog-card"):
+                                with ui.column().classes("w-full gap-4 p-5"):
+                                    ui.label("Workshop Client Content").classes(
+                                        "text-xl font-black mod-title-small"
+                                    )
+                                    ui.label(
+                                        "Explicit client content; does not alter the collection."
+                                    ).classes("mod-subtitle text-sm")
+                                    if client_content_ids:
+                                        for item_id in client_content_ids:
+                                            entry = workshop_entries_by_id.get(item_id)
+                                            title = item_id if entry is None else entry.friendly
+                                            with ui.row().classes("w-full items-center justify-between gap-2"):
+                                                ui.label(f"{title} ({item_id})").classes("mod-subtitle text-sm")
 
-                                        with ui.row().classes("w-full justify-end gap-2"):
-                                            ui.button("Cancel", on_click=collection_dialog.close).classes(
-                                                "mod-list-button secondary"
-                                            )
-                                            collection_save_button = ui.button(
-                                                "Save collection",
-                                                on_click=submit_collection,
-                                            ).classes("mod-list-button")
-                                            if not can_manage:
-                                                collection_save_button.disable()
-                            collection_button = ui.button(
-                                "Edit collection" if collection_is_configured else "Set collection",
-                                on_click=collection_dialog.open,
-                            ).classes("mod-list-button secondary")
-                            if not can_manage:
-                                collection_button.disable()
-
-                        if ModSourceAction.MANAGE_CLIENT_CONTENT in available_actions:
-                            with ui.dialog() as client_content_dialog:
-                                with ui.card().classes("mod-card mod-dialog-card"):
-                                    with ui.column().classes("w-full gap-4 p-5"):
-                                        ui.label("Workshop Client Content").classes(
-                                            "text-xl font-black mod-title-small"
-                                        )
-                                        ui.label(
-                                            "Explicit client content; does not alter the collection."
-                                        ).classes("mod-subtitle text-sm")
-                                        if client_content_ids:
-                                            for item_id in client_content_ids:
-                                                entry = workshop_entries_by_id.get(item_id)
-                                                title = item_id if entry is None else entry.friendly
-                                                with ui.row().classes("w-full items-center justify-between gap-2"):
-                                                    ui.label(f"{title} ({item_id})").classes("mod-subtitle text-sm")
-
-                                                    async def remove_client_content(
-                                                        item_id_to_remove: str = item_id,
-                                                    ) -> None:
-                                                        await save_client_content(
-                                                            tuple(
-                                                                configured_item_id
-                                                                for configured_item_id in client_content_ids
-                                                                if configured_item_id != item_id_to_remove
-                                                            )
+                                                async def remove_client_content(
+                                                    item_id_to_remove: str = item_id,
+                                                ) -> None:
+                                                    await save_client_content(
+                                                        tuple(
+                                                            configured_item_id
+                                                            for configured_item_id in client_content_ids
+                                                            if configured_item_id != item_id_to_remove
                                                         )
+                                                    )
 
-                                                    remove_button = ui.button(
-                                                        "Remove",
-                                                        on_click=remove_client_content,
-                                                    ).classes("mod-list-button danger")
-                                                    if not can_manage:
-                                                        remove_button.disable()
-                                        add_input = ui.input(
-                                            "Workshop IDs",
-                                            placeholder="Separate multiple IDs with spaces or commas",
-                                        ).classes("w-full")
+                                                remove_button = ui.button(
+                                                    "Remove",
+                                                    on_click=remove_client_content,
+                                                ).classes("mod-list-button danger")
+                                                if not can_manage:
+                                                    remove_button.disable()
+                                    add_input = ui.input(
+                                        "Workshop IDs",
+                                        placeholder="Separate multiple IDs with spaces or commas",
+                                    ).classes("w-full")
 
-                                        async def add_client_content() -> None:
-                                            submitted_ids = tuple(
-                                                item_id
-                                                for item_id in _value_as_text(add_input).replace(",", " ").split()
-                                                if item_id
-                                            )
-                                            if not submitted_ids:
-                                                ui.notify("Enter at least one Workshop ID.", type="warning")
-                                                return
-                                            deduplicated_ids = tuple(dict.fromkeys((*client_content_ids, *submitted_ids)))
-                                            await save_client_content(deduplicated_ids)
+                                    async def add_client_content() -> None:
+                                        submitted_ids = tuple(
+                                            item_id
+                                            for item_id in _value_as_text(add_input).replace(",", " ").split()
+                                            if item_id
+                                        )
+                                        if not submitted_ids:
+                                            ui.notify("Enter at least one Workshop ID.", type="warning")
+                                            return
+                                        deduplicated_ids = tuple(dict.fromkeys((*client_content_ids, *submitted_ids)))
+                                        await save_client_content(deduplicated_ids)
 
-                                        with ui.row().classes("w-full justify-end gap-2"):
-                                            ui.button("Close", on_click=client_content_dialog.close).classes(
-                                                "mod-list-button secondary"
-                                            )
-                                            add_button = ui.button(
-                                                "Add",
-                                                on_click=add_client_content,
-                                            ).classes("mod-list-button")
-                                            if not can_manage:
-                                                add_button.disable()
-                            client_content_button = ui.button(
-                                "Client content",
-                                on_click=client_content_dialog.open,
-                            ).classes("mod-list-button secondary")
-                            if not can_manage:
-                                client_content_button.disable()
+                                    with ui.row().classes("w-full justify-end gap-2"):
+                                        ui.button("Close", on_click=client_content_dialog.close).classes(
+                                            "mod-list-button secondary"
+                                        )
+                                        add_button = ui.button(
+                                            "Add",
+                                            on_click=add_client_content,
+                                        ).classes("mod-list-button")
+                                        if not can_manage:
+                                            add_button.disable()
+                        client_content_button = ui.button(
+                            "Client content",
+                            on_click=client_content_dialog.open,
+                        ).classes("mod-list-button secondary")
+                        if not can_manage:
+                            client_content_button.disable()
 
-                        if ModSourceAction.REFRESH in available_actions:
-                            refresh_button = ui.button("Refresh", on_click=apply_refresh).classes("mod-list-button")
-                            if not can_manage:
-                                refresh_button.disable()
+                        refresh_button = ui.button("Refresh", on_click=apply_refresh).classes("mod-list-button")
+                        if not can_manage:
+                            refresh_button.disable()
                 if source_status.warning is not None:
                     ui.label(source_status.warning).classes("w-full mod-subtitle text-sm")
-                if not can_manage and has_source_controls:
+                if not can_manage:
                     ui.label("Sudo access is required to manage Workshop content.").classes(
                         "w-full mod-subtitle text-sm"
                     )

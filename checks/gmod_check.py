@@ -319,6 +319,15 @@ class GmodSettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Workshop ID"):
                 render_gmod_workshop_manifest(('123456789"); RunString("bad")',))
 
+    def test_workshop_manifest_excludes_its_configured_collection_id(self) -> None:
+        manifest = render_gmod_workshop_manifest(
+            ("100", "200"),
+            collection_id="100",
+        )
+
+        self.assertNotIn('resource.AddWorkshop("100")', manifest)
+        self.assertIn('resource.AddWorkshop("200")', manifest)
+
 
 class GmodReadinessTests(unittest.TestCase):
     def test_console_status_probe_requires_a_complete_dedicated_server_status(self) -> None:
@@ -594,6 +603,54 @@ class GmodIntegrationTests(unittest.TestCase):
         self.assertNotIn('resource.AddWorkshop("234567890")', updated_manifest)
         self.assertIn('resource.AddWorkshop("345678901")', updated_manifest)
         self.assertEqual(invalidate.call_count, 3)
+
+    def test_client_content_rejects_the_configured_collection_id_before_persisting(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            app.update_workshop_collection("100")
+
+            with self.assertRaisesRegex(ValueError, "configured Workshop collection ID"):
+                app.update_client_content_workshop_ids(("100", "200"))
+
+            persisted = cast(
+                dict[str, object],
+                json.loads(gmod_settings_path(directory).read_text(encoding="utf-8")),
+            )
+
+        self.assertEqual(persisted["client_content_workshop_ids"], [])
+
+    def test_client_content_allows_a_collection_member_id(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            app.update_workshop_collection("100")
+            manifest_path = app.update_client_content_workshop_ids(("200",))
+            manifest = manifest_path.read_text(encoding="utf-8")
+
+        self.assertIn('resource.AddWorkshop("200")', manifest)
+
+    def test_client_content_manifest_failure_restores_persisted_settings_and_manifest(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            app = self._app(directory)
+            manifest_path = app.update_client_content_workshop_ids(("200",))
+            previous_manifest = manifest_path.read_text(encoding="utf-8")
+
+            with (
+                patch.object(app, "_sync_workshop_manifest", side_effect=OSError("manifest is read-only")),
+                self.assertRaisesRegex(OSError, "manifest is read-only"),
+            ):
+                app.update_client_content_workshop_ids(("300",))
+
+            persisted = cast(
+                dict[str, object],
+                json.loads(gmod_settings_path(directory).read_text(encoding="utf-8")),
+            )
+            restored_manifest = manifest_path.read_text(encoding="utf-8")
+
+        self.assertEqual(persisted["client_content_workshop_ids"], ["200"])
+        self.assertEqual(restored_manifest, previous_manifest)
 
     def test_expired_gslt_exit_has_a_safe_actionable_diagnosis(self) -> None:
         with TemporaryDirectory() as temporary_directory:

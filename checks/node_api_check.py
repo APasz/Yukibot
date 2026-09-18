@@ -83,10 +83,6 @@ from apps._mod_catalog import (
     ModAction,
     ModCatalog,
     ModReference,
-    ModSourceAction,
-    ModSourceConfiguration,
-    ModSourceConfigurationField,
-    ModSourceConfigurationKey,
     ModSourceKind,
 )
 from apps._node_api import NodeModUploadSource
@@ -248,6 +244,7 @@ from node_api.mod import (
     NodeClientPackModConfigUpdate,
     NodeClientPackPublishRequest,
     NodeDownloadRequest,
+    NodeGmodWorkshopSourceState,
     NodeGmodWorkshopClientContentUpdateRequest,
     NodeModEntry,
     NodeModList,
@@ -5636,16 +5633,13 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(restored.artifact_available)
 
     def test_mod_list_keeps_duplicate_local_and_workshop_names_distinct(self) -> None:
-        workshop_configuration = ModSourceConfiguration(
-            source=ModSourceKind.STEAM_WORKSHOP,
-            fields=(
-                ModSourceConfigurationField(
-                    key=ModSourceConfigurationKey.COLLECTION_ID,
-                    label="Collection",
-                    value="100",
-                ),
-            ),
-            actions=(ModSourceAction.REFRESH,),
+        workshop_state = NodeGmodWorkshopSourceState(
+            collection_id="100",
+            collection_title="Example collection",
+            auto_update=False,
+            server_mounted_count=1,
+            client_content_ids=("200",),
+            client_required_count=1,
         )
         local = NodeModEntry(
             name="shared-addon",
@@ -5704,7 +5698,7 @@ class NodeApiTests(unittest.TestCase):
                     healthy=False,
                     warning="Steam Workshop unavailable; showing cached data.",
                     using_cached_entries=True,
-                    configuration=workshop_configuration,
+                    gmod_workshop_state=workshop_state,
                 ),
             ),
         )
@@ -5719,7 +5713,27 @@ class NodeApiTests(unittest.TestCase):
         self.assertFalse(restored.mods[1].artifact_available)
         self.assertFalse(restored.mods[1].supports_action(ModAction.DELETE))
         self.assertTrue(restored.source_statuses[1].using_cached_entries)
-        self.assertEqual(restored.source_statuses[1].configuration, workshop_configuration)
+        self.assertEqual(restored.source_statuses[1].gmod_workshop_state, workshop_state)
+
+    def test_gmod_workshop_source_state_api_round_trip(self) -> None:
+        state = NodeGmodWorkshopSourceState(
+            collection_id="100",
+            collection_title="Example collection",
+            auto_update=False,
+            server_mounted_count=3,
+            client_content_ids=("200", "300"),
+            client_required_count=2,
+        )
+        status = NodeModSourceStatus(
+            source=ModSourceKind.STEAM_WORKSHOP,
+            label="Steam Workshop",
+            gmod_workshop_state=state,
+        )
+
+        restored = NodeModSourceStatus.from_mapping(status.to_mapping())
+
+        self.assertEqual(restored, status)
+        self.assertEqual(restored.gmod_workshop_state, state)
 
     def test_app_can_register_a_catalog_source_without_a_local_mod_manager(self) -> None:
         app = object.__new__(_DummyApp)
@@ -8564,6 +8578,44 @@ class NodeApiTests(unittest.TestCase):
         invalidate_inventory.assert_called_once_with("gmod_alpha")
         self.assertEqual(observed_invalidation_counts, [1])
         refresh_source.assert_not_awaited()
+
+    def test_successful_gmod_workshop_client_content_mutation_refreshes_only_workshop_source(self) -> None:
+        app = _build_app(Mock())
+        app.name = "gmod_alpha"
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        invalidate_inventory = Mock()
+        service = NodeModService(
+            node_name=lambda: "yuki",
+            require_acl=lambda: cast(Any, acl),
+            build_runtime_summary=AsyncMock(),
+            invalidate_client_pack_content=Mock(),
+            invalidate_mod_inventory=invalidate_inventory,
+            upload_mod_paths=AsyncMock(),
+            operations=cast(Any, Mock()),
+        )
+        gmod = Mock()
+        refreshed = Mock()
+        refresh_source = AsyncMock(return_value=refreshed)
+        request = NodeGmodWorkshopClientContentUpdateRequest(item_ids=("200",))
+
+        with (
+            patch.object(NodeModService, "_require_gmod_workshop_app", return_value=gmod),
+            patch.object(service, "_refresh_source_inventory", new=refresh_source),
+        ):
+            result = asyncio.run(
+                service.update_gmod_workshop_client_content(
+                    app=app,
+                    update=request,
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertIs(result, refreshed)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        gmod.update_client_content_workshop_ids.assert_called_once_with(("200",))
+        invalidate_inventory.assert_called_once_with("gmod_alpha")
+        refresh_source.assert_awaited_once_with(app=app, source=ModSourceKind.STEAM_WORKSHOP)
 
     def test_unknown_mod_source_refresh_does_not_invalidate_inventory(self) -> None:
         app = _build_app(Mock())

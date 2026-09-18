@@ -400,7 +400,7 @@ class NodeModService:
                 await catalog.refresh_source(source, invalidate=True)
             except LookupError as xcp:
                 raise _http_exception(404, str(xcp)) from xcp
-            inventory = self._inventory_from_catalog(catalog)
+            inventory = self._inventory_from_catalog(app=app, catalog=catalog)
             self._inventory_cache[app_key] = inventory
         app_stats = await self._build_runtime_summary(app)
         return self._mod_list_from_inventory(app=app, inventory=inventory, app_stats=app_stats)
@@ -437,14 +437,24 @@ class NodeModService:
                 return cached
             catalog = app.has_mod_catalog
             await catalog.refresh()
-            inventory = self._inventory_from_catalog(catalog)
+            inventory = self._inventory_from_catalog(app=app, catalog=catalog)
             self._inventory_cache[app_key] = inventory
             return inventory
 
-    def _inventory_from_catalog(self, catalog: ModCatalog) -> mod_contracts.TimedModInventory:
+    def _inventory_from_catalog(
+        self,
+        *,
+        app: App,
+        catalog: ModCatalog,
+    ) -> mod_contracts.TimedModInventory:
         """Materialise a node inventory from an already refreshed catalog."""
 
         entries = catalog.list_entries()
+        gmod_workshop_state = (
+            mod_contracts.NodeGmodWorkshopSourceState.from_source_state(app.workshop_source.source_state)
+            if isinstance(app, Gmod)
+            else None
+        )
         return mod_contracts.TimedModInventory(
             captured_at_seconds=time.monotonic(),
             summary=mod_contracts.NodeModSummary(
@@ -469,7 +479,14 @@ class NodeModService:
             ),
             mods=tuple(self._inventory_entry_to_node_entry(entry) for entry in entries),
             source_statuses=tuple(
-                mod_contracts.NodeModSourceStatus.from_source_status(status)
+                mod_contracts.NodeModSourceStatus.from_source_status(
+                    status,
+                    gmod_workshop_state=(
+                        gmod_workshop_state
+                        if status.source is ModSourceKind.STEAM_WORKSHOP
+                        else None
+                    ),
+                )
                 for status in catalog.source_statuses
             ),
         )

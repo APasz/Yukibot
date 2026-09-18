@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import UploadFile
 from modmux.models import Provider
@@ -36,16 +36,18 @@ from apps._config import (
     is_client_pack_candidate,
     normalise_client_pack_changelog,
 )
-from apps._node_api import optional_string, required_bool, required_int, required_string
+from apps._node_api import optional_string, required_bool, required_int, required_string, string_tuple
 from apps._mod_catalog import (
     ModAction,
     ModReference,
-    ModSourceConfiguration,
     ModSourceKind,
     ModSourceStatus,
 )
 from apps.minecraft.pack_export import PackFormat, PackPurpose
 from .app_state import NodeAppRuntimeSummary
+
+if TYPE_CHECKING:
+    from apps.gmod.workshop import GmodWorkshopSourceState
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,15 +120,91 @@ class NodeModSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeGmodWorkshopSourceState:
+    """Typed GMod Workshop state rendered alongside generic source health."""
+
+    collection_id: str | None
+    collection_title: str | None
+    auto_update: bool
+    server_mounted_count: int
+    client_content_ids: tuple[str, ...]
+    client_required_count: int
+
+    def __post_init__(self) -> None:
+        if self.collection_id is not None and (not isinstance(self.collection_id, str) or not self.collection_id):
+            raise ValueError("Node GMod Workshop collection ID must be non-empty text when set.")
+        if self.collection_title is not None and (
+            not isinstance(self.collection_title, str) or not self.collection_title
+        ):
+            raise ValueError("Node GMod Workshop collection title must be non-empty text when set.")
+        if self.collection_id is None and self.collection_title is not None:
+            raise ValueError("Node GMod Workshop collection title requires a collection ID.")
+        if not isinstance(self.auto_update, bool):
+            raise TypeError("Node GMod Workshop auto-update state must be a bool.")
+        for value, label in (
+            (self.server_mounted_count, "server-mounted count"),
+            (self.client_required_count, "client-required count"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"Node GMod Workshop {label} must be an integer.")
+            if value < 0:
+                raise ValueError(f"Node GMod Workshop {label} cannot be negative.")
+        if not isinstance(self.client_content_ids, tuple):
+            raise TypeError("Node GMod Workshop client content IDs must be a tuple.")
+        if any(not isinstance(item_id, str) or not item_id for item_id in self.client_content_ids):
+            raise ValueError("Node GMod Workshop client content IDs must be non-empty text.")
+        if len(set(self.client_content_ids)) != len(self.client_content_ids):
+            raise ValueError("Node GMod Workshop client content IDs must be unique.")
+        if self.collection_id is not None and self.collection_id in self.client_content_ids:
+            raise ValueError("Node GMod Workshop client content cannot include its configured collection ID.")
+        if self.client_required_count != len(self.client_content_ids):
+            raise ValueError("Node GMod Workshop client-required count must match explicit client content IDs.")
+
+    @classmethod
+    def from_source_state(cls, state: GmodWorkshopSourceState) -> NodeGmodWorkshopSourceState:
+        """Build the API contract from GMod's typed source state."""
+
+        return cls(
+            collection_id=state.collection_id,
+            collection_title=state.collection_title,
+            auto_update=state.auto_update,
+            server_mounted_count=state.server_mounted_count,
+            client_content_ids=state.client_content_ids,
+            client_required_count=state.client_required_count,
+        )
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeGmodWorkshopSourceState:
+        return cls(
+            collection_id=optional_string(payload, "collection_id"),
+            collection_title=optional_string(payload, "collection_title"),
+            auto_update=required_bool(payload, "auto_update"),
+            server_mounted_count=required_int(payload, "server_mounted_count"),
+            client_content_ids=string_tuple(payload, "client_content_ids"),
+            client_required_count=required_int(payload, "client_required_count"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "collection_id": self.collection_id,
+            "collection_title": self.collection_title,
+            "auto_update": self.auto_update,
+            "server_mounted_count": self.server_mounted_count,
+            "client_content_ids": list(self.client_content_ids),
+            "client_required_count": self.client_required_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NodeModSourceStatus:
-    """Source-neutral health information rendered with a mod inventory."""
+    """Generic source health plus an optional typed source-specific state."""
 
     source: ModSourceKind
     label: str
     healthy: bool = True
     warning: str | None = None
     using_cached_entries: bool = False
-    configuration: ModSourceConfiguration | None = None
+    gmod_workshop_state: NodeGmodWorkshopSourceState | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, ModSourceKind):
@@ -139,11 +217,11 @@ class NodeModSourceStatus:
             raise ValueError("Node mod source status warning must be non-empty text when set.")
         if not isinstance(self.using_cached_entries, bool):
             raise TypeError("Node mod source status cached-entry flag must be a bool.")
-        if self.configuration is not None:
-            if not isinstance(self.configuration, ModSourceConfiguration):
-                raise TypeError("Node mod source status configuration must be a ModSourceConfiguration.")
-            if self.configuration.source is not self.source:
-                raise ValueError("Node mod source status configuration belongs to a different source.")
+        if self.gmod_workshop_state is not None:
+            if not isinstance(self.gmod_workshop_state, NodeGmodWorkshopSourceState):
+                raise TypeError("Node GMod Workshop source state must be a NodeGmodWorkshopSourceState.")
+            if self.source is not ModSourceKind.STEAM_WORKSHOP:
+                raise ValueError("Node GMod Workshop source state belongs to a different source.")
         if self.healthy and self.warning is not None:
             raise ValueError("Healthy node mod sources cannot carry a warning.")
         if self.healthy and self.using_cached_entries:
@@ -152,14 +230,19 @@ class NodeModSourceStatus:
             raise ValueError("Unhealthy node mod sources require a warning.")
 
     @classmethod
-    def from_source_status(cls, status: ModSourceStatus) -> NodeModSourceStatus:
+    def from_source_status(
+        cls,
+        status: ModSourceStatus,
+        *,
+        gmod_workshop_state: NodeGmodWorkshopSourceState | None = None,
+    ) -> NodeModSourceStatus:
         return cls(
             source=status.source,
             label=status.label,
             healthy=status.healthy,
             warning=status.warning,
             using_cached_entries=status.using_cached_entries,
-            configuration=status.configuration,
+            gmod_workshop_state=gmod_workshop_state,
         )
 
     @classmethod
@@ -169,14 +252,9 @@ class NodeModSourceStatus:
             source = ModSourceKind(raw_source)
         except ValueError as xcp:
             raise ValueError("Node mod source status source is invalid.") from xcp
-        raw_configuration = payload.get("configuration")
-        if raw_configuration is not None and not isinstance(raw_configuration, Mapping):
-            raise ValueError("Node mod source status configuration is invalid.")
-        configuration = (
-            None
-            if raw_configuration is None
-            else ModSourceConfiguration.from_mapping(raw_configuration)
-        )
+        raw_gmod_workshop_state = payload.get("gmod_workshop_state")
+        if raw_gmod_workshop_state is not None and not isinstance(raw_gmod_workshop_state, Mapping):
+            raise ValueError("Node GMod Workshop source state is invalid.")
         return cls(
             source=source,
             label=required_string(payload, "label"),
@@ -187,7 +265,11 @@ class NodeModSourceStatus:
                 if "using_cached_entries" in payload
                 else False
             ),
-            configuration=configuration,
+            gmod_workshop_state=(
+                None
+                if raw_gmod_workshop_state is None
+                else NodeGmodWorkshopSourceState.from_mapping(raw_gmod_workshop_state)
+            ),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -197,7 +279,9 @@ class NodeModSourceStatus:
             "healthy": self.healthy,
             "warning": self.warning,
             "using_cached_entries": self.using_cached_entries,
-            "configuration": None if self.configuration is None else self.configuration.to_mapping(),
+            "gmod_workshop_state": (
+                None if self.gmod_workshop_state is None else self.gmod_workshop_state.to_mapping()
+            ),
         }
 
 

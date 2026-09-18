@@ -64,10 +64,6 @@ from apps._config import (
 )
 from apps._mod_catalog import (
     ModAction,
-    ModSourceAction,
-    ModSourceConfiguration,
-    ModSourceConfigurationField,
-    ModSourceConfigurationKey,
     ModSourceKind,
 )
 from apps._steam import SteamGameServerLoginTokenStatus
@@ -187,6 +183,7 @@ from node_api.app_installer import (
 )
 from node_api.console import NodeConsoleActionEntry, NodeConsoleActionParameter
 from node_api.mod import (
+    NodeGmodWorkshopSourceState,
     NodeModEntry,
     NodeModList,
     NodeModSourceStatus,
@@ -12532,31 +12529,13 @@ class ModWebTests(unittest.TestCase):
         source_status = NodeModSourceStatus(
             source=ModSourceKind.STEAM_WORKSHOP,
             label="Steam Workshop",
-            configuration=ModSourceConfiguration(
-                source=ModSourceKind.STEAM_WORKSHOP,
-                fields=(
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.COLLECTION_ID,
-                        label="Collection",
-                        value=collection_id,
-                    ),
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.COLLECTION_TITLE,
-                        label="Collection title",
-                        value=collection_title,
-                    ),
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.SERVER_MOUNTED_COUNT,
-                        label="Server-mounted",
-                        value="3",
-                    ),
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT,
-                        label="Client entries",
-                        value="2",
-                    ),
-                ),
-                actions=(),
+            gmod_workshop_state=NodeGmodWorkshopSourceState(
+                collection_id=collection_id,
+                collection_title=collection_title,
+                auto_update=True,
+                server_mounted_count=3,
+                client_content_ids=("200", "300"),
+                client_required_count=2,
             ),
         )
         model = cast(
@@ -12590,21 +12569,13 @@ class ModWebTests(unittest.TestCase):
         source_status = NodeModSourceStatus(
             source=ModSourceKind.STEAM_WORKSHOP,
             label="Steam Workshop",
-            configuration=ModSourceConfiguration(
-                source=ModSourceKind.STEAM_WORKSHOP,
-                fields=(
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.COLLECTION_ID,
-                        label="Collection",
-                        value="Disabled",
-                    ),
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.AUTO_UPDATE,
-                        label="Auto-update",
-                        value="Enabled",
-                    ),
-                ),
-                actions=(ModSourceAction.SET_AUTO_UPDATE,),
+            gmod_workshop_state=NodeGmodWorkshopSourceState(
+                collection_id=None,
+                collection_title=None,
+                auto_update=True,
+                server_mounted_count=0,
+                client_content_ids=(),
+                client_required_count=0,
             ),
         )
         model = cast(
@@ -12626,26 +12597,50 @@ class ModWebTests(unittest.TestCase):
         self.assertIn(call("Collection: Disabled"), ui.label.call_args_list)
         self.assertIn(call("No Workshop content configured."), ui.label.call_args_list)
 
+    def test_gmod_workshop_source_panel_uses_typed_client_content_ids(self) -> None:
+        service = ModWebService()
+        source_status = NodeModSourceStatus(
+            source=ModSourceKind.STEAM_WORKSHOP,
+            label="Steam Workshop",
+            gmod_workshop_state=NodeGmodWorkshopSourceState(
+                collection_id="100",
+                collection_title=None,
+                auto_update=False,
+                server_mounted_count=0,
+                client_content_ids=("200", "300"),
+                client_required_count=2,
+            ),
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(mods=SimpleNamespace(mods=()))),
+        )
+        ui = MagicMock()
+
+        with patch.object(service, "_user_has_level", return_value=False):
+            service._render_gmod_workshop_source_panel(
+                ui=cast(ModWebUi, ui),
+                model=model,
+                user=ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None),
+                source_status=source_status,
+            )
+
+        self.assertIn(call("200 (200)"), ui.label.call_args_list)
+        self.assertIn(call("300 (300)"), ui.label.call_args_list)
+        self.assertIs(ui.switch.call_args.kwargs["value"], False)
+
     def test_gmod_workshop_source_panel_saves_collection_auto_update(self) -> None:
         service = ModWebService()
         source_status = NodeModSourceStatus(
             source=ModSourceKind.STEAM_WORKSHOP,
             label="Steam Workshop",
-            configuration=ModSourceConfiguration(
-                source=ModSourceKind.STEAM_WORKSHOP,
-                fields=(
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.COLLECTION_ID,
-                        label="Collection",
-                        value="3803451508",
-                    ),
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.AUTO_UPDATE,
-                        label="Auto-update",
-                        value="Enabled",
-                    ),
-                ),
-                actions=(ModSourceAction.SET_AUTO_UPDATE,),
+            gmod_workshop_state=NodeGmodWorkshopSourceState(
+                collection_id="3803451508",
+                collection_title=None,
+                auto_update=False,
+                server_mounted_count=0,
+                client_content_ids=("200",),
+                client_required_count=1,
             ),
         )
         model = cast(
@@ -12667,6 +12662,7 @@ class ModWebTests(unittest.TestCase):
                 user=user,
                 source_status=source_status,
             )
+            self.assertIs(ui.switch.call_args.kwargs["value"], False)
             on_change = ui.switch.call_args.kwargs["on_change"]
             asyncio.run(on_change(SimpleNamespace(value=False)))
 
@@ -12676,7 +12672,7 @@ class ModWebTests(unittest.TestCase):
             user=user,
         )
         self.assertEqual(
-            [call.args[0] for call in ui.row.return_value.classes.call_args_list],
+            [call.args[0] for call in ui.row.return_value.classes.call_args_list[:2]],
             [
                 "items-center gap-3 flex-wrap",
                 "items-center gap-2 flex-wrap",
@@ -12694,26 +12690,13 @@ class ModWebTests(unittest.TestCase):
             healthy=False,
             warning=warning,
             using_cached_entries=False,
-            configuration=ModSourceConfiguration(
-                source=ModSourceKind.STEAM_WORKSHOP,
-                fields=(
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.COLLECTION_ID,
-                        label="Collection",
-                        value="3803451508",
-                    ),
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.SERVER_MOUNTED_COUNT,
-                        label="Server-mounted",
-                        value="3",
-                    ),
-                    ModSourceConfigurationField(
-                        key=ModSourceConfigurationKey.CLIENT_REQUIRED_COUNT,
-                        label="Client entries",
-                        value="2",
-                    ),
-                ),
-                actions=(),
+            gmod_workshop_state=NodeGmodWorkshopSourceState(
+                collection_id="3803451508",
+                collection_title=None,
+                auto_update=True,
+                server_mounted_count=3,
+                client_content_ids=("200", "300"),
+                client_required_count=2,
             ),
         )
         model = cast(
