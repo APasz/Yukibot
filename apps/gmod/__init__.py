@@ -971,14 +971,19 @@ class Gmod(App[App_Config]):
         )
 
     def update_workshop_auto_update(self, enabled: bool) -> None:
-        """Persist the next-start collection auto-update setting."""
+        """Persist the next-start collection auto-update setting.
+
+        Auto-update affects GMod's next launch, not the Workshop inventory
+        resolved from Steam. Keep the current source metadata and catalog
+        snapshot intact so this local setting can be changed offline.
+        """
 
         if not isinstance(enabled, bool):
             raise TypeError("Workshop auto-update enabled state must be a bool.")
-        self._update_workshop_setting(
+        self._persist_workshop_setting(
+            settings=self._require_settings(),
             key="workshop_auto_update",
             value="true" if enabled else "false",
-            discard_source_snapshot=False,
         )
 
     def update_client_content_workshop_ids(self, item_ids: Sequence[str]) -> Path:

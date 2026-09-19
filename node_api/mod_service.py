@@ -154,6 +154,7 @@ class NodeModService:
             app=app,
             actor_user_id=actor_user_id,
             mutation=lambda gmod: gmod.update_workshop_collection(update.collection_id or None),
+            refresh_workshop_source=True,
         )
 
     async def update_gmod_workshop_auto_update(
@@ -163,12 +164,13 @@ class NodeModService:
         update: mod_contracts.NodeGmodWorkshopAutoUpdateRequest,
         actor_user_id: int,
     ) -> mod_contracts.NodeModList:
-        """Persist source-level auto-update state, then refresh its inventory view."""
+        """Persist auto-update state and rebuild its view without a Steam refresh."""
 
         return await self._mutate_gmod_workshop_source(
             app=app,
             actor_user_id=actor_user_id,
             mutation=lambda gmod: gmod.update_workshop_auto_update(update.enabled),
+            refresh_workshop_source=False,
         )
 
     async def update_gmod_workshop_client_content(
@@ -184,6 +186,7 @@ class NodeModService:
             app=app,
             actor_user_id=actor_user_id,
             mutation=lambda gmod: gmod.update_client_content_workshop_ids(update.item_ids),
+            refresh_workshop_source=True,
         )
 
     async def start_bulk_metadata_discovery(
@@ -405,14 +408,33 @@ class NodeModService:
         app_stats = await self._build_runtime_summary(app)
         return self._mod_list_from_inventory(app=app, inventory=inventory, app_stats=app_stats)
 
+    async def _rebuild_inventory_without_source_refresh(
+        self,
+        *,
+        app: App,
+    ) -> mod_contracts.NodeModList:
+        """Rebuild the aggregate view from retained source snapshots only."""
+
+        app_key = app.name.casefold()
+        lock = self._inventory_cache_locks.setdefault(app_key, asyncio.Lock())
+        async with lock:
+            inventory = self._inventory_from_catalog(app=app, catalog=app.has_mod_catalog)
+            self._inventory_cache[app_key] = inventory
+        app_stats = await self._build_runtime_summary(app)
+        return self._mod_list_from_inventory(app=app, inventory=inventory, app_stats=app_stats)
+
     async def _mutate_gmod_workshop_source(
         self,
         *,
         app: App,
         actor_user_id: int,
         mutation: Callable[[Gmod], object],
+        refresh_workshop_source: bool,
     ) -> mod_contracts.NodeModList:
-        """Apply one sudo-only GMod source mutation and refresh its inventory."""
+        """Apply one sudo-only GMod source mutation and update its inventory."""
+
+        if not isinstance(refresh_workshop_source, bool):
+            raise TypeError("GMod Workshop source refresh flag must be a bool.")
 
         await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
         gmod = self._require_gmod_workshop_app(app)
@@ -421,7 +443,9 @@ class NodeModService:
             mutation(gmod)
         except (TypeError, ValueError) as xcp:
             raise _http_exception(400, str(xcp)) from xcp
-        return await self._refresh_source_inventory(app=app, source=ModSourceKind.STEAM_WORKSHOP)
+        if refresh_workshop_source:
+            return await self._refresh_source_inventory(app=app, source=ModSourceKind.STEAM_WORKSHOP)
+        return await self._rebuild_inventory_without_source_refresh(app=app)
 
     async def _cached_mod_inventory(self, app: App) -> mod_contracts.TimedModInventory:
         app_key = app.name.casefold()

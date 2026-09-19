@@ -84,6 +84,7 @@ from apps._mod_catalog import (
     ModCatalog,
     ModReference,
     ModSourceKind,
+    ModSourceStatus,
 )
 from apps._node_api import NodeModUploadSource
 from apps._save_files import (
@@ -120,6 +121,8 @@ from apps.factorio import (
     FactorioModPortalReleaseOption,
     FactorioModPortalResolution,
 )
+from apps.gmod import Gmod
+from apps.gmod.workshop import GmodWorkshopSource
 from apps.factorio.node_api import (
     NodeFactorioModSettings,
     NodeModPortalInstallRequest,
@@ -244,6 +247,7 @@ from node_api.mod import (
     NodeClientPackModConfigUpdate,
     NodeClientPackPublishRequest,
     NodeDownloadRequest,
+    NodeGmodWorkshopAutoUpdateRequest,
     NodeGmodWorkshopSourceState,
     NodeGmodWorkshopClientContentUpdateRequest,
     NodeModEntry,
@@ -393,6 +397,13 @@ def _parse_servers_dat(content: bytes) -> tuple[_ServersDatEntry, ...]:
 class _DummyReceiver:
     async def send(self, payload: object) -> None:
         del payload
+
+
+@dataclass(slots=True)
+class _NodeGmodWorkshopSettings:
+    workshop_collection_id: str | None
+    client_content_workshop_ids: tuple[str, ...]
+    workshop_auto_update: bool
 
 
 class _DummySettingsApp(App_Settings):
@@ -8616,6 +8627,78 @@ class NodeApiTests(unittest.TestCase):
         gmod.update_client_content_workshop_ids.assert_called_once_with(("200",))
         invalidate_inventory.assert_called_once_with("gmod_alpha")
         refresh_source.assert_awaited_once_with(app=app, source=ModSourceKind.STEAM_WORKSHOP)
+
+    def test_gmod_workshop_auto_update_rebuilds_state_without_refreshing_steam(self) -> None:
+        settings = _NodeGmodWorkshopSettings(
+            workshop_collection_id=None,
+            client_content_workshop_ids=(),
+            workshop_auto_update=True,
+        )
+        workshop = GmodWorkshopSource(settings=lambda: settings)
+        workshop._status = ModSourceStatus.unavailable(
+            ModSourceKind.STEAM_WORKSHOP,
+            label="Steam Workshop",
+            warning="Steam Workshop unavailable.",
+        )
+        gmod = object.__new__(Gmod)
+        gmod.name = "gmod_alpha"
+        gmod.friendly = "GMod Alpha"
+        gmod.mod_catalog = ModCatalog((workshop,))
+        gmod._workshop_source = workshop
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        invalidate_inventory = Mock()
+        runtime_summary = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version=None,
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+        service = NodeModService(
+            node_name=lambda: "yuki",
+            require_acl=lambda: cast(Any, acl),
+            build_runtime_summary=AsyncMock(return_value=runtime_summary),
+            invalidate_client_pack_content=Mock(),
+            invalidate_mod_inventory=invalidate_inventory,
+            upload_mod_paths=AsyncMock(),
+            operations=cast(Any, Mock()),
+        )
+
+        def update_auto_update(enabled: bool) -> None:
+            settings.workshop_auto_update = enabled
+
+        with (
+            patch.object(gmod, "update_workshop_auto_update", side_effect=update_auto_update) as update,
+            patch.object(workshop, "refresh", new=AsyncMock()) as refresh,
+        ):
+            result = asyncio.run(
+                service.update_gmod_workshop_auto_update(
+                    app=gmod,
+                    update=NodeGmodWorkshopAutoUpdateRequest(enabled=False),
+                    actor_user_id=42,
+                )
+            )
+
+        state = result.source_statuses[0].gmod_workshop_state
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertFalse(state.auto_update)
+        self.assertFalse(result.source_statuses[0].healthy)
+        self.assertEqual(result.source_statuses[0].warning, "Steam Workshop unavailable.")
+        self.assertFalse(result.source_statuses[0].using_cached_entries)
+        cached_state = service._inventory_cache["gmod_alpha"].source_statuses[0].gmod_workshop_state
+        self.assertIsNotNone(cached_state)
+        assert cached_state is not None
+        self.assertFalse(cached_state.auto_update)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        invalidate_inventory.assert_called_once_with("gmod_alpha")
+        update.assert_called_once_with(False)
+        refresh.assert_not_awaited()
 
     def test_unknown_mod_source_refresh_does_not_invalidate_inventory(self) -> None:
         app = _build_app(Mock())

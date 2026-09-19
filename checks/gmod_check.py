@@ -602,7 +602,7 @@ class GmodIntegrationTests(unittest.TestCase):
         self.assertEqual(updated["client_content_workshop_ids"], ["345678901"])
         self.assertNotIn('resource.AddWorkshop("234567890")', updated_manifest)
         self.assertIn('resource.AddWorkshop("345678901")', updated_manifest)
-        self.assertEqual(invalidate.call_count, 3)
+        self.assertEqual(invalidate.call_count, 2)
 
     def test_client_content_rejects_the_configured_collection_id_before_persisting(self) -> None:
         with TemporaryDirectory() as temporary_directory:

@@ -40,6 +40,8 @@ _STEAM_WORKSHOP_ORIGIN: Final[str] = "Steam Workshop"
 _STEAM_WORKSHOP_METADATA_CACHE_TTL_SECONDS: Final[float] = 10 * 60
 _STEAM_WORKSHOP_FAILURE_CACHE_TTL_SECONDS: Final[float] = 30.0
 
+type _WorkshopMetadataCacheKey = tuple[str | None, tuple[str, ...]]
+
 
 class GmodWorkshopSettings(Protocol):
     """The persisted GMod settings consumed by the read-only source."""
@@ -99,8 +101,10 @@ class _ConfiguredWorkshopContent:
     auto_update: bool
 
     @property
-    def cache_key(self) -> tuple[str | None, tuple[str, ...], bool]:
-        return (self.collection_id, self.client_item_ids, self.auto_update)
+    def cache_key(self) -> _WorkshopMetadataCacheKey:
+        """Return the configuration that changes Steam-resolved inventory."""
+
+        return (self.collection_id, self.client_item_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,9 +172,9 @@ class GmodWorkshopSource:
         self._metadata_by_item_id: dict[str, _WorkshopItemMetadata] = {}
         self._collection_titles_by_id: dict[str, str] = {}
         self._last_successful_refresh_at_seconds: float | None = None
-        self._last_successful_configuration: tuple[str | None, tuple[str, ...], bool] | None = None
+        self._last_successful_configuration: _WorkshopMetadataCacheKey | None = None
         self._last_failed_refresh_at_seconds: float | None = None
-        self._last_failed_configuration: tuple[str | None, tuple[str, ...], bool] | None = None
+        self._last_failed_configuration: _WorkshopMetadataCacheKey | None = None
         self._status = ModSourceStatus.ready(self.kind, label=self.label)
 
     @property

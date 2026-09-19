@@ -530,6 +530,60 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([request.url for request in transport.requests], [_DETAILS_ENDPOINT])
         self.assertEqual(source.list_entries()[0].friendly, "Cached addon")
 
+    async def test_auto_update_change_reuses_workshop_metadata_and_source_health(self) -> None:
+        def responder(url: str, _data: Mapping[str, str]) -> object:
+            self.assertEqual(url, _DETAILS_ENDPOINT)
+            return _details_payload(_detail("200", title="Cached addon"))
+
+        settings = _MutableWorkshopSettings(None, ("200",), workshop_auto_update=True)
+        clock = _MonotonicClock()
+        transport = _SteamTransport(responder)
+        source = GmodWorkshopSource(
+            settings=lambda: settings,
+            session_factory=_FakeSessionFactory(transport),
+            monotonic=clock,
+        )
+
+        await source.refresh()
+        expected_entries = source.list_entries()
+        expected_status = source.status
+        settings.workshop_auto_update = False
+        clock.seconds = 1.0
+        await source.refresh()
+
+        self.assertEqual([request.url for request in transport.requests], [_DETAILS_ENDPOINT])
+        self.assertEqual(source.list_entries(), expected_entries)
+        self.assertEqual(source.status, expected_status)
+        self.assertFalse(source.source_state.auto_update)
+        clock.seconds = 600.0
+        await source.refresh()
+
+        self.assertEqual([request.url for request in transport.requests], [_DETAILS_ENDPOINT, _DETAILS_ENDPOINT])
+
+    async def test_auto_update_change_preserves_unavailable_workshop_state(self) -> None:
+        settings = _MutableWorkshopSettings(None, ("200",), workshop_auto_update=True)
+        clock = _MonotonicClock()
+        transport = _SteamTransport(lambda _url, _data: AssertionError("Steam should be unavailable"))
+        transport.failure = aiohttp.ClientConnectionError("offline")
+        source = GmodWorkshopSource(
+            settings=lambda: settings,
+            session_factory=_FakeSessionFactory(transport),
+            monotonic=clock,
+        )
+
+        with self.assertRaises(ModSourceRefreshError):
+            await source.refresh()
+        expected_status = source.status
+        settings.workshop_auto_update = False
+        clock.seconds = 29.0
+        with self.assertRaises(ModSourceRefreshError):
+            await source.refresh()
+
+        self.assertEqual([request.url for request in transport.requests], [_DETAILS_ENDPOINT])
+        self.assertEqual(source.status, expected_status)
+        self.assertFalse(source.status.healthy)
+        self.assertFalse(source.source_state.auto_update)
+
     async def test_explicit_invalidation_bypasses_workshop_ttl(self) -> None:
         def responder(url: str, _data: Mapping[str, str]) -> object:
             self.assertEqual(url, _DETAILS_ENDPOINT)
