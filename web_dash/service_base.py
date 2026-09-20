@@ -860,6 +860,21 @@ class ModWebServiceSupport:
     ) -> Callable[..., Awaitable[NodeModList]]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_remote_gmod_workshop_client_content_add_async"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_gmod_workshop_client_content_delete_async"]
+    ) -> Callable[..., Awaitable[NodeModMutationResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_gmod_workshop_item_client_required_update_async"]
+    ) -> Callable[..., Awaitable[NodeModMutationResult]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_refresh_mod_source"]) -> Callable[..., Awaitable[NodeModList]]: ...
 
     @overload
@@ -875,6 +890,11 @@ class ModWebServiceSupport:
     @overload
     def __getattr__(
         self, name: Literal["_update_gmod_workshop_client_content"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_add_gmod_workshop_client_content"]
     ) -> Callable[..., Awaitable[NodeModList]]: ...
 
     @overload

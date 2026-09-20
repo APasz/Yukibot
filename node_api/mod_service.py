@@ -120,6 +120,7 @@ class NodeModService:
         self._operations = operations
         self._inventory_cache: dict[str, mod_contracts.TimedModInventory] = {}
         self._inventory_cache_locks: dict[str, asyncio.Lock] = {}
+        self._gmod_workshop_mutation_locks: dict[str, asyncio.Lock] = {}
 
     def invalidate_inventory(self, app_name: str) -> None:
         self._inventory_cache.pop(app_name.casefold(), None)
@@ -187,6 +188,80 @@ class NodeModService:
             actor_user_id=actor_user_id,
             mutation=lambda gmod: gmod.update_client_content_workshop_ids(update.item_ids),
             refresh_workshop_source=True,
+        )
+
+    async def add_gmod_workshop_client_content(
+        self,
+        *,
+        app: App,
+        add: mod_contracts.NodeGmodWorkshopClientContentAddRequest,
+        actor_user_id: int,
+    ) -> mod_contracts.NodeModList:
+        """Add one explicit Workshop client-content item and refresh its source."""
+
+        return await self._mutate_gmod_workshop_source(
+            app=app,
+            actor_user_id=actor_user_id,
+            mutation=lambda gmod: gmod.add_client_content_workshop_item(add.item_reference),
+            refresh_workshop_source=True,
+        )
+
+    async def remove_gmod_workshop_client_content(
+        self,
+        *,
+        app: App,
+        item_id: str,
+        actor_user_id: int,
+    ) -> mod_contracts.NodeModMutationResult:
+        """Remove one explicit Workshop client-content item through its mod-row action."""
+
+        await self._mutate_gmod_workshop_source(
+            app=app,
+            actor_user_id=actor_user_id,
+            mutation=lambda gmod: gmod.remove_client_content_workshop_item(item_id),
+            refresh_workshop_source=True,
+        )
+        normalised_item_id = item_id.strip()
+        return mod_contracts.NodeModMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self._node_name(),
+            mod_name=normalised_item_id,
+            action=mod_contracts.NodeModMutationAction.DELETE,
+            message=f"Removed Workshop client content {normalised_item_id}.",
+            mod=None,
+        )
+
+    async def update_gmod_workshop_item_client_required(
+        self,
+        *,
+        app: App,
+        item_id: str,
+        update: mod_contracts.NodeGmodWorkshopClientRequirementUpdateRequest,
+        actor_user_id: int,
+    ) -> mod_contracts.NodeModMutationResult:
+        """Set the client-download requirement for one collection-mounted item."""
+
+        await self._mutate_gmod_workshop_source(
+            app=app,
+            actor_user_id=actor_user_id,
+            mutation=lambda gmod: gmod.update_workshop_item_client_required(item_id, update.client_required),
+            refresh_workshop_source=True,
+        )
+        normalised_item_id = item_id.strip()
+        message = (
+            f"Workshop item {normalised_item_id} now requires client content."
+            if update.client_required
+            else f"Workshop item {normalised_item_id} is now optional for clients."
+        )
+        return mod_contracts.NodeModMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self._node_name(),
+            mod_name=normalised_item_id,
+            action=mod_contracts.NodeModMutationAction.UPDATE_CLIENT_REQUIRED,
+            message=message,
+            mod=None,
         )
 
     async def start_bulk_metadata_discovery(
@@ -387,6 +462,16 @@ class NodeModService:
             source_statuses=inventory.source_statuses,
         )
 
+    @staticmethod
+    def _lock_for_app(*, locks: dict[str, asyncio.Lock], app_key: str) -> asyncio.Lock:
+        """Return the retained lock for one canonical application key."""
+
+        lock = locks.get(app_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[app_key] = lock
+        return lock
+
     async def _refresh_source_inventory(
         self,
         *,
@@ -396,13 +481,15 @@ class NodeModService:
         """Refresh and cache one source without reloading unrelated sources."""
 
         app_key = app.name.casefold()
-        lock = self._inventory_cache_locks.setdefault(app_key, asyncio.Lock())
+        lock = self._lock_for_app(locks=self._inventory_cache_locks, app_key=app_key)
         async with lock:
             catalog = app.has_mod_catalog
             try:
                 await catalog.refresh_source(source, invalidate=True)
             except LookupError as xcp:
                 raise _http_exception(404, str(xcp)) from xcp
+            if source is ModSourceKind.STEAM_WORKSHOP and isinstance(app, Gmod):
+                app.sync_workshop_manifest()
             inventory = self._inventory_from_catalog(app=app, catalog=catalog)
             self._inventory_cache[app_key] = inventory
         app_stats = await self._build_runtime_summary(app)
@@ -416,7 +503,7 @@ class NodeModService:
         """Rebuild the aggregate view from retained source snapshots only."""
 
         app_key = app.name.casefold()
-        lock = self._inventory_cache_locks.setdefault(app_key, asyncio.Lock())
+        lock = self._lock_for_app(locks=self._inventory_cache_locks, app_key=app_key)
         async with lock:
             inventory = self._inventory_from_catalog(app=app, catalog=app.has_mod_catalog)
             self._inventory_cache[app_key] = inventory
@@ -438,14 +525,17 @@ class NodeModService:
 
         await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
         gmod = self._require_gmod_workshop_app(app)
-        self._invalidate_mod_inventory(app.name)
-        try:
-            mutation(gmod)
-        except (TypeError, ValueError) as xcp:
-            raise _http_exception(400, str(xcp)) from xcp
-        if refresh_workshop_source:
-            return await self._refresh_source_inventory(app=app, source=ModSourceKind.STEAM_WORKSHOP)
-        return await self._rebuild_inventory_without_source_refresh(app=app)
+        app_key = app.name.casefold()
+        mutation_lock = self._lock_for_app(locks=self._gmod_workshop_mutation_locks, app_key=app_key)
+        async with mutation_lock:
+            self._invalidate_mod_inventory(app.name)
+            try:
+                mutation(gmod)
+            except (TypeError, ValueError) as xcp:
+                raise _http_exception(400, str(xcp)) from xcp
+            if refresh_workshop_source:
+                return await self._refresh_source_inventory(app=app, source=ModSourceKind.STEAM_WORKSHOP)
+            return await self._rebuild_inventory_without_source_refresh(app=app)
 
     async def _cached_mod_inventory(self, app: App) -> mod_contracts.TimedModInventory:
         app_key = app.name.casefold()
@@ -453,7 +543,7 @@ class NodeModService:
         cached = self._inventory_cache.get(app_key)
         if cached is not None and now - cached.captured_at_seconds < _MOD_INVENTORY_CACHE_TTL_SECONDS:
             return cached
-        lock = self._inventory_cache_locks.setdefault(app_key, asyncio.Lock())
+        lock = self._lock_for_app(locks=self._inventory_cache_locks, app_key=app_key)
         async with lock:
             now = time.monotonic()
             cached = self._inventory_cache.get(app_key)
@@ -818,6 +908,15 @@ class NodeModService:
         action: mod_contracts.NodeModMutationAction,
         actor_user_id: int,
     ) -> mod_contracts.NodeModMutationResult:
+        if action is mod_contracts.NodeModMutationAction.UPDATE_CLIENT_REQUIRED:
+            await self._require_acl().perm_check(
+                actor_user_id,
+                mod_contracts.required_mod_mutation_level(action),
+            )
+            raise _http_exception(
+                400,
+                "Client requirement changes are only available through the GMod Workshop source.",
+            )
         try:
             manager: Mod_Manager = app.has_mod_manager
             await manager.reload_mods()

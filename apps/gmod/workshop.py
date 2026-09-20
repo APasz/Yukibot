@@ -1,7 +1,8 @@
-"""Read-only Steam Workshop inventory for Garry's Mod.
+"""Steam Workshop inventory for Garry's Mod.
 
-This source intentionally reports configured Workshop content without trying to
-subscribe, download, alter collections, or otherwise manage Steam state.
+The source reports configured Workshop content without trying to subscribe,
+download, alter collections, or otherwise manage Steam state. GMod owns the
+small set of source-backed configuration mutations separately.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import aiohttp
 
 from apps._config import ClientPackConfig, ModPageLink, ModPlacement, ModType
 from apps._mod_catalog import (
+    ModAction,
     ModInventoryEntry,
     ModReference,
     ModSourceKind,
@@ -40,7 +42,7 @@ _STEAM_WORKSHOP_ORIGIN: Final[str] = "Steam Workshop"
 _STEAM_WORKSHOP_METADATA_CACHE_TTL_SECONDS: Final[float] = 10 * 60
 _STEAM_WORKSHOP_FAILURE_CACHE_TTL_SECONDS: Final[float] = 30.0
 
-type _WorkshopMetadataCacheKey = tuple[str | None, tuple[str, ...]]
+type _WorkshopMetadataCacheKey = tuple[str | None, tuple[str, ...], tuple[str, ...]]
 
 
 class GmodWorkshopSettings(Protocol):
@@ -54,6 +56,9 @@ class GmodWorkshopSettings(Protocol):
 
     @property
     def client_content_workshop_ids(self) -> tuple[str, ...]: ...
+
+    @property
+    def client_content_workshop_excluded_ids(self) -> tuple[str, ...]: ...
 
 
 class _WorkshopSessionFactory(Protocol):
@@ -98,13 +103,14 @@ class _WorkshopItemMetadata:
 class _ConfiguredWorkshopContent:
     collection_id: str | None
     client_item_ids: tuple[str, ...]
+    client_optional_item_ids: tuple[str, ...]
     auto_update: bool
 
     @property
     def cache_key(self) -> _WorkshopMetadataCacheKey:
         """Return the configuration that changes Steam-resolved inventory."""
 
-        return (self.collection_id, self.client_item_ids)
+        return (self.collection_id, self.client_item_ids, self.client_optional_item_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,8 +151,6 @@ class GmodWorkshopSourceState:
             raise ValueError("GMod Workshop client content IDs must be unique.")
         if self.collection_id is not None and self.collection_id in self.client_content_ids:
             raise ValueError("GMod Workshop client content cannot include its configured collection ID.")
-        if self.client_required_count != len(self.client_content_ids):
-            raise ValueError("GMod Workshop client-required count must match explicit client content IDs.")
 
 
 class GmodWorkshopSource:
@@ -227,7 +231,12 @@ class GmodWorkshopSource:
                     for item_id in await self._collection_item_ids(session, configured.collection_id):
                         if item_id == configured.collection_id:
                             continue
-                        self._merge_role(roles_by_item_id, item_id=item_id, server_mounted=True)
+                        self._merge_role(
+                            roles_by_item_id,
+                            item_id=item_id,
+                            server_mounted=True,
+                            client_required=item_id not in configured.client_optional_item_ids,
+                        )
                 for item_id in configured.client_item_ids:
                     if item_id == configured.collection_id:
                         continue
@@ -278,6 +287,34 @@ class GmodWorkshopSource:
     def list_entries(self) -> tuple[ModInventoryEntry, ...]:
         return self._entries
 
+    def server_mounted_item_ids(self) -> tuple[str, ...]:
+        """Return known members of the currently configured mounted collection.
+
+        A failed refresh deliberately retains old entries for display, but those
+        entries must not leak into a newly selected collection's client-download
+        manifest. Changes to client delivery settings do not alter collection
+        membership, so they can safely reuse the last resolved member list.
+        """
+
+        configured = self._configured_content(self._settings())
+        last_successful_configuration = self._last_successful_configuration
+        if (
+            last_successful_configuration is None
+            or last_successful_configuration[0] != configured.collection_id
+        ):
+            return ()
+        return tuple(
+            entry.reference.source_key
+            for entry in self._entries
+            if entry.server_loadable
+        )
+
+    def is_server_mounted_item(self, item_id: str) -> bool:
+        """Return whether a resolved Workshop item comes from the mounted collection."""
+
+        normalised_item_id = self._workshop_id(item_id)
+        return normalised_item_id in self.server_mounted_item_ids()
+
     def _configured_content(self, settings: GmodWorkshopSettings) -> _ConfiguredWorkshopContent:
         raw_collection_id = settings.workshop_collection_id
         collection_id = None if raw_collection_id is None else self._workshop_id(raw_collection_id)
@@ -285,11 +322,20 @@ class GmodWorkshopSource:
         if not isinstance(raw_client_item_ids, tuple):
             raise _SteamWorkshopResponseError("Configured client Workshop IDs are invalid.")
         client_item_ids = tuple(self._workshop_id(item_id) for item_id in raw_client_item_ids)
+        raw_client_optional_item_ids = getattr(settings, "client_content_workshop_excluded_ids", ())
+        if not isinstance(raw_client_optional_item_ids, tuple):
+            raise _SteamWorkshopResponseError("Configured client Workshop exclusion IDs are invalid.")
+        client_optional_item_ids = tuple(
+            self._workshop_id(item_id) for item_id in raw_client_optional_item_ids
+        )
         if collection_id is not None:
             # Older persisted settings may have duplicated the collection in
             # resource.AddWorkshop content. Treat it as collection-only while
             # exposing a valid state and never re-emitting it in a manifest.
             client_item_ids = tuple(item_id for item_id in client_item_ids if item_id != collection_id)
+            client_optional_item_ids = tuple(
+                item_id for item_id in client_optional_item_ids if item_id != collection_id
+            )
         # The source predates this source-panel field. Keep existing in-process
         # adapters readable while the persisted Gmod_Settings contract remains
         # authoritative in production.
@@ -299,6 +345,7 @@ class GmodWorkshopSource:
         return _ConfiguredWorkshopContent(
             collection_id=collection_id,
             client_item_ids=client_item_ids,
+            client_optional_item_ids=client_optional_item_ids,
             auto_update=raw_auto_update,
         )
 
@@ -372,7 +419,7 @@ class GmodWorkshopSource:
             auto_update=configured.auto_update,
             server_mounted_count=sum(entry.server_loadable for entry in self._entries),
             client_content_ids=configured.client_item_ids,
-            client_required_count=len(configured.client_item_ids),
+            client_required_count=sum(entry.client_required for entry in self._entries),
         )
 
     def _placeholder_metadata(self, item_id: str) -> _WorkshopItemMetadata:
@@ -501,9 +548,16 @@ class GmodWorkshopSource:
     ) -> ModInventoryEntry:
         placement = ModPlacement.SERVER_ENABLED if roles.server_mounted else ModPlacement.CLIENT_ONLY
         mod_type = ModType.REGULAR if roles.server_mounted else ModType.CLIENT
+        available_actions = (
+            frozenset({ModAction.UPDATE_CLIENT_REQUIRED})
+            if roles.server_mounted
+            else frozenset({ModAction.DELETE})
+            if roles.client_required
+            else frozenset()
+        )
         return ModInventoryEntry(
             reference=ModReference(source=self.kind, source_key=metadata.item_id),
-            available_actions=frozenset(),
+            available_actions=available_actions,
             name=metadata.item_id,
             friendly=metadata.title,
             enabled=placement.enabled,
@@ -532,8 +586,8 @@ class GmodWorkshopSource:
                     ),
                 ),
             ),
-            # resource.AddWorkshop is intentionally represented by
-            # client_required, never by the generic client-pack configuration.
+            # Workshop content is delivered independently of the generic
+            # client-pack configuration.
             client_pack=ClientPackConfig(included_in_client=False),
         )
 

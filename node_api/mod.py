@@ -157,8 +157,6 @@ class NodeGmodWorkshopSourceState:
             raise ValueError("Node GMod Workshop client content IDs must be unique.")
         if self.collection_id is not None and self.collection_id in self.client_content_ids:
             raise ValueError("Node GMod Workshop client content cannot include its configured collection ID.")
-        if self.client_required_count != len(self.client_content_ids):
-            raise ValueError("Node GMod Workshop client-required count must match explicit client content IDs.")
 
     @classmethod
     def from_source_state(cls, state: GmodWorkshopSourceState) -> NodeGmodWorkshopSourceState:
@@ -358,6 +356,8 @@ class NodeModEntry:
             return True
         if action is ModAction.UPDATE_PROPERTIES:
             return self.mod_type is not ModType.BUILTIN
+        if action is ModAction.UPDATE_CLIENT_REQUIRED:
+            return False
         if action is ModAction.TOGGLE_COREMOD:
             return self.mod_type is not ModType.BUILTIN
         if action is ModAction.TOGGLE_DOWNLOAD_BLOCK:
@@ -558,7 +558,7 @@ class NodeModEntry:
 
 
 class NodeModMutationAction(StrEnum):
-    """Local-route mutations, kept distinct from source-specific capabilities."""
+    """Mod-row mutations, dispatched through local or source-specific routes."""
 
     ENABLE = ModAction.ENABLE.value
     DISABLE = ModAction.DISABLE.value
@@ -566,6 +566,7 @@ class NodeModMutationAction(StrEnum):
     TOGGLE_DOWNLOAD_BLOCK = ModAction.TOGGLE_DOWNLOAD_BLOCK.value
     UPDATE_PROPERTIES = ModAction.UPDATE_PROPERTIES.value
     UPDATE_NOTES = ModAction.UPDATE_NOTES.value
+    UPDATE_CLIENT_REQUIRED = ModAction.UPDATE_CLIENT_REQUIRED.value
     DELETE = ModAction.DELETE.value
 
 
@@ -580,6 +581,7 @@ def required_mod_mutation_level(
         NodeModMutationAction.TOGGLE_COREMOD,
         NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK,
         NodeModMutationAction.UPDATE_PROPERTIES,
+        NodeModMutationAction.UPDATE_CLIENT_REQUIRED,
         NodeModMutationAction.DELETE,
     }:
         return Power_Level.sudo
@@ -614,6 +616,22 @@ class NodeGmodWorkshopClientContentUpdateRequest(BaseModel):
     item_ids: tuple[str, ...]
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+
+class NodeGmodWorkshopClientContentAddRequest(BaseModel):
+    """One numeric Workshop ID or official Steam Workshop item URL to add."""
+
+    item_reference: str
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+
+class NodeGmodWorkshopClientRequirementUpdateRequest(BaseModel):
+    """Set whether one collection-mounted Workshop item is required on clients."""
+
+    client_required: bool
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class NodeModPropertiesUpdateRequest(BaseModel):

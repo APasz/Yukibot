@@ -441,6 +441,35 @@ class ModWebActionsMixin(ModWebServiceSupport):
         if not cls._supports_legacy_local_action(entry, action):
             raise PermissionError(f"This mod does not support {action.value.replace('_', ' ')}.")
 
+    @staticmethod
+    def _is_gmod_workshop_client_content_delete(
+        *,
+        entry: NodeModEntry,
+        action: NodeModMutationAction,
+    ) -> bool:
+        """Return whether a source-owned Workshop client row may use Delete."""
+
+        return (
+            action is NodeModMutationAction.DELETE
+            and entry.source is ModSourceKind.STEAM_WORKSHOP
+            and entry.placement is ModPlacement.CLIENT_ONLY
+            and entry.client_required
+            and entry.supports_action(ModAction.DELETE)
+        )
+
+    @staticmethod
+    def _is_gmod_workshop_client_requirement_update(
+        *,
+        entry: NodeModEntry,
+        action: NodeModMutationAction,
+    ) -> bool:
+        return (
+            action is NodeModMutationAction.UPDATE_CLIENT_REQUIRED
+            and entry.source is ModSourceKind.STEAM_WORKSHOP
+            and entry.server_loadable
+            and entry.supports_action(ModAction.UPDATE_CLIENT_REQUIRED)
+        )
+
     def _user_can_mutate_mod(
         self,
         *,
@@ -448,6 +477,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
         entry: NodeModEntry,
         action: NodeModMutationAction,
     ) -> bool:
+        if self._is_gmod_workshop_client_content_delete(entry=entry, action=action):
+            return self._user_has_level(user, Power_Level.sudo)
+        if self._is_gmod_workshop_client_requirement_update(entry=entry, action=action):
+            return self._user_has_level(user, Power_Level.sudo)
         if not self._supports_legacy_local_action(entry, ModAction(action.value)):
             return False
         if self._is_builtin_mod(entry):
@@ -850,6 +883,29 @@ class ModWebActionsMixin(ModWebServiceSupport):
         if (mod_name is None) is (entry is None):
             raise ValueError("Mod mutation requires exactly one mod identity.")
         resolved_entry = entry if entry is not None else self._resolve_mod_entry(model=model, mod_name=mod_name or "")
+        if self._is_gmod_workshop_client_content_delete(entry=resolved_entry, action=action):
+            if not self._user_has_level(user, Power_Level.sudo):
+                raise PermissionError("Sudo access is required to manage Workshop client content.")
+            result = await self._remote_gmod_workshop_client_content_delete_async(
+                self._remote_node_link(model.node_name),
+                model.app_name,
+                resolved_entry.reference.source_key,
+                user,
+            )
+            self._invalidate_mod_update_cache(model=model, mod_id=resolved_entry.id)
+            return result
+        if self._is_gmod_workshop_client_requirement_update(entry=resolved_entry, action=action):
+            if not self._user_has_level(user, Power_Level.sudo):
+                raise PermissionError("Sudo access is required to manage Workshop client content.")
+            result = await self._remote_gmod_workshop_item_client_required_update_async(
+                self._remote_node_link(model.node_name),
+                model.app_name,
+                resolved_entry.reference.source_key,
+                not resolved_entry.client_required,
+                user,
+            )
+            self._invalidate_mod_update_cache(model=model, mod_id=resolved_entry.id)
+            return result
         self._require_local_entry_action(entry=resolved_entry, action=ModAction(action.value))
         if self._is_builtin_mod(resolved_entry):
             raise PermissionError("Built-in mods cannot be changed from mod web.")
@@ -922,6 +978,22 @@ class ModWebActionsMixin(ModWebServiceSupport):
             self._remote_node_link(model.node_name),
             model.app_name,
             item_ids,
+            user,
+        )
+
+    async def _add_gmod_workshop_client_content(
+        self,
+        *,
+        model: ModWebPageModel,
+        item_reference: str,
+        user: ModWebUser,
+    ) -> NodeModList:
+        if not self._user_has_level(user, Power_Level.sudo):
+            raise PermissionError("Sudo access is required to manage Workshop client content.")
+        return await self._remote_gmod_workshop_client_content_add_async(
+            self._remote_node_link(model.node_name),
+            model.app_name,
+            item_reference,
             user,
         )
 
@@ -1400,6 +1472,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return "Save Properties"
             case NodeModMutationAction.UPDATE_NOTES:
                 return "Save Notes"
+            case NodeModMutationAction.UPDATE_CLIENT_REQUIRED:
+                return "Mark client optional" if entry.client_required else "Require on client"
             case NodeModMutationAction.DELETE:
                 return "Delete"
             case _:
@@ -1424,6 +1498,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return "mod-list-button"
             case NodeModMutationAction.UPDATE_NOTES:
                 return "mod-list-button"
+            case NodeModMutationAction.UPDATE_CLIENT_REQUIRED:
+                return "mod-list-button secondary"
             case NodeModMutationAction.DELETE:
                 return "mod-list-button danger"
             case _:
@@ -1806,6 +1882,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
         download_text = self._mod_download_summary(entry)
         client_pack_text = self._mod_client_pack_summary(entry)
         available_actions = self._available_mod_actions(user=user, entry=entry)
+        can_update_client_required = self._user_can_mutate_mod(
+            user=user,
+            entry=entry,
+            action=NodeModMutationAction.UPDATE_CLIENT_REQUIRED,
+        )
         can_edit_properties: bool = (
             self._supports_legacy_local_action(entry, ModAction.UPDATE_PROPERTIES)
             and not self._is_builtin_mod(entry)
@@ -3031,12 +3112,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
         launcher_resolution_dialog = ui.dialog()
         metadata_detection_review_dialog = ui.dialog()
         delete_confirm_button: Button | None = None
+        delete_description = (
+            f"{entry.friendly} will be removed from Workshop client content."
+            if self._is_gmod_workshop_client_content_delete(
+                entry=entry,
+                action=NodeModMutationAction.DELETE,
+            )
+            else f"{entry.friendly} will be removed from the server."
+        )
 
         with ui.dialog() as delete_confirm_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
                     ui.label("Delete mod?").classes("text-xl font-black mod-title-small")
-                    ui.label(f"{entry.friendly} will be removed from the server.").classes("mod-subtitle text-sm")
+                    ui.label(delete_description).classes("mod-subtitle text-sm")
                     with ui.row().classes("w-full justify-end gap-2"):
                         ui.button("Cancel", on_click=delete_confirm_dialog.close).classes("mod-list-button secondary")
                         delete_confirm_button = ui.button(
@@ -3062,8 +3151,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         self._render_mod_detail_item(ui=ui, label="Origin", value=entry.origin)
                         self._render_mod_detail_item(ui=ui, label="Added", value=entry.added)
                         self._render_mod_detail_item(ui=ui, label="File download", value=download_text)
-                        if entry.client_required:
-                            self._render_mod_detail_item(ui=ui, label="Client content", value="Required")
+                        if entry.client_required or can_update_client_required:
+                            self._render_mod_detail_item(
+                                ui=ui,
+                                label="Client content",
+                                value="Required" if entry.client_required else "Optional",
+                            )
                         if supports_client_pack:
                             self._render_mod_detail_item(
                                 ui=ui,
@@ -3086,6 +3179,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         with ui.column().classes("mod-detail-item gap-1 mod-mod-details-description"):
                             ui.label("Description").classes("mod-stat-label")
                             ui.label(entry.description).classes("mod-stat-value break-words")
+                    if can_update_client_required:
+                        with ui.column().classes("mod-detail-item gap-2 mod-mod-details-client-content"):
+                            ui.label("Client content").classes("mod-stat-label")
+                            ui.label(
+                                (
+                                    "Players must download this Workshop item before joining."
+                                    if entry.client_required
+                                    else "Players do not need to download this Workshop item before joining."
+                                )
+                            ).classes("mod-subtitle text-xs")
+                            ui.button(
+                                self._mod_action_label(NodeModMutationAction.UPDATE_CLIENT_REQUIRED, entry),
+                                on_click=_create_mod_action_handler(NodeModMutationAction.UPDATE_CLIENT_REQUIRED),
+                            ).classes(self._mod_action_button_classes(NodeModMutationAction.UPDATE_CLIENT_REQUIRED, entry))
                     notes = entry.notes
                     if can_edit_notes or notes is not None:
                         with ui.column().classes("mod-detail-item gap-1 mod-mod-details-notes"):
@@ -3560,6 +3667,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.label(entry.friendly).classes("mod-row-title")
                 ui.label(entry.name).classes("mod-row-file")
             with ui.row().classes("mod-row-meta"):
+                if entry.client_required:
+                    ui.label("Client required").classes("mod-pill size")
                 if not show_source_page_link:
                     ui.label(entry.source.label).classes("mod-pill")
                 ui.label(entry.size_text).classes("mod-pill size")
@@ -3569,8 +3678,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     ui.label(entry.placement.label).classes("mod-pill")
                 if entry.client_pack.policy is not ClientPackPolicy.REQUIRED:
                     ui.label(entry.client_pack.policy.label).classes("mod-pill")
-                if entry.client_required:
-                    ui.label("Client required").classes("mod-pill")
                 show_download_block_badge: bool = entry.download_is_policy_blocked and not (
                     entry.mod_type is ModType.SERVER
                     and entry.download_block_reason == ModDownloadBlockReason.SERVER_ONLY.value

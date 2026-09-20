@@ -248,6 +248,8 @@ from node_api.mod import (
     NodeClientPackPublishRequest,
     NodeDownloadRequest,
     NodeGmodWorkshopAutoUpdateRequest,
+    NodeGmodWorkshopClientContentAddRequest,
+    NodeGmodWorkshopClientRequirementUpdateRequest,
     NodeGmodWorkshopSourceState,
     NodeGmodWorkshopClientContentUpdateRequest,
     NodeModEntry,
@@ -404,6 +406,7 @@ class _NodeGmodWorkshopSettings:
     workshop_collection_id: str | None
     client_content_workshop_ids: tuple[str, ...]
     workshop_auto_update: bool
+    client_content_workshop_excluded_ids: tuple[str, ...] = ()
 
 
 class _DummySettingsApp(App_Settings):
@@ -1701,6 +1704,15 @@ class NodeApiTests(unittest.TestCase):
         self.assertIn("/api/node/apps/{app_name}/mods/sources/steam_workshop/collection", handlers)
         self.assertIn("/api/node/apps/{app_name}/mods/sources/steam_workshop/auto-update", handlers)
         self.assertIn("/api/node/apps/{app_name}/mods/sources/steam_workshop/client-content", handlers)
+        self.assertIn("/api/node/apps/{app_name}/mods/sources/steam_workshop/client-content/items", handlers)
+        self.assertIn(
+            "/api/node/apps/{app_name}/mods/sources/steam_workshop/client-content/items/{item_id}",
+            handlers,
+        )
+        self.assertIn(
+            "/api/node/apps/{app_name}/mods/sources/steam_workshop/client-content/items/{item_id}/required",
+            handlers,
+        )
         self.assertIn("/api/node/ping", handlers)
         self.assertIn("/api/node/presence/stream", handlers)
         self.assertIn("/api/node/system/restart-schedules", handlers)
@@ -5608,6 +5620,10 @@ class NodeApiTests(unittest.TestCase):
             Power_Level.sudo,
         )
         self.assertEqual(required_mod_mutation_level(NodeModMutationAction.DELETE), Power_Level.sudo)
+        self.assertEqual(
+            required_mod_mutation_level(NodeModMutationAction.UPDATE_CLIENT_REQUIRED),
+            Power_Level.sudo,
+        )
 
     def test_mod_entry_includes_explicit_client_path(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -5733,7 +5749,7 @@ class NodeApiTests(unittest.TestCase):
             auto_update=False,
             server_mounted_count=3,
             client_content_ids=("200", "300"),
-            client_required_count=2,
+            client_required_count=3,
         )
         status = NodeModSourceStatus(
             source=ModSourceKind.STEAM_WORKSHOP,
@@ -5979,6 +5995,33 @@ class NodeApiTests(unittest.TestCase):
                 )
 
         self.assertEqual(getattr(raised.exception, "status_code"), 409)
+
+    def test_mutate_mod_rejects_client_requirement_outside_the_gmod_workshop_source(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mod = _TestMod(Mod_Config(name="example.jar", directory=Path(temp_dir)))
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.return_value = mod
+            app = _build_app(manager)
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(
+                    service.mutate_mod(
+                        app=app,
+                        mod_name=mod.name,
+                        action=NodeModMutationAction.UPDATE_CLIENT_REQUIRED,
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("GMod Workshop source", raised.exception.detail)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        manager.reload_mods.assert_not_awaited()
 
     def test_mutate_mod_enable_blocks_when_target_app_is_running(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -8625,6 +8668,128 @@ class NodeApiTests(unittest.TestCase):
         self.assertIs(result, refreshed)
         acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
         gmod.update_client_content_workshop_ids.assert_called_once_with(("200",))
+        invalidate_inventory.assert_called_once_with("gmod_alpha")
+        refresh_source.assert_awaited_once_with(app=app, source=ModSourceKind.STEAM_WORKSHOP)
+
+    def test_gmod_workshop_client_content_add_refreshes_only_workshop_source(self) -> None:
+        app = _build_app(Mock())
+        app.name = "gmod_alpha"
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        invalidate_inventory = Mock()
+        service = NodeModService(
+            node_name=lambda: "yuki",
+            require_acl=lambda: cast(Any, acl),
+            build_runtime_summary=AsyncMock(),
+            invalidate_client_pack_content=Mock(),
+            invalidate_mod_inventory=invalidate_inventory,
+            upload_mod_paths=AsyncMock(),
+            operations=cast(Any, Mock()),
+        )
+        gmod = Mock()
+        refreshed = Mock()
+        refresh_source = AsyncMock(return_value=refreshed)
+        request = NodeGmodWorkshopClientContentAddRequest(
+            item_reference="https://steamcommunity.com/sharedfiles/filedetails/?id=200"
+        )
+
+        with (
+            patch.object(NodeModService, "_require_gmod_workshop_app", return_value=gmod),
+            patch.object(service, "_refresh_source_inventory", new=refresh_source),
+        ):
+            result = asyncio.run(
+                service.add_gmod_workshop_client_content(
+                    app=app,
+                    add=request,
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertIs(result, refreshed)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        gmod.add_client_content_workshop_item.assert_called_once_with(request.item_reference)
+        invalidate_inventory.assert_called_once_with("gmod_alpha")
+        refresh_source.assert_awaited_once_with(app=app, source=ModSourceKind.STEAM_WORKSHOP)
+
+    def test_gmod_workshop_client_content_remove_returns_a_delete_mutation(self) -> None:
+        app = _build_app(Mock())
+        app.name = "gmod_alpha"
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        invalidate_inventory = Mock()
+        service = NodeModService(
+            node_name=lambda: "yuki",
+            require_acl=lambda: cast(Any, acl),
+            build_runtime_summary=AsyncMock(),
+            invalidate_client_pack_content=Mock(),
+            invalidate_mod_inventory=invalidate_inventory,
+            upload_mod_paths=AsyncMock(),
+            operations=cast(Any, Mock()),
+        )
+        gmod = Mock()
+        refresh_source = AsyncMock(return_value=Mock())
+
+        with (
+            patch.object(NodeModService, "_require_gmod_workshop_app", return_value=gmod),
+            patch.object(service, "_refresh_source_inventory", new=refresh_source),
+        ):
+            result = asyncio.run(
+                service.remove_gmod_workshop_client_content(
+                    app=app,
+                    item_id=" 200 ",
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertEqual(result.app_name, "gmod_alpha")
+        self.assertEqual(result.mod_name, "200")
+        self.assertIs(result.action, NodeModMutationAction.DELETE)
+        self.assertEqual(result.message, "Removed Workshop client content 200.")
+        self.assertIsNone(result.mod)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        gmod.remove_client_content_workshop_item.assert_called_once_with(" 200 ")
+        invalidate_inventory.assert_called_once_with("gmod_alpha")
+        refresh_source.assert_awaited_once_with(app=app, source=ModSourceKind.STEAM_WORKSHOP)
+
+    def test_gmod_workshop_client_requirement_update_returns_a_source_mutation(self) -> None:
+        app = _build_app(Mock())
+        app.name = "gmod_alpha"
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        invalidate_inventory = Mock()
+        service = NodeModService(
+            node_name=lambda: "yuki",
+            require_acl=lambda: cast(Any, acl),
+            build_runtime_summary=AsyncMock(),
+            invalidate_client_pack_content=Mock(),
+            invalidate_mod_inventory=invalidate_inventory,
+            upload_mod_paths=AsyncMock(),
+            operations=cast(Any, Mock()),
+        )
+        gmod = Mock()
+        refresh_source = AsyncMock(return_value=Mock())
+        request = NodeGmodWorkshopClientRequirementUpdateRequest(client_required=False)
+
+        with (
+            patch.object(NodeModService, "_require_gmod_workshop_app", return_value=gmod),
+            patch.object(service, "_refresh_source_inventory", new=refresh_source),
+        ):
+            result = asyncio.run(
+                service.update_gmod_workshop_item_client_required(
+                    app=app,
+                    item_id=" 200 ",
+                    update=request,
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertEqual(result.app_name, "gmod_alpha")
+        self.assertEqual(result.mod_name, "200")
+        self.assertIs(result.action, NodeModMutationAction.UPDATE_CLIENT_REQUIRED)
+        self.assertEqual(result.message, "Workshop item 200 is now optional for clients.")
+        self.assertIsNone(result.mod)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        gmod.update_workshop_item_client_required.assert_called_once_with(" 200 ", False)
         invalidate_inventory.assert_called_once_with("gmod_alpha")
         refresh_source.assert_awaited_once_with(app=app, source=ModSourceKind.STEAM_WORKSHOP)
 

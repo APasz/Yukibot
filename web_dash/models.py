@@ -87,6 +87,7 @@ from .runtime_imports import (
     NodeMinecraftRecipeWorkspaceState,
     NodeModDependencyResolutionResult,
     NodeModList,
+    NodeModMutationResult,
     NodeModPortalVersionList,
     NodeModUploadBatchResult,
     NodeSaveBatchMutationResult,
@@ -1419,6 +1420,66 @@ class ModWebModelsMixin(ModWebServiceSupport):
             json_payload={"item_ids": list(item_ids)},
         )
         return NodeModList.from_mapping(payload)
+
+    async def _remote_gmod_workshop_client_content_add_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        item_reference: str,
+        user: ModWebUser,
+    ) -> NodeModList:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/mods/sources/steam_workshop/client-content/items",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"item_reference": item_reference},
+        )
+        return NodeModList.from_mapping(payload)
+
+    async def _remote_gmod_workshop_client_content_delete_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        item_id: str,
+        user: ModWebUser,
+    ) -> NodeModMutationResult:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=(
+                f"/apps/{quote(app_name, safe='')}/mods/sources/steam_workshop/"
+                f"client-content/items/{quote(item_id, safe='')}"
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="DELETE",
+        )
+        return NodeModMutationResult.from_mapping(payload)
+
+    async def _remote_gmod_workshop_item_client_required_update_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        item_id: str,
+        client_required: bool,
+        user: ModWebUser,
+    ) -> NodeModMutationResult:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=(
+                f"/apps/{quote(app_name, safe='')}/mods/sources/steam_workshop/"
+                f"client-content/items/{quote(item_id, safe='')}/required"
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="PUT",
+            json_payload={"client_required": client_required},
+        )
+        return NodeModMutationResult.from_mapping(payload)
 
     async def _remote_minecraft_recipe_summaries_async(
         self,

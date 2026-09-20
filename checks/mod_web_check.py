@@ -1536,7 +1536,13 @@ class ModWebTests(unittest.TestCase):
             client_required=client_required,
         )
 
-    def _render_mod_info_dialog_labels(self, entry: NodeModEntry) -> list[str]:
+    def _render_mod_info_dialog_labels(
+        self,
+        entry: NodeModEntry,
+        *,
+        button_labels: list[str] | None = None,
+        user_has_level: bool = False,
+    ) -> list[str]:
         class FakeContainer:
             def __enter__(self) -> "FakeContainer":
                 return self
@@ -1591,6 +1597,7 @@ class ModWebTests(unittest.TestCase):
         class FakeUi:
             def __init__(self) -> None:
                 self.labels: list[FakeLabel] = []
+                self.button_labels: list[str] = []
 
             def dialog(self) -> FakeDialog:
                 return FakeDialog()
@@ -1618,7 +1625,8 @@ class ModWebTests(unittest.TestCase):
                 return FakeLink()
 
             def button(self, text: str, on_click: object | None = None) -> FakeButton:
-                del text, on_click
+                del on_click
+                self.button_labels.append(text)
                 return FakeButton()
 
         service = ModWebService()
@@ -1668,7 +1676,7 @@ class ModWebTests(unittest.TestCase):
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
 
         with (
-            patch.object(service, "_user_has_level", return_value=False),
+            patch.object(service, "_user_has_level", return_value=user_has_level),
             patch.object(service, "_available_mod_actions", return_value=()),
         ):
             service._render_mod_info_dialog(
@@ -1678,6 +1686,8 @@ class ModWebTests(unittest.TestCase):
                 user=user,
             )
 
+        if button_labels is not None:
+            button_labels.extend(ui.button_labels)
         return [label.text for label in ui.labels]
 
     def test_render_mod_info_dialog_shows_description_below_mod_pages_when_available(
@@ -1724,6 +1734,28 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertNotIn("Description", labels)
+
+    def test_render_mod_info_dialog_offers_the_collection_client_requirement_toggle(self) -> None:
+        button_labels: list[str] = []
+        labels = self._render_mod_info_dialog_labels(
+            self._mod_entry(
+                name="200",
+                friendly="Collection addon",
+                downloadable=False,
+                placement=ModPlacement.SERVER_ENABLED,
+                source=ModSourceKind.STEAM_WORKSHOP,
+                source_key="200",
+                available_actions=(ModAction.UPDATE_CLIENT_REQUIRED,),
+                artifact_available=False,
+                client_required=True,
+                client_pack_eligible=False,
+            ),
+            button_labels=button_labels,
+            user_has_level=True,
+        )
+
+        self.assertIn("Client content", labels)
+        self.assertIn("Mark client optional", button_labels)
 
     @staticmethod
     def _save_list(*, app_name: str = "minecraft_alpha") -> NodeSaveList:
@@ -12156,6 +12188,11 @@ class ModWebTests(unittest.TestCase):
             mod_pages=(ModPageLink(name="Workshop", url=workshop_url),),
             artifact_available=False,
             available_actions=(),
+            client_required=True,
+        )
+        client_required_badge = MagicMock()
+        ui.label.side_effect = lambda text: (
+            client_required_badge if text == "Client required" else MagicMock()
         )
 
         service._render_mod_download_row(
@@ -12171,8 +12208,14 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertIn(call("Remote"), ui.label.call_args_list)
+        self.assertIn(call("Client required"), ui.label.call_args_list)
         self.assertNotIn(call("Not local"), ui.label.call_args_list)
         self.assertNotIn(call("Steam Workshop"), ui.label.call_args_list)
+        self.assertLess(
+            ui.label.call_args_list.index(call("Client required")),
+            ui.label.call_args_list.index(call("Remote")),
+        )
+        client_required_badge.classes.assert_called_once_with("mod-pill size")
         ui.link.assert_called_once_with("Workshop", workshop_url, new_tab=True)
         source_link.classes.assert_called_once_with("mod-row-download")
         source_link.props.assert_called_once_with('rel="noopener noreferrer"')
@@ -12223,6 +12266,7 @@ class ModWebTests(unittest.TestCase):
                 mod_pages=(ModPageLink(name="Workshop", url=workshop_url),),
                 artifact_available=False,
                 available_actions=(),
+                client_required=True,
             ),
             *(self._mod_entry(name=f"mod-{index}.jar", friendly=f"Mod {index}") for index in range(1, 50)),
         )
@@ -12324,6 +12368,11 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("data-mod-download", virtual_row_template)
         self.assertIn('v-else-if="props.row.source_page_url"', virtual_row_template)
         self.assertIn('v-if="props.row.show_source"', virtual_row_template)
+        self.assertIn('v-if="props.row.show_client_required" class="mod-pill size"', virtual_row_template)
+        self.assertLess(
+            virtual_row_template.index('v-if="props.row.show_client_required"'),
+            virtual_row_template.index('v-if="props.row.show_source"'),
+        )
         self.assertIn("@click.stop", virtual_row_template)
         self.assertNotIn("$parent.$emit", virtual_row_template)
         self.assertIn('class="mod-pill size"', virtual_row_template)
@@ -12333,6 +12382,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(workshop_row["source_page_label"], "Workshop")
         self.assertEqual(workshop_row["source_page_url"], workshop_url)
         self.assertFalse(workshop_row["show_source"])
+        self.assertTrue(workshop_row["show_client_required"])
         self.assertIn("'mod-setting-badge', 'mod-mod-type-badge'", virtual_row_template)
         table.on.assert_called_once()
         self.assertEqual(table.on.call_args.args[0], "click")
@@ -12597,7 +12647,7 @@ class ModWebTests(unittest.TestCase):
         self.assertIn(call("Collection: Disabled"), ui.label.call_args_list)
         self.assertIn(call("No Workshop content configured."), ui.label.call_args_list)
 
-    def test_gmod_workshop_source_panel_uses_typed_client_content_ids(self) -> None:
+    def test_gmod_workshop_source_panel_renders_a_single_item_add_input(self) -> None:
         service = ModWebService()
         source_status = NodeModSourceStatus(
             source=ModSourceKind.STEAM_WORKSHOP,
@@ -12625,9 +12675,15 @@ class ModWebTests(unittest.TestCase):
                 source_status=source_status,
             )
 
-        self.assertIn(call("200 (200)"), ui.label.call_args_list)
-        self.assertIn(call("300 (300)"), ui.label.call_args_list)
         self.assertIs(ui.switch.call_args.kwargs["value"], False)
+        self.assertEqual(
+            [call.args[0] for call in ui.input.call_args_list],
+            ["Collection ID", "Workshop ID or URL"],
+        )
+        self.assertEqual(
+            ui.input.call_args_list[1].kwargs["placeholder"],
+            "123456789 or https://steamcommunity.com/sharedfiles/filedetails/?id=123456789",
+        )
         self.assertEqual(
             [call.args[0] for call in ui.input.return_value.classes.call_args_list],
             ["w-full mod-config-input", "w-full mod-config-input"],
@@ -12732,6 +12788,7 @@ class ModWebTests(unittest.TestCase):
         update_collection = AsyncMock()
         update_auto_update = AsyncMock()
         update_client_content = AsyncMock()
+        add_client_content = AsyncMock()
 
         with (
             patch.object(service, "_user_has_level", return_value=False),
@@ -12739,6 +12796,7 @@ class ModWebTests(unittest.TestCase):
             patch.object(service, "_remote_gmod_workshop_collection_update_async", new=update_collection),
             patch.object(service, "_remote_gmod_workshop_auto_update_async", new=update_auto_update),
             patch.object(service, "_remote_gmod_workshop_client_content_update_async", new=update_client_content),
+            patch.object(service, "_remote_gmod_workshop_client_content_add_async", new=add_client_content),
         ):
             with self.assertRaisesRegex(PermissionError, "Sudo"):
                 asyncio.run(
@@ -12772,11 +12830,20 @@ class ModWebTests(unittest.TestCase):
                         user=user,
                     )
                 )
+            with self.assertRaisesRegex(PermissionError, "Sudo"):
+                asyncio.run(
+                    service._add_gmod_workshop_client_content(
+                        model=model,
+                        item_reference="https://steamcommunity.com/sharedfiles/filedetails/?id=200",
+                        user=user,
+                    )
+                )
 
         refresh.assert_not_awaited()
         update_collection.assert_not_awaited()
         update_auto_update.assert_not_awaited()
         update_client_content.assert_not_awaited()
+        add_client_content.assert_not_awaited()
 
     def test_bulk_mod_update_check_skips_non_local_entries(self) -> None:
         service = ModWebService()
@@ -14496,6 +14563,156 @@ class ModWebTests(unittest.TestCase):
             actions = service._available_mod_actions(user=user, entry=entry)
 
         self.assertEqual(actions, (NodeModMutationAction.DELETE,))
+
+    def test_client_only_gmod_workshop_row_uses_the_standard_delete_action(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+        entry = self._mod_entry(
+            name="200",
+            friendly="Workshop addon",
+            enabled=False,
+            mod_type=ModType.CLIENT,
+            downloadable=False,
+            placement=ModPlacement.CLIENT_ONLY,
+            source=ModSourceKind.STEAM_WORKSHOP,
+            source_key="200",
+            available_actions=(ModAction.DELETE,),
+            artifact_available=False,
+            client_required=True,
+            client_pack_eligible=False,
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="gmod_alpha")),
+        )
+        expected_result = NodeModMutationResult(
+            app_name="gmod_alpha",
+            app_friendly="Garry's Mod Alpha",
+            node="yuki",
+            mod_name="200",
+            action=NodeModMutationAction.DELETE,
+            message="Removed Workshop client content 200.",
+            mod=None,
+        )
+        delete_client_content = AsyncMock(return_value=expected_result)
+        local_mutation = AsyncMock()
+        node = Mock()
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_gmod_workshop_client_content_delete_async",
+                new=delete_client_content,
+            ),
+            patch.object(service, "_remote_mod_mutation_async", new=local_mutation),
+        ):
+            actions = service._available_mod_actions(user=user, entry=entry)
+            result = asyncio.run(
+                service._mutate_mod(
+                    model=model,
+                    entry=entry,
+                    action=NodeModMutationAction.DELETE,
+                    user=user,
+                )
+            )
+
+        self.assertEqual(actions, (NodeModMutationAction.DELETE,))
+        self.assertIs(result, expected_result)
+        delete_client_content.assert_awaited_once_with(node, "gmod_alpha", "200", user)
+        local_mutation.assert_not_awaited()
+
+    def test_collection_gmod_workshop_row_toggles_its_client_requirement_from_details(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+        entry = self._mod_entry(
+            name="200",
+            friendly="Collection addon",
+            downloadable=False,
+            placement=ModPlacement.SERVER_ENABLED,
+            source=ModSourceKind.STEAM_WORKSHOP,
+            source_key="200",
+            available_actions=(ModAction.UPDATE_CLIENT_REQUIRED,),
+            artifact_available=False,
+            client_required=True,
+            client_pack_eligible=False,
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="gmod_alpha")),
+        )
+        expected_result = NodeModMutationResult(
+            app_name="gmod_alpha",
+            app_friendly="Garry's Mod Alpha",
+            node="yuki",
+            mod_name="200",
+            action=NodeModMutationAction.UPDATE_CLIENT_REQUIRED,
+            message="Workshop item 200 is now optional for clients.",
+            mod=None,
+        )
+        update_client_requirement = AsyncMock(return_value=expected_result)
+        local_mutation = AsyncMock()
+        node = Mock()
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_gmod_workshop_item_client_required_update_async",
+                new=update_client_requirement,
+            ),
+            patch.object(service, "_remote_mod_mutation_async", new=local_mutation),
+        ):
+            result = asyncio.run(
+                service._mutate_mod(
+                    model=model,
+                    entry=entry,
+                    action=NodeModMutationAction.UPDATE_CLIENT_REQUIRED,
+                    user=user,
+                )
+            )
+
+        self.assertIs(result, expected_result)
+        self.assertEqual(
+            ModWebService._mod_action_label(NodeModMutationAction.UPDATE_CLIENT_REQUIRED, entry),
+            "Mark client optional",
+        )
+        update_client_requirement.assert_awaited_once_with(node, "gmod_alpha", "200", False, user)
+        local_mutation.assert_not_awaited()
+
+    def test_add_gmod_workshop_client_content_sends_one_item_reference(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="gmod_alpha")),
+        )
+        node = Mock()
+        expected_result = self._mod_list(app_name="gmod_alpha")
+        add_client_content = AsyncMock(return_value=expected_result)
+        item_reference = "https://steamcommunity.com/sharedfiles/filedetails/?id=200"
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_gmod_workshop_client_content_add_async",
+                new=add_client_content,
+            ),
+        ):
+            result = asyncio.run(
+                service._add_gmod_workshop_client_content(
+                    model=model,
+                    item_reference=item_reference,
+                    user=user,
+                )
+            )
+
+        self.assertIs(result, expected_result)
+        add_client_content.assert_awaited_once_with(node, "gmod_alpha", item_reference, user)
 
     def test_mutate_mod_allows_admin_enable_for_regular_mod(self) -> None:
         service = ModWebService()

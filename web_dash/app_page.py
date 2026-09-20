@@ -6843,6 +6843,9 @@ class ModWebAppPageMixin(
                                     <div class="mod-row-file">{{ props.row.file }}</div>
                                   </div>
                                   <div class="mod-row-meta">
+                                    <span v-if="props.row.show_client_required" class="mod-pill size">
+                                      Client required
+                                    </span>
                                     <span v-if="props.row.show_source" class="mod-pill">{{ props.row.source }}</span>
                                     <span class="mod-pill size">{{ props.row.size }}</span>
                                     <span v-if="props.row.update_available" class="mod-pill size update">Update</span>
@@ -6851,9 +6854,6 @@ class ModWebAppPageMixin(
                                     </span>
                                     <span v-if="props.row.show_policy" class="mod-pill">
                                       {{ props.row.policy }}
-                                    </span>
-                                    <span v-if="props.row.show_client_required" class="mod-pill">
-                                      Client required
                                     </span>
                                     <span v-if="props.row.show_download_block" class="mod-pill blocked">
                                       {{ props.row.download_block_label }}
@@ -7066,14 +7066,8 @@ class ModWebAppPageMixin(
         )
         server_mounted_count = workshop_state.server_mounted_count
         auto_update_enabled = workshop_state.auto_update
-        client_content_ids = workshop_state.client_content_ids
         client_required_count = workshop_state.client_required_count
         can_manage = self._user_has_level(user, Power_Level.sudo)
-        workshop_entries_by_id = {
-            entry.source_key: entry
-            for entry in model.mods.mods
-            if entry.source is ModSourceKind.STEAM_WORKSHOP and entry.source_key is not None
-        }
 
         async def apply_refresh() -> None:
             try:
@@ -7101,18 +7095,19 @@ class ModWebAppPageMixin(
             ui.notify("Collection saved; applies on next start.", type="positive")
             self._guarded_reload(ui=ui)
 
-        async def save_client_content(item_ids: tuple[str, ...]) -> None:
+        async def add_client_content(item_reference: str) -> bool:
             try:
-                await self._update_gmod_workshop_client_content(
+                await self._add_gmod_workshop_client_content(
                     model=model,
-                    item_ids=item_ids,
+                    item_reference=item_reference,
                     user=user,
                 )
             except Exception as xcp:
-                ui.notify(f"Workshop client content update failed: {xcp}", type="negative")
-                return
-            ui.notify("Client content saved; manifest regenerated.", type="positive")
+                ui.notify(f"Workshop item add failed: {xcp}", type="negative")
+                return False
+            ui.notify("Workshop item added as client content; manifest regenerated.", type="positive")
             self._guarded_reload(ui=ui)
+            return True
 
         with ui.card().classes("mod-setting-card w-full"):
             with ui.column().classes("w-full flex-wrap gap-3").style(
@@ -7203,72 +7198,46 @@ class ModWebAppPageMixin(
                         if not can_manage:
                             collection_button.disable()
 
-                        with ui.dialog() as client_content_dialog:
+                        with ui.dialog() as add_client_content_dialog:
                             with ui.card().classes("mod-card mod-dialog-card"):
                                 with ui.column().classes("w-full gap-4 p-5"):
-                                    ui.label("Workshop Client Content").classes(
+                                    ui.label("Add Workshop Item").classes(
                                         "text-xl font-black mod-title-small"
                                     )
                                     ui.label(
-                                        "Explicit client content; does not alter the collection."
+                                        "Adds client-required content without changing the collection."
                                     ).classes("mod-subtitle text-sm")
-                                    if client_content_ids:
-                                        for item_id in client_content_ids:
-                                            entry = workshop_entries_by_id.get(item_id)
-                                            title = item_id if entry is None else entry.friendly
-                                            with ui.row().classes("w-full items-center justify-between gap-2"):
-                                                ui.label(f"{title} ({item_id})").classes("mod-subtitle text-sm")
-
-                                                async def remove_client_content(
-                                                    item_id_to_remove: str = item_id,
-                                                ) -> None:
-                                                    await save_client_content(
-                                                        tuple(
-                                                            configured_item_id
-                                                            for configured_item_id in client_content_ids
-                                                            if configured_item_id != item_id_to_remove
-                                                        )
-                                                    )
-
-                                                remove_button = ui.button(
-                                                    "Remove",
-                                                    on_click=remove_client_content,
-                                                ).classes("mod-list-button danger")
-                                                if not can_manage:
-                                                    remove_button.disable()
                                     add_input = ui.input(
-                                        "Workshop IDs",
-                                        placeholder="Separate multiple IDs with spaces or commas",
+                                        "Workshop ID or URL",
+                                        placeholder=(
+                                            "123456789 or https://steamcommunity.com/sharedfiles/filedetails/?id=123456789"
+                                        ),
                                     ).classes("w-full mod-config-input")
 
-                                    async def add_client_content() -> None:
-                                        submitted_ids = tuple(
-                                            item_id
-                                            for item_id in _value_as_text(add_input).replace(",", " ").split()
-                                            if item_id
-                                        )
-                                        if not submitted_ids:
-                                            ui.notify("Enter at least one Workshop ID.", type="warning")
+                                    async def submit_client_content_item() -> None:
+                                        item_reference = _value_as_text(add_input)
+                                        if not item_reference.strip():
+                                            ui.notify("Enter a Workshop ID or URL.", type="warning")
                                             return
-                                        deduplicated_ids = tuple(dict.fromkeys((*client_content_ids, *submitted_ids)))
-                                        await save_client_content(deduplicated_ids)
+                                        if await add_client_content(item_reference):
+                                            add_client_content_dialog.close()
 
                                     with ui.row().classes("w-full justify-end gap-2"):
-                                        ui.button("Close", on_click=client_content_dialog.close).classes(
+                                        ui.button("Cancel", on_click=add_client_content_dialog.close).classes(
                                             "mod-list-button secondary"
                                         )
                                         add_button = ui.button(
-                                            "Add",
-                                            on_click=add_client_content,
+                                            "Add item",
+                                            on_click=submit_client_content_item,
                                         ).classes("mod-list-button")
                                         if not can_manage:
                                             add_button.disable()
-                        client_content_button = ui.button(
-                            "Client content",
-                            on_click=client_content_dialog.open,
+                        add_client_content_button = ui.button(
+                            "Add Workshop item",
+                            on_click=add_client_content_dialog.open,
                         ).classes("mod-list-button secondary")
                         if not can_manage:
-                            client_content_button.disable()
+                            add_client_content_button.disable()
 
                         refresh_button = ui.button("Refresh", on_click=apply_refresh).classes("mod-list-button")
                         if not can_manage:

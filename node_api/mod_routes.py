@@ -28,6 +28,8 @@ from .mod import (
     NodeClientPackPublishRequest,
     NodeDownloadRequest,
     NodeGmodWorkshopAutoUpdateRequest,
+    NodeGmodWorkshopClientContentAddRequest,
+    NodeGmodWorkshopClientRequirementUpdateRequest,
     NodeGmodWorkshopClientContentUpdateRequest,
     NodeGmodWorkshopCollectionUpdateRequest,
     NodeModMetadataFetchRequest,
@@ -173,6 +175,101 @@ def register_mod_routes(
             actor_user_id=actor_user_id,
             node_name=auth.node_name,
             app_name=app_name,
+            required_level=Power_Level.sudo.name,
+        )
+        return result.to_mapping()
+
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/sources/steam_workshop/client-content/items")
+    async def _add_gmod_workshop_client_content(
+        app_name: str,
+        payload: dict[str, object],
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        add = NodeGmodWorkshopClientContentAddRequest.model_validate(payload)
+        result = await mod_service.add_gmod_workshop_client_content(
+            app=resolve_app(app_name),
+            add=add,
+            actor_user_id=actor_user_id,
+        )
+        audit_log(
+            "gmod.workshop_client_content_added",
+            actor_user_id=actor_user_id,
+            node_name=auth.node_name,
+            app_name=app_name,
+            mod_name=add.item_reference,
+            required_level=Power_Level.sudo.name,
+        )
+        return result.to_mapping()
+
+    @nicegui_app.delete(
+        f"{api_prefix}/apps/{{app_name}}/mods/sources/steam_workshop/client-content/items/{{item_id}}"
+    )
+    async def _remove_gmod_workshop_client_content(
+        app_name: str,
+        item_id: str,
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        result = await mod_service.remove_gmod_workshop_client_content(
+            app=resolve_app(app_name),
+            item_id=item_id,
+            actor_user_id=actor_user_id,
+        )
+        audit_log(
+            "gmod.workshop_client_content_removed",
+            actor_user_id=actor_user_id,
+            node_name=auth.node_name,
+            app_name=app_name,
+            mod_name=result.mod_name,
+            required_level=Power_Level.sudo.name,
+        )
+        return result.to_mapping()
+
+    @nicegui_app.put(
+        f"{api_prefix}/apps/{{app_name}}/mods/sources/steam_workshop/client-content/items/{{item_id}}/required"
+    )
+    async def _update_gmod_workshop_item_client_required(
+        app_name: str,
+        item_id: str,
+        payload: dict[str, object],
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        context = auth.require_access(
+            request,
+            access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+        )
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        update = NodeGmodWorkshopClientRequirementUpdateRequest.model_validate(payload)
+        result = await mod_service.update_gmod_workshop_item_client_required(
+            app=resolve_app(app_name),
+            item_id=item_id,
+            update=update,
+            actor_user_id=actor_user_id,
+        )
+        audit_log(
+            "gmod.workshop_client_requirement_updated",
+            actor_user_id=actor_user_id,
+            node_name=auth.node_name,
+            app_name=app_name,
+            mod_name=result.mod_name,
             required_level=Power_Level.sudo.name,
         )
         return result.to_mapping()

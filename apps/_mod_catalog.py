@@ -139,6 +139,7 @@ class ModAction(StrEnum):
     TOGGLE_DOWNLOAD_BLOCK = "toggle_download_block"
     UPDATE_PROPERTIES = "update_properties"
     UPDATE_NOTES = "update_notes"
+    UPDATE_CLIENT_REQUIRED = "update_client_required"
     DELETE = "delete"
 
 

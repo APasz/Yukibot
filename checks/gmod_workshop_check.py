@@ -38,6 +38,7 @@ class _WorkshopSettings:
     workshop_collection_id: str | None
     client_content_workshop_ids: tuple[str, ...]
     workshop_auto_update: bool = True
+    client_content_workshop_excluded_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -45,6 +46,7 @@ class _MutableWorkshopSettings:
     workshop_collection_id: str | None
     client_content_workshop_ids: tuple[str, ...]
     workshop_auto_update: bool = True
+    client_content_workshop_excluded_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -246,7 +248,7 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         entries = source.list_entries()
         self.assertEqual(tuple(entry.reference.source_key for entry in entries), ("200", "400", "300"))
         self.assertNotIn("100", tuple(entry.name for entry in entries))
-        shared, server_only, client_only = entries
+        shared, collection_member, client_only = entries
         self.assertIs(shared.reference.source, ModSourceKind.STEAM_WORKSHOP)
         self.assertEqual(shared.friendly, "Shared addon")
         self.assertEqual(shared.origin, "Steam Workshop")
@@ -259,19 +261,21 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(shared.enabled)
         self.assertTrue(shared.server_loadable)
         self.assertTrue(shared.client_required)
-        self.assertFalse(server_only.client_required)
-        self.assertTrue(server_only.server_loadable)
+        self.assertTrue(collection_member.client_required)
+        self.assertTrue(collection_member.server_loadable)
         self.assertIsNone(client_only.version)
         self.assertEqual(client_only.placement, ModPlacement.CLIENT_ONLY)
         self.assertFalse(client_only.server_loadable)
         self.assertTrue(client_only.client_required)
+        self.assertEqual(shared.available_actions, frozenset({ModAction.UPDATE_CLIENT_REQUIRED}))
+        self.assertEqual(collection_member.available_actions, frozenset({ModAction.UPDATE_CLIENT_REQUIRED}))
+        self.assertEqual(client_only.available_actions, frozenset({ModAction.DELETE}))
         for entry in entries:
             with self.subTest(item_id=entry.reference.source_key):
                 self.assertFalse(entry.downloadable)
                 self.assertFalse(entry.client_pack_eligible)
                 self.assertIsNone(entry.artifact)
                 self.assertFalse(entry.artifact_available)
-                self.assertEqual(entry.available_actions, frozenset())
                 self.assertFalse(entry.client_pack.included_in_client)
         self.assertEqual([request.url for request in transport.requests], [_COLLECTION_ENDPOINT, _DETAILS_ENDPOINT])
         self.assertTrue(factory.timeouts)
@@ -303,10 +307,12 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
     async def test_collection_metadata_populates_typed_source_state_without_a_collection_row(self) -> None:
         def responder(url: str, _data: Mapping[str, str]) -> object:
             if url == _COLLECTION_ENDPOINT:
-                return _collection_payload("100", ("200",))
+                return _collection_payload("100", ("200", "400"))
             if url == _DETAILS_ENDPOINT:
                 return _details_payload(
                     _detail("200", title="Mounted addon"),
+                    _detail("300", title="Explicit client addon"),
+                    _detail("400", title="Collection addon"),
                     _detail("100", title="My server collection"),
                 )
             raise AssertionError(f"Unexpected Steam endpoint: {url}")
@@ -321,11 +327,55 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         state = source.source_state
         self.assertEqual(state.collection_id, "100")
         self.assertEqual(state.collection_title, "My server collection")
-        self.assertEqual(state.server_mounted_count, 1)
+        self.assertEqual(state.server_mounted_count, 2)
         self.assertEqual(state.client_content_ids, ("200", "300"))
-        self.assertEqual(state.client_required_count, 2)
+        self.assertEqual(state.client_required_count, 3)
         self.assertFalse(state.auto_update)
         self.assertNotIn("100", tuple(entry.name for entry in source.list_entries()))
+
+    async def test_collection_client_requirement_can_be_overridden_per_item(self) -> None:
+        def responder(url: str, _data: Mapping[str, str]) -> object:
+            if url == _COLLECTION_ENDPOINT:
+                return _collection_payload("100", ("200", "400"))
+            if url == _DETAILS_ENDPOINT:
+                return _details_payload(
+                    _detail("200", title="Required collection addon"),
+                    _detail("400", title="Optional collection addon"),
+                    _detail("100", title="My server collection"),
+                )
+            raise AssertionError(f"Unexpected Steam endpoint: {url}")
+
+        settings = _MutableWorkshopSettings(
+            "100",
+            (),
+            client_content_workshop_excluded_ids=("400",),
+        )
+        source = GmodWorkshopSource(
+            settings=lambda: settings,
+            session_factory=_FakeSessionFactory(_SteamTransport(responder)),
+        )
+
+        await source.refresh()
+
+        entries_by_id = {entry.reference.source_key: entry for entry in source.list_entries()}
+        self.assertTrue(entries_by_id["200"].client_required)
+        self.assertFalse(entries_by_id["400"].client_required)
+        self.assertEqual(
+            entries_by_id["200"].available_actions,
+            frozenset({ModAction.UPDATE_CLIENT_REQUIRED}),
+        )
+        self.assertEqual(
+            entries_by_id["400"].available_actions,
+            frozenset({ModAction.UPDATE_CLIENT_REQUIRED}),
+        )
+        self.assertEqual(source.server_mounted_item_ids(), ("200", "400"))
+        self.assertTrue(source.is_server_mounted_item("200"))
+        self.assertFalse(source.is_server_mounted_item("999"))
+
+        settings.workshop_collection_id = "500"
+
+        self.assertEqual(source.server_mounted_item_ids(), ())
+        self.assertFalse(source.is_server_mounted_item("200"))
 
     async def test_no_configured_workshop_content_does_not_call_steam(self) -> None:
         transport = _SteamTransport(lambda _url, _data: AssertionError("Steam should not be called"))
