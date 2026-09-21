@@ -14679,6 +14679,13 @@ class ModWebTests(unittest.TestCase):
             ModWebService._mod_action_label(NodeModMutationAction.UPDATE_CLIENT_REQUIRED, entry),
             "Mark client optional",
         )
+        self.assertEqual(
+            ModWebService._mod_action_label(
+                NodeModMutationAction.UPDATE_CLIENT_REQUIRED,
+                replace(entry, client_required=False),
+            ),
+            "Require on client",
+        )
         update_client_requirement.assert_awaited_once_with(node, "gmod_alpha", "200", False, user)
         local_mutation.assert_not_awaited()
 

@@ -406,7 +406,6 @@ class _NodeGmodWorkshopSettings:
     workshop_collection_id: str | None
     client_content_workshop_ids: tuple[str, ...]
     workshop_auto_update: bool
-    client_content_workshop_excluded_ids: tuple[str, ...] = ()
 
 
 class _DummySettingsApp(App_Settings):
@@ -8864,6 +8863,51 @@ class NodeApiTests(unittest.TestCase):
         invalidate_inventory.assert_called_once_with("gmod_alpha")
         update.assert_called_once_with(False)
         refresh.assert_not_awaited()
+
+    def test_gmod_workshop_source_refresh_does_not_rewrite_the_client_manifest(self) -> None:
+        settings = _NodeGmodWorkshopSettings(
+            workshop_collection_id=None,
+            client_content_workshop_ids=(),
+            workshop_auto_update=True,
+        )
+        workshop = GmodWorkshopSource(settings=lambda: settings)
+        gmod = object.__new__(Gmod)
+        gmod.name = "gmod_alpha"
+        gmod.friendly = "GMod Alpha"
+        gmod.mod_catalog = ModCatalog((workshop,))
+        gmod._workshop_source = workshop
+        service = NodeModService(
+            node_name=lambda: "yuki",
+            require_acl=Mock(),
+            build_runtime_summary=AsyncMock(
+                return_value=NodeAppRuntimeSummary(
+                    running=False,
+                    enabled=True,
+                    version=None,
+                    player_count=None,
+                    player_capacity=None,
+                    relay_support=ChatRelaySupport.NONE,
+                    storage_percent=None,
+                    storage_free_bytes=None,
+                    storage_total_bytes=None,
+                )
+            ),
+            invalidate_client_pack_content=Mock(),
+            invalidate_mod_inventory=Mock(),
+            upload_mod_paths=AsyncMock(),
+            operations=cast(Any, Mock()),
+        )
+
+        with patch.object(gmod, "sync_workshop_manifest") as sync_workshop_manifest:
+            result = asyncio.run(
+                service._refresh_source_inventory(
+                    app=gmod,
+                    source=ModSourceKind.STEAM_WORKSHOP,
+                )
+            )
+
+        self.assertEqual(result.mods, ())
+        sync_workshop_manifest.assert_not_called()
 
     def test_unknown_mod_source_refresh_does_not_invalidate_inventory(self) -> None:
         app = _build_app(Mock())

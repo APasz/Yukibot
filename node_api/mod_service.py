@@ -488,8 +488,6 @@ class NodeModService:
                 await catalog.refresh_source(source, invalidate=True)
             except LookupError as xcp:
                 raise _http_exception(404, str(xcp)) from xcp
-            if source is ModSourceKind.STEAM_WORKSHOP and isinstance(app, Gmod):
-                app.sync_workshop_manifest()
             inventory = self._inventory_from_catalog(app=app, catalog=catalog)
             self._inventory_cache[app_key] = inventory
         app_stats = await self._build_runtime_summary(app)

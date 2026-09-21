@@ -42,7 +42,7 @@ _STEAM_WORKSHOP_ORIGIN: Final[str] = "Steam Workshop"
 _STEAM_WORKSHOP_METADATA_CACHE_TTL_SECONDS: Final[float] = 10 * 60
 _STEAM_WORKSHOP_FAILURE_CACHE_TTL_SECONDS: Final[float] = 30.0
 
-type _WorkshopMetadataCacheKey = tuple[str | None, tuple[str, ...], tuple[str, ...]]
+type _WorkshopMetadataCacheKey = tuple[str | None, tuple[str, ...]]
 
 
 class GmodWorkshopSettings(Protocol):
@@ -56,9 +56,6 @@ class GmodWorkshopSettings(Protocol):
 
     @property
     def client_content_workshop_ids(self) -> tuple[str, ...]: ...
-
-    @property
-    def client_content_workshop_excluded_ids(self) -> tuple[str, ...]: ...
 
 
 class _WorkshopSessionFactory(Protocol):
@@ -103,14 +100,13 @@ class _WorkshopItemMetadata:
 class _ConfiguredWorkshopContent:
     collection_id: str | None
     client_item_ids: tuple[str, ...]
-    client_optional_item_ids: tuple[str, ...]
     auto_update: bool
 
     @property
     def cache_key(self) -> _WorkshopMetadataCacheKey:
         """Return the configuration that changes Steam-resolved inventory."""
 
-        return (self.collection_id, self.client_item_ids, self.client_optional_item_ids)
+        return (self.collection_id, self.client_item_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,7 +231,6 @@ class GmodWorkshopSource:
                             roles_by_item_id,
                             item_id=item_id,
                             server_mounted=True,
-                            client_required=item_id not in configured.client_optional_item_ids,
                         )
                 for item_id in configured.client_item_ids:
                     if item_id == configured.collection_id:
@@ -290,10 +285,10 @@ class GmodWorkshopSource:
     def server_mounted_item_ids(self) -> tuple[str, ...]:
         """Return known members of the currently configured mounted collection.
 
-        A failed refresh deliberately retains old entries for display, but those
-        entries must not leak into a newly selected collection's client-download
-        manifest. Changes to client delivery settings do not alter collection
-        membership, so they can safely reuse the last resolved member list.
+        A failed refresh deliberately retains old entries for display, but a
+        newly selected collection must not report those stale members. Changes
+        to client delivery settings do not alter collection membership, so they
+        can safely reuse the last resolved member list.
         """
 
         configured = self._configured_content(self._settings())
@@ -322,20 +317,11 @@ class GmodWorkshopSource:
         if not isinstance(raw_client_item_ids, tuple):
             raise _SteamWorkshopResponseError("Configured client Workshop IDs are invalid.")
         client_item_ids = tuple(self._workshop_id(item_id) for item_id in raw_client_item_ids)
-        raw_client_optional_item_ids = getattr(settings, "client_content_workshop_excluded_ids", ())
-        if not isinstance(raw_client_optional_item_ids, tuple):
-            raise _SteamWorkshopResponseError("Configured client Workshop exclusion IDs are invalid.")
-        client_optional_item_ids = tuple(
-            self._workshop_id(item_id) for item_id in raw_client_optional_item_ids
-        )
         if collection_id is not None:
-            # Older persisted settings may have duplicated the collection in
-            # resource.AddWorkshop content. Treat it as collection-only while
-            # exposing a valid state and never re-emitting it in a manifest.
+            # The collection root is launch configuration, not explicit client
+            # content. Ignore stale values defensively so it never becomes an
+            # inventory row or a resource.AddWorkshop candidate.
             client_item_ids = tuple(item_id for item_id in client_item_ids if item_id != collection_id)
-            client_optional_item_ids = tuple(
-                item_id for item_id in client_optional_item_ids if item_id != collection_id
-            )
         # The source predates this source-panel field. Keep existing in-process
         # adapters readable while the persisted Gmod_Settings contract remains
         # authoritative in production.
@@ -345,7 +331,6 @@ class GmodWorkshopSource:
         return _ConfiguredWorkshopContent(
             collection_id=collection_id,
             client_item_ids=client_item_ids,
-            client_optional_item_ids=client_optional_item_ids,
             auto_update=raw_auto_update,
         )
 

@@ -38,7 +38,6 @@ class _WorkshopSettings:
     workshop_collection_id: str | None
     client_content_workshop_ids: tuple[str, ...]
     workshop_auto_update: bool = True
-    client_content_workshop_excluded_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -46,7 +45,6 @@ class _MutableWorkshopSettings:
     workshop_collection_id: str | None
     client_content_workshop_ids: tuple[str, ...]
     workshop_auto_update: bool = True
-    client_content_workshop_excluded_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -261,7 +259,7 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(shared.enabled)
         self.assertTrue(shared.server_loadable)
         self.assertTrue(shared.client_required)
-        self.assertTrue(collection_member.client_required)
+        self.assertFalse(collection_member.client_required)
         self.assertTrue(collection_member.server_loadable)
         self.assertIsNone(client_only.version)
         self.assertEqual(client_only.placement, ModPlacement.CLIENT_ONLY)
@@ -329,27 +327,30 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.collection_title, "My server collection")
         self.assertEqual(state.server_mounted_count, 2)
         self.assertEqual(state.client_content_ids, ("200", "300"))
-        self.assertEqual(state.client_required_count, 3)
+        self.assertEqual(state.client_required_count, 2)
         self.assertFalse(state.auto_update)
         self.assertNotIn("100", tuple(entry.name for entry in source.list_entries()))
 
-    async def test_collection_client_requirement_can_be_overridden_per_item(self) -> None:
-        def responder(url: str, _data: Mapping[str, str]) -> object:
+    async def test_collection_members_remain_client_optional_when_the_collection_changes(self) -> None:
+        def responder(url: str, data: Mapping[str, str]) -> object:
             if url == _COLLECTION_ENDPOINT:
-                return _collection_payload("100", ("200", "400"))
+                collection_id = data["publishedfileids[0]"]
+                if collection_id == "100":
+                    return _collection_payload("100", ("200", "400"))
+                if collection_id == "500":
+                    return _collection_payload("500", ("600",))
+                raise AssertionError(f"Unexpected collection ID: {collection_id}")
             if url == _DETAILS_ENDPOINT:
+                item_count = int(data["itemcount"])
                 return _details_payload(
-                    _detail("200", title="Required collection addon"),
-                    _detail("400", title="Optional collection addon"),
-                    _detail("100", title="My server collection"),
+                    *(
+                        _detail(data[f"publishedfileids[{index}]"], title="Collection addon")
+                        for index in range(item_count)
+                    )
                 )
             raise AssertionError(f"Unexpected Steam endpoint: {url}")
 
-        settings = _MutableWorkshopSettings(
-            "100",
-            (),
-            client_content_workshop_excluded_ids=("400",),
-        )
+        settings = _MutableWorkshopSettings("100", ())
         source = GmodWorkshopSource(
             settings=lambda: settings,
             session_factory=_FakeSessionFactory(_SteamTransport(responder)),
@@ -358,7 +359,7 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
         await source.refresh()
 
         entries_by_id = {entry.reference.source_key: entry for entry in source.list_entries()}
-        self.assertTrue(entries_by_id["200"].client_required)
+        self.assertFalse(entries_by_id["200"].client_required)
         self.assertFalse(entries_by_id["400"].client_required)
         self.assertEqual(
             entries_by_id["200"].available_actions,
@@ -376,6 +377,14 @@ class GmodWorkshopSourceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(source.server_mounted_item_ids(), ())
         self.assertFalse(source.is_server_mounted_item("200"))
+
+        await source.refresh()
+
+        entries = source.list_entries()
+        self.assertEqual(tuple(entry.reference.source_key for entry in entries), ("600",))
+        self.assertTrue(entries[0].server_loadable)
+        self.assertFalse(entries[0].client_required)
+        self.assertEqual(source.server_mounted_item_ids(), ("600",))
 
     async def test_no_configured_workshop_content_does_not_call_steam(self) -> None:
         transport = _SteamTransport(lambda _url, _data: AssertionError("Steam should not be called"))

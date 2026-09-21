@@ -86,8 +86,6 @@ _GMOD_WORKSHOP_COLLECTION_ID_LABEL: Final[str] = "Workshop collection ID"
 _GMOD_CLIENT_CONTENT_WORKSHOP_ITEM_LABEL: Final[str] = "client content Workshop ID"
 _GMOD_CLIENT_CONTENT_WORKSHOP_REFERENCE_LABEL: Final[str] = "client content Workshop item"
 _GMOD_CLIENT_CONTENT_WORKSHOP_LIST_LABEL: Final[str] = "client content Workshop IDs"
-_GMOD_CLIENT_CONTENT_WORKSHOP_EXCLUSION_ITEM_LABEL: Final[str] = "client content Workshop exclusion ID"
-_GMOD_CLIENT_CONTENT_WORKSHOP_EXCLUSION_LIST_LABEL: Final[str] = "client content Workshop exclusion IDs"
 _GMOD_STEAM_ACCOUNT_COMMAND_RE: Final[re.Pattern[str]] = re.compile(
     r"\bsv_setsteamaccount(?:\s|$)",
     re.IGNORECASE,
@@ -303,46 +301,10 @@ def _normalise_gmod_client_content_workshop_ids(
 ) -> tuple[str, ...]:
     """Validate explicit client content against the configured collection."""
 
-    return _normalise_gmod_workshop_item_ids_excluding_collection(
-        raw_values,
-        collection_id=collection_id,
-        item_label=_GMOD_CLIENT_CONTENT_WORKSHOP_ITEM_LABEL,
-        list_label=_GMOD_CLIENT_CONTENT_WORKSHOP_LIST_LABEL,
-        deduplicate=deduplicate,
-    )
-
-
-def _normalise_gmod_client_content_workshop_excluded_ids(
-    raw_values: Sequence[object],
-    *,
-    collection_id: str | None,
-    deduplicate: bool = False,
-) -> tuple[str, ...]:
-    """Validate collection items explicitly excluded from client delivery."""
-
-    return _normalise_gmod_workshop_item_ids_excluding_collection(
-        raw_values,
-        collection_id=collection_id,
-        item_label=_GMOD_CLIENT_CONTENT_WORKSHOP_EXCLUSION_ITEM_LABEL,
-        list_label=_GMOD_CLIENT_CONTENT_WORKSHOP_EXCLUSION_LIST_LABEL,
-        deduplicate=deduplicate,
-    )
-
-
-def _normalise_gmod_workshop_item_ids_excluding_collection(
-    raw_values: Sequence[object],
-    *,
-    collection_id: str | None,
-    item_label: str,
-    list_label: str,
-    deduplicate: bool = False,
-) -> tuple[str, ...]:
-    """Validate a Workshop ID list that cannot contain its collection root."""
-
     item_ids = _normalise_gmod_workshop_item_ids(
         raw_values,
-        item_label=item_label,
-        list_label=list_label,
+        item_label=_GMOD_CLIENT_CONTENT_WORKSHOP_ITEM_LABEL,
+        list_label=_GMOD_CLIENT_CONTENT_WORKSHOP_LIST_LABEL,
         deduplicate=deduplicate,
     )
     if collection_id is None:
@@ -353,7 +315,8 @@ def _normalise_gmod_workshop_item_ids_excluding_collection(
     )
     if normalised_collection_id in item_ids:
         raise ValueError(
-            f"Garry's Mod {list_label} must not include the configured Workshop collection ID."
+            f"Garry's Mod {_GMOD_CLIENT_CONTENT_WORKSHOP_LIST_LABEL} must not include the configured Workshop "
+            "collection ID."
         )
     return item_ids
 
@@ -444,7 +407,6 @@ def ensure_gmod_managed_files(directory: Path) -> tuple[Path, ...]:
                     "workshop_collection_id": "",
                     "workshop_auto_update": GMOD_DEFAULT_WORKSHOP_AUTO_UPDATE,
                     "client_content_workshop_ids": [],
-                    "client_content_workshop_excluded_ids": [],
                 },
                 indent=4,
             )
@@ -460,7 +422,7 @@ def render_gmod_workshop_manifest(
     *,
     collection_id: str | None = None,
 ) -> str:
-    """Render the server-only Lua manifest for effective client Workshop content."""
+    """Render the server-only Lua manifest for explicit client Workshop content."""
 
     normalised_ids = _normalise_gmod_workshop_item_ids(
         workshop_item_ids,
@@ -797,22 +759,6 @@ class Gmod_Settings(App_Settings):
                         "next server start; do not include Lua-only addons."
                     ),
                 ),
-                Setting[tuple[str, ...]](
-                    _GmodWorkshopItemListSettingSpec(
-                        item_label=_GMOD_CLIENT_CONTENT_WORKSHOP_EXCLUSION_ITEM_LABEL,
-                        list_label=_GMOD_CLIENT_CONTENT_WORKSHOP_EXCLUSION_LIST_LABEL,
-                    ),
-                    "Client Content Workshop Exclusion IDs",
-                    "client_content_workshop_excluded_ids",
-                    (),
-                    default=(),
-                    power_level=Power_Level.sudo,
-                    show_in_settings=False,
-                    desc=(
-                        "Workshop collection item IDs that are mounted on the server but do not require a "
-                        "client download."
-                    ),
-                ),
             ],
         )
 
@@ -823,6 +769,9 @@ class Gmod_Settings(App_Settings):
 
     def save(self) -> dict[str, Any]:
         payload = _load_gmod_settings_payload(self.pointer)
+        # This was a private implementation detail of the former default-opt-out
+        # delivery model. A normal settings save is enough to discard stale data.
+        payload.pop("client_content_workshop_excluded_ids", None)
         for setting in self.options:
             setting.set(payload)
         self.pointer.write_text(json.dumps(payload, indent=4) + "\n", config.STR_ENCODE)
@@ -857,10 +806,6 @@ class Gmod_Settings(App_Settings):
     @property
     def client_content_workshop_ids(self) -> tuple[str, ...]:
         return self._workshop_item_id_tuple_setting_value("client_content_workshop_ids")
-
-    @property
-    def client_content_workshop_excluded_ids(self) -> tuple[str, ...]:
-        return self._workshop_item_id_tuple_setting_value("client_content_workshop_excluded_ids")
 
     def _string_setting_value(self, key: str) -> str:
         setting = self.get_setting(key)
@@ -977,7 +922,7 @@ class Gmod(App[App_Config]):
                 self.apply_version(self.detect_installed_version(), persist=False)
 
     async def post_init(self) -> None:
-        """Resolve collection content before synchronising its client-download manifest."""
+        """Initialise GMod and synchronise its explicit client-download manifest."""
 
         await super().post_init()
         self.sync_workshop_manifest()
@@ -1082,19 +1027,10 @@ class Gmod(App[App_Config]):
             settings.client_content_workshop_ids,
             collection_id=normalised_collection_id,
         )
-        excluded_item_ids = (
-            ()
-            if normalised_collection_id != settings.workshop_collection_id
-            else _normalise_gmod_client_content_workshop_excluded_ids(
-                settings.client_content_workshop_excluded_ids,
-                collection_id=normalised_collection_id,
-            )
-        )
         self._persist_workshop_settings(
             settings=settings,
             values=(
                 ("workshop_collection_id", "" if normalised_collection_id is None else normalised_collection_id),
-                ("client_content_workshop_excluded_ids", ", ".join(excluded_item_ids)),
             ),
         )
         self.has_mod_catalog.invalidate_source(
@@ -1131,11 +1067,6 @@ class Gmod(App[App_Config]):
             raise ValueError(f"Garry's Mod client content Workshop item is already configured: {item_id}.")
         return self._update_client_content_workshop_configuration(
             item_ids=(*item_ids, item_id),
-            excluded_item_ids=tuple(
-                excluded_item_id
-                for excluded_item_id in settings.client_content_workshop_excluded_ids
-                if excluded_item_id != item_id
-            ),
         )
 
     def remove_client_content_workshop_item(self, item_id: str) -> Path:
@@ -1158,11 +1089,7 @@ class Gmod(App[App_Config]):
     def update_client_content_workshop_ids(self, item_ids: Sequence[str]) -> Path:
         """Persist explicit resource.AddWorkshop IDs and synchronise their manifest."""
 
-        settings = self._require_settings()
-        return self._update_client_content_workshop_configuration(
-            item_ids=item_ids,
-            excluded_item_ids=settings.client_content_workshop_excluded_ids,
-        )
+        return self._update_client_content_workshop_configuration(item_ids=item_ids)
 
     def update_workshop_item_client_required(self, item_id: str, client_required: bool) -> Path:
         """Persist whether one collection-mounted item requires a client download."""
@@ -1179,33 +1106,24 @@ class Gmod(App[App_Config]):
             )
         settings = self._require_settings()
         item_ids = settings.client_content_workshop_ids
-        excluded_item_ids = settings.client_content_workshop_excluded_ids
         if client_required:
-            updated_item_ids = item_ids
-            updated_excluded_item_ids = tuple(
-                excluded_item_id for excluded_item_id in excluded_item_ids if excluded_item_id != normalised_item_id
+            updated_item_ids = (
+                item_ids
+                if normalised_item_id in item_ids
+                else (*item_ids, normalised_item_id)
             )
         else:
             updated_item_ids = tuple(
                 configured_item_id for configured_item_id in item_ids if configured_item_id != normalised_item_id
             )
-            updated_excluded_item_ids = (
-                excluded_item_ids
-                if normalised_item_id in excluded_item_ids
-                else (*excluded_item_ids, normalised_item_id)
-            )
-        return self._update_client_content_workshop_configuration(
-            item_ids=updated_item_ids,
-            excluded_item_ids=updated_excluded_item_ids,
-        )
+        return self._update_client_content_workshop_configuration(item_ids=updated_item_ids)
 
     def _update_client_content_workshop_configuration(
         self,
         *,
         item_ids: Sequence[str],
-        excluded_item_ids: Sequence[str],
     ) -> Path:
-        """Persist client-delivery settings and synchronise their owned Lua manifest."""
+        """Persist explicit client-delivery IDs and synchronise their owned Lua manifest."""
 
         settings = self._require_settings()
         deduplicated_item_ids = _normalise_gmod_client_content_workshop_ids(
@@ -1213,19 +1131,12 @@ class Gmod(App[App_Config]):
             collection_id=settings.workshop_collection_id,
             deduplicate=True,
         )
-        deduplicated_excluded_item_ids = _normalise_gmod_client_content_workshop_excluded_ids(
-            excluded_item_ids,
-            collection_id=settings.workshop_collection_id,
-            deduplicate=True,
-        )
         previous_item_ids = settings.client_content_workshop_ids
-        previous_excluded_item_ids = settings.client_content_workshop_excluded_ids
         previous_manifest_content = self._read_workshop_manifest_content()
         self._persist_workshop_settings(
             settings=settings,
             values=(
                 ("client_content_workshop_ids", ", ".join(deduplicated_item_ids)),
-                ("client_content_workshop_excluded_ids", ", ".join(deduplicated_excluded_item_ids)),
             ),
         )
         try:
@@ -1234,7 +1145,6 @@ class Gmod(App[App_Config]):
             self._restore_client_content_workshop_configuration_after_manifest_failure(
                 settings=settings,
                 previous_item_ids=previous_item_ids,
-                previous_excluded_item_ids=previous_excluded_item_ids,
                 previous_manifest_content=previous_manifest_content,
             )
             raise
@@ -1292,25 +1202,17 @@ class Gmod(App[App_Config]):
         )
 
     def sync_workshop_manifest(self) -> Path:
-        """Synchronise the current effective manifest through GMod's public API."""
+        """Synchronise the current explicit client-download manifest through GMod's public API."""
 
         return self._sync_workshop_manifest()
 
     def _sync_workshop_manifest(self) -> Path:
-        """Synchronise client downloads from explicit and resolved collection content."""
+        """Synchronise client downloads from explicit resource.AddWorkshop IDs only."""
 
         settings = self._require_settings()
-        excluded_item_ids = frozenset(settings.client_content_workshop_excluded_ids)
-        manifest_item_ids = list(settings.client_content_workshop_ids)
-        known_item_ids = set(manifest_item_ids)
-        for item_id in self._workshop_source.server_mounted_item_ids():
-            if item_id in excluded_item_ids or item_id in known_item_ids:
-                continue
-            manifest_item_ids.append(item_id)
-            known_item_ids.add(item_id)
         return sync_gmod_workshop_manifest(
             self.directory,
-            tuple(manifest_item_ids),
+            settings.client_content_workshop_ids,
             collection_id=settings.workshop_collection_id,
         )
 
@@ -1327,7 +1229,6 @@ class Gmod(App[App_Config]):
         *,
         settings: Gmod_Settings,
         previous_item_ids: tuple[str, ...],
-        previous_excluded_item_ids: tuple[str, ...],
         previous_manifest_content: str | None,
     ) -> None:
         """Restore this mutation's persisted and generated state after a manifest failure."""
@@ -1337,7 +1238,6 @@ class Gmod(App[App_Config]):
                 settings=settings,
                 values=(
                     ("client_content_workshop_ids", ", ".join(previous_item_ids)),
-                    ("client_content_workshop_excluded_ids", ", ".join(previous_excluded_item_ids)),
                 ),
             )
         except Exception:
@@ -1509,8 +1409,6 @@ class Gmod(App[App_Config]):
 
         self._reset_startup_status_probe()
         try:
-            if self._require_settings().workshop_collection_id is not None:
-                await self.has_mod_catalog.refresh_source(self._workshop_source.kind)
             self._sync_workshop_manifest()
             self._launch_token = token
             self.cmd_start = self._launch_command(token)

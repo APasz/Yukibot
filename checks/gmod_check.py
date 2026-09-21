@@ -138,7 +138,6 @@ class GmodSettingsTests(unittest.TestCase):
             self.assertIsNone(settings.workshop_collection_id)
             self.assertEqual(settings.workshop_auto_update, GMOD_DEFAULT_WORKSHOP_AUTO_UPDATE)
             self.assertEqual(settings.client_content_workshop_ids, ())
-            self.assertEqual(settings.client_content_workshop_excluded_ids, ())
             self.assertTrue(gmod_server_config_path(directory).is_file())
 
     def test_custom_launch_settings_drive_the_generated_command(self) -> None:
@@ -226,11 +225,9 @@ class GmodSettingsTests(unittest.TestCase):
         self.assertIsNone(settings.workshop_collection_id)
         self.assertTrue(settings.workshop_auto_update)
         self.assertEqual(settings.client_content_workshop_ids, ())
-        self.assertEqual(settings.client_content_workshop_excluded_ids, ())
         self.assertEqual(persisted["workshop_collection_id"], "")
         self.assertTrue(persisted["workshop_auto_update"])
         self.assertEqual(persisted["client_content_workshop_ids"], [])
-        self.assertEqual(persisted["client_content_workshop_excluded_ids"], [])
 
     def test_workshop_settings_generate_safe_launch_and_client_download_manifest(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
@@ -567,11 +564,9 @@ class GmodIntegrationTests(unittest.TestCase):
         self.assertNotIn("workshop_collection_id", setting_keys)
         self.assertNotIn("workshop_auto_update", setting_keys)
         self.assertNotIn("client_content_workshop_ids", setting_keys)
-        self.assertNotIn("client_content_workshop_excluded_ids", setting_keys)
         self.assertNotIn("workshop_collection_id", management_setting_keys)
         self.assertNotIn("workshop_auto_update", management_setting_keys)
         self.assertNotIn("client_content_workshop_ids", management_setting_keys)
-        self.assertNotIn("client_content_workshop_excluded_ids", management_setting_keys)
 
     def test_workshop_source_mutations_persist_and_regenerate_client_manifest(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -609,7 +604,7 @@ class GmodIntegrationTests(unittest.TestCase):
         self.assertIn('resource.AddWorkshop("345678901")', updated_manifest)
         self.assertEqual(invalidate.call_count, 2)
 
-    def test_collection_item_client_requirement_updates_the_client_download_manifest(self) -> None:
+    def test_collection_item_client_requirement_updates_only_the_explicit_client_manifest(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             app = self._app(directory)
@@ -621,30 +616,27 @@ class GmodIntegrationTests(unittest.TestCase):
                 return_value=("200", "300"),
             ):
                 default_manifest = app.sync_workshop_manifest().read_text(encoding="utf-8")
+                app.update_workshop_item_client_required("200", True)
+                required_settings = cast(
+                    dict[str, object],
+                    json.loads(gmod_settings_path(directory).read_text(encoding="utf-8")),
+                )
+                required_manifest = gmod_workshop_manifest_path(directory).read_text(encoding="utf-8")
                 app.update_workshop_item_client_required("200", False)
                 optional_settings = cast(
                     dict[str, object],
                     json.loads(gmod_settings_path(directory).read_text(encoding="utf-8")),
                 )
                 optional_manifest = gmod_workshop_manifest_path(directory).read_text(encoding="utf-8")
-                app.update_workshop_item_client_required("200", True)
-                required_manifest = gmod_workshop_manifest_path(directory).read_text(encoding="utf-8")
+                collection_member_still_mounted = app.workshop_source.is_server_mounted_item("200")
 
-            required_settings = cast(
-                dict[str, object],
-                json.loads(gmod_settings_path(directory).read_text(encoding="utf-8")),
-            )
-
-        self.assertIn('resource.AddWorkshop("200")', default_manifest)
-        self.assertIn('resource.AddWorkshop("300")', default_manifest)
+        self.assertNotIn("resource.AddWorkshop(", default_manifest)
+        self.assertEqual(required_settings["client_content_workshop_ids"], ["200"])
+        self.assertEqual(required_manifest.count('resource.AddWorkshop("200")'), 1)
+        self.assertNotIn('resource.AddWorkshop("300")', required_manifest)
         self.assertEqual(optional_settings["client_content_workshop_ids"], [])
-        self.assertEqual(optional_settings["client_content_workshop_excluded_ids"], ["200"])
-        self.assertNotIn('resource.AddWorkshop("200")', optional_manifest)
-        self.assertIn('resource.AddWorkshop("300")', optional_manifest)
-        self.assertIn('resource.AddWorkshop("200")', required_manifest)
-        self.assertIn('resource.AddWorkshop("300")', required_manifest)
-        self.assertEqual(required_settings["client_content_workshop_ids"], [])
-        self.assertEqual(required_settings["client_content_workshop_excluded_ids"], [])
+        self.assertNotIn("resource.AddWorkshop(", optional_manifest)
+        self.assertTrue(collection_member_still_mounted)
 
     def test_collection_item_client_requirement_rejects_items_outside_the_collection(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -1232,7 +1224,7 @@ class GmodIntegrationTests(unittest.TestCase):
         assert ready_event is not None
         self.assertTrue(ready_event.is_set())
 
-    def test_manifest_sync_failure_does_not_retain_the_gslt(self) -> None:
+    def test_manifest_sync_failure_does_not_query_workshop_metadata_or_retain_the_gslt(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
         with TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
@@ -1250,7 +1242,7 @@ class GmodIntegrationTests(unittest.TestCase):
 
         self.assertNotIn(token, app.cmd_start)
         self.assertIsNone(app._launch_token)
-        refresh_source.assert_awaited_once_with(app.workshop_source.kind)
+        refresh_source.assert_not_awaited()
 
     def test_start_waits_for_source_query_and_cleans_up_a_failed_readiness_check(self) -> None:
         token = "A0B1C2D3E4F5G6H7I8J9K0L1M2"
