@@ -441,17 +441,22 @@ async def _portal_maintenance_restart_loop(
 ) -> None:
     available_targets = (RestartTarget.BOT,)
     while not stop_event.is_set():
-        maintenance.reload()
-        now = datetime.now().astimezone()
-        due_targets = maintenance.due_restart_targets(now=now, available_targets=available_targets)
-        if due_targets:
-            maintenance.mark_triggered(due_targets, triggered_at=now)
-            log.critical(
-                "Portal maintenance restart: due=%s",
-                ",".join(target.value for target in due_targets),
-            )
-            on_restart(RestartKind.SCHEDULED_BOT)
-            continue
+        try:
+            if maintenance.reload():
+                now = datetime.now().astimezone()
+                due_targets = maintenance.due_restart_targets(now=now, available_targets=available_targets)
+                if due_targets:
+                    maintenance.mark_triggered(due_targets, triggered_at=now)
+                    log.critical(
+                        "Portal maintenance restart: due=%s",
+                        ",".join(target.value for target in due_targets),
+                    )
+                    on_restart(RestartKind.SCHEDULED_BOT)
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Portal maintenance restart cycle failed")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except asyncio.TimeoutError:
@@ -894,7 +899,8 @@ def main():
         await sync_bot_metadata(bot, initial=False)
 
     async def _run_maintenance_restart_cycle() -> None:
-        maintenance.reload()
+        if not maintenance.reload():
+            return
         available_targets = available_maintenance_restart_targets(profile)
         now = datetime.now().astimezone()
         due_warnings = maintenance.due_restart_warnings(now=now, available_targets=available_targets)
@@ -922,6 +928,7 @@ def main():
                 tts_notice_count,
             )
 
+        now = datetime.now().astimezone()
         due_targets = maintenance.due_restart_targets(now=now, available_targets=available_targets)
         if not due_targets:
             return
@@ -930,7 +937,7 @@ def main():
         if effective_target is None:
             return
 
-        scheduled_for = maintenance.next_restart_at(effective_target, now=now) or now.replace(second=0, microsecond=0)
+        scheduled_for = maintenance.next_restart_at(effective_target) or now.replace(second=0, microsecond=0)
         maintenance.mark_triggered(due_targets, triggered_at=now)
         schedule = maintenance.schedule_for(effective_target)
         due_names = ", ".join(target.value for target in due_targets)

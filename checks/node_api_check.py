@@ -9821,6 +9821,11 @@ class NodeApiTests(unittest.TestCase):
                         int(triggered_at.timestamp()),
                     )
 
+                    self.assertEqual(
+                        state.schedules[0].next_restart_timestamp,
+                        int(datetime.fromisoformat("2026-07-01T11:30:00+10:00").timestamp()),
+                    )
+
                     updated = await service.node_management.update_restart_schedule(
                         target=RestartTarget.SYSTEM,
                         interval_minutes=7 * 24 * 60,

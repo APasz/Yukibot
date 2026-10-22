@@ -15,11 +15,19 @@ import main
 from _manager import AppStartBlocker, AppStartBlockerKind, App_Manager
 from apps._app import App
 from apps._config import AppResourcePointProfile, App_Config
+from maintenance import MaintenanceService
 from mirror_models import MirrorProject
 from relay_notices import BotLifecycleStage, RelayNoticeSeverity, render_system_notice_text
+from restart_state import RestartKind
+from restart_targets import RestartTarget
 
 
 class _FakeApp(App[App_Config]):
+    _is_running: bool = False
+
+    def check_running(self) -> bool:
+        return self._is_running
+
     async def start(self) -> bool:
         return True
 
@@ -45,7 +53,6 @@ def _build_fake_app(*, friendly: str) -> _FakeApp:
         startup=None,
     )
     app._is_running = False
-    app.check_running = lambda app=app: cast(bool, getattr(app, "_is_running", False))  # type: ignore[method-assign]
     return app
 
 
@@ -75,8 +82,6 @@ def _build_resource_app(
             ram_points=running_ram_points if startup_ram_points is None else startup_ram_points,
         ),
     )
-    app._is_running = False
-    app.check_running = lambda app=app: cast(bool, getattr(app, "_is_running", False))  # type: ignore[method-assign]
     return app
 
 
@@ -410,6 +415,60 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
             )
 
         mirrors.sync_next_due_git_project.assert_called_once_with()
+
+    async def test_portal_maintenance_skips_failed_configuration_reload(self) -> None:
+        stop_event = asyncio.Event()
+        maintenance = Mock(spec=MaintenanceService)
+        maintenance.reload.side_effect = (False, True)
+        maintenance.due_restart_targets.return_value = (RestartTarget.BOT,)
+        on_restart = Mock(side_effect=lambda _: stop_event.set())
+
+        await main._portal_maintenance_restart_loop(
+            maintenance=maintenance,
+            stop_event=stop_event,
+            on_restart=on_restart,
+            interval_seconds=0,
+        )
+
+        self.assertEqual(maintenance.reload.call_count, 2)
+        maintenance.due_restart_targets.assert_called_once()
+        maintenance.mark_triggered.assert_called_once()
+        on_restart.assert_called_once_with(RestartKind.SCHEDULED_BOT)
+
+    async def test_portal_maintenance_retries_after_state_write_failure(self) -> None:
+        stop_event = asyncio.Event()
+        maintenance = Mock(spec=MaintenanceService)
+        maintenance.reload.return_value = True
+        maintenance.due_restart_targets.return_value = (RestartTarget.BOT,)
+        maintenance.mark_triggered.side_effect = (OSError("State file is temporarily unavailable"), None)
+        on_restart = Mock(side_effect=lambda _: stop_event.set())
+
+        with self.assertLogs("system", level="ERROR") as logs:
+            await main._portal_maintenance_restart_loop(
+                maintenance=maintenance,
+                stop_event=stop_event,
+                on_restart=on_restart,
+                interval_seconds=0,
+            )
+
+        self.assertEqual(maintenance.mark_triggered.call_count, 2)
+        self.assertIn("Portal maintenance restart cycle failed", logs.output[0])
+        on_restart.assert_called_once_with(RestartKind.SCHEDULED_BOT)
+
+    async def test_portal_maintenance_propagates_cancellation(self) -> None:
+        maintenance = Mock(spec=MaintenanceService)
+        maintenance.reload.side_effect = asyncio.CancelledError
+        on_restart = Mock()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await main._portal_maintenance_restart_loop(
+                maintenance=maintenance,
+                stop_event=asyncio.Event(),
+                on_restart=on_restart,
+                interval_seconds=0,
+            )
+
+        on_restart.assert_not_called()
 
     async def test_portal_process_action_exits_main_process_with_failure(self) -> None:
         restart_handler: Callable[[main.NodeSystemAction, bool, bool], None] = Mock()

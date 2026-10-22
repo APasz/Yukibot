@@ -25,6 +25,13 @@ MAX_RESTART_INTERVAL_MINUTES = 7 * 24 * 60
 MIN_RESTART_SAVE_LEAD_MINUTES = 60
 
 
+def _next_restart_timestamp(*, anchor_timestamp: int, interval_minutes: int, after_timestamp: int) -> int:
+    """Return the first anchor-aligned restart strictly after the given timestamp."""
+    interval_seconds = interval_minutes * 60
+    intervals_to_next = (after_timestamp - anchor_timestamp) // interval_seconds + 1
+    return anchor_timestamp + intervals_to_next * interval_seconds
+
+
 @dataclass(frozen=True, slots=True)
 class ScheduledRestartWarning:
     effective_target: RestartTarget
@@ -113,8 +120,11 @@ class MaintenanceService:
                 if anchor is None:
                     raise RuntimeError("Enabled restart schedule unexpectedly has no anchor timestamp.")
                 interval_seconds = interval_minutes * 60
-                intervals_to_next = (save_cutoff - anchor) // interval_seconds + 1
-                next_restart_timestamp = anchor + intervals_to_next * interval_seconds
+                next_restart_timestamp = _next_restart_timestamp(
+                    anchor_timestamp=anchor,
+                    interval_minutes=interval_minutes,
+                    after_timestamp=save_cutoff,
+                )
                 if next_restart_timestamp != anchor:
                     skipped_through_timestamp = next_restart_timestamp - interval_seconds
                     if skipped_through_timestamp <= 0:
@@ -271,30 +281,26 @@ class MaintenanceService:
             parts.append(f"{minutes}m")
         return " ".join(parts) or "0m"
 
-    def next_restart_at(
-        self,
-        target: RestartTarget,
-        *,
-        now: datetime | None = None,
-    ) -> datetime | None:
+    def next_restart_at(self, target: RestartTarget) -> datetime | None:
+        """Return the next unhandled restart, including an overdue occurrence."""
         return self._next_restart_for_schedule(self.schedule_for(target))
 
     @staticmethod
     def _next_restart_for_schedule(schedule: config.PersistedRestartSchedule) -> datetime | None:
+        """Return the first unhandled restart aligned to the original anchor."""
         if not schedule.enabled or schedule.anchor_timestamp is None:
             return None
-        if schedule.last_triggered_timestamp is None:
-            if schedule.skipped_through_timestamp is None:
-                next_timestamp = schedule.anchor_timestamp
-            else:
-                next_timestamp = schedule.skipped_through_timestamp + schedule.interval_minutes * 60
-        else:
-            next_timestamp = schedule.last_triggered_timestamp + schedule.interval_minutes * 60
-            if (
-                schedule.skipped_through_timestamp is not None
-                and schedule.skipped_through_timestamp >= next_timestamp
-            ):
-                next_timestamp = schedule.skipped_through_timestamp + schedule.interval_minutes * 60
+        handled_through = schedule.last_triggered_timestamp
+        skipped_through = schedule.skipped_through_timestamp
+        if skipped_through is not None and (handled_through is None or skipped_through > handled_through):
+            handled_through = skipped_through
+        next_timestamp = schedule.anchor_timestamp
+        if handled_through is not None:
+            next_timestamp = _next_restart_timestamp(
+                anchor_timestamp=schedule.anchor_timestamp,
+                interval_minutes=schedule.interval_minutes,
+                after_timestamp=handled_through,
+            )
         return datetime.fromtimestamp(next_timestamp).astimezone()
 
     @staticmethod
@@ -373,21 +379,6 @@ class MaintenanceService:
     def format_restart_warning_notice(cls, warning: ScheduledRestartWarning) -> str:
         return render_system_notice_text(cls.build_restart_warning_notice(warning))
 
-    @staticmethod
-    def _was_triggered_for_slot(
-        schedule: config.PersistedRestartSchedule,
-        *,
-        now_local: datetime,
-    ) -> bool:
-        if schedule.last_triggered_timestamp is None:
-            return False
-        last_local = datetime.fromtimestamp(schedule.last_triggered_timestamp, tz=now_local.tzinfo)
-        return (
-            last_local.date() == now_local.date()
-            and last_local.hour == now_local.hour
-            and last_local.minute == now_local.minute
-        )
-
     def _load_bot_configuration(self) -> config.BotConfiguration:
         if not self._bot_configuration_path.exists():
             return config.BotConfiguration()
@@ -407,7 +398,7 @@ class MaintenanceService:
     ) -> tuple[RestartTarget, ...]:
         due_targets: list[RestartTarget] = []
         for target in available_targets:
-            next_restart = self.next_restart_at(target, now=slot_local)
+            next_restart = self.next_restart_at(target)
             if next_restart is not None and next_restart.replace(second=0, microsecond=0) == slot_local.replace(
                 second=0, microsecond=0
             ):
@@ -422,11 +413,8 @@ class MaintenanceService:
     ) -> tuple[RestartTarget, ...]:
         due_targets: list[RestartTarget] = []
         for target in available_targets:
-            schedule = self.schedule_for(target)
-            next_restart = self.next_restart_at(target, now=now_local)
+            next_restart = self.next_restart_at(target)
             if next_restart is None or next_restart > now_local:
-                continue
-            if self._was_triggered_for_slot(schedule, now_local=now_local):
                 continue
             due_targets.append(target)
         return tuple(due_targets)

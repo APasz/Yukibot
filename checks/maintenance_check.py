@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -14,6 +16,22 @@ from restart_targets import RestartTarget
 
 def _timestamp(value: str) -> int:
     return int(datetime.fromisoformat(value).timestamp())
+
+
+@contextmanager
+def _restart_service(schedule: config.PersistedRestartSchedule) -> Iterator[MaintenanceService]:
+    with TemporaryDirectory() as temp_dir:
+        config_path = Path(temp_dir) / "configuration.json"
+        config.save_bot_configuration(
+            config_path,
+            config.BotConfiguration(
+                maintenance=config.PersistedMaintenanceSettings(
+                    restart_schedules={RestartTarget.BOT: schedule}
+                )
+            ),
+        )
+        with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
+            yield MaintenanceService()
 
 
 class MaintenanceServiceTests(unittest.TestCase):
@@ -148,6 +166,23 @@ class MaintenanceServiceTests(unittest.TestCase):
                     datetime.fromisoformat("2026-05-27T11:01:00+10:00"),
                 )
 
+    def test_saving_schedule_skips_restart_exactly_one_hour_away(self) -> None:
+        with _restart_service(config.PersistedRestartSchedule()) as service:
+            service.update_restart_intervals(
+                {RestartTarget.BOT: 75},
+                anchor_timestamp=_timestamp("2026-05-27T11:00:00+10:00"),
+                saved_at_timestamp=_timestamp("2026-05-27T10:00:00+10:00"),
+            )
+
+            self.assertEqual(
+                service.schedule_for(RestartTarget.BOT).skipped_through_timestamp,
+                _timestamp("2026-05-27T11:00:00+10:00"),
+            )
+            self.assertEqual(
+                service.next_restart_at(RestartTarget.BOT),
+                datetime.fromisoformat("2026-05-27T12:15:00+10:00"),
+            )
+
     def test_future_anchor_defines_interval_phase_without_delaying_shorter_schedule(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "configuration.json"
@@ -165,6 +200,15 @@ class MaintenanceServiceTests(unittest.TestCase):
                 self.assertEqual(
                     service.next_restart_at(RestartTarget.BOT),
                     datetime.fromisoformat("2026-07-05T04:08:00+00:00"),
+                )
+
+                service.mark_triggered(
+                    (RestartTarget.BOT,),
+                    triggered_at=datetime.fromisoformat("2026-07-05T04:08:45+00:00"),
+                )
+                self.assertEqual(
+                    service.next_restart_at(RestartTarget.BOT),
+                    datetime.fromisoformat("2026-07-06T04:08:00+00:00"),
                 )
 
     def test_recurring_interval_becomes_due_with_minute_precision(self) -> None:
@@ -197,12 +241,176 @@ class MaintenanceServiceTests(unittest.TestCase):
                     triggered_at=datetime.fromisoformat("2026-05-27T04:30:00+10:00"),
                 )
                 self.assertEqual(
-                    service.next_restart_at(
-                        RestartTarget.BOT,
-                        now=datetime.fromisoformat("2026-05-27T04:30:00+10:00"),
-                    ),
+                    service.next_restart_at(RestartTarget.BOT),
                     datetime.fromisoformat("2026-05-27T05:45:00+10:00"),
                 )
+
+    def test_late_restarts_keep_anchor_across_reloads(self) -> None:
+        anchor = datetime.fromisoformat("2026-10-20T05:02:00+00:00")
+        for interval_minutes in (60, 75, 24 * 60, 7 * 24 * 60):
+            with (
+                self.subTest(interval_minutes=interval_minutes),
+                _restart_service(
+                    config.PersistedRestartSchedule(
+                        enabled=True,
+                        interval_minutes=interval_minutes,
+                        anchor_timestamp=int(anchor.timestamp()),
+                    )
+                ) as service,
+            ):
+                for occurrence, delay_seconds in enumerate((15, 46, 75)):
+                    scheduled_for = anchor + timedelta(minutes=occurrence * interval_minutes)
+                    triggered_at = scheduled_for + timedelta(seconds=delay_seconds)
+                    self.assertEqual(service.next_restart_at(RestartTarget.BOT), scheduled_for)
+                    self.assertEqual(
+                        service.due_restart_targets(now=triggered_at, available_targets=(RestartTarget.BOT,)),
+                        (RestartTarget.BOT,),
+                    )
+                    service.mark_triggered((RestartTarget.BOT,), triggered_at=triggered_at)
+                    self.assertTrue(service.reload())
+                    self.assertEqual(
+                        service.schedule_for(RestartTarget.BOT).last_triggered_timestamp,
+                        int(triggered_at.timestamp()),
+                    )
+                    self.assertEqual(
+                        service.next_restart_at(RestartTarget.BOT),
+                        scheduled_for + timedelta(minutes=interval_minutes),
+                    )
+                    self.assertEqual(
+                        service.due_restart_targets(now=triggered_at, available_targets=(RestartTarget.BOT,)),
+                        (),
+                    )
+
+    def test_existing_drifted_schedules_realign_to_anchor(self) -> None:
+        for anchor, last_triggered, skipped_through, expected in (
+            ("2026-07-30T05:02:00+00:00", "2026-10-21T05:25:46+00:00", None, "2026-10-22T05:02:00+00:00"),
+            ("2026-08-03T05:05:00+00:00", "2026-10-21T05:24:22+00:00", None, "2026-10-22T05:05:00+00:00"),
+            (
+                "2026-07-30T05:02:00+00:00",
+                "2026-10-21T05:25:46+00:00",
+                "2026-10-23T05:25:46+00:00",
+                "2026-10-24T05:02:00+00:00",
+            ),
+            (
+                "2026-07-30T05:02:00+00:00",
+                "2026-10-21T05:25:46+00:00",
+                "2026-10-20T05:25:46+00:00",
+                "2026-10-22T05:02:00+00:00",
+            ),
+            ("2026-07-30T05:02:00+00:00", None, "2026-10-23T05:25:46+00:00", "2026-10-24T05:02:00+00:00"),
+        ):
+            with (
+                self.subTest(anchor=anchor, last_triggered=last_triggered, skipped_through=skipped_through),
+                _restart_service(
+                    config.PersistedRestartSchedule(
+                        enabled=True,
+                        interval_minutes=24 * 60,
+                        anchor_timestamp=_timestamp(anchor),
+                        last_triggered_timestamp=None if last_triggered is None else _timestamp(last_triggered),
+                        skipped_through_timestamp=None if skipped_through is None else _timestamp(skipped_through),
+                    )
+                ) as service,
+            ):
+                self.assertEqual(service.next_restart_at(RestartTarget.BOT), datetime.fromisoformat(expected))
+
+    def test_hourly_restarts_remain_distinct_across_repeated_dst_hour(self) -> None:
+        with _restart_service(
+            config.PersistedRestartSchedule(
+                enabled=True,
+                interval_minutes=60,
+                anchor_timestamp=_timestamp("2026-04-05T01:30:00+11:00"),
+            )
+        ) as service:
+            for occurrence in (
+                "2026-04-05T01:30:00+11:00",
+                "2026-04-05T02:30:00+11:00",
+                "2026-04-05T02:30:00+10:00",
+                "2026-04-05T03:30:00+10:00",
+            ):
+                with self.subTest(occurrence=occurrence):
+                    scheduled_for = datetime.fromisoformat(occurrence)
+                    self.assertEqual(service.next_restart_at(RestartTarget.BOT), scheduled_for)
+                    self.assertEqual(
+                        service.due_restart_targets(now=scheduled_for, available_targets=(RestartTarget.BOT,)),
+                        (RestartTarget.BOT,),
+                    )
+                    triggered_at = scheduled_for + timedelta(seconds=30)
+                    service.mark_triggered((RestartTarget.BOT,), triggered_at=triggered_at)
+                    self.assertEqual(
+                        service.due_restart_targets(now=triggered_at, available_targets=(RestartTarget.BOT,)),
+                        (),
+                    )
+
+    def test_overdue_restart_runs_once_then_resumes_anchor(self) -> None:
+        with _restart_service(
+            config.PersistedRestartSchedule(
+                enabled=True,
+                interval_minutes=24 * 60,
+                anchor_timestamp=_timestamp("2026-10-20T05:02:00+00:00"),
+            )
+        ) as service:
+            recovered_at = datetime.fromisoformat("2026-10-23T06:10:00+00:00")
+            self.assertEqual(
+                service.due_restart_targets(now=recovered_at, available_targets=(RestartTarget.BOT,)),
+                (RestartTarget.BOT,),
+            )
+            service.mark_triggered((RestartTarget.BOT,), triggered_at=recovered_at)
+            self.assertTrue(service.reload())
+            next_restart = datetime.fromisoformat("2026-10-24T05:02:00+00:00")
+            self.assertEqual(service.next_restart_at(RestartTarget.BOT), next_restart)
+            for now in (recovered_at, next_restart - timedelta(seconds=1)):
+                self.assertEqual(
+                    service.due_restart_targets(now=now, available_targets=(RestartTarget.BOT,)),
+                    (),
+                )
+            self.assertEqual(
+                service.due_restart_targets(now=next_restart, available_targets=(RestartTarget.BOT,)),
+                (RestartTarget.BOT,),
+            )
+
+    def test_skips_after_late_restart_keep_anchor(self) -> None:
+        with _restart_service(
+            config.PersistedRestartSchedule(
+                enabled=True,
+                interval_minutes=24 * 60,
+                anchor_timestamp=_timestamp("2026-10-20T05:02:00+00:00"),
+                last_triggered_timestamp=_timestamp("2026-10-20T05:02:45+00:00"),
+            )
+        ) as service:
+            for skipped_at in ("2026-10-21T05:02:00+00:00", "2026-10-22T05:02:00+00:00"):
+                skipped = service.skip_next_restart(RestartTarget.BOT)
+                self.assertEqual(skipped.skipped_through_timestamp, _timestamp(skipped_at))
+                self.assertTrue(service.reload())
+            self.assertEqual(
+                service.next_restart_at(RestartTarget.BOT),
+                datetime.fromisoformat("2026-10-23T05:02:00+00:00"),
+            )
+            service.mark_triggered(
+                (RestartTarget.BOT,),
+                triggered_at=datetime.fromisoformat("2026-10-23T05:02:59+00:00"),
+            )
+            self.assertIsNone(service.schedule_for(RestartTarget.BOT).skipped_through_timestamp)
+            self.assertEqual(
+                service.next_restart_at(RestartTarget.BOT),
+                datetime.fromisoformat("2026-10-24T05:02:00+00:00"),
+            )
+
+    def test_warnings_use_anchor_after_late_restart(self) -> None:
+        with _restart_service(
+            config.PersistedRestartSchedule(
+                enabled=True,
+                interval_minutes=24 * 60,
+                anchor_timestamp=_timestamp("2026-10-20T05:02:00+00:00"),
+                last_triggered_timestamp=_timestamp("2026-10-20T05:25:46+00:00"),
+            )
+        ) as service:
+            warnings = service.due_restart_warnings(
+                now=datetime.fromisoformat("2026-10-21T05:01:30+00:00"),
+                available_targets=(RestartTarget.BOT,),
+            )
+            self.assertEqual(len(warnings), 1)
+            self.assertEqual(warnings[0].lead_minutes, 1)
+            self.assertEqual(warnings[0].scheduled_for, datetime.fromisoformat("2026-10-21T05:02:00+00:00"))
 
     def test_skip_next_restart_persists_and_supports_repeated_skips(self) -> None:
         with TemporaryDirectory() as temp_dir:
