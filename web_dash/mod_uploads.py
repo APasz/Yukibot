@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-import math
-import json
 
 from nicegui.elements.checkbox import Checkbox
 
 from _utils import Utilities
 from node_api.mod import NodeModUploadPreview
+
 from .nicegui_protocols import ModWebUi
 
 
@@ -27,10 +28,24 @@ def mod_upload_error_detail(response: str) -> str:
     return detail
 
 
-def show_mod_upload_preview(
+async def show_mod_upload_preview(
     *, ui: ModWebUi, preview: NodeModUploadPreview,
     apply: Callable[[tuple[str, ...]], Awaitable[None]], discard: Callable[[], Awaitable[None]],
 ) -> None:
+    """Install a single new mod immediately, or show the component selection."""
+    async def install(names: tuple[str, ...]) -> bool:
+        try:
+            await apply(names)
+        except Exception as xcp:
+            ui.notify(f"Mod installation failed: {xcp}", type="negative")
+            return False
+        return True
+
+    if len(preview.components) == 1:
+        component = preview.components[0]
+        if component.status == "new" and await install((component.name,)):
+            return
+
     checkboxes: dict[str, Checkbox] = {}
 
     async def install_selected() -> None:
@@ -41,11 +56,8 @@ def show_mod_upload_preview(
         install_button.disable()
         cancel_button.disable()
         try:
-            await apply(names)
-        except Exception as xcp:
-            ui.notify(f"Mod installation failed: {xcp}", type="negative")
-        else:
-            dialog.close()
+            if await install(names):
+                dialog.close()
         finally:
             install_button.enable()
             cancel_button.enable()
@@ -64,7 +76,9 @@ def show_mod_upload_preview(
         with ui.card().classes("mod-card mod-dialog-card"):
             with ui.column().classes("w-full gap-4 p-5"):
                 ui.label("Review uploaded mods").classes("text-xl font-black mod-title-small")
-                ui.label("Select new mods to install. Existing and protected components will be skipped.").classes("mod-subtitle text-sm")
+                ui.label("Select new mods to install. Existing and protected mods skipped.").classes(
+                    "mod-subtitle text-sm"
+                )
                 minutes = max(0, math.ceil((preview.expires_at - datetime.now(timezone.utc)).total_seconds() / 60))
                 ui.label(f"This preview expires in {minutes} minutes.").classes("mod-subtitle text-sm")
                 with ui.column().classes("w-full gap-2 max-h-96 overflow-y-auto"):

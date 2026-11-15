@@ -487,11 +487,77 @@ def test_preview_selects_only_new_components(harness: tuple[NodeModService, App,
         ui.checkbox.side_effect = checkbox
         apply = AsyncMock()
         discard = AsyncMock()
-        show_mod_upload_preview(ui=cast(ModWebUi, ui), preview=preview, apply=apply, discard=discard)
+        await show_mod_upload_preview(ui=cast(ModWebUi, ui), preview=preview, apply=apply, discard=discard)
         checkboxes["First"].disable.assert_called_once()
         checkboxes["0_TFP_Harmony"].disable.assert_called_once()
         await buttons["Install selected"]()
         apply.assert_awaited_once_with(("Second",))
+        await service.discard_mod_upload(app=app, actor_user_id=42, upload_id=preview.upload_id)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("placement", [ModPlacement.SERVER_ENABLED, ModPlacement.CLIENT_ONLY])
+def test_single_new_mod_installs_without_showing_a_preview(
+    harness: tuple[NodeModService, App, Mod_Manager], placement: ModPlacement,
+) -> None:
+    service, app, manager = harness
+
+    async def run() -> None:
+        preview = await service.inspect_mod_uploads(app=app, uploads=[UploadFile(_zip(("First",)), filename="pack.zip")], upload_names=None, actor_user_id=42, placement=placement)
+        ui = MagicMock()
+
+        async def install(names: tuple[str, ...]) -> None:
+            await service.apply_mod_upload(app=app, actor_user_id=42, upload_id=preview.upload_id, names=names)
+
+        apply = AsyncMock(side_effect=install)
+        discard = AsyncMock()
+        await show_mod_upload_preview(ui=cast(ModWebUi, ui), preview=preview, apply=apply, discard=discard)
+        apply.assert_awaited_once_with(("First",))
+        discard.assert_not_awaited()
+        ui.dialog.assert_not_called()
+        assert manager.get("First").cfg.placement is placement
+        assert not service._staged_mod_uploads
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("name", ["First", "0_TFP_Harmony"])
+def test_single_existing_or_protected_mod_is_not_automatically_installed(
+    harness: tuple[NodeModService, App, Mod_Manager], name: str,
+) -> None:
+    service, app, manager = harness
+    if name == "First":
+        existing = manager.folder / name
+        existing.mkdir()
+        (existing / "ModInfo.xml").write_text(_info(name))
+
+    async def run() -> None:
+        preview = await service.inspect_mod_uploads(app=app, uploads=[UploadFile(_zip((name,)), filename="pack.zip")], upload_names=None, actor_user_id=42, placement=ModPlacement.SERVER_ENABLED)
+        ui = MagicMock()
+        apply = AsyncMock()
+        discard = AsyncMock()
+        await show_mod_upload_preview(ui=cast(ModWebUi, ui), preview=preview, apply=apply, discard=discard)
+        apply.assert_not_awaited()
+        ui.dialog.assert_called_once()
+        await service.discard_mod_upload(app=app, actor_user_id=42, upload_id=preview.upload_id)
+
+    asyncio.run(run())
+
+
+def test_failed_automatic_install_shows_the_preview_for_retry_or_cancel(harness: tuple[NodeModService, App, Mod_Manager]) -> None:
+    service, app, _manager = harness
+
+    async def run() -> None:
+        preview = await service.inspect_mod_uploads(app=app, uploads=[UploadFile(_zip(("First",)), filename="pack.zip")], upload_names=None, actor_user_id=42, placement=ModPlacement.SERVER_ENABLED)
+        ui = MagicMock()
+        apply = AsyncMock(side_effect=RuntimeError("Server started"))
+        discard = AsyncMock()
+        await show_mod_upload_preview(ui=cast(ModWebUi, ui), preview=preview, apply=apply, discard=discard)
+        apply.assert_awaited_once_with(("First",))
+        ui.notify.assert_called_once_with("Mod installation failed: Server started", type="negative")
+        ui.dialog.assert_called_once()
+        discard.assert_not_awaited()
         await service.discard_mod_upload(app=app, actor_user_id=42, upload_id=preview.upload_id)
 
     asyncio.run(run())

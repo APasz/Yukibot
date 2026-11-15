@@ -7,10 +7,7 @@ from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypedDict
 
-from apps._mod_catalog import (
-    ModAction,
-    ModSourceKind,
-)
+from _utils import Utilities
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
     CLIENT_PACK_CHANGELOG_MAX_LENGTH,
@@ -26,9 +23,14 @@ from apps._config import (
     normalise_app_title_font,
     resolve_app_title_font,
 )
+from apps._mod_catalog import (
+    ModAction,
+    ModSourceKind,
+)
 from apps._steam import STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL
 from font_assets import font_assets
 from mod_web_theme import mod_web_tooltip_css
+from node_api.mod import NodeModUploadPreview
 
 from .app_page_factorio import ModWebAppPageFactorioMixin
 from .app_page_minecraft import (
@@ -54,13 +56,12 @@ from .constants import (
     _BULK_METADATA_OPERATION_POLL_SECONDS,
     _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
-    _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
     _REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+    _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
     log,
 )
 from .links import mod_web_node_path
 from .mod_uploads import mod_upload_error_detail, show_mod_upload_preview
-from node_api.mod import NodeModUploadPreview
 from .nicegui_protocols import (
     AsyncRefresh,
     ModWebEventArgumentsContainer,
@@ -103,10 +104,10 @@ from .runtime_imports import (
     NodeModDependencyEntry,
     NodeModDependencyResolutionResult,
     NodeModEntry,
-    NodeModSourceStatus,
     NodeModMutationAction,
     NodeModPortalVersionEntry,
     NodeModPortalVersionList,
+    NodeModSourceStatus,
     NodeModSummary,
     NodeOperationKind,
     NodeOperationState,
@@ -164,7 +165,6 @@ from .types import (
 )
 from .ui_helpers import ModWebUiHelpersMixin, copy_text_to_clipboard
 from .utils import _format_player_capacity
-from _utils import Utilities
 
 if TYPE_CHECKING:
     from nicegui.element import Element
@@ -4747,7 +4747,7 @@ class ModWebAppPageMixin(
             ui.notify(f"Uploaded mods for {model.app_friendly}.", type="positive")
             self._guarded_reload(ui=ui)
 
-        def direct_upload_inspected(event: ModWebEventArgumentsContainer) -> None:
+        async def direct_upload_inspected(event: ModWebEventArgumentsContainer) -> None:
             try:
                 preview = NodeModUploadPreview.model_validate_json(_event_args_as_text(event))
             except ValueError as xcp:
@@ -4783,7 +4783,7 @@ class ModWebAppPageMixin(
                         inline_upload_control.run_method("reset")
                         inline_upload_control.enable()
 
-            show_mod_upload_preview(ui=ui, preview=preview, apply=apply, discard=discard)
+            await show_mod_upload_preview(ui=ui, preview=preview, apply=apply, discard=discard)
 
         def direct_upload_failed(event: ModWebEventArgumentsContainer | None = None) -> None:
             error = f"Mod upload failed before {model.app_friendly} accepted it."
@@ -7062,11 +7062,11 @@ class ModWebAppPageMixin(
                     self._ensure_mod_list_dropzone_style(ui=ui)
                     upload_limits = model.mods.upload_limits
                     if upload_limits is not None:
-                        detail = f"Mod uploads: up to {Utilities.humanise_bytes(upload_limits.max_bytes, separator=' ')} per batch."
+                        detail = f"Up to {Utilities.humanise_bytes(upload_limits.max_bytes, separator=' ')} per batch."
                         if preview_mod_upload:
                             detail += (
                                 f" Archives may expand to {Utilities.humanise_bytes(upload_limits.max_extracted_bytes, separator=' ')}"
-                                f", with up to {Utilities.humanise_bytes(upload_limits.max_file_bytes, separator=' ')} per extracted file."
+                                f", up to {Utilities.humanise_bytes(upload_limits.max_file_bytes, separator=' ')} per file."
                             )
                         ui.label(detail).classes("mod-subtitle text-sm")
                     inline_upload_control = ui.upload(
