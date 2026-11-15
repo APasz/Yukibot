@@ -12,9 +12,47 @@ import hikari
 import config
 
 from _file import File_Utils
+from checks.rar_helpers import RAR_FIXTURES, UNRAR_AVAILABLE, stored_rar
 
 
 class FileUtilsTests(unittest.TestCase):
+    @unittest.skipUnless(UNRAR_AVAILABLE, "Compressed RAR checks require unrar")
+    def test_extract_compressed_rar_uses_the_shared_backend(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "Example.rar"
+            archive_path.write_bytes((RAR_FIXTURES / "single-rar4.rar").read_bytes())
+            destination = File_Utils.extract(archive_path, root / "Mods")
+            self.assertTrue((destination / "ModInfo.xml").is_file())
+            self.assertEqual((destination / "Resources/asset.unity3d").read_bytes(), b"asset data" * 64)
+
+    def test_extract_rar_unwraps_the_root_and_preserves_windows_paths(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "Example.RAR"
+            archive_path.write_bytes(stored_rar((
+                ("Inner\\ModInfo.xml", b"<xml/>"),
+                ("Inner\\Config/settings.xml", b"<settings/>"),
+            )).getvalue())
+            destination = File_Utils.extract(archive_path, root / "Mods")
+            self.assertEqual(destination.name, "Example")
+            self.assertEqual((destination / "ModInfo.xml").read_bytes(), b"<xml/>")
+            self.assertEqual((destination / "Config/settings.xml").read_bytes(), b"<settings/>")
+
+    def test_failed_rar_extraction_preserves_the_existing_destination(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "Example.rar"
+            destination = root / "Mods/Example"
+            destination.mkdir(parents=True)
+            (destination / "original.txt").write_text("keep")
+            archive_path.write_bytes(stored_rar((("ModInfo.xml", b"<xml/>"), ("../outside", b"bad"))).getvalue())
+            with self.assertRaisesRegex(ValueError, "member path is invalid"):
+                File_Utils.extract(archive_path, destination.parent)
+            self.assertEqual((destination / "original.txt").read_text(), "keep")
+            self.assertEqual(tuple(destination.parent.iterdir()), (destination,))
+            self.assertFalse((root / "outside").exists())
+
     def test_extract_treats_a_broken_symlink_as_an_existing_destination(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -29,6 +29,8 @@ from apps._mod_metadata import ModIdentity, ModIdentityKind
 from apps.sevendays import Mod_7D2D
 from apps.sevendays.mod_upload import prepare_mod_archive
 from archive_safety import ZipArchiveLimits
+from checks.rar_helpers import RAR_FIXTURES, UNRAR_AVAILABLE, stored_rar
+from node_api.mod import NodeModUploadPreview
 from node_api.mod_routes import register_mod_routes
 from node_api.mod_service import NodeModService
 from node_api.upload import NodeApiRequestBodyLimitMiddleware
@@ -51,6 +53,11 @@ def _zip(names: tuple[str, ...] = ("First", "Second"), *, windows: bool = False)
             archive.writestr(prefix + "Resources/asset.unity3d", b"asset data")
     stream.seek(0)
     return stream
+
+
+def _rar(stream: BytesIO | None = None) -> BytesIO:
+    with zipfile.ZipFile(_zip() if stream is None else stream) as archive:
+        return stored_rar(tuple((member.filename, archive.read(member)) for member in archive.infolist()))
 
 
 @pytest.fixture
@@ -148,6 +155,68 @@ def test_7z_bundle_has_the_same_component_validation(tmp_path: Path) -> None:
     prepared = prepare_mod_archive(stream, "pack.7z", tmp_path, limits=ZipArchiveLimits(), cancelled=Event(), validate_root=Mod_7D2D._validate_archive_root)
     assert tuple(component.name for component in prepared.components) == ("First",)
     assert (prepared.components[0].directory / "Resources/asset.unity3d").read_bytes() == b"asset"
+
+
+def test_rar_bundle_detects_wrappers_and_windows_paths(tmp_path: Path) -> None:
+    prepared = prepare_mod_archive(_rar(_zip(windows=True)), "pack.RAR", tmp_path, limits=ZipArchiveLimits(), cancelled=Event(), validate_root=Mod_7D2D._validate_archive_root)
+    assert tuple(component.name for component in prepared.components) == ("First", "Second")
+    assert prepared.file_count == 4
+    assert all((component.directory / "Resources/asset.unity3d").read_bytes() == b"asset data" for component in prepared.components)
+    assert not list(tmp_path.glob("yukibot-rar-*"))
+
+
+@pytest.mark.skipif(not UNRAR_AVAILABLE, reason="Compressed RAR checks require unrar")
+@pytest.mark.parametrize("filename", ["bundle-rar4.rar", "bundle-rar5.rar", "bundle-solid-rar5.rar"])
+def test_compressed_rar_bundles_extract_all_components(tmp_path: Path, filename: str) -> None:
+    prepared = prepare_mod_archive(BytesIO((RAR_FIXTURES / filename).read_bytes()), filename, tmp_path, limits=ZipArchiveLimits(), cancelled=Event(), validate_root=Mod_7D2D._validate_archive_root)
+    assert tuple(component.name for component in prepared.components) == ("First", "Second")
+    assert prepared.file_count == 4
+    assert all((component.directory / "Resources/asset.unity3d").read_bytes() == b"asset data" * 64 for component in prepared.components)
+
+
+@pytest.mark.parametrize("member", ["../outside", "C:\\outside", "Wrapper/Mods/First/modinfo.XML", "Wrapper/Mods/First/Resources", "Wrapper/Mods/First/Nested/ModInfo.xml"])
+def test_rar_bundle_rejects_unsafe_or_conflicting_layouts(tmp_path: Path, member: str) -> None:
+    stream = _zip()
+    with zipfile.ZipFile(stream, "a") as archive:
+        archive.writestr(member, _info("Nested"))
+    with pytest.raises(ValueError):
+        prepare_mod_archive(_rar(stream), "pack.rar", tmp_path, limits=ZipArchiveLimits(), cancelled=Event(), validate_root=Mod_7D2D._validate_archive_root)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("filename", ["encrypted-data.rar", "encrypted-headers.rar", "symlink-rar5.rar", "hardlink-rar5.rar", "split.part1.rar"])
+def test_rar_bundle_rejects_unsupported_archives_before_extraction(tmp_path: Path, filename: str) -> None:
+    with pytest.raises(ValueError):
+        prepare_mod_archive(BytesIO((RAR_FIXTURES / filename).read_bytes()), filename, tmp_path, limits=ZipArchiveLimits(), cancelled=Event(), validate_root=Mod_7D2D._validate_archive_root)
+    assert not list(tmp_path.iterdir())
+
+
+def test_rar_bundle_preview_and_selected_install(harness: tuple[NodeModService, App, Mod_Manager]) -> None:
+    service, app, manager = harness
+
+    async def run() -> None:
+        preview = await service.inspect_mod_uploads(app=app, uploads=[UploadFile(_rar(), filename="pack.rar")], upload_names=None, actor_user_id=42, placement=ModPlacement.SERVER_ENABLED)
+        assert tuple(component.name for component in preview.components) == ("First", "Second")
+        await service.apply_mod_upload(app=app, actor_user_id=42, upload_id=preview.upload_id, names=("Second",))
+        assert not (manager.folder / "First").exists()
+        assert (manager.folder / "Second/Resources/asset.unity3d").read_bytes() == b"asset data"
+        assert not service._staged_mod_uploads
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(not UNRAR_AVAILABLE, reason="Compressed RAR checks require unrar")
+def test_solid_rar_multipart_upload_is_prepared_from_its_spool(harness: tuple[NodeModService, App, Mod_Manager]) -> None:
+    service, app, manager = harness
+    with TestClient(_mod_api(service, app)) as client:
+        response = client.post(f"/api/node/apps/{app.name}/mods/upload/inspect", files={"upload": ("pack.rar", (RAR_FIXTURES / "bundle-solid-rar5.rar").read_bytes())})
+        assert response.status_code == 200, response.text
+        preview = NodeModUploadPreview.model_validate_json(response.content)
+        assert tuple(component.name for component in preview.components) == ("First", "Second")
+        discarded = client.post(f"/api/node/apps/{app.name}/mods/upload/{preview.upload_id}/discard")
+        assert discarded.status_code == 200
+    assert not manager.index
+    assert not service._staged_mod_uploads
 
 
 def test_existing_and_builtin_components_are_skipped_and_selected_new_mods_install(harness: tuple[NodeModService, App, Mod_Manager]) -> None:
@@ -470,7 +539,7 @@ def test_cleanup_failure_does_not_mask_invalid_archive_or_block_new_previews(
     async def run() -> None:
         with monkeypatch.context() as patch:
             patch.setattr("node_api.mod_service.shutil.rmtree", Mock(side_effect=PermissionError("cleanup failed")))
-            with pytest.raises(ValueError, match="ZIP or 7z"):
+            with pytest.raises(ValueError, match="ZIP, 7z, or RAR"):
                 await service.inspect_mod_uploads(app=app, uploads=[UploadFile(BytesIO(b"invalid"), filename="pack.zip")], upload_names=None, actor_user_id=42, placement=ModPlacement.SERVER_ENABLED)
             preview = await service.inspect_mod_uploads(app=app, uploads=[UploadFile(_zip(), filename="pack.zip")], upload_names=None, actor_user_id=42, placement=ModPlacement.SERVER_ENABLED)
             expired = service._staged_mod_uploads[preview.upload_id]

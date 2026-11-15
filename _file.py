@@ -19,7 +19,7 @@ import hikari
 
 import config
 from _async_utils import run_blocking
-from archive_safety import validated_archive_member_path
+from archive_safety import extract_rar_entries, open_rar_archive, validated_archive_member_path, validated_rar_entries
 
 log: Logger = logging.getLogger(__name__)
 MOD_UPLOAD_STAGING_PREFIX = ".yukibot-mod-upload-"
@@ -54,6 +54,7 @@ def atomic_write_bytes(pointer: Path, contents: bytes) -> None:
 class ArchiveKind(enum.StrEnum):
     ZIP = "zip"
     SEVEN_ZIP = "7z"
+    RAR = "rar"
 
 
 class File_Utils:
@@ -61,8 +62,9 @@ class File_Utils:
     def _detect_archive_kind(archive_path: Path) -> ArchiveKind:
         if zipfile.is_zipfile(archive_path):
             return ArchiveKind.ZIP
-        if archive_path.suffix.casefold() == ".7z":
-            return ArchiveKind.SEVEN_ZIP
+        for kind in (ArchiveKind.SEVEN_ZIP, ArchiveKind.RAR):
+            if archive_path.suffix.casefold() == f".{kind.value}":
+                return kind
         raise ValueError(f"Unsupported archive type: {archive_path.name}")
 
     @staticmethod
@@ -118,6 +120,14 @@ class File_Utils:
 
         raise ValueError("7z extraction requires py7zr or a 7z-compatible executable.")
 
+    @staticmethod
+    def _extract_rar_archive(archive_path: Path, staging_dir: Path) -> None:
+        limits = config.NODE_API_MOD_ARCHIVE_LIMITS
+        with open_rar_archive(archive_path, archive_label="Archive", limits=limits) as archive:
+            entries = validated_rar_entries(archive, archive_label="Archive", limits=limits)
+            require_free_disk_space(staging_dir, sum(member.file_size for member, _path in entries))
+            extract_rar_entries(archive, entries, staging_dir)
+
     @classmethod
     def _extract_archive_to_directory(
         cls,
@@ -130,6 +140,8 @@ class File_Utils:
                 cls._extract_zip_archive(archive_path, staging_dir)
             case ArchiveKind.SEVEN_ZIP:
                 cls._extract_7z_archive(archive_path, staging_dir)
+            case ArchiveKind.RAR:
+                cls._extract_rar_archive(archive_path, staging_dir)
 
     @staticmethod
     def _resolved_archive_root(staging_dir: Path) -> Path:

@@ -49,6 +49,7 @@ from apps.sevendays import (
     parse_admin_add_value,
     parse_gamestat_value,
 )
+from checks.rar_helpers import stored_rar
 
 
 class _RecordingActivityManager:
@@ -150,6 +151,22 @@ class SevenDaysModUploadTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.reload_mods()
 
         self.assertIs(self.manager.get(mod.name).cfg.placement, ModPlacement.CLIENT_ONLY)
+
+    async def test_rar_upload_installs_for_server_and_client_and_survives_reload(self) -> None:
+        source = self.archive_path.with_suffix(".rar")
+        with zipfile.ZipFile(self.archive_path) as archive:
+            source.write_bytes(stored_rar(tuple((member.filename, archive.read(member)) for member in archive.infolist())).getvalue())
+        for placement in (ModPlacement.SERVER_ENABLED, ModPlacement.CLIENT_ONLY):
+            with self.subTest(placement=placement):
+                mod = await self.manager.add(source, placement=placement)
+                self.assertEqual(mod.friendly, "Honk To Open")
+                self.assertEqual(mod.version, "1.0")
+                self.assertEqual((mod.storage_path / "HonkToOpen.dll").read_bytes(), b"dll-data")
+                await self.manager.reload_mods()
+                reloaded = self.manager.get(mod.name)
+                self.assertIs(reloaded.cfg.placement, placement)
+                self.assertTrue(reloaded.exists())
+                await self.manager.remove(mod.name)
 
     async def test_upload_rejects_existing_extraction_directory(self) -> None:
         existing = self.mods_dir / self.archive_path.stem

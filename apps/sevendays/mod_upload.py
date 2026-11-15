@@ -16,7 +16,10 @@ import py7zr
 from py7zr.exceptions import ArchiveError, PasswordRequired
 
 from _file import require_free_disk_space
-from archive_safety import ZipArchiveLimits, validated_archive_member_path, validated_zip_entries
+from archive_safety import (
+    ZipArchiveLimits, extract_rar_entries, open_rar_archive, validated_archive_member_path,
+    validate_archive_member_layout, validated_rar_entries, validated_zip_entries,
+)
 from . import MOD_INFO_MAX_BYTES, _read_modinfo_value
 
 _ZIP_ENCRYPTED_FLAG = 0x1
@@ -72,25 +75,17 @@ def _validate_members(members: tuple[_ArchiveMember, ...], limits: ZipArchiveLim
     files = [member for member in members if not member.is_directory]
     if len(files) > limits.file_count or sum(member.size for member in files) > limits.extracted_bytes:
         raise ValueError("Mod archive exceeds its file-count or extracted-size limit.")
-    paths: dict[str, tuple[PurePosixPath, bool]] = {}
-    seen: set[str] = set()
     for member in members:
-        if len(member.path.parts) > 64:
-            raise ValueError("Mod archive paths are nested too deeply.")
-        if member.path.name == "ModInfo.xml" and member.size > MOD_INFO_MAX_BYTES:
-            raise ValueError("7D2D mod metadata exceeds the 1 MiB size limit.")
         if member.size > limits.file_bytes:
             raise ValueError(f"Mod archive member is too large: {member.name}")
-        key = member.path.as_posix().casefold()
-        if key in seen:
-            raise ValueError(f"Mod archive contains duplicate paths: {member.name}")
-        seen.add(key)
-        for index in range(1, len(member.path.parts) + 1):
-            path = PurePosixPath(*member.path.parts[:index])
-            is_directory = index < len(member.path.parts) or member.is_directory
-            previous = paths.setdefault(path.as_posix().casefold(), (path, is_directory))
-            if previous != (path, is_directory):
-                raise ValueError(f"Mod archive contains conflicting paths: {member.name}")
+    validate_archive_member_layout(((member.path, member.is_directory) for member in members), archive_label="Mod archive")
+    _validate_mod_metadata(members)
+
+
+def _validate_mod_metadata(members: tuple[_ArchiveMember, ...]) -> None:
+    for member in members:
+        if member.path.name == "ModInfo.xml" and member.size > MOD_INFO_MAX_BYTES:
+            raise ValueError("7D2D mod metadata exceeds the 1 MiB size limit.")
 
 
 def _component_root(path: PurePosixPath, roots: Mapping[PurePosixPath, str]) -> PurePosixPath | None:
@@ -182,8 +177,22 @@ def _prepare_mod_archive(
             if cancelled.is_set():
                 raise InterruptedError("Mod upload cancelled.")
             archive.extractall(path=destination)
+    elif Path(upload_name).suffix.casefold() == ".rar":
+        with open_rar_archive(
+            stream, archive_label="Mod archive", limits=limits,
+            temporary_directory=destination, cancelled=cancelled,
+        ) as archive:
+            entries = validated_rar_entries(archive, archive_label="Mod archive", limits=limits)
+            members = tuple(
+                _ArchiveMember(info.filename, path, info.file_size, info.is_dir())
+                for info, path in entries
+            )
+            _validate_mod_metadata(members)
+            roots = _validated_layout(members, upload_name)
+            require_free_disk_space(destination, sum(member.size for member in members))
+            extract_rar_entries(archive, entries, destination, cancelled=cancelled)
     else:
-        raise ValueError("7D2D mod uploads must be ZIP or 7z archives.")
+        raise ValueError("7D2D mod uploads must be ZIP, 7z, or RAR archives.")
 
     components: list[PreparedModComponent] = []
     sizes = dict.fromkeys(roots, 0)

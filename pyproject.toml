@@ -29,6 +29,7 @@ dependencies = [
     "pydantic",
     "pydantic-settings",
     "python-dateutil",
+    "rarfile>=4.5,<5",
     "regex",
     "requests",
     "satisfactory-api-client>=0.2.1",
