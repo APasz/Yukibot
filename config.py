@@ -5,6 +5,7 @@ import logging.config
 import os
 import re
 import sys
+import tempfile
 import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -125,6 +126,8 @@ class EnvSettings(BaseSettings):
     node_name: str | None = None
     node_api_token_secret: str | None = None
     node_api_upload_max_bytes: str | None = None
+    node_api_mod_upload_max_bytes: str | None = None
+    node_api_mod_extracted_max_bytes: str | None = None
     node_api_bind_host: str | None = None
     node_api_port: str | None = None
     node_api_public_base_url: str | None = None
@@ -2554,6 +2557,19 @@ NODE_API_UPLOAD_MAX_BYTES = _parse_positive_int(
     default=1 * 1024 * 1024 * 1024,
 )
 NODE_API_ARCHIVE_LIMITS = ZipArchiveLimits()
+NODE_API_MOD_UPLOAD_MAX_BYTES = _parse_positive_int(
+    _env_settings.node_api_mod_upload_max_bytes,
+    var_name="NODE_API_MOD_UPLOAD_MAX_BYTES",
+    default=8 * 1024**3,
+)
+NODE_API_MOD_ARCHIVE_LIMITS = ZipArchiveLimits(
+    file_bytes=4 * 1024**3,
+    extracted_bytes=_parse_positive_int(
+        _env_settings.node_api_mod_extracted_max_bytes,
+        var_name="NODE_API_MOD_EXTRACTED_MAX_BYTES",
+        default=16 * 1024**3,
+    ),
+)
 NODE_API_BIND_HOST = _parse_bind_host(_env_settings.node_api_bind_host)
 NODE_API_PORT = _parse_optional_port(_env_settings.node_api_port, var_name="NODE_API_PORT")
 MOD_WEB_BIND_HOST = _parse_bind_host(_env_settings.mod_web_bind_host) or "0.0.0.0"
@@ -2653,6 +2669,8 @@ DIR_LOG.mkdir(parents=True, exist_ok=True)
 DIR_LOG_USER.mkdir(parents=True, exist_ok=True)
 DIR_LOG_MACHINE.mkdir(parents=True, exist_ok=True)
 DIR_TMP.mkdir(parents=True, exist_ok=True)
+# Multipart parsers use Python's default temporary directory for large uploads.
+tempfile.tempdir = str(DIR_TMP.resolve())
 DIR_UPLOAD.mkdir(parents=True, exist_ok=True)
 DIR_ZIPS.mkdir(parents=True, exist_ok=True)
 

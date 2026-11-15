@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from apps._updater import format_steamcmd_output
+
 from .constants import log
 from .nicegui_protocols import ModWebNotificationType, ModWebUi, ModWebValueContainer, _value_as_text
 from .runtime_imports import (
@@ -35,6 +37,7 @@ from .operation_stream import ModWebNodeOperationSnapshot
 from .operations_ui import operation_detail_path
 from .service_base import ModWebServiceSupport
 from .types import ModWebBasePageModel, _ModWebBadgeSpec
+from .ui_helpers import distinct_status_detail
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,7 +449,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 detail="Downloading package 3 of 7.",
                 log_lines=(
                     "stdout: Connecting anonymously to Steam public...",
-                    "stdout: Update state (0x61) downloading, progress: 42.50",
+                    f"stdout: {format_steamcmd_output('Update state (0x61) downloading, progress: 42.50').text}",
                     "stdout: Downloading depot 294421 chunk 3/7",
                 ),
                 started_at_unix_ms=now_unix_ms - 18_000,
@@ -458,7 +461,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 progress_percent=100.0,
                 detail="SteamCMD completed successfully.",
                 log_lines=(
-                    "stdout: Update state (0x81) verifying update, progress: 100.00",
+                    f"stdout: {format_steamcmd_output('Update state (0x81) verifying update, progress: 100.00').text}",
                     "stdout: Success! App '123456' fully installed.",
                 ),
                 started_at_unix_ms=now_unix_ms - 95_000,
@@ -471,7 +474,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 progress_percent=63.0,
                 detail="Command failed: steamcmd +app_update 123456 -beta latest_experimental [ERROR! Failed to install app]",
                 log_lines=(
-                    "stdout: Update state (0x61) downloading, progress: 63.00",
+                    f"stdout: {format_steamcmd_output('Update state (0x61) downloading, progress: 63.00').text}",
                     "stderr: ERROR! Failed to install app '123456' (disk write failure)",
                 ),
                 started_at_unix_ms=now_unix_ms - 71_000,
@@ -484,7 +487,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 progress_percent=100.0,
                 detail="Validation completed with no missing files.",
                 log_lines=(
-                    "stdout: Update state (0x81) verifying update, progress: 100.00",
+                    f"stdout: {format_steamcmd_output('Update state (0x81) verifying update, progress: 100.00').text}",
                     "stdout: Success! Verified installation of app '123456'.",
                 ),
                 started_at_unix_ms=now_unix_ms - 143_000,
@@ -497,7 +500,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                 progress_percent=88.0,
                 detail="1 file failed validation and will be reacquired.",
                 log_lines=(
-                    "stdout: Update state (0x81) verifying update, progress: 88.00",
+                    f"stdout: {format_steamcmd_output('Update state (0x81) verifying update, progress: 88.00').text}",
                     "stderr: Validation failure: 1 file corrupt or missing",
                 ),
                 started_at_unix_ms=now_unix_ms - 121_000,
@@ -675,7 +678,11 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
             status=displayed_status,
             operation=operation,
             status_summary="No update recorded." if displayed_status is None else displayed_status.summary,
-            status_detail=None if displayed_status is None else displayed_status.detail,
+            status_detail=(
+                None if displayed_status is None else distinct_status_detail(
+                    summary=displayed_status.summary, detail=displayed_status.detail
+                )
+            ),
             progress_percent=progress_percent,
             progress_text=cls._update_progress_text(displayed_status),
             update_block_reason=update_block_reason,

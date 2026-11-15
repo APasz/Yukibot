@@ -4,11 +4,13 @@ import enum
 import json
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import config
+from _file import atomic_write_bytes
 from apps._config import ModClassificationOverride, ModPageLink, normalise_optional_friendly_name
 
 log = logging.getLogger(__name__)
@@ -89,6 +91,13 @@ class SharedModMetadataDocument(BaseModel):
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class _ModMetadataSnapshot:
+    mods: tuple[SharedModMetadata, ...]
+    contents: bytes | None
+    dirty: bool
+
+
 class ScopeModMetadataStore:
     _instances: dict[Path, ScopeModMetadataStore] = {}
     _instances_lock = threading.Lock()
@@ -127,6 +136,30 @@ class ScopeModMetadataStore:
                 f"Shared mod metadata scope mismatch at {self.path}: {document.scope!r} != {self.scope!r}."
             )
         self._mods = list(document.mods)
+
+    def snapshot(self) -> _ModMetadataSnapshot:
+        """Capture metadata and its persisted form before a multi-mod transaction."""
+        with self._lock:
+            return _ModMetadataSnapshot(tuple(self._mods), self.path.read_bytes() if self.path.exists() else None, self._dirty)
+
+    def restore(self, snapshot: _ModMetadataSnapshot, *, identities: tuple[ModIdentity, ...]) -> None:
+        """Undo this batch's identities while retaining unrelated instance edits."""
+        keys = self._identity_keys(identities)
+        with self._lock:
+            current_unrelated = tuple(mod for mod in self._mods if not keys.intersection(identity.key for identity in mod.identities))
+            original_unrelated = tuple(mod for mod in snapshot.mods if not keys.intersection(identity.key for identity in mod.identities))
+            if current_unrelated != original_unrelated:
+                original_related = tuple(mod for mod in snapshot.mods if keys.intersection(identity.key for identity in mod.identities))
+                self._mods = [*current_unrelated, *original_related]
+                self._dirty = True
+                self.save_if_dirty()
+                return
+            if snapshot.contents is None:
+                self.path.unlink(missing_ok=True)
+            elif not self.path.exists() or self.path.read_bytes() != snapshot.contents:
+                atomic_write_bytes(self.path, snapshot.contents)
+            self._mods = list(snapshot.mods)
+            self._dirty = snapshot.dirty
 
     @staticmethod
     def _identity_keys(identities: tuple[ModIdentity, ...]) -> frozenset[tuple[ModIdentityKind, str, str]]:

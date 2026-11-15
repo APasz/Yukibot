@@ -3,9 +3,10 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from threading import Event
 from typing import Any
 
 import aiofiles
@@ -13,8 +14,8 @@ from modmux import parse_url
 from modmux.models import Provider
 
 import config
-from _async_utils import run_blocking
-from _file import File_Utils
+from _async_utils import run_blocking, run_blocking_cancellable
+from _file import File_Utils, atomic_write_bytes
 from apps._config import (
     App_Config,
     BulkLauncherMetadataEntry,
@@ -136,6 +137,11 @@ class Mod(ABC):
     @classmethod
     def iter_candidates(cls, folder: Path) -> tuple[Path, ...]:
         return tuple(sorted(folder.iterdir(), key=lambda pointer: pointer.name.casefold()))
+
+    @staticmethod
+    def name_from_upload(src: Path) -> str:
+        """Return the installed mod name for an uploaded source."""
+        return src.name
 
     @classmethod
     def config_from_candidate(
@@ -435,9 +441,19 @@ class Mod(ABC):
         await run_blocking(File_Utils.move, src, self.path, atomic)
         log.info(f"Copied mod; {self.name}: {self.path}")
 
-    async def _handle_extr(self, src: Path, atomic: bool = True):
-        await run_blocking(File_Utils.extract, src, self.path.parent, atomic)
+    async def _handle_extr(
+        self,
+        src: Path,
+        atomic: bool = True,
+        *,
+        validate_root: Callable[[Path], None] | None = None,
+    ) -> None:
+        await run_blocking(File_Utils.extract, src, self.path.parent, atomic, validate_root=validate_root)
         log.info(f"Extracted mod; {self.name}: {self.path}")
+
+    async def install_client(self, src: Path, atomic: bool = True) -> None:
+        """Store a client upload without invoking server installation hooks."""
+        await run_blocking(File_Utils.move, src, self.storage_path, atomic)
 
     @abstractmethod
     async def install(self, src: Path, atomic: bool = True):
@@ -794,8 +810,7 @@ class Mod_Manager:
         self.validate_client_pack_configuration()
         self.shared_metadata.save_if_dirty()
         lines = [self._instance_config(mod).model_dump_json() for mod in self.index.values()]
-        async with aiofiles.open(self.db_path, mode="w") as f:
-            await f.write("\n".join(lines))
+        await run_blocking_cancellable(Event(), atomic_write_bytes, self.db_path, "\n".join(lines).encode(config.STR_ENCODE))
 
     def validate_client_pack_configuration(self, mods: Iterable[Mod] | None = None) -> None:
         choice_groups: dict[str, list[Mod]] = {}
@@ -834,49 +849,107 @@ class Mod_Manager:
             raise ValueError(f"src must be Path not: {type(src)}")  # pyright: ignore[reportUnreachable]
         if placement is ModPlacement.SERVER_DISABLED:
             raise ValueError("New mod uploads cannot start server-disabled")
+        mod_name = self.mod_cls.name_from_upload(src)
         if src.name.endswith((".disabled", ".client")):
             raise ValueError(f"Uploaded mod name uses a reserved placement marker: {src.name}")
+        mod = self.new_upload_mod(mod_name, placement=placement)
+        self.require_available_upload_path(mod)
+        if placement is ModPlacement.CLIENT_ONLY:
+            mod.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            await mod.install_client(src, atomic)
+        else:
+            await mod.install(src, atomic)
+        await self._register_uploaded_mods((mod,))
+        return mod
+
+    def new_upload_mod(self, mod_name: str, *, placement: ModPlacement) -> Mod:
+        """Build the same placement and metadata configuration for every upload path."""
+        if placement is ModPlacement.SERVER_DISABLED:
+            raise ValueError("New mod uploads cannot start server-disabled")
+        if mod_name.endswith((".disabled", ".client")):
+            raise ValueError(f"Uploaded mod name uses a reserved placement marker: {mod_name}")
+        if Path(mod_name).name != mod_name or not mod_name or mod_name in {".", ".."} or "\\" in mod_name:
+            raise ValueError(f"Invalid uploaded mod name: {mod_name}")
 
         if placement is ModPlacement.CLIENT_ONLY:
             client_path = (
-                self.client_folder / src.name
+                self.client_folder / mod_name
                 if self.has_separate_client_folder and self.client_folder is not None
-                else Mod._append_marker(self.folder / src.name, "client")
+                else Mod._append_marker(self.folder / mod_name, "client")
             )
             cfg = self.modcf_cls(
-                name=src.name,
+                name=mod_name,
                 directory=self.folder,
                 client_path=client_path,
                 placement=placement,
                 mod_type=ModType.CLIENT,
             )
         else:
-            cfg = self.modcf_cls(name=src.name, directory=self.folder, placement=placement)
+            cfg = self.modcf_cls(name=mod_name, directory=self.folder, placement=placement)
 
-        mod = self.mod_cls(cfg)
+        return self.mod_cls(cfg)
+
+    def require_available_upload_path(self, mod: Mod) -> None:
+        if any(existing.casefold() == mod.name.casefold() for existing in self.index):
+            raise FileExistsError(f"Mod is already installed: {mod.name}")
+        representations = {mod.enabled_path, mod.disabled_path, mod.client_path, mod.legacy_disabled_path}
         conflicting_paths = tuple(
-            pointer
-            for pointer in {mod.enabled_path, mod.disabled_path, mod.client_path, mod.legacy_disabled_path}
-            if pointer.exists()
+            pointer for parent in {path.parent for path in representations} if parent.is_dir()
+            for pointer in parent.iterdir()
+            if pointer.name.casefold() in {path.name.casefold() for path in representations if path.parent == parent}
         )
         if conflicting_paths:
             raise FileExistsError(
                 f"Mod already has a physical representation: {mod.name}: "
                 f"{', '.join(str(pointer) for pointer in sorted(conflicting_paths))}"
             )
-        if placement is ModPlacement.CLIENT_ONLY:
-            mod.storage_path.parent.mkdir(parents=True, exist_ok=True)
-            await run_blocking(File_Utils.move, src, mod.storage_path, atomic)
-        else:
-            await mod.install(src, atomic)
-        mod.sync_metadata()
-        self._migrate_shared_metadata((mod,))
-        await self.mod_cls.sync_external_metadata_batch((mod,))
-        self._migrate_shared_metadata((mod,))
-        self.index[mod.name] = mod
+
+    async def _register_uploaded_mods(self, mods: tuple[Mod, ...]) -> None:
+        for mod in mods:
+            mod.sync_metadata()
+        self._migrate_shared_metadata(mods)
+        await self.mod_cls.sync_external_metadata_batch(mods)
+        self._migrate_shared_metadata(mods)
+        self.index.update((mod.name, mod) for mod in mods)
         self._rebuild_lookup()
         await self.save_mods()
-        return mod
+
+    async def add_prepared_batch(
+        self, sources: tuple[tuple[str, Path], ...], *, placement: ModPlacement,
+    ) -> tuple[Mod, ...]:
+        """Install prepared components together and restore files and metadata on failure."""
+        if not sources or len({name.casefold() for name, _path in sources}) != len(sources):
+            raise ValueError("Prepared mod names must be non-empty and unique.")
+        mods = tuple(self.new_upload_mod(name, placement=placement) for name, _path in sources)
+        for mod in mods:
+            self.require_available_upload_path(mod)
+            if mod.mod_type is ModType.BUILTIN or mod.default_mod_type() is ModType.BUILTIN:
+                raise ValueError(f"Built-in mod components cannot be uploaded: {mod.name}")
+        old_index = self.index.copy()
+        metadata_snapshot = self.shared_metadata.snapshot()
+        metadata_identities: tuple[ModIdentity, ...] = ()
+        database = self.db_path.read_bytes() if self.db_path.exists() else None
+        moved: list[tuple[Path, Mod]] = []
+        try:
+            for mod, (_name, source) in zip(mods, sources, strict=True):
+                mod.storage_path.parent.mkdir(parents=True, exist_ok=True)
+                source.rename(mod.storage_path)
+                moved.append((source, mod))
+            metadata_identities = tuple(identity for mod in mods for identity in mod.metadata_identities(scope=self.scope))
+            await self._register_uploaded_mods(mods)
+        except BaseException:
+            for source, mod in reversed(moved):
+                mod.storage_path.rename(source)
+            self.index = old_index
+            self._rebuild_lookup()
+            if metadata_identities:
+                self.shared_metadata.restore(metadata_snapshot, identities=metadata_identities)
+            if database is None:
+                self.db_path.unlink(missing_ok=True)
+            elif not self.db_path.exists() or self.db_path.read_bytes() != database:
+                atomic_write_bytes(self.db_path, database)
+            raise
+        return mods
 
     async def remove(self, mod_name: str | Mod, *, override_coremod: bool = False) -> Mod:
         mod = self.get(mod_name)

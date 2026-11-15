@@ -18,6 +18,21 @@ from safe_http import PublicAddressResolver, UnsafeOutboundUrlError, validate_pu
 
 
 class ArchiveSafetyTests(unittest.TestCase):
+    def test_windows_separator_opt_in_normalizes_paths_but_rejects_traversal(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mod.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("Mods\\Example\\", b"")
+                archive.writestr("Mods\\Example\\ModInfo.xml", b"<xml/>")
+            entries = validated_zip_entries(path, archive_label="Mod", limits=ZipArchiveLimits(file_count=1), allow_windows_separators=True)
+            self.assertEqual(tuple(member.as_posix() for _, member in entries), ("Mods/Example", "Mods/Example/ModInfo.xml"))
+            with self.assertRaises(ValueError):
+                validated_zip_entries(path, archive_label="Save", limits=ZipArchiveLimits())
+            with zipfile.ZipFile(path, "a") as archive:
+                archive.writestr("Mods\\..\\..\\outside", b"unsafe")
+            with self.assertRaisesRegex(ValueError, "member path is invalid"):
+                validated_zip_entries(path, archive_label="Mod", limits=ZipArchiveLimits(), allow_windows_separators=True)
+
     def test_zip_limits_reject_excessive_file_count(self) -> None:
         with TemporaryDirectory() as directory:
             archive_path = Path(directory) / "save.zip"

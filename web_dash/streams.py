@@ -176,6 +176,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         return self._console_stdout_broker.subscribe(
             key=key,
             callback=on_update,
+            replay_latest=True,
             listener_factory=lambda publish: self._local_app_console_stdout_listener(
                 app=app,
                 max_lines=max_lines,
@@ -196,6 +197,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         return self._console_stdout_broker.subscribe(
             key=key,
             callback=on_update,
+            replay_latest=True,
             listener_factory=lambda publish: self._remote_console_stdout_stream_listener(
                 node=node,
                 app_name=app_name,

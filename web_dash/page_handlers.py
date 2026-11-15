@@ -892,6 +892,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     can_write_map_annotations=can_manage_app and app_entry.map_url is not None,
                     supports_chat=app_entry.supports_chat,
                     supports_updates=app_entry.supports_updates,
+                    steam_update_supported=app_entry.steam_update_supported,
                     client_pack_content_dirty=app_entry.client_pack_content_dirty,
                     client_pack_published_version=app_entry.client_pack_published_version,
                     client_pack_next_version=app_entry.client_pack_next_version,
@@ -1101,6 +1102,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     can_write_map_annotations=can_manage_app and app_entry.map_url is not None,
                     supports_chat=app_entry.supports_chat,
                     supports_updates=app_entry.supports_updates,
+                    steam_update_supported=app_entry.steam_update_supported,
                     chat_url=(
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),

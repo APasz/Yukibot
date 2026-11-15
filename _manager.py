@@ -1362,6 +1362,10 @@ class App_Manager(metaclass=config.Singleton):
     @staticmethod
     def _resolve_next_steam_update_config(*, app: ManagedApp, details: AppDetailsUpdate) -> SteamUpdateConfig | None:
         current_steam_update = app.cfg.steam_update
+        if not app.steam_update_supported:
+            if details.steam_update_enabled:
+                raise ValueError("Steam updating is unavailable for this installation profile.")
+            return None if details.steam_update_enabled is False else current_steam_update
         preset = steam_update_preset_for_scope(app.scope)
         if details.steam_update_enabled is None:
             if current_steam_update is None or preset is None:
@@ -1487,7 +1491,7 @@ class App_Manager(metaclass=config.Singleton):
     ) -> None:
         if steam_update_preset_for_scope(app.scope) is None:
             return
-        if next_steam_update is None:
+        if next_steam_update is None or not app.steam_update_supported:
             app.updater = None
             return
         if app.updater is not None and not self._steam_update_runtime_rebuild_required(

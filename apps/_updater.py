@@ -15,6 +15,7 @@ from typing import Protocol, assert_never
 import _errors
 import config
 from _async_utils import run_blocking
+from _utils import Utilities
 from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
 from apps._steam import (
     build_steamcmd_login_arguments,
@@ -68,7 +69,7 @@ def redact_steamcmd_output(
     steam_update: SteamUpdateConfig,
     additional_secrets: Sequence[str | None] = (),
 ) -> str:
-    """Redact SteamCMD credentials and any related secret values from text."""
+    """Strip terminal controls and redact SteamCMD credentials and related secrets."""
 
     return _redact_steamcmd_text(
         text=text,
@@ -123,17 +124,12 @@ async def run_steamcmd_command(
 ) -> bool:
     """Run SteamCMD and stream its output to an optional status sink."""
 
-    success_markers = (
-        "Success! App",
-        "fully installed",
-        "fully installed.",
-        "Success! Verified",
-    )
+    success_markers = ("Success! App", "Success! Verified")
     success_marker_seen = False
 
     def handle_output(source: str, line: str) -> None:
         nonlocal success_marker_seen
-        if source == "stdout" and any(marker in line for marker in success_markers):
+        if source == "stdout" and line.lstrip().startswith(success_markers):
             success_marker_seen = True
         if on_output is not None:
             on_output(source, line)
@@ -177,10 +173,15 @@ async def _consume_steamcmd_stream(
     if stream is None:
         return
     while True:
-        chunk = await stream.readline()
+        try:
+            chunk = await stream.readuntil((b"\n", b"\r"))
+        except asyncio.IncompleteReadError as error:
+            chunk = error.partial
         if not chunk:
             return
-        line = chunk.decode(config.STR_ENCODE, errors="replace").rstrip("\r\n")
+        line = _clean_steamcmd_text(chunk.decode(config.STR_ENCODE, errors="replace")).rstrip("\r\n")
+        if not line:
+            continue
         sink.append(line)
         if on_output is not None:
             on_output(source, line)
@@ -908,19 +909,18 @@ class SteamCmd_Update_Manager(Update_Manager):
         steam_update: SteamUpdateConfig,
     ) -> None:
         redacted_line = redact_steamcmd_output(text=line, steam_update=steam_update)
-        clean_line = redacted_line.strip()
+        output = format_steamcmd_output(redacted_line)
+        clean_line = output.text
         self._append_command_log(source=source, line=redacted_line)
         if not clean_line:
             return
-        progress = steamcmd_progress(clean_line)
-        if progress is not None:
-            phase, progress_percent = progress
+        if output.phase is not None:
             log.info(
                 "SteamCMD progress: app=%s source=%s phase=%s progress=%s",
                 self.app.friendly,
                 source,
-                phase,
-                progress_percent,
+                output.phase,
+                output.progress_percent,
             )
         elif source == "stderr":
             log.warning("SteamCMD stderr: app=%s line=%s", self.app.friendly, clean_line)
@@ -937,14 +937,10 @@ class SteamCmd_Update_Manager(Update_Manager):
                 detail=clean_line,
                 log_lines=tuple(self._log_tail),
                 log_cursor=self._log_cursor,
+                progress_percent=(
+                    output.progress_percent if output.phase is not None else self._status.progress_percent
+                ),
             )
-            if progress is not None:
-                phase_text, progress_percent = progress
-                next_status = replace(
-                    next_status,
-                    summary=phase_text[:1].upper() + phase_text[1:] if phase_text else clean_line,
-                    progress_percent=progress_percent,
-                )
             self._status = next_status
 
     def _finish_operation(
@@ -1009,20 +1005,22 @@ def _mapping(raw: object, *, label: str) -> dict[str, object]:
 
 
 def _command_error_text(*, command: list[str], stdout_text: str, stderr_text: str) -> str:
-    output_lines = [line.strip() for line in (stdout_text + "\n" + stderr_text).splitlines() if line.strip()]
-    tail_lines = output_lines[-4:]
-    tail_text = _redact_steamcmd_text(
-        text=" | ".join(tail_lines),
+    redacted_text = _redact_steamcmd_text(
+        text=stdout_text + "\n" + stderr_text,
         secrets=_steamcmd_command_secrets(command),
     )
+    output_lines = [format_steamcmd_output(line).text for line in redacted_text.splitlines()]
+    tail_lines = [line for line in output_lines if line][-_STEAMCMD_ERROR_OUTPUT_LINE_LIMIT:]
+    tail_text = " | ".join(tail_lines)
     if tail_text:
         return f"Command failed: {_display_command(command)} [{tail_text}]"
     return f"Command failed: {_display_command(command)}"
 
 
 def _redact_steamcmd_text(*, text: str, secrets: Sequence[str | None]) -> str:
-    redacted_text = text
-    for secret in sorted({secret for secret in secrets if secret}, key=len, reverse=True):
+    redacted_text = _clean_steamcmd_text(text)
+    clean_secrets = {_clean_steamcmd_text(secret) for secret in secrets if secret}
+    for secret in sorted(clean_secrets - {""}, key=len, reverse=True):
         redacted_text = redacted_text.replace(secret, "******")
     return redacted_text
 
@@ -1086,19 +1084,77 @@ def _steam_manifest_candidates(directory: Path, *, manifest_name: str) -> tuple[
     return tuple(candidates)
 
 
+_STEAMCMD_TERMINAL_ESCAPE_RE = re.compile(
+    r"(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)"
+    r"|(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+    r"|\x1b[@-_]"
+    r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
+)
+_STEAMCMD_STATE_PREFIX_RE = re.compile(r"^Update state \([^)]*\)\s*", re.IGNORECASE)
 _STEAMCMD_PROGRESS_RE = re.compile(
-    r"Update state \([^)]*\)\s*(?P<phase>[^,]+),\s*progress:\s*(?P<progress>\d+(?:\.\d+)?)",
+    r"(?P<phase>[^,\r\n]+),\s*progress:\s*(?P<progress>\d+(?:\.\d+)?)"
+    r"\s*(?:\(\s*(?P<completed>\d+)\s*/\s*(?P<total>\d+)\s*\))?",
     re.IGNORECASE,
 )
+_STEAMCMD_PHASE_LABELS: Mapping[str, str] = {
+    "reconfiguring": "Preparing download",
+    "preallocating": "Preparing download",
+    "allocating": "Preparing download",
+    "preparing": "Preparing download",
+    "downloading": "Downloading game files",
+    "downloading update": "Downloading game files",
+    "validating": "Checking installed files",
+    "verifying": "Checking installed files",
+    "verifying update": "Checking installed files",
+    "staging": "Applying update",
+    "installing": "Applying update",
+    "committing": "Applying update",
+    "finalizing": "Applying update",
+    "unpacking": "Applying update",
+    "recombining": "Applying update",
+}
 
 
-def steamcmd_progress(line: str) -> tuple[str, float] | None:
-    """Extract the latest SteamCMD progress observation from one output line."""
+@dataclass(frozen=True, slots=True)
+class SteamCmdOutputLine:
+    """Display text and optional phase progress from one SteamCMD observation."""
 
-    match = _STEAMCMD_PROGRESS_RE.search(line)
+    text: str
+    phase: str | None = None
+    progress_percent: float | None = None
+
+
+def _clean_steamcmd_text(text: str) -> str:
+    return _STEAMCMD_TERMINAL_ESCAPE_RE.sub("", text)
+
+
+def format_steamcmd_output(line: str) -> SteamCmdOutputLine:
+    """Make SteamCMD status lines readable while preserving other output."""
+
+    clean_line = _clean_steamcmd_text(line).strip()
+    state_prefix = _STEAMCMD_STATE_PREFIX_RE.match(clean_line)
+    if state_prefix is None:
+        return SteamCmdOutputLine(text=clean_line)
+    state_text = clean_line[state_prefix.end():].strip()
+    match = _STEAMCMD_PROGRESS_RE.fullmatch(state_text)
     if match is None:
-        return None
-    return (match.group("phase").strip(), float(match.group("progress")))
+        phase_label = _STEAMCMD_PHASE_LABELS.get(state_text.casefold())
+        return SteamCmdOutputLine(text=phase_label or state_text, phase=phase_label)
+    progress_percent = float(match.group("progress"))
+    if not 0 <= progress_percent <= 100:
+        return SteamCmdOutputLine(text=state_text)
+    phase = match.group("phase").strip()
+    phase_label = _STEAMCMD_PHASE_LABELS.get(phase.casefold(), phase[:1].upper() + phase[1:])
+    text = f"{phase_label} — {progress_percent:.1f}%"
+    if match.group("total") is not None:
+        completed, total = int(match.group("completed")), int(match.group("total"))
+        if total > 0:
+            completed_text, total_text = (
+                Utilities.humanise_bytes(size, precision=0 if size < 1024 else 2, separator=" ")
+                for size in (completed, total)
+            )
+            text += f" ({completed_text} of {total_text})"
+    return SteamCmdOutputLine(text=text, phase=phase_label, progress_percent=progress_percent)
 
 
 def _unix_ms_now() -> int:

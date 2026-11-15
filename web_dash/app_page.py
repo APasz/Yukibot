@@ -55,9 +55,12 @@ from .constants import (
     _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
     _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
+    _REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
     log,
 )
 from .links import mod_web_node_path
+from .mod_uploads import mod_upload_error_detail, show_mod_upload_preview
+from node_api.mod import NodeModUploadPreview
 from .nicegui_protocols import (
     AsyncRefresh,
     ModWebEventArgumentsContainer,
@@ -161,6 +164,7 @@ from .types import (
 )
 from .ui_helpers import ModWebUiHelpersMixin, copy_text_to_clipboard
 from .utils import _format_player_capacity
+from _utils import Utilities
 
 if TYPE_CHECKING:
     from nicegui.element import Element
@@ -4653,6 +4657,7 @@ class ModWebAppPageMixin(
         inline_upload_control: Upload | None = None
         direct_upload_transfer_id: int | None = None
         upload_placement = ModPlacement.SERVER_ENABLED
+        preview_mod_upload = model.app_scope == config.AppScopes.sevendays.value and model.mods.upload_limits is not None
         mod_link_input: Input | None = None
         mod_link_version_input: Input | None = None
         mod_link_version_select: Select | None = None
@@ -4723,6 +4728,9 @@ class ModWebAppPageMixin(
                 placement=upload_placement,
             )
             inline_upload_control.props["url"] = target.url
+            if preview_mod_upload:
+                base_url, separator, query = target.url.partition("?")
+                inline_upload_control.props["url"] = f"{base_url}/inspect" + (f"?{query}" if separator else "")
             inline_upload_control.props["headers"] = [
                 {"name": "Authorization", "value": target.authorization_header},
             ]
@@ -4739,8 +4747,48 @@ class ModWebAppPageMixin(
             ui.notify(f"Uploaded mods for {model.app_friendly}.", type="positive")
             self._guarded_reload(ui=ui)
 
-        def direct_upload_failed() -> None:
+        def direct_upload_inspected(event: ModWebEventArgumentsContainer) -> None:
+            try:
+                preview = NodeModUploadPreview.model_validate_json(_event_args_as_text(event))
+            except ValueError as xcp:
+                finish_direct_upload_transfer(error=f"Invalid upload preview: {xcp}")
+                ui.notify("The node returned an invalid upload preview.", type="negative")
+                return
+            if inline_upload_control is not None:
+                inline_upload_control.disable()
+
+            async def apply(names: tuple[str, ...]) -> None:
+                node = self._remote_node_link(model.node_name)
+                payload = await self._remote_json_async(
+                    node=node, app_name=model.app_name,
+                    path=f"/apps/{quote(model.app_name, safe='')}/mods/upload/{preview.upload_id}/apply",
+                    scopes=(NodeApiScope.MODS_WRITE,), user=user, method="POST", json_payload={"names": list(names)},
+                    timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+                )
+                finish_direct_upload_transfer(error=None)
+                ui.notify(str(payload.get("message", "Installed selected mods.")), type="positive")
+                self._guarded_reload(ui=ui)
+
+            async def discard() -> None:
+                node = self._remote_node_link(model.node_name)
+                try:
+                    await self._remote_json_async(
+                        node=node, app_name=model.app_name,
+                        path=f"/apps/{quote(model.app_name, safe='')}/mods/upload/{preview.upload_id}/discard",
+                        scopes=(NodeApiScope.MODS_WRITE,), user=user, method="POST",
+                    )
+                finally:
+                    finish_direct_upload_transfer(error="Mod upload cancelled.")
+                    if inline_upload_control is not None:
+                        inline_upload_control.run_method("reset")
+                        inline_upload_control.enable()
+
+            show_mod_upload_preview(ui=ui, preview=preview, apply=apply, discard=discard)
+
+        def direct_upload_failed(event: ModWebEventArgumentsContainer | None = None) -> None:
             error = f"Mod upload failed before {model.app_friendly} accepted it."
+            if event is not None and (detail := mod_upload_error_detail(_event_args_as_text(event))):
+                error = f"Mod upload failed: {detail}"
             ensure_direct_upload_transfer()
             finish_direct_upload_transfer(error=error)
             ui.notify(
@@ -7012,16 +7060,33 @@ class ModWebAppPageMixin(
 
                 if can_upload_mod:
                     self._ensure_mod_list_dropzone_style(ui=ui)
+                    upload_limits = model.mods.upload_limits
+                    if upload_limits is not None:
+                        detail = f"Mod uploads: up to {Utilities.humanise_bytes(upload_limits.max_bytes, separator=' ')} per batch."
+                        if preview_mod_upload:
+                            detail += (
+                                f" Archives may expand to {Utilities.humanise_bytes(upload_limits.max_extracted_bytes, separator=' ')}"
+                                f", with up to {Utilities.humanise_bytes(upload_limits.max_file_bytes, separator=' ')} per extracted file."
+                            )
+                        ui.label(detail).classes("mod-subtitle text-sm")
                     inline_upload_control = ui.upload(
                         label="",
                         auto_upload=True,
                         multiple=True,
+                        max_file_size=upload_limits.max_bytes if upload_limits is not None else None,
+                        max_total_size=upload_limits.max_bytes if upload_limits is not None else None,
                     ).classes("mod-file-upload-zone mod-mod-list-dropzone w-full")
                     inline_upload_control.props["batch"] = True
                     inline_upload_control.props["field-name"] = "upload"
                     inline_upload_control.on("start", direct_upload_started, args=[])
-                    inline_upload_control.on("uploaded", direct_upload_succeeded, args=[])
-                    inline_upload_control.on("failed", direct_upload_failed, args=[])
+                    if preview_mod_upload:
+                        inline_upload_control.on("uploaded", direct_upload_inspected, js_handler="(event) => emit(event.xhr.responseText)")
+                    else:
+                        inline_upload_control.on("uploaded", direct_upload_succeeded, args=[])
+                    if preview_mod_upload:
+                        inline_upload_control.on("failed", direct_upload_failed, js_handler="(event) => emit(event.xhr?.responseText ?? '')")
+                    else:
+                        inline_upload_control.on("failed", direct_upload_failed, args=[])
                     inline_upload_control.on("rejected", direct_upload_rejected, args=[])
                     refresh_direct_upload_target()
                     direct_upload_token_timer: Timer = ui.timer(
@@ -7361,7 +7426,7 @@ class ModWebAppPageMixin(
         delete_instance_submit_button: Button | None = None
         activity_provider_checkboxes: list[tuple[str, Checkbox]] = []
         current_runtime_model: ModWebBasePageModel = model
-        steam_update_preset = self._details_steam_update_preset(model.app_name)
+        steam_update_preset = self._details_steam_update_preset(model.app_name) if model.steam_update_supported else None
         steam_update_branch_options = self._details_steam_update_branch_options(
             app_name=model.app_name,
             update_info=model.update_info,

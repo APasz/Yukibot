@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import hashlib
 import logging
 import shutil
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -25,14 +27,20 @@ from _manager import (
 )
 from _async_utils import run_blocking
 from _security import Access_Control, Power_Level
-from apps._config import SteamUpdateBranch, SteamUpdateConfig
+from apps._config import AppInstallProfile, SteamUpdateBranch, SteamUpdateConfig
+from apps.sevendays.installation import (
+    UNDEAD_LEGACY_RELEASE,
+    cleanup_install_downloads,
+    prepare_undead_legacy_install,
+    validate_overhaul_archive_source,
+)
 from apps._steam import cached_steam_update_branches, load_steam_update_branches, merge_steam_update_branches, steam_update_preset_for_scope
 from apps._updater import (
     build_steamcmd_command,
+    format_steamcmd_output,
     redact_steamcmd_output,
     resolve_steamcmd_command_prefix,
     run_steamcmd_command,
-    steamcmd_progress,
 )
 from .operations import (
     NodeOperationKind,
@@ -163,6 +171,45 @@ class NodeAppInstallField:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeAppInstallProfile:
+    profile: AppInstallProfile
+    label: str
+    steam_branch_id: str | None = None
+    game_version: str | None = None
+    overhaul_version: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.label.strip():
+            raise ValueError("Install profiles require a label.")
+        release_values = (self.steam_branch_id, self.game_version, self.overhaul_version)
+        if self.profile is AppInstallProfile.STANDARD:
+            if any(value is not None for value in release_values):
+                raise ValueError("The standard profile must not override release selection.")
+        elif not all(isinstance(value, str) and value.strip() for value in release_values):
+            raise ValueError("Overhaul profiles require compatible game and overhaul release information.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppInstallProfile":
+        return cls(
+            profile=AppInstallProfile(_required_text(payload, "profile", label="installation profile")),
+            label=_required_text(payload, "label", label="installation profile label"),
+            steam_branch_id=_optional_text(payload.get("steam_branch_id"), label="profile Steam branch"),
+            game_version=_optional_text(payload.get("game_version"), label="profile game version"),
+            overhaul_version=_optional_text(payload.get("overhaul_version"), label="profile overhaul version"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "profile": self.profile.value, "label": self.label,
+            "steam_branch_id": self.steam_branch_id, "game_version": self.game_version,
+            "overhaul_version": self.overhaul_version,
+        }
+
+
+_STANDARD_INSTALL_PROFILE = NodeAppInstallProfile(profile=AppInstallProfile.STANDARD, label="Standard")
+
+
+@dataclass(frozen=True, slots=True)
 class NodeAppInstallRecipe:
     scope: str
     label: str
@@ -172,6 +219,7 @@ class NodeAppInstallRecipe:
     fields: tuple[NodeAppInstallField, ...] = ()
     default_instance_key: str = DEFAULT_INSTANCE_KEY
     default_subfolder: str = ""
+    profiles: tuple[NodeAppInstallProfile, ...] = (_STANDARD_INSTALL_PROFILE,)
 
     def __post_init__(self) -> None:
         if not isinstance(self.default_instance_key, str):
@@ -184,6 +232,17 @@ class NodeAppInstallRecipe:
         default_subfolder = self.default_subfolder.strip() or f"{self.scope}-{default_instance_key}"
         object.__setattr__(self, "default_instance_key", default_instance_key)
         object.__setattr__(self, "default_subfolder", default_subfolder)
+        profile_ids = tuple(profile.profile for profile in self.profiles)
+        if AppInstallProfile.STANDARD not in profile_ids or len(set(profile_ids)) != len(profile_ids):
+            raise ValueError("Install profiles must be non-empty and unique.")
+        if self.scope != "sevendays" and AppInstallProfile.UNDEAD_LEGACY in profile_ids:
+            raise ValueError("Undead Legacy requires the 7D2D app scope.")
+
+    def install_profile(self, profile_id: AppInstallProfile) -> NodeAppInstallProfile:
+        for profile in self.profiles:
+            if profile.profile is profile_id:
+                return profile
+        raise ValueError("The selected installation profile is not available.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppInstallRecipe":
@@ -212,6 +271,11 @@ class NodeAppInstallRecipe:
                 _optional_text(payload.get("default_subfolder"), label="install default subfolder")
                 or ""
             ),
+            profiles=(
+                tuple(NodeAppInstallProfile.from_mapping(profile) for profile in
+                      _mapping_sequence(payload["profiles"], label="install profiles"))
+                if "profiles" in payload else (_STANDARD_INSTALL_PROFILE,)
+            ),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -224,6 +288,7 @@ class NodeAppInstallRecipe:
             "default_subfolder": self.default_subfolder,
             "branches": [branch.to_mapping() for branch in self.branches],
             "fields": [field.to_mapping() for field in self.fields],
+            "profiles": [profile.to_mapping() for profile in self.profiles],
         }
 
 
@@ -466,6 +531,8 @@ class NodeAppInstallRequest(BaseModel):
     port: int | None = None
     steam_branch_id: str
     inputs: dict[AppInstallInput, str] = Field(default_factory=dict, repr=False)
+    profile: AppInstallProfile = AppInstallProfile.STANDARD
+    archive_source: str | None = None
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -516,6 +583,7 @@ class _ValidatedInstallRequest:
     request: NodeAppInstallRequest
     create_request: AppInstanceCreateRequest
     plan: AppInstanceCreationPlan
+    archive_source: Path | None
 
 
 class NodeAppInstallerManager(Protocol):
@@ -561,6 +629,19 @@ class NodeAppInstallerService:
         self._require_acl = require_acl
         self._require_available = require_available
         self._operations = operations or NodeOperationService()
+        self._last_download_cleanup: float | None = None
+
+    @property
+    def download_cache_directory(self) -> Path:
+        node_key = hashlib.sha256(self._node_name().encode("utf-8")).hexdigest()[:16]
+        return config.DIR_OPT / "app-install-downloads" / node_key
+
+    async def cleanup_download_cache(self) -> None:
+        now = time.monotonic()
+        if self._last_download_cleanup is not None and now - self._last_download_cleanup < 60 * 60:
+            return
+        await run_blocking(cleanup_install_downloads, self.download_cache_directory)
+        self._last_download_cleanup = now
 
     async def build_catalog(
         self,
@@ -677,10 +758,12 @@ class NodeAppInstallerService:
                     plan=validated.plan,
                     create_request=validated.create_request,
                     steam_update=validated.recipe.steam_update.with_selected_branch(
-                        validated.request.steam_branch_id
+                        validated.request.steam_branch_id, add_if_missing=True,
                     ),
                     post_steam_install=validated.recipe.post_steam_install,
                     secret_values=secret_values,
+                    profile=validated.request.profile,
+                    archive_source=validated.archive_source,
                 ),
                 name=f"app-install-{job_id}",
             )
@@ -761,6 +844,8 @@ class NodeAppInstallerService:
         steam_update: SteamUpdateConfig,
         post_steam_install: AppSteamInstallPostProcessor | None,
         secret_values: tuple[str, ...],
+        profile: AppInstallProfile = AppInstallProfile.STANDARD,
+        archive_source: Path | None = None,
     ) -> None:
         app_name: str | None = None
         instance_created = False
@@ -819,6 +904,14 @@ class NodeAppInstallerService:
                     ),
                 )
                 await post_steam_install(staging_directory, create_request)
+
+            if profile is AppInstallProfile.UNDEAD_LEGACY:
+                await prepare_undead_legacy_install(
+                    staging_directory,
+                    cache_directory=self.download_cache_directory,
+                    archive_source=archive_source,
+                    report=lambda message: self._record_overhaul_progress(operation_id, message),
+                )
 
             self._raise_if_install_cancellation_requested(operation_id=operation_id)
             self._operations.update_active(
@@ -950,7 +1043,39 @@ class NodeAppInstallerService:
                 )
                 for install_input in recipe.inputs
             ),
+            profiles=(
+                (
+                    NodeAppInstallProfile(profile=AppInstallProfile.STANDARD, label="Vanilla"),
+                    NodeAppInstallProfile(
+                        profile=AppInstallProfile.UNDEAD_LEGACY, label="Undead Legacy",
+                        steam_branch_id=UNDEAD_LEGACY_RELEASE.steam_branch,
+                        game_version=UNDEAD_LEGACY_RELEASE.game_version,
+                        overhaul_version=UNDEAD_LEGACY_RELEASE.version,
+                    ),
+                ) if recipe.scope == "sevendays" else (_STANDARD_INSTALL_PROFILE,)
+            ),
         )
+
+    def _record_overhaul_progress(self, operation_id: str, message: str) -> None:
+        self._record_install_progress(
+            operation=self._operations.get(operation_id),
+            progress=NodeOperationProgress(summary=message, phase=NodeAppInstallState.INSTALLING.value),
+            log_line=message,
+        )
+
+    def _record_install_progress(
+        self,
+        *,
+        operation: NodeOperationRecord,
+        progress: NodeOperationProgress,
+        log_line: str,
+    ) -> None:
+        if not operation.active:
+            return
+        if operation.state is NodeOperationState.CANCEL_REQUESTED:
+            self._operations.append_log(operation_id=operation.operation_id, log_line=log_line)
+            return
+        self._operations.update_active(operation_id=operation.operation_id, progress=progress, log_line=log_line)
 
     def _available_recipes(self, *, manager: NodeAppInstallerManager) -> tuple[AppSteamInstallRecipe, ...]:
         """Return recipes allowed by the node policy without SteamCMD discovery."""
@@ -959,11 +1084,13 @@ class NodeAppInstallerService:
         policy = self._scope_policy()
         return tuple(recipe for recipe in recipes if policy.allows(recipe.scope))
 
-    async def _recipe_for_scope(self, *, manager: NodeAppInstallerManager, scope: str) -> AppSteamInstallRecipe:
+    async def _recipe_for_scope(
+        self, *, manager: NodeAppInstallerManager, scope: str, discover_branches: bool = True,
+    ) -> AppSteamInstallRecipe:
         scope_key = scope.strip().casefold()
         for recipe in self._available_recipes(manager=manager):
             if recipe.scope.casefold() == scope_key:
-                return await self._with_discovered_branches(recipe)
+                return await self._with_discovered_branches(recipe) if discover_branches else recipe
         raise ValueError("That app is not available for installation.")
 
     async def _validated_install_request(
@@ -974,8 +1101,21 @@ class NodeAppInstallerService:
     ) -> _ValidatedInstallRequest:
         """Resolve and validate all non-mutating install inputs once."""
 
-        recipe = await self._recipe_for_scope(manager=manager, scope=request.scope)
-        branch = self._recipe_branch(recipe=recipe, branch_id=request.steam_branch_id)
+        recipe = await self._recipe_for_scope(
+            manager=manager, scope=request.scope, discover_branches=request.profile is AppInstallProfile.STANDARD,
+        )
+        if request.profile is AppInstallProfile.UNDEAD_LEGACY:
+            if recipe.scope != "sevendays":
+                raise ValueError("Undead Legacy is only supported for fresh 7D2D instances.")
+            if request.steam_branch_id != UNDEAD_LEGACY_RELEASE.steam_branch:
+                raise ValueError(f"Undead Legacy {UNDEAD_LEGACY_RELEASE.version} requires game {UNDEAD_LEGACY_RELEASE.game_version}.")
+            archive_source = await run_blocking(validate_overhaul_archive_source, request.archive_source)
+            branch = SteamUpdateBranch(branch_id=UNDEAD_LEGACY_RELEASE.steam_branch)
+        else:
+            archive_source = None
+            if request.archive_source:
+                raise ValueError("An overhaul archive requires the Undead Legacy installation profile.")
+            branch = self._recipe_branch(recipe=recipe, branch_id=request.steam_branch_id)
         normalised_request = request.model_copy(
             update={"scope": recipe.scope, "steam_branch_id": branch.branch_id}
         )
@@ -989,6 +1129,7 @@ class NodeAppInstallerService:
             request=normalised_request,
             create_request=create_request,
             plan=plan,
+            archive_source=archive_source,
         )
 
     @staticmethod
@@ -1059,35 +1200,31 @@ class NodeAppInstallerService:
         steam_update: SteamUpdateConfig,
         secret_values: tuple[str, ...],
     ) -> None:
-        redacted_line = redact_steamcmd_output(
-            text=line,
-            steam_update=steam_update,
-            additional_secrets=secret_values,
-        ).strip()
-        if not redacted_line:
+        output = format_steamcmd_output(
+            redact_steamcmd_output(
+                text=line,
+                steam_update=steam_update,
+                additional_secrets=secret_values,
+            )
+        )
+        if not output.text:
             return
-        log_line = f"{source}: {redacted_line[:_INSTALL_LOG_LINE_MAX_LENGTH]}"
-        progress = steamcmd_progress(redacted_line)
+        log_line = f"{source}: {output.text[:_INSTALL_LOG_LINE_MAX_LENGTH]}"
         try:
             operation = self._operations.get(operation_id)
         except LookupError:
             return
-        if not operation.active:
-            return
-        if operation.state is NodeOperationState.CANCEL_REQUESTED:
-            self._operations.append_log(operation_id=operation_id, log_line=log_line)
-            return
         summary = operation.summary
         progress_percent = operation.progress_percent
-        if progress is not None:
-            phase, progress_percent = progress
-            summary = phase[:1].upper() + phase[1:] if phase else redacted_line
-        self._operations.update_active(
-            operation_id=operation_id,
+        if output.phase is not None:
+            progress_percent = output.progress_percent
+            summary = output.text
+        self._record_install_progress(
+            operation=operation,
             progress=NodeOperationProgress(
                 summary=summary,
                 phase=operation.phase,
-                detail=redacted_line,
+                detail=output.text,
                 progress_percent=progress_percent,
             ),
             log_line=log_line,

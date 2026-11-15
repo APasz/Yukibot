@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import BinaryIO
 import zipfile
 
 
@@ -40,14 +41,15 @@ def validated_archive_member_path(member_name: str, *, archive_label: str) -> Pu
 
 
 def validated_zip_entries(
-    archive_path: Path | str,
+    archive_path: Path | str | BinaryIO,
     *,
     archive_label: str,
     limits: ZipArchiveLimits,
+    allow_windows_separators: bool = False,
 ) -> list[tuple[zipfile.ZipInfo, PurePosixPath]]:
     """Return safe ZIP members after enforcing traversal and resource limits."""
     if not zipfile.is_zipfile(archive_path):
-        raise ValueError(f"{archive_label} is not a zip archive: {PurePosixPath(archive_path).name}")
+        raise ValueError(f"{archive_label} is not a zip archive.")
 
     entries: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
     file_count = 0
@@ -56,11 +58,12 @@ def validated_zip_entries(
         for member_index, member in enumerate(archive.infolist(), start=1):
             if member_index > limits.member_count:
                 raise ValueError(f"{archive_label} exceeds the maximum member count.")
-            raw_name = member.filename.rstrip("/")
+            member_name = member.filename.replace("\\", "/") if allow_windows_separators else member.filename
+            raw_name = member_name.rstrip("/")
             if not raw_name:
                 continue
             path = validated_archive_member_path(raw_name, archive_label=archive_label)
-            if not member.is_dir():
+            if not member_name.endswith("/"):
                 file_count += 1
                 if file_count > limits.file_count:
                     raise ValueError(f"{archive_label} exceeds the maximum file count.")

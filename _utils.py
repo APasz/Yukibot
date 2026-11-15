@@ -188,6 +188,7 @@ class Utilities:
         use_iec: bool = True,
         magnitude: str | None = None,
         precision: int = 2,
+        separator: str = "",
     ) -> str:
         """Return string with appropriate notation for a number of bytes
 
@@ -198,6 +199,7 @@ class Utilities:
             use_iec: Whether to use powers of 1024 (IEC) or 1000 (SI)
             magnitude: Specific notation to use
             precision: Decimal precision of the result
+            separator: Text between the number and its unit
 
         Raises;
             ValueError: If byte_num is not an int or magnitude is invalid
@@ -233,7 +235,7 @@ class Utilities:
         power = "i" if use_iec and magnitude else ""
         unit = "b" if is_bit else "B"
 
-        return f"{size}{magnitude}{power}{unit}"
+        return f"{size}{separator}{magnitude}{power}{unit}"
 
     @classmethod
     def parse_time(cls, string: str, tz: tzinfo = timezone.utc) -> datetime | None:

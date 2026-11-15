@@ -9,9 +9,8 @@ from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
 
-from nicegui.elements.card import Card
-
 from _manager import AppInstallInput
+from apps._config import AppInstallProfile
 from node_api.app_installer import (
     NodeAppInstallCatalog,
     NodeAppInstallInputKind,
@@ -36,7 +35,7 @@ from .portal_app_installer import (
 from .runtime_imports import Button, Card, Input, Label, ModWebUser, Select, Textarea, Timer, asyncio
 from .service_base import ModWebServiceSupport
 from .types import ModWebNodeLink
-from .ui_helpers import ModWebUiHelpersMixin
+from .ui_helpers import ModWebUiHelpersMixin, distinct_status_detail
 
 if TYPE_CHECKING:
     from nicegui.client import Client
@@ -47,7 +46,7 @@ _INSTALL_STATUS_REFRESH_SECONDS = 1.0
 _INSTALL_FIELD_PROPS = "filled square dense clearable hide-bottom-space color=accent"
 _INSTALL_SELECT_PROPS = "filled square dense hide-bottom-space color=accent options-dark popup-content-class=mod-setting-menu"
 _INSTALL_PREFLIGHT_SECRET_PLACEHOLDER = "preflight-secret"
-_AppInstallerTextField = Literal["instance_key", "friendly_name", "subfolder", "port_text"]
+_AppInstallerTextField = Literal["instance_key", "friendly_name", "subfolder", "port_text", "archive_source"]
 
 
 def _notify_in_page_client(
@@ -137,6 +136,8 @@ class _AppInstallerPageState:
     subfolder: str = ""
     port_text: str = ""
     steam_branch_id: str = ""
+    profile: AppInstallProfile = AppInstallProfile.STANDARD
+    archive_source: str = ""
     inputs: dict[AppInstallInput, str] = field(default_factory=dict)
     catalog_error: str | None = None
     release_loading: bool = False
@@ -166,6 +167,8 @@ class _AppInstallerPageState:
         self.preflight_message = None
         self.show_advanced_settings = False
         self.instance_identity_customized = False
+        self.profile = AppInstallProfile.STANDARD
+        self.archive_source = ""
         if recipe is None:
             self.instance_key = ""
             self.friendly_name = ""
@@ -204,7 +207,13 @@ class _AppInstallerPageState:
         self.inputs = next_inputs
         self.release_loading = False
         self.release_error = None
-        if self.steam_branch_id.casefold() not in {branch.branch_id.casefold() for branch in recipe.branches}:
+        selected_profile = next((profile for profile in recipe.profiles if profile.profile is self.profile), None)
+        if selected_profile is None:
+            self.profile = AppInstallProfile.STANDARD
+            self.archive_source = ""
+        if selected_profile is not None and selected_profile.steam_branch_id is not None:
+            self.steam_branch_id = selected_profile.steam_branch_id
+        elif self.steam_branch_id.casefold() not in {branch.branch_id.casefold() for branch in recipe.branches}:
             self.steam_branch_id = recipe.default_branch_id
         if not self.instance_identity_customized:
             self.instance_key = recipe.default_instance_key
@@ -421,6 +430,9 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             )
 
         def selected_branch_label(recipe: NodeAppInstallRecipe) -> str:
+            profile = recipe.install_profile(state.profile)
+            if profile.steam_branch_id is not None:
+                return f"7D2D {profile.game_version} / {profile.label} {profile.overhaul_version}"
             for branch in recipe.branches:
                 if branch.branch_id.casefold() == state.steam_branch_id.casefold():
                     return branch.label
@@ -651,9 +663,9 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             if progress_percent is not None:
                 controls.progress_label.set_text(f"{progress_percent:.0f}%")
 
-            detail = state.status_error or status.detail or ""
-            controls.detail_label.set_visibility(bool(detail))
-            controls.detail_label.set_text(detail)
+            detail = distinct_status_detail(summary=status.summary, detail=state.status_error or status.detail)
+            controls.detail_label.set_visibility(detail is not None)
+            controls.detail_label.set_text(detail or "")
 
             app_name = status.app_name
             controls.app_link.set_visibility(app_name is not None)
@@ -764,7 +776,8 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             if recipe is None:
                 notify("Choose an app.", tone="warning")
                 return
-            if state.steam_branch_id.casefold() not in {branch.branch_id.casefold() for branch in recipe.branches}:
+            profile = recipe.install_profile(state.profile)
+            if profile.steam_branch_id is None and state.steam_branch_id.casefold() not in {branch.branch_id.casefold() for branch in recipe.branches}:
                 notify("Choose an available release.", tone="warning")
                 return
             state.step = _AppInstallerWizardStep.REQUIREMENTS if recipe.fields else _AppInstallerWizardStep.SERVER
@@ -804,6 +817,8 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 port=_optional_port(state.port_text),
                 steam_branch_id=state.steam_branch_id,
                 inputs=dict(state.inputs),
+                profile=state.profile,
+                archive_source=state.archive_source.strip() or None,
             )
 
         async def continue_to_review_step() -> None:
@@ -909,6 +924,23 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                 notify("Choose an available release.", tone="warning")
                 return
             state.steam_branch_id = event.value
+            render_wizard.refresh()
+
+        def change_profile(event: ValueChangeEventArguments[str | None]) -> None:
+            if wizard_is_locked() or event.value is None:
+                return
+            recipe = selected_recipe()
+            if recipe is None:
+                return
+            profile = next((profile for profile in recipe.profiles if profile.profile.value == event.value), None)
+            if profile is None:
+                raise ValueError("The selected installation profile is not available.")
+            state.profile = profile.profile
+            state.steam_branch_id = profile.steam_branch_id or recipe.default_branch_id
+            state.archive_source = ""
+            if state.friendly_name in {f"{recipe.label} Server", f"{recipe.label} [Undead Legacy] Server"}:
+                suffix = " [Undead Legacy]" if profile.profile is AppInstallProfile.UNDEAD_LEGACY else ""
+                state.friendly_name = f"{recipe.label}{suffix} Server"
             render_wizard.refresh()
 
         def toggle_advanced_settings() -> None:
@@ -1096,6 +1128,27 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                     ui.label(f"{selected_node().label} · {recipe.label}").classes("mod-subtitle text-sm")
 
                     if state.step is _AppInstallerWizardStep.RELEASE:
+                        if len(recipe.profiles) > 1:
+                            profile_select = ui.select(
+                                {profile.profile.value: profile.label for profile in recipe.profiles},
+                                value=state.profile.value, label="Installation",
+                            ).props(_INSTALL_SELECT_PROPS).classes("w-full md:max-w-md mod-app-details-field")
+                            profile_select.on_value_change(change_profile)
+                            disable_when_wizard_locked(profile_select)
+                        profile = recipe.install_profile(state.profile)
+                        if profile.steam_branch_id is not None:
+                            ui.label(selected_branch_label(recipe)).classes("font-semibold")
+                            ui.label("Fresh installation. Game and overhaul updates are deferred for this profile.").classes("mod-subtitle text-sm")
+                            archive_input = ui.input(
+                                f"Optional ZIP path on {selected_node().label}", value=state.archive_source,
+                            ).props(_INSTALL_FIELD_PROPS).classes("w-full mod-app-details-field")
+                            archive_input.on_value_change(lambda event: set_text("archive_source", event))
+                            ui.label("Leave blank to download the official release. Alternatively, supply the absolute path to a complete ZIP already on this node.").classes("mod-subtitle text-xs")
+                            with ui.row().classes("items-center gap-2 flex-wrap"):
+                                back_button = ui.button("Back", icon="arrow_back", on_click=back_to_app_step).classes("mod-list-button secondary")
+                                next_button = ui.button("Next", icon="arrow_forward", on_click=continue_from_release_step).classes("mod-list-button")
+                                disable_when_wizard_locked(back_button, archive_input, next_button)
+                            return
                         ui.label("Choose the Steam release to install.").classes("font-semibold")
                         if state.release_loading:
                             ui.label("Loading current release options…").classes("mod-subtitle text-sm")
@@ -1252,6 +1305,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
                             for label, value in (
                                 ("Node", selected_node().label),
                                 ("Game", recipe.label),
+                                ("Installation", recipe.install_profile(state.profile).label),
                                 ("Release", selected_branch_label(recipe)),
                                 ("Server name", state.friendly_name),
                                 ("Game port", state.port_text or "Use game default"),
@@ -1343,7 +1397,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.APP_MANAGE,),
             user=user,
             method="POST",
-            json_payload=cast(dict[str, object], request.model_dump(mode="json")),
+            json_payload=cast(dict[str, object], request.model_dump(mode="json", exclude_defaults=True)),
         )
         return NodeAppInstallPreflight.from_mapping(payload)
 
@@ -1388,7 +1442,7 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.APP_MANAGE,),
             user=user,
             method="POST",
-            json_payload=cast(dict[str, object], request.model_dump(mode="json")),
+            json_payload=cast(dict[str, object], request.model_dump(mode="json", exclude_defaults=True)),
         )
         return NodeAppInstallStatus.from_mapping(payload)
 

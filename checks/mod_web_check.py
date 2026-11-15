@@ -35,6 +35,7 @@ from apps._app import (
     ChatRelaySupport,
 )
 from apps._config import (
+    AppInstallProfile,
     AppTitleFont,
     ClientPackConfig,
     ClientPackKubeJsScript,
@@ -138,6 +139,7 @@ from node_api.chat import (
 from node_api.console import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
+    NodeConsoleStdoutSnapshot,
 )
 from node_api.files import (
     NodeConfigEntry,
@@ -174,6 +176,7 @@ from node_api.app_installer import (
     NodeAppInstallField,
     NodeAppInstallInputKind,
     NodeAppInstallPreflight,
+    NodeAppInstallProfile,
     NodeAppInstallRequest,
     NodeAppInstallRecipe,
     NodeAppInstallScopeOption,
@@ -225,6 +228,7 @@ from web_dash.app_installer import (
     _redact_install_error_detail,
     _validate_preflight_result,
 )
+from web_dash.ui_helpers import distinct_status_detail
 from web_dash.portal_app_installer import (
     PORTAL_APP_INSTALL_CONFLICT_MESSAGE,
     PortalAppInstallConflictError,
@@ -1812,6 +1816,77 @@ class ModWebTests(unittest.TestCase):
             node="yuki",
             actions=(),
         )
+
+    def test_console_editor_initializes_live_updates_when_opened_after_page_load(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            ui = MagicMock()
+            model = replace(self._overview_model_with_config_and_chat(), console_actions=self._console_action_list())
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            with (
+                patch.object(service, "_render_flat_tab_header"),
+                patch.object(service, "_remote_node_link"),
+                patch.object(service, "_register_client_cleanup"),
+                patch.object(service, "_create_remote_console_stdout_subscription") as subscribe,
+            ):
+                service._render_console_editor(ui=cast(ModWebUi, ui), model=model, user=user)
+                bootstrap = ui.run_javascript.call_args.args[0]
+                self.assertIn("window.modWebConsoleFeed ??=", bootstrap)
+                self.assertNotIn("<script>", bootstrap)
+                ui.add_head_html.assert_not_called()
+                snapshot = NodeConsoleStdoutSnapshot(
+                    app_name=model.app_name, app_friendly=model.app_friendly, node=model.node_name,
+                    lines=("BepInEx loaded", "Server ready"), truncated=False, running=True,
+                )
+                subscribe.call_args.kwargs["on_update"](snapshot)
+                await asyncio.sleep(0)
+                feed = ui.html.return_value.classes.return_value
+                update = feed.client.run_javascript.call_args.args[0]
+                self.assertIn("BepInEx loaded\\nServer ready", update)
+                self.assertIn("modWebConsoleFeed?.update", update)
+
+        asyncio.run(exercise())
+
+    def test_console_subscribers_receive_existing_output_without_waiting_for_new_lines(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            node = ModWebNodeLink(
+                node_name="erin", label="Erin", url="/mod-web/nodes/erin/system",
+                api_base_url="https://erin.example.test/api/node", api_url="/api/node/erin", is_current=False,
+            )
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            snapshot = NodeConsoleStdoutSnapshot(
+                app_name="sevendays_udl", app_friendly="Undead Legacy", node="erin",
+                lines=("Startup failed",), truncated=False, running=False,
+            )
+            published = asyncio.Event()
+            first: list[NodeConsoleStdoutSnapshot] = []
+            second: list[NodeConsoleStdoutSnapshot] = []
+
+            async def listen(*, on_update: Callable[[NodeConsoleStdoutSnapshot], None], **_: object) -> None:
+                on_update(snapshot)
+                published.set()
+                await asyncio.Event().wait()
+
+            with patch.object(service, "_remote_console_stdout_stream_listener", new=listen):
+                unsubscribe_first = service._create_remote_console_stdout_subscription(
+                    node=node, app_name=snapshot.app_name, max_lines=200, user=user, on_update=first.append,
+                )
+                try:
+                    await asyncio.wait_for(published.wait(), timeout=1)
+                    unsubscribe_second = service._create_remote_console_stdout_subscription(
+                        node=node, app_name=snapshot.app_name, max_lines=200, user=user, on_update=second.append,
+                    )
+                    try:
+                        self.assertEqual(first, [snapshot])
+                        self.assertEqual(second, [snapshot])
+                    finally:
+                        unsubscribe_second()
+                finally:
+                    unsubscribe_first()
+                    await service._console_stdout_broker.close()
+
+        asyncio.run(exercise())
 
     @staticmethod
     def _overview_model_with_config_and_chat() -> ModWebOverviewPageModel:
@@ -4140,6 +4215,38 @@ class ModWebTests(unittest.TestCase):
     def test_app_installer_starts_without_a_selected_node(self) -> None:
         self.assertIsNone(_AppInstallerPageState().node_name)
 
+    def test_status_detail_only_displays_additional_information(self) -> None:
+        summary = "Downloading game files — 3.0% (491.64 MiB of 15.75 GiB)"
+        for detail in (None, "", " \n ", summary, f"  {summary}\n"):
+            with self.subTest(detail=detail):
+                self.assertIsNone(distinct_status_detail(summary=summary, detail=detail))
+        for detail in ("Warning: retrying download.", f"{summary}\nERROR! Disk write failed."):
+            with self.subTest(detail=detail):
+                self.assertEqual(distinct_status_detail(summary=summary, detail=detail), detail)
+
+    def test_app_installer_keeps_overhaul_branch_when_releases_refresh(self) -> None:
+        standard = NodeAppInstallProfile(profile=AppInstallProfile.STANDARD, label="Vanilla")
+        overhaul = NodeAppInstallProfile(
+            profile=AppInstallProfile.UNDEAD_LEGACY, label="Undead Legacy", steam_branch_id="v2.6",
+            game_version="2.6", overhaul_version="2.7.40",
+        )
+        recipe = NodeAppInstallRecipe(
+            scope="sevendays", label="7 Days to Die", default_port=26900, default_branch_id="public",
+            branches=(NodeAppInstallBranch(branch_id="public", label="Stable"),), profiles=(standard, overhaul),
+        )
+        state = _AppInstallerPageState(node_name="erin")
+        state.apply_catalog(NodeAppInstallCatalog(node="erin", recipes=(recipe,)))
+        state.apply_recipe(recipe)
+        state.profile = AppInstallProfile.UNDEAD_LEGACY
+        state.archive_source = "/archives/overhaul.zip"
+        state.apply_release_recipe(recipe)
+        self.assertEqual(state.steam_branch_id, "v2.6")
+        self.assertEqual(state.archive_source, "/archives/overhaul.zip")
+        state.apply_release_recipe(replace(recipe, profiles=(standard,)))
+        self.assertIs(state.profile, AppInstallProfile.STANDARD)
+        self.assertEqual(state.steam_branch_id, "public")
+        self.assertEqual(state.archive_source, "")
+
     def test_app_installer_recipe_defaults_use_the_node_instance_identity(self) -> None:
         recipe = NodeAppInstallRecipe(
             scope="ets",
@@ -4684,6 +4791,39 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(view_state.branch_selection_disabled)
         self.assertEqual(view_state.action_status_text, "Requires Sudo access.")
 
+    def test_update_section_shows_progress_once_and_retains_distinct_details(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            supports_verify=True,
+        )
+        summary = "Downloading game files — 3.0% (491.64 MiB of 15.75 GiB)"
+        model = self._overview_model_with_config_and_chat()
+        for detail, expected_detail in ((summary, None), ("Warning: retrying download.", "Warning: retrying download.")):
+            with self.subTest(detail=detail):
+                status = AppUpdateStatus(
+                    state=AppUpdateState.RUNNING,
+                    summary=summary,
+                    detail=detail,
+                    operation_kind=AppUpdateOperationKind.UPDATE,
+                    log_lines=(f"stdout: {summary}",),
+                )
+                view_state = ModWebService._update_section_view_state(
+                    model=model,
+                    update_info=update_info,
+                    status=status,
+                    selected_branch_id="public",
+                    can_manage_updates=True,
+                    dry_preview_active=False,
+                )
+                self.assertEqual(view_state.status_summary, summary)
+                self.assertEqual(view_state.status_detail, expected_detail)
+                self.assertEqual(view_state.status, status)
+                self.assertTrue(view_state.show_log)
+
     def test_details_steam_update_preset_resolves_scope_default(self) -> None:
         preset = ModWebService._details_steam_update_preset("sevendays_alpha")
 
@@ -5125,6 +5265,9 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(statuses[2].state, AppUpdateState.FAILED)
         self.assertEqual(statuses[3].operation_kind, AppUpdateOperationKind.VERIFY)
         self.assertEqual(statuses[4].operation_kind, AppUpdateOperationKind.VERIFY)
+        self.assertIn("stdout: Downloading game files — 42.5%", statuses[0].log_lines)
+        self.assertIn("stdout: Checking installed files — 100.0%", statuses[3].log_lines)
+        self.assertTrue(all("Update state (" not in line for status in statuses for line in status.log_lines))
 
     def test_user_level_helpers_reflect_acl_level(self) -> None:
         with TemporaryDirectory[str]() as tmp:
@@ -6137,6 +6280,7 @@ class ModWebTests(unittest.TestCase):
             can_write_map_annotations=True,
             supports_chat=True,
             supports_updates=False,
+            steam_update_supported=False,
             chat_url="/mod-web/chat/minecraft_alpha",
             update_info=None,
             update_status=None,
@@ -6153,6 +6297,7 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(model.map_api_url, "/api/node/apps/minecraft%20alpha/map")
+        self.assertFalse(model.steam_update_supported)
         self.assertEqual(model.join_address, "play.example.test:25565")
         self.assertEqual(model.join_direct_ip_address, "203.0.113.10:25565")
         self.assertEqual(
@@ -21275,6 +21420,17 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(len(root_ui.dialogs), 1)
         self.assertTrue(root_ui.dialogs[0].opened)
         self.assertTrue(any("Back up saves and mods first." in label for label in root_ui.labels))
+
+        overhaul_ui = FakeUi()
+        with patch.object(service, "_user_has_level", return_value=True):
+            service._render_app_properties_section(
+                ui=cast(ModWebUi, cast(object, overhaul_ui)),
+                model=replace(model, app_name="sevendays_alpha", steam_update_supported=False),
+                user=user,
+                tab=service._app_properties_tab_definition(),
+            )
+        self.assertNotIn("Update Configuration", overhaul_ui.labels)
+        self.assertNotIn("Enable Steam updates", [control.label for control in overhaul_ui.checkboxes])
 
     def test_render_user_header_omits_discord_settings_for_sudo_users(
         self,

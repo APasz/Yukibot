@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import tempfile
+import asyncio
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import config
+from _async_utils import run_blocking
+from _file import InsufficientDiskSpaceError, require_free_disk_space
+
+_MULTIPART_OVERHEAD_BYTES = 1024**2
+
+
+def is_mod_upload_path(path: str, api_prefix: str) -> bool:
+    prefix = f"{api_prefix.rstrip('/')}/apps/"
+    if not path.startswith(prefix):
+        return False
+    parts = path.removeprefix(prefix).split("/")
+    return len(parts) in {3, 4} and bool(parts[0]) and parts[1:] in (["mods", "upload"], ["mods", "upload", "inspect"])
 
 
 class UploadStream(Protocol):
@@ -25,6 +38,10 @@ class _RequestBodyTooLargeError(Exception):
     """Raised internally when a streamed Node API request exceeds its limit."""
 
 
+class _UploadStorageFullError(Exception):
+    """Abort reception before exhausting the temporary filesystem."""
+
+
 class NodeApiRequestBodyLimitMiddleware:
     """Reject oversized Node API request bodies before multipart parsing writes them to disk."""
 
@@ -34,12 +51,17 @@ class NodeApiRequestBodyLimitMiddleware:
         *,
         max_bytes: int,
         api_prefix: str,
+        mod_max_bytes: int | None = None,
     ) -> None:
         if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
             raise ValueError("Node API request size limit must be a positive integer.")
         self._app = app
         self._max_bytes = max_bytes
         self._api_prefix = api_prefix
+        if mod_max_bytes is not None and (isinstance(mod_max_bytes, bool) or not isinstance(mod_max_bytes, int) or mod_max_bytes <= 0):
+            raise ValueError("Mod upload size limit must be a positive integer.")
+        self._mod_max_bytes = mod_max_bytes
+        self._mod_upload_lock = asyncio.Lock()
 
     async def __call__(
         self,
@@ -51,23 +73,47 @@ class NodeApiRequestBodyLimitMiddleware:
             await self._app(scope, receive, send)
             return
 
-        content_length = self._content_length(scope)
-        if content_length is not None and content_length > self._max_bytes:
-            await self._send_too_large_response(send)
+        mod_upload = self._mod_max_bytes is not None and is_mod_upload_path(scope["path"], self._api_prefix)
+        limit = self._mod_max_bytes + _MULTIPART_OVERHEAD_BYTES if mod_upload and self._mod_max_bytes is not None else self._max_bytes
+        if mod_upload and self._mod_upload_lock.locked():
+            await self._send_error(send, 429, "Another mod upload is being received. Please retry shortly.")
             return
 
+        content_length = self._content_length(scope)
+        if content_length is not None and content_length > limit:
+            await self._send_too_large_response(send, limit)
+            return
+        if mod_upload:
+            await self._mod_upload_lock.acquire()
+            try:
+                await run_blocking(require_free_disk_space, Path(tempfile.gettempdir()), max(content_length or 0, 0))
+            except InsufficientDiskSpaceError as xcp:
+                self._mod_upload_lock.release()
+                await self._send_error(send, 507, str(xcp))
+                return
+            except BaseException:
+                self._mod_upload_lock.release()
+                raise
+
         received_bytes = 0
+        next_space_check = 64 * 1024**2
         response_started = False
 
         async def limited_receive() -> Message:
-            nonlocal received_bytes
+            nonlocal received_bytes, next_space_check
             message = await receive()
             if message.get("type") == "http.request":
                 body = message.get("body", b"")
                 if isinstance(body, bytes):
                     received_bytes += len(body)
-                    if received_bytes > self._max_bytes:
+                    if received_bytes > limit:
                         raise _RequestBodyTooLargeError
+                    if mod_upload and received_bytes >= next_space_check:
+                        try:
+                            await run_blocking(require_free_disk_space, Path(tempfile.gettempdir()), 0)
+                        except InsufficientDiskSpaceError as xcp:
+                            raise _UploadStorageFullError(str(xcp)) from xcp
+                        next_space_check = received_bytes + 64 * 1024**2
             return message
 
         async def tracked_send(message: Message) -> None:
@@ -80,7 +126,13 @@ class NodeApiRequestBodyLimitMiddleware:
             await self._app(scope, limited_receive, tracked_send)
         except _RequestBodyTooLargeError:
             if not response_started:
-                await self._send_too_large_response(send)
+                await self._send_too_large_response(send, limit)
+        except _UploadStorageFullError as xcp:
+            if not response_started:
+                await self._send_error(send, 507, str(xcp))
+        finally:
+            if mod_upload:
+                self._mod_upload_lock.release()
 
     def _should_limit(self, scope: Scope) -> bool:
         return (
@@ -104,12 +156,17 @@ class NodeApiRequestBodyLimitMiddleware:
     async def _send_too_large_response(
         self,
         send: Send,
+        max_bytes: int,
     ) -> None:
-        body = f"Request body exceeds the {self._max_bytes} byte limit.".encode("utf-8")
+        await self._send_error(send, 413, f"Request body exceeds the {max_bytes} byte limit.")
+
+    @staticmethod
+    async def _send_error(send: Send, status: int, detail: str) -> None:
+        body = detail.encode("utf-8")
         await send(
             {
                 "type": "http.response.start",
-                "status": 413,
+                "status": status,
                 "headers": [
                     (b"content-type", b"text/plain; charset=utf-8"),
                     (b"content-length", str(len(body)).encode("ascii")),

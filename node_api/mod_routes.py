@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
+import errno
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Any, cast
 
-from fastapi import File, Form, Request, UploadFile
+from fastapi import Request, UploadFile, HTTPException
 from fastapi.responses import FileResponse
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from _audit import audit_log
+from _file import InsufficientDiskSpaceError
+from _mod_ops import RunningAppModMutationError
 from _security import Power_Level
 from apps._app import App
 from apps._mod_catalog import ModSourceKind
@@ -38,6 +42,7 @@ from .mod import (
     NodeModNotesUpdateRequest,
     NodeModPageResolveRequest,
     NodeModPropertiesUpdateRequest,
+    NodeModUploadSelection,
 )
 from .client_pack import NodeClientPackService
 from .mod_service import NodeModService
@@ -353,31 +358,44 @@ def register_mod_routes(
             request=NodeDownloadRequest(mod_name=mod_name),
         )
 
-    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/upload")
-    async def _upload_mod(
-        app_name: str,
-        request: Request,
-        upload: Annotated[list[UploadFile], File()],
-        filename: Annotated[list[str] | None, Form()] = None,
-        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
-        access_token: str | None = None,
+    async def _receive_mod_upload(
+        app_name: str, request: Request, placement: ModPlacement, access_token: str | None, *, inspect: bool,
     ) -> dict[str, object]:
-        traffic_log.info("Node API mod upload request: node=%s app=%s", auth.node_name, app_name)
-        context = auth.require_access(
-            request,
-            access_token,
-            app_name=app_name,
-            scopes=(NodeApiScope.MODS_WRITE,),
-        )
+        # Validate the short-lived token before a potentially hours-long transfer.
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
         actor_user_id = auth.require_actor(context).require_actor_user_id()
         app = resolve_app(app_name)
-        result = await mod_service.upload_mod_files(
-            app=app,
-            uploads=upload,
-            upload_names=filename,
-            actor_user_id=actor_user_id,
-            placement=placement,
-        )
+        try:
+            mod_service.require_mod_upload_allowed(app=app, placement=placement, inspect=inspect)
+            async with request.form() as form:
+                raw_uploads = form.getlist("upload")
+                if not raw_uploads or any(not isinstance(value, StarletteUploadFile) for value in raw_uploads):
+                    raise ValueError("Select one or more mod files to upload.")
+                uploads = [cast(UploadFile, value) for value in raw_uploads]
+                raw_names = form.getlist("filename")
+                if any(not isinstance(value, str) for value in raw_names):
+                    raise ValueError("Mod upload filenames must be text.")
+                names = [cast(str, value) for value in raw_names] if raw_names else None
+                if inspect:
+                    preview = await mod_service.inspect_mod_uploads(
+                        app=app, uploads=uploads, upload_names=names,
+                        actor_user_id=actor_user_id, placement=placement,
+                    )
+                    return preview.model_dump(mode="json")
+                result = await mod_service.upload_mod_files(
+                    app=app, uploads=uploads, upload_names=names,
+                    actor_user_id=actor_user_id, placement=placement,
+                )
+        except RunningAppModMutationError as xcp:
+            raise HTTPException(409, str(xcp)) from xcp
+        except InsufficientDiskSpaceError as xcp:
+            raise HTTPException(507, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise HTTPException(400, str(xcp)) from xcp
+        except OSError as xcp:
+            if xcp.errno == errno.ENOSPC:
+                raise HTTPException(507, "Insufficient free disk space for this mod upload.") from xcp
+            raise
         audit_log(
             "mod.file_uploaded",
             actor_user_id=actor_user_id,
@@ -387,6 +405,55 @@ def register_mod_routes(
             required_level=Power_Level.user.name,
         )
         return result.to_mapping()
+
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/upload")
+    async def _upload_mod(
+        app_name: str, request: Request, placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        return await _receive_mod_upload(app_name, request, placement, access_token, inspect=False)
+
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/upload/inspect")
+    async def _inspect_mod_upload(
+        app_name: str, request: Request,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        return await _receive_mod_upload(app_name, request, placement, access_token, inspect=True)
+
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/upload/{{upload_id}}/apply")
+    async def _apply_mod_upload(
+        app_name: str, upload_id: str, request: Request, selection: NodeModUploadSelection,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        actor_user_id = auth.require_actor(context).require_actor_user_id()
+        app = resolve_app(app_name)
+        try:
+            result = await mod_service.apply_mod_upload(
+                app=app, actor_user_id=actor_user_id, upload_id=upload_id, names=selection.names,
+            )
+        except (RunningAppModMutationError, FileExistsError) as xcp:
+            raise HTTPException(409, str(xcp)) from xcp
+        except InsufficientDiskSpaceError as xcp:
+            raise HTTPException(507, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise HTTPException(400, str(xcp)) from xcp
+        audit_log(
+            "mod.file_uploaded", actor_user_id=actor_user_id, node_name=auth.node_name,
+            app_name=app.name, mod_name=",".join(mod.name for mod in result.mods), required_level=Power_Level.user.name,
+        )
+        return result.to_mapping()
+
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/upload/{{upload_id}}/discard")
+    async def _discard_mod_upload(
+        app_name: str, upload_id: str, request: Request, access_token: str | None = None,
+    ) -> dict[str, bool]:
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+        await mod_service.discard_mod_upload(
+            app=resolve_app(app_name), actor_user_id=auth.require_actor(context).require_actor_user_id(), upload_id=upload_id,
+        )
+        return {"discarded": True}
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/install-link")
     async def _install_mod_link(

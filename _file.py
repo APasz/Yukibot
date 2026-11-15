@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
-from collections.abc import AsyncIterator, Collection
+from collections.abc import AsyncIterator, Callable, Collection
 from logging import Logger
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -22,6 +22,33 @@ from _async_utils import run_blocking
 from archive_safety import validated_archive_member_path
 
 log: Logger = logging.getLogger(__name__)
+MOD_UPLOAD_STAGING_PREFIX = ".yukibot-mod-upload-"
+_DISK_SPACE_RESERVE_BYTES = 256 * 1024**2
+
+
+class InsufficientDiskSpaceError(ValueError):
+    """The target filesystem cannot hold a transfer and its working files."""
+
+
+def require_free_disk_space(directory: Path, required_bytes: int) -> None:
+    """Keep working room beyond a transfer's declared storage requirement."""
+    if required_bytes < 0:
+        raise ValueError("Required disk space cannot be negative.")
+    if shutil.disk_usage(directory).free < required_bytes + _DISK_SPACE_RESERVE_BYTES:
+        raise InsufficientDiskSpaceError("Insufficient free disk space for the upload and its temporary files.")
+
+
+def atomic_write_bytes(pointer: Path, contents: bytes) -> None:
+    """Replace a small state file only after its complete contents are written."""
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=f".{pointer.name}-", dir=pointer.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(contents)
+        temporary.replace(pointer)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 class ArchiveKind(enum.StrEnum):
@@ -40,7 +67,8 @@ class File_Utils:
 
     @staticmethod
     def _normalise_archive_member_path(member_name: str) -> Path:
-        path = validated_archive_member_path(member_name, archive_label="Archive")
+        """Interpret Windows ZIP separators before applying path safety checks."""
+        path = validated_archive_member_path(member_name.replace("\\", "/"), archive_label="Archive")
         return Path(*path.parts)
 
     @classmethod
@@ -52,12 +80,15 @@ class File_Utils:
                     continue
                 relative_path: Path = cls._normalise_archive_member_path(member_name)
                 target_path: Path = staging_dir / relative_path
-                if member_name.endswith("/"):
-                    target_path.mkdir(parents=True, exist_ok=True)
-                    continue
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(member, "r") as source, open(target_path, "wb") as target:
-                    target.write(source.read())
+                try:
+                    if member_name.endswith(("/", "\\")):
+                        target_path.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member, "r") as source, target_path.open("xb") as target:
+                        shutil.copyfileobj(source, target)
+                except (FileExistsError, NotADirectoryError, IsADirectoryError) as xcp:
+                    raise ValueError(f"Archive members have conflicting paths: {relative_path}") from xcp
 
     @staticmethod
     def _extract_7z_archive(archive_path: Path, staging_dir: Path) -> None:
@@ -102,7 +133,7 @@ class File_Utils:
 
     @staticmethod
     def _resolved_archive_root(staging_dir: Path) -> Path:
-        entries: tuple[Path, ...] = tuple[Path, ...](staging_dir.iterdir())
+        entries = tuple(staging_dir.iterdir())
         if len(entries) == 1 and entries[0].is_dir():
             return entries[0]
         return staging_dir
@@ -121,7 +152,7 @@ class File_Utils:
     def append_num(pointer: Path) -> Path:
         for i in range(1, 100):
             candidate: Path = pointer.with_stem(f"{pointer.stem}_{i}")
-            if not candidate.exists():
+            if not candidate.exists() and not candidate.is_symlink():
                 return candidate
         raise RuntimeError("Too many conflicting zip names")
 
@@ -200,29 +231,45 @@ class File_Utils:
         return target
 
     @classmethod
-    def extract(cls, src_file: Path, dst_dir: Path, overwrite: bool | None = True) -> Path:
+    def extract(
+        cls,
+        src_file: Path,
+        dst_dir: Path,
+        overwrite: bool | None = True,
+        *,
+        validate_root: Callable[[Path], None] | None = None,
+    ) -> Path:
+        """Stage and validate an archive before replacing its destination."""
         try:
             archive_path = Path(src_file)
             archive_kind = cls._detect_archive_kind(archive_path)
             dst_dir.mkdir(parents=True, exist_ok=True)
             extract_base = dst_dir / archive_path.stem
-            if overwrite:
-                cls.remove(extract_base, silent=True)
-            elif overwrite is None and extract_base.exists():
-                extract_base = cls.append_num(extract_base)
-            elif extract_base.exists():
-                raise FileExistsError(f"Can't extract to existing {extract_base=}")
+            if extract_base.exists() or extract_base.is_symlink():
+                if overwrite is None:
+                    extract_base = cls.append_num(extract_base)
+                elif not overwrite:
+                    raise FileExistsError(f"Can't extract to existing {extract_base=}")
 
-            extract_base.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="yukibot-extract-") as temp_dir:
-                staging_dir = Path(temp_dir)
+            with tempfile.TemporaryDirectory(prefix="yukibot-extract-", dir=dst_dir) as temp_dir:
+                staging_dir = Path(temp_dir) / "contents"
+                staging_dir.mkdir()
                 cls._extract_archive_to_directory(archive_path, staging_dir, archive_kind)
                 resolved_root = cls._resolved_archive_root(staging_dir)
-                for entry in resolved_root.iterdir():
-                    target = extract_base / entry.name
-                    if target.exists():
-                        raise FileExistsError(f"Can't move to existing {target=}")
-                    shutil.move(str(entry), str(target))
+                if validate_root is not None:
+                    validate_root(resolved_root)
+                previous = Path(temp_dir) / "previous"
+                destination_exists = extract_base.exists() or extract_base.is_symlink()
+                if overwrite and destination_exists:
+                    extract_base.rename(previous)
+                elif destination_exists:
+                    raise FileExistsError(f"Can't extract to existing {extract_base=}")
+                try:
+                    resolved_root.rename(extract_base)
+                except BaseException:
+                    if previous.exists() or previous.is_symlink():
+                        previous.rename(extract_base)
+                    raise
 
         except Exception:
             log.exception(f"extraction failed: {overwrite=}\n{src_file}\n{dst_dir}")

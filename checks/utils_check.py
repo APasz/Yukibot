@@ -41,6 +41,12 @@ class FileCleanerTests(unittest.TestCase):
             self.assertTrue(fresh_file.exists())
 
 
+class ByteFormattingTests(unittest.TestCase):
+    def test_byte_units_can_be_spaced_without_changing_existing_output(self) -> None:
+        self.assertEqual(Utilities.humanise_bytes(2847540397), "2.65GiB")
+        self.assertEqual(Utilities.humanise_bytes(2847540397, separator=" "), "2.65 GiB")
+
+
 class TimestampFormattingTests(unittest.TestCase):
     def test_timestamp_format_representations_cover_every_available_style(self) -> None:
         styles = {template[-2] for _, template in Utilities.DISCORD_TIMESTAMP_FORMATS}

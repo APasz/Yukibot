@@ -966,6 +966,11 @@ def _css_font_family_literal(family_name: str) -> str:
     return f'"{escaped_family_name}"'
 
 
+class AppInstallProfile(enum.StrEnum):
+    STANDARD = "standard"
+    UNDEAD_LEGACY = "undead_legacy"
+
+
 class ModDownloadBlockReason(enum.StrEnum):
     SERVER_ONLY = "server_only"
     BUILTIN = "builtin"

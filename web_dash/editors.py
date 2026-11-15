@@ -180,10 +180,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         console_actions_available: bool = bool(current_console_actions.actions)
 
         def _ensure_console_stdout_client_script() -> None:
-            ui.add_head_html(
+            ui.run_javascript(
                 """
-                <script>
-                window.modWebConsoleFeed = (() => {
+                window.modWebConsoleFeed ??= (() => {
                     const bindVersion = '2026-06-17-atomic-stdout';
                     const bottomThresholdPx = 24;
                     const scheduledById = new Map();
@@ -329,7 +328,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     };
                     return { bind, jump, setHeight, update };
                 })();
-                </script>
                 """
             )
 
@@ -3188,8 +3186,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 detail_text=f"Installing mods for {model.app_friendly}.",
             )
             node = self._remote_node_link(model.node_name)
-            result = await run_blocking(
-                self._remote_mod_uploads,
+            result = await self._remote_mod_uploads_async(
                 node,
                 model.app_name,
                 tuple(resolved_uploads),

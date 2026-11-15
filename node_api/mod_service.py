@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
+import shutil
 import tempfile
 import time
+from threading import Event
+from uuid import uuid4
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -16,8 +21,8 @@ import apps._node_api as app_node_api
 import apps.factorio.node_api as factorio_node_api
 import config
 from . import mod as mod_contracts
-from _async_utils import run_blocking
-from _file import File_Utils
+from _async_utils import run_blocking, run_blocking_cancellable
+from _file import File_Utils, MOD_UPLOAD_STAGING_PREFIX
 from _mod_ops import RunningAppModMutationError, require_app_stopped_for_mod_mutation
 from _security import Access_Control, Power_Level
 from _utils import Utilities
@@ -46,6 +51,8 @@ from apps._launcher_metadata import (
 from apps._mod import Mod, Mod_Manager
 from apps._mod_catalog import ModAction, ModCatalog, ModInventoryEntry, ModSourceKind
 from apps.factorio import FactorioModPortalCandidate, FactorioVanillaMod
+from apps.sevendays import Mod_7D2D
+from apps.sevendays.mod_upload import PreparedModComponent, prepare_mod_archive
 from apps.gmod import Gmod
 from apps.factorio.node_api import (
     FactorioModUpdateApplyResult,
@@ -67,6 +74,7 @@ from .upload import persist_upload_to_temp, validated_upload_filename
 
 _MOD_INVENTORY_CACHE_TTL_SECONDS = 5.0
 _BULK_METADATA_RESULT_TTL_SECONDS = 60 * 60
+_MOD_UPLOAD_PREVIEW_TTL_SECONDS = 30 * 60
 
 log = logging.getLogger(__name__)
 traffic_log = logging.getLogger(config.LOGGER_TRAFFIC)
@@ -97,6 +105,16 @@ class _BulkMetadataCancellationRequested(Exception):
     """Raised when a bulk metadata operation reaches a safe stop boundary."""
 
 
+@dataclass(frozen=True, slots=True)
+class _StagedModUpload:
+    app_name: str
+    actor_user_id: int
+    placement: ModPlacement
+    directory: Path
+    components: tuple[PreparedModComponent, ...]
+    expires_at: float
+
+
 class NodeModService:
     """Owns node-side mod inventory, mutations, uploads, and metadata workflows."""
 
@@ -121,6 +139,8 @@ class NodeModService:
         self._inventory_cache: dict[str, mod_contracts.TimedModInventory] = {}
         self._inventory_cache_locks: dict[str, asyncio.Lock] = {}
         self._gmod_workshop_mutation_locks: dict[str, asyncio.Lock] = {}
+        self._staged_mod_uploads: dict[str, _StagedModUpload] = {}
+        self._mod_upload_locks: dict[str, asyncio.Lock] = {}
 
     def invalidate_inventory(self, app_name: str) -> None:
         self._inventory_cache.pop(app_name.casefold(), None)
@@ -460,6 +480,11 @@ class NodeModService:
             mods=inventory.mods,
             app_stats=app_stats,
             source_statuses=inventory.source_statuses,
+            upload_limits=mod_contracts.NodeModUploadLimits(
+                max_bytes=config.NODE_API_MOD_UPLOAD_MAX_BYTES,
+                max_extracted_bytes=config.NODE_API_MOD_ARCHIVE_LIMITS.extracted_bytes,
+                max_file_bytes=config.NODE_API_MOD_ARCHIVE_LIMITS.file_bytes,
+            ),
         )
 
     @staticmethod
@@ -624,6 +649,7 @@ class NodeModService:
             upload_names=None if upload_name is None else [upload_name],
             actor_user_id=actor_user_id,
             placement=placement,
+            require_single_component=True,
         )
         return self._single_mod_upload_result(result)
 
@@ -635,13 +661,29 @@ class NodeModService:
         upload_names: Sequence[str] | None,
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+        require_single_component: bool = False,
     ) -> mod_contracts.NodeModUploadBatchResult:
+        manager = self.require_mod_upload_allowed(app=app, placement=placement)
+        if isinstance(manager, Mod_Manager) and issubclass(manager.mod_cls, Mod_7D2D):
+            preview = await self.inspect_mod_uploads(
+                app=app, uploads=uploads, upload_names=upload_names, actor_user_id=actor_user_id, placement=placement,
+            )
+            names = tuple(component.name for component in preview.components if component.status == "new")
+            if not names:
+                await self.discard_mod_upload(app=app, actor_user_id=actor_user_id, upload_id=preview.upload_id)
+                raise _http_exception(409, "All uploaded components are already installed or protected.")
+            if require_single_component and len(names) != 1:
+                await self.discard_mod_upload(app=app, actor_user_id=actor_user_id, upload_id=preview.upload_id)
+                raise _http_exception(400, "Use the batch upload endpoint to install a bundle containing multiple new mods.")
+            return await self.apply_mod_upload(app=app, actor_user_id=actor_user_id, upload_id=preview.upload_id, names=names)
         upload_sources = self._resolve_mod_upload_requests(uploads=uploads, upload_names=upload_names)
+        if sum(upload.size or 0 for upload in uploads) > config.NODE_API_MOD_UPLOAD_MAX_BYTES:
+            raise _http_exception(413, "The selected mod files exceed the mod upload limit.")
         temp_paths: list[Path] = []
         try:
             resolved_sources: list[app_node_api.NodeModUploadSource] = []
             for upload_request in upload_sources:
-                temp_path = await persist_upload_to_temp(upload_request.upload)
+                temp_path = await persist_upload_to_temp(upload_request.upload, max_bytes=config.NODE_API_MOD_UPLOAD_MAX_BYTES)
                 temp_paths.append(temp_path)
                 resolved_sources.append(
                     app_node_api.NodeModUploadSource(
@@ -654,10 +696,210 @@ class NodeModService:
                 upload_sources=resolved_sources,
                 actor_user_id=actor_user_id,
                 placement=placement,
+                consume_sources=True,
             )
         finally:
             for temp_path in temp_paths:
                 temp_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _mod_upload_inventory(manager: Mod_Manager) -> dict[str, Mod]:
+        """Index installed components by both folder and native metadata identity."""
+        installed: dict[str, Mod] = {}
+        for mod in manager.index.values():
+            installed[mod.name.casefold()] = mod
+            if native_id := mod.native_metadata_id():
+                installed[native_id.casefold()] = mod
+        return installed
+
+    @staticmethod
+    def require_mod_upload_allowed(*, app: App, placement: ModPlacement, inspect: bool = False) -> Mod_Manager:
+        """Reject unavailable uploads before receiving or preparing large files."""
+        if app.mods is None:
+            raise _http_exception(409, f"{app.friendly} does not support mods.")
+        manager = app.has_mod_manager
+        if inspect and not issubclass(manager.mod_cls, Mod_7D2D):
+            raise _http_exception(400, "Bundle inspection is available for 7D2D mods.")
+        if placement is ModPlacement.SERVER_DISABLED:
+            raise _http_exception(400, "New mod uploads cannot start server-disabled.")
+        require_app_stopped_for_mod_mutation(app)
+        return manager
+
+    def _mod_upload_component_status(
+        self, manager: Mod_Manager, component: PreparedModComponent, placement: ModPlacement,
+        installed: Mapping[str, Mod],
+    ) -> Literal["new", "existing", "protected"]:
+        candidate = manager.new_upload_mod(component.name, placement=placement)
+        existing = installed.get(component.name.casefold()) or installed.get((component.native_id or "").casefold())
+        if candidate.default_mod_type() is ModType.BUILTIN or existing is not None and existing.mod_type is ModType.BUILTIN:
+            return "protected"
+        if existing is not None:
+            return "existing"
+        try:
+            manager.require_available_upload_path(candidate)
+        except FileExistsError:
+            return "existing"
+        return "new"
+
+    async def cleanup_mod_uploads(self, apps: Iterable[App] = ()) -> None:
+        apps = tuple(apps)
+        for upload_id, staged in tuple(self._staged_mod_uploads.items()):
+            lock = self._lock_for_app(locks=self._mod_upload_locks, app_key=staged.app_name)
+            if not lock.locked() and staged.expires_at <= time.monotonic():
+                self._staged_mod_uploads.pop(upload_id)
+                await self._remove_mod_upload_directory(staged.directory)
+        active_directories = {staged.directory for staged in self._staged_mod_uploads.values()}
+        cutoff = time.time() - _MOD_UPLOAD_PREVIEW_TTL_SECONDS
+        for app in apps:
+            manager = app.mods
+            if manager is None or self._lock_for_app(locks=self._mod_upload_locks, app_key=app.name).locked():
+                continue
+            root = self._mod_upload_staging_root(manager)
+            if not root.is_dir():
+                continue
+            for pointer in root.iterdir():
+                try:
+                    expired = pointer.name.startswith(MOD_UPLOAD_STAGING_PREFIX) and not pointer.is_symlink() and pointer.is_dir() and pointer not in active_directories and pointer.stat().st_mtime <= cutoff
+                except FileNotFoundError:
+                    continue
+                if expired:
+                    await self._remove_mod_upload_directory(pointer)
+
+    @staticmethod
+    async def _remove_mod_upload_directory(directory: Path) -> None:
+        """Keep failed cleanup from hiding transfer errors or committed installations."""
+        try:
+            await run_blocking_cancellable(Event(), shutil.rmtree, directory)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.exception("Could not remove mod upload staging directory: %s", directory)
+
+    @staticmethod
+    def _mod_upload_staging_root(manager: Mod_Manager, *, create: bool = False) -> Path:
+        root = manager.folder.parent / ".yukibot/mod-uploads"
+        if create:
+            root.mkdir(parents=True, exist_ok=True)
+            if root.stat().st_dev != manager.folder.stat().st_dev:
+                raise ValueError("The app and Mods directory must share a filesystem for atomic mod installation.")
+        return root
+
+    async def inspect_mod_uploads(
+        self, *, app: App, uploads: Sequence[UploadFile], upload_names: Sequence[str] | None,
+        actor_user_id: int, placement: ModPlacement,
+    ) -> mod_contracts.NodeModUploadPreview:
+        manager = self.require_mod_upload_allowed(app=app, placement=placement, inspect=True)
+        requests = self._resolve_mod_upload_requests(uploads=uploads, upload_names=upload_names)
+        await self.cleanup_mod_uploads((app,))
+        lock = self._lock_for_app(locks=self._mod_upload_locks, app_key=app.name)
+        async with lock:
+            for upload_id, previous in tuple(self._staged_mod_uploads.items()):
+                if previous.app_name == app.name and previous.actor_user_id == actor_user_id:
+                    self._staged_mod_uploads.pop(upload_id)
+                    await self._remove_mod_upload_directory(previous.directory)
+            destination = self._mod_upload_staging_root(manager, create=True)
+            directory = Path(tempfile.mkdtemp(prefix=MOD_UPLOAD_STAGING_PREFIX, dir=destination))
+            components: list[PreparedModComponent] = []
+            cancelled = Event()
+            try:
+                received_bytes = 0
+                extracted_bytes = 0
+                file_count = 0
+                member_count = 0
+                for index, request in enumerate(requests):
+                    stream = request.upload.file
+                    stream.seek(0, 2)
+                    received_bytes += stream.tell()
+                    if received_bytes > config.NODE_API_MOD_UPLOAD_MAX_BYTES:
+                        raise _http_exception(413, "The selected mod files exceed the mod upload limit.")
+                    remaining = config.NODE_API_MOD_ARCHIVE_LIMITS.extracted_bytes - extracted_bytes
+                    if remaining <= 0 or file_count >= config.NODE_API_MOD_ARCHIVE_LIMITS.file_count or member_count >= config.NODE_API_MOD_ARCHIVE_LIMITS.member_count:
+                        raise ValueError("The selected mod archives exceed their extraction limits.")
+                    archive_directory = directory / str(index)
+                    archive_directory.mkdir()
+                    limits = config.NODE_API_MOD_ARCHIVE_LIMITS
+                    prepared = await run_blocking_cancellable(
+                        cancelled, prepare_mod_archive, stream, request.upload_name, archive_directory,
+                        limits=replace(limits, extracted_bytes=remaining, file_count=limits.file_count - file_count, member_count=limits.member_count - member_count), cancelled=cancelled,
+                        validate_root=Mod_7D2D._validate_archive_root,
+                    )
+                    components.extend(prepared.components)
+                    extracted_bytes += prepared.extracted_bytes
+                    file_count += prepared.file_count
+                    member_count += prepared.member_count
+                if len({component.name.casefold() for component in components}) != len(components):
+                    raise ValueError("The selected archives contain duplicate mod names.")
+                native_ids = [component.native_id.casefold() for component in components if component.native_id]
+                if len(set(native_ids)) != len(native_ids):
+                    raise ValueError("The selected archives contain duplicate native mod identities.")
+                await manager.reload_mods()
+                installed = self._mod_upload_inventory(manager)
+                preview = mod_contracts.NodeModUploadPreview(
+                    upload_id=uuid4().hex,
+                    components=tuple(
+                        mod_contracts.NodeModUploadComponent(
+                            name=component.name, size_bytes=component.size_bytes,
+                            status=self._mod_upload_component_status(manager, component, placement, installed),
+                        )
+                        for component in components
+                    ),
+                    expires_at=datetime.now(timezone.utc) + timedelta(seconds=_MOD_UPLOAD_PREVIEW_TTL_SECONDS),
+                )
+                self._staged_mod_uploads[preview.upload_id] = _StagedModUpload(
+                    app_name=app.name, actor_user_id=actor_user_id, placement=placement,
+                    directory=directory, components=tuple(components),
+                    expires_at=time.monotonic() + _MOD_UPLOAD_PREVIEW_TTL_SECONDS,
+                )
+                return preview
+            except BaseException:
+                await self._remove_mod_upload_directory(directory)
+                raise
+            finally:
+                for upload in uploads:
+                    await upload.close()
+
+    def _require_staged_upload(self, app: App, actor_user_id: int, upload_id: str) -> _StagedModUpload:
+        staged = self._staged_mod_uploads.get(upload_id)
+        if staged is None or staged.app_name != app.name or staged.actor_user_id != actor_user_id:
+            raise _http_exception(404, "The staged mod upload was not found. Upload the archive again.")
+        if staged.expires_at <= time.monotonic():
+            raise _http_exception(410, "The mod upload preview expired. Upload the archive again.")
+        return staged
+
+    async def discard_mod_upload(self, *, app: App, actor_user_id: int, upload_id: str) -> None:
+        async with self._lock_for_app(locks=self._mod_upload_locks, app_key=app.name):
+            staged = self._require_staged_upload(app, actor_user_id, upload_id)
+            self._staged_mod_uploads.pop(upload_id)
+            await self._remove_mod_upload_directory(staged.directory)
+
+    async def apply_mod_upload(
+        self, *, app: App, actor_user_id: int, upload_id: str, names: tuple[str, ...],
+    ) -> mod_contracts.NodeModUploadBatchResult:
+        async with self._lock_for_app(locks=self._mod_upload_locks, app_key=app.name):
+            staged = self._require_staged_upload(app, actor_user_id, upload_id)
+            require_app_stopped_for_mod_mutation(app)
+            manager = app.has_mod_manager
+            await manager.reload_mods()
+            selected = tuple(component for component in staged.components if component.name in names)
+            if not names or len(selected) != len(names) or len(set(names)) != len(names):
+                raise _http_exception(400, "Select one or more components from this upload.")
+            installed = self._mod_upload_inventory(manager)
+            if any(self._mod_upload_component_status(manager, component, staged.placement, installed) != "new" for component in selected):
+                raise _http_exception(409, "A selected mod is already installed or protected. Existing mods can only be skipped.")
+            try:
+                mods = await manager.add_prepared_batch(
+                    tuple((component.name, component.directory) for component in selected), placement=staged.placement,
+                )
+            finally:
+                self._invalidate_mod_inventory(app.name)
+                self._invalidate_client_pack_content(app)
+            self._staged_mod_uploads.pop(upload_id)
+            await self._remove_mod_upload_directory(staged.directory)
+            entries = tuple(self._mod_entry(mod) for mod in mods)
+            return mod_contracts.NodeModUploadBatchResult(
+                app_name=app.name, app_friendly=app.friendly, node=self._node_name(),
+                mods=entries, message=self._mod_upload_message(app=app, mods=entries),
+            )
 
     async def upload_mod_path(
         self,
@@ -673,6 +915,7 @@ class NodeModService:
             upload_sources=[app_node_api.NodeModUploadSource(source_path=source_path, upload_name=upload_name)],
             actor_user_id=actor_user_id,
             placement=placement,
+            require_single_component=True,
         )
         return self._single_mod_upload_result(result)
 
@@ -851,12 +1094,26 @@ class NodeModService:
         upload_sources: Sequence[app_node_api.NodeModUploadSource],
         actor_user_id: int,
         placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+        consume_sources: bool = False,
+        require_single_component: bool = False,
     ) -> mod_contracts.NodeModUploadBatchResult:
         if app.mods is None:
             raise _http_exception(409, f"{app.friendly} does not support mods.")
         resolved_upload_sources: tuple[app_node_api.NodeModUploadSource, ...] = self._validated_mod_upload_sources(
             upload_sources
         )
+        if isinstance(app.has_mod_manager, Mod_Manager) and issubclass(app.has_mod_manager.mod_cls, Mod_7D2D):
+            uploads: list[UploadFile] = []
+            try:
+                for source in resolved_upload_sources:
+                    uploads.append(UploadFile(source.source_path.open("rb"), filename=source.upload_name))
+                return await self.upload_mod_files(
+                    app=app, uploads=uploads, upload_names=None, actor_user_id=actor_user_id,
+                    placement=placement, require_single_component=require_single_component,
+                )
+            finally:
+                for upload in uploads:
+                    await upload.close()
         try:
             require_app_stopped_for_mod_mutation(app)
             manager: Mod_Manager = app.has_mod_manager
@@ -865,7 +1122,10 @@ class NodeModService:
             with tempfile.TemporaryDirectory(prefix="yukibot-mod-upload-") as temp_dir:
                 for upload_source in resolved_upload_sources:
                     staged_path: Path = Path(temp_dir) / upload_source.upload_name
-                    await run_blocking(File_Utils.copy, upload_source.source_path, staged_path, True)
+                    if consume_sources:
+                        await run_blocking(File_Utils.move, upload_source.source_path, staged_path, False)
+                    else:
+                        await run_blocking(File_Utils.copy, upload_source.source_path, staged_path, True)
                     uploaded_mods.append(await manager.add(staged_path, atomic=True, placement=placement))
         except RunningAppModMutationError as xcp:
             raise _http_exception(409, str(xcp)) from xcp

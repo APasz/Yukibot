@@ -22,12 +22,14 @@ from _manager import (
     AppSteamInstallRecipe,
 )
 from _security import Power_Level
-from apps._config import SteamUpdateBranch, SteamUpdateConfig, SteamUpdateLogin
+from apps._config import AppInstallProfile, SteamUpdateBranch, SteamUpdateConfig, SteamUpdateLogin
+from apps.sevendays.installation import UNDEAD_LEGACY_RELEASE
 from node_api.app_installer import (
     NodeAppInstallCatalog,
     NodeAppInstallBranch,
     NodeAppInstallField,
     NodeAppInstallPreflight,
+    NodeAppInstallProfile,
     NodeAppInstallRecipe,
     NodeAppInstallRequest,
     NodeAppInstallScopeOption,
@@ -92,9 +94,9 @@ class _InstallerManager:
         return AppInstanceInstallDefaults(instance_key="alpha", subfolder=f"{scope}-alpha")
 
     def prepare_instance_creation(self, request: AppInstanceCreateRequest) -> AppInstanceCreationPlan:
-        assert request.scope == "demo"
+        assert request.scope == self.plan.scope
         assert request.instance_key == self.plan.instance_key
-        assert request.steam_branch == "public"
+        assert request.steam_branch == self.plan.steam_branch
         assert request.initial_version is None
         assert request.clear_template_version
         return self.plan
@@ -103,7 +105,7 @@ class _InstallerManager:
         self.create_requests.append(request)
         if self.on_create_instance is not None:
             self.on_create_instance(request)
-        return "demo_alpha"
+        return f"{request.scope}_{request.instance_key}"
 
     async def load_instance(self, *, scope: str, instance_key: str) -> None:
         self.loaded_instances.append((scope, instance_key))
@@ -244,6 +246,199 @@ class _NodeSettingsRouteService(_RouteService):
 
 
 class AppInstallerCheck(unittest.TestCase):
+    def test_overhaul_progress_retains_cancellation_and_writes_each_log_once(self) -> None:
+        operations = NodeOperationService()
+        service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock(), operations=operations)
+        operation = operations.create(
+            kind=NodeOperationKind.APP_INSTALL, node_name="node-a", subject="sevendays", requested_by_user_id=42,
+            progress=NodeOperationProgress(summary="Queued."),
+        )
+        operations.begin(operation_id=operation.operation_id, progress=NodeOperationProgress(summary="Installing."))
+        before_revision = operations.get(operation.operation_id).detail_revision
+        service._record_overhaul_progress(operation.operation_id, "Downloading Undead Legacy.")
+        running = operations.get(operation.operation_id)
+        self.assertEqual(running.summary, "Downloading Undead Legacy.")
+        self.assertEqual(running.log_lines, ("Downloading Undead Legacy.",))
+        self.assertEqual(running.detail_revision, before_revision + 1)
+        cancelled = operations.request_cancellation(operation_id=operation.operation_id)
+        service._record_overhaul_progress(operation.operation_id, "Reusing a cached Undead Legacy archive.")
+        after = operations.get(operation.operation_id)
+        self.assertEqual(after.state, NodeOperationState.CANCEL_REQUESTED)
+        self.assertEqual((after.summary, after.detail, after.phase), (cancelled.summary, cancelled.detail, cancelled.phase))
+        self.assertEqual(after.log_lines[-1], "Reusing a cached Undead Legacy archive.")
+
+    def test_install_progress_is_readable_in_status_and_persisted_logs(self) -> None:
+        with TemporaryDirectory() as temporary:
+            database_path = Path(temporary) / "operations.sqlite3"
+            operations = NodeOperationService(database_path=database_path)
+            service = NodeAppInstallerService(
+                node_name=lambda: "node-a", invalidate_state_caches=Mock(), operations=operations
+            )
+            operation = operations.create(
+                kind=NodeOperationKind.APP_INSTALL,
+                node_name="node-a",
+                subject="Demo app",
+                requested_by_user_id=42,
+                progress=NodeOperationProgress(summary="Queued."),
+            )
+            operations.begin(
+                operation_id=operation.operation_id,
+                progress=NodeOperationProgress(summary="Installing.", phase="installing"),
+            )
+            steam_update = SteamUpdateConfig(app_id=123)
+            service._record_output(
+                operation_id=operation.operation_id,
+                source="stdout",
+                line="\x1b[0mUpdate state (0x61) downloading, progress: 16.83 (2847540397 / 16916605506)",
+                steam_update=steam_update,
+                secret_values=("admin-secret",),
+            )
+            status = service.install_status(job_id=operation.operation_id)
+            self.assertEqual(status.summary, "Downloading game files — 16.8% (2.65 GiB of 15.75 GiB)")
+            self.assertEqual(status.detail, status.summary)
+            self.assertEqual(status.progress_percent, 16.83)
+            self.assertEqual(status.log_lines[-1], f"stdout: {status.summary}")
+            operations.request_cancellation(operation_id=operation.operation_id)
+            service._record_output(
+                operation_id=operation.operation_id,
+                source="stderr",
+                line="\x1b[31mWarning: retrying admin-\x1b[0msecret\x07",
+                steam_update=steam_update,
+                secret_values=("admin-secret",),
+            )
+            self.assertEqual(operations.get(operation.operation_id).state, NodeOperationState.CANCEL_REQUESTED)
+            persisted = NodeOperationService(database_path=database_path).get(operation.operation_id)
+            self.assertEqual(persisted.log_lines[-1], "stderr: Warning: retrying ******")
+            self.assertEqual(persisted.log_lines[-2], f"stdout: {status.summary}")
+
+    def test_download_cache_cleanup_runs_immediately_then_hourly(self) -> None:
+        async def run() -> None:
+            service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
+            cleanup = AsyncMock()
+            with (
+                patch("node_api.app_installer.time", new=Mock(monotonic=Mock(side_effect=(0.0, 1.0, 3600.0)))),
+                patch("node_api.app_installer.run_blocking", new=cleanup),
+            ):
+                await service.cleanup_download_cache()
+                await service.cleanup_download_cache()
+                await service.cleanup_download_cache()
+            self.assertEqual(cleanup.await_count, 2)
+        asyncio.run(run())
+
+    def test_install_profiles_round_trip_and_old_nodes_default_to_standard(self) -> None:
+        with TemporaryDirectory() as temporary:
+            manager = _InstallerManager(root=Path(temporary))
+            manager.recipe = replace(manager.recipe, scope="sevendays")
+            catalog = asyncio.run(NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock()).build_catalog(manager=manager))
+        recipe = catalog.recipes[0]
+        self.assertEqual(NodeAppInstallRecipe.from_mapping(recipe.to_mapping()), recipe)
+        self.assertEqual(tuple(profile.profile for profile in recipe.profiles), (AppInstallProfile.STANDARD, AppInstallProfile.UNDEAD_LEGACY))
+        overhaul = recipe.profiles[1]
+        self.assertEqual(overhaul.steam_branch_id, UNDEAD_LEGACY_RELEASE.steam_branch)
+        self.assertEqual(overhaul.overhaul_version, UNDEAD_LEGACY_RELEASE.version)
+        legacy_payload = recipe.to_mapping()
+        del legacy_payload["profiles"]
+        self.assertEqual(NodeAppInstallRecipe.from_mapping(legacy_payload).profiles[0].profile, AppInstallProfile.STANDARD)
+        with self.assertRaises(ValueError):
+            replace(recipe, profiles=())
+        with self.assertRaises(ValueError):
+            replace(recipe, scope="demo")
+        with self.assertRaises(ValueError):
+            NodeAppInstallProfile(profile=AppInstallProfile.UNDEAD_LEGACY, label="Undead Legacy")
+
+    def test_overhaul_requires_its_game_branch_and_cannot_target_another_app(self) -> None:
+        async def run() -> None:
+            with TemporaryDirectory() as temporary:
+                manager = _InstallerManager(root=Path(temporary))
+                service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
+                request = NodeAppInstallRequest(
+                    scope="demo", instance_key="alpha", friendly_name="Alpha", subfolder="demo-alpha",
+                    steam_branch_id="public", profile=AppInstallProfile.UNDEAD_LEGACY,
+                    inputs={AppInstallInput.ADMIN_PASSWORD: "secret"},
+                )
+                with self.assertRaisesRegex(ValueError, "only supported for fresh 7D2D"):
+                    await service._validated_install_request(manager=manager, request=request)
+                manager.recipe = replace(manager.recipe, scope="sevendays")
+                with patch.object(service, "_with_discovered_branches", new=AsyncMock(return_value=manager.recipe)):
+                    with self.assertRaisesRegex(ValueError, "requires game"):
+                        await service._validated_install_request(manager=manager, request=request.model_copy(update={"scope": "sevendays"}))
+                    with self.assertRaisesRegex(ValueError, "requires the Undead Legacy"):
+                        await service._validated_install_request(manager=manager, request=request.model_copy(update={"profile": AppInstallProfile.STANDARD, "scope": "sevendays", "archive_source": "/some/archive.zip"}))
+                self.assertEqual(manager.create_requests, [])
+        asyncio.run(run())
+
+    def test_overhaul_finishes_before_registration_and_failed_or_cancelled_installs_keep_only_cache(self) -> None:
+        async def run(expected: NodeAppInstallState) -> None:
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manager = _InstallerManager(root=root)
+                manager.recipe = replace(manager.recipe, scope="sevendays")
+                manager.plan = replace(manager.plan, scope="sevendays", steam_branch=UNDEAD_LEGACY_RELEASE.steam_branch)
+                acl = Mock(perm_check=AsyncMock())
+                service = NodeAppInstallerService(node_name=lambda: "node-a", invalidate_state_caches=Mock())
+                started = asyncio.Event()
+                cached: Path | None = None
+
+                async def steamcmd(*, command: list[str], cwd: Path, on_output: object = None) -> bool:
+                    del on_output
+                    self.assertIn(UNDEAD_LEGACY_RELEASE.steam_branch, command)
+                    (cwd / "game.bin").write_bytes(b"game")
+                    return True
+
+                async def overhaul(directory: Path, *, cache_directory: Path, archive_source: Path | None, report: Callable[[str], None]) -> None:
+                    nonlocal cached
+                    self.assertEqual(manager.create_requests, [])
+                    self.assertIsNone(archive_source)
+                    self.assertTrue((directory / "game.bin").exists())
+                    cache_directory.mkdir(parents=True)
+                    cached = cache_directory / "reusable.zip"
+                    cached.write_bytes(b"archive")
+                    report("Preparing overhaul.")
+                    started.set()
+                    if expected is NodeAppInstallState.CANCELLED:
+                        await asyncio.Event().wait()
+                    elif expected is NodeAppInstallState.FAILED:
+                        raise ValueError("Invalid overhaul archive")
+                    (directory / "overhaul.bin").write_bytes(b"overhaul")
+
+                def before_registration(request: AppInstanceCreateRequest) -> None:
+                    del request
+                    staged = next(root.glob(".*.install-*"))
+                    self.assertTrue((staged / "overhaul.bin").is_file())
+                manager.on_create_instance = before_registration
+                request = NodeAppInstallRequest(
+                    scope="sevendays", instance_key="alpha", friendly_name="UL Alpha", subfolder="demo-alpha",
+                    steam_branch_id=UNDEAD_LEGACY_RELEASE.steam_branch, profile=AppInstallProfile.UNDEAD_LEGACY,
+                    inputs={AppInstallInput.ADMIN_PASSWORD: "secret"},
+                )
+                with (
+                    patch.object(config, "DIR_OPT", root / "cache"),
+                    patch.object(service, "_with_discovered_branches", new=AsyncMock(side_effect=AssertionError("Pinned installs must not discover Steam branches"))),
+                    patch("node_api.app_installer.run_steamcmd_command", new=steamcmd),
+                    patch("node_api.app_installer.prepare_undead_legacy_install", new=overhaul),
+                ):
+                    queued = await service.start_install(manager=manager, acl=acl, actor_user_id=42, request=request)
+                    await asyncio.wait_for(started.wait(), timeout=2)
+                    if expected is NodeAppInstallState.CANCELLED:
+                        await service.cancel_install(job_id=queued.job_id, actor_user_id=42, acl=acl)
+                    for _ in range(200):
+                        status = service.install_status(job_id=queued.job_id)
+                        if not status.running and not tuple(root.glob(".*.install-*")):
+                            break
+                        await asyncio.sleep(0.01)
+                    else:
+                        self.fail("Overhaul installation did not finish cleanup.")
+                self.assertEqual(status.state, expected)
+                self.assertIsNotNone(cached)
+                assert cached is not None
+                self.assertTrue(cached.exists())
+                self.assertEqual(manager.plan.directory.exists(), expected is NodeAppInstallState.READY)
+                self.assertEqual(len(manager.create_requests), int(expected is NodeAppInstallState.READY))
+                self.assertEqual(manager.loaded_instances, [("sevendays", "alpha")] if expected is NodeAppInstallState.READY else [])
+        for expected in (NodeAppInstallState.READY, NodeAppInstallState.FAILED, NodeAppInstallState.CANCELLED):
+            with self.subTest(expected=expected):
+                asyncio.run(run(expected))
+
     def test_completed_install_operations_have_bounded_history(self) -> None:
         next_timestamp = 1
 

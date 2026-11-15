@@ -619,6 +619,11 @@ class App(Generic[ConfigT], ABC):
         return overrides
 
     @property
+    def steam_update_supported(self) -> bool:
+        """Whether this installation permits independent Steam updates."""
+        return True
+
+    @property
     def update_info(self) -> AppUpdateInfo | None:
         if self.updater is None:
             return None

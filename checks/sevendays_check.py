@@ -2,7 +2,8 @@ import asyncio
 import unittest
 import zipfile
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -79,6 +80,126 @@ class _SevenDaysActivityAppStub:
     def deregister_activity_providers(self) -> None:
         for provider in self.providers:
             self.activity_manager.deregister(provider)
+
+
+class SevenDaysModUploadTests(unittest.IsolatedAsyncioTestCase):
+    def __init__(self, methodName: str = "runTest") -> None:
+        super().__init__(methodName)
+        self.mods_dir: Path
+        self.manager: Mod_Manager
+        self.archive_path: Path
+
+    def setUp(self) -> None:
+        temp_dir = TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        root = Path(temp_dir.name)
+        apps_dir = root / "apps"
+        app_dir = apps_dir / "sevendays"
+        self.mods_dir = app_dir / "Mods"
+        self.mods_dir.mkdir(parents=True)
+        app_cfg = App_Config(
+            name="sevendays_alpha",
+            instance_key="alpha",
+            friendly_name="7D2D",
+            directory=app_dir,
+            apps_dir=apps_dir,
+            mods_dir=self.mods_dir,
+            join_host="127.0.0.1",
+            scope="sevendays",
+        )
+        Mod_Manager._instances.clear()
+        self.addCleanup(Mod_Manager._instances.clear)
+        self.manager = Mod_Manager(app_cfg, mod_cls=Mod_7D2D, db_path=root / "mods.jsonl")
+        self.archive_path = root / "Honk To Open 12374 1.0.zip"
+        with zipfile.ZipFile(self.archive_path, "w") as archive:
+            archive.writestr(
+                "HonkToOpen\\ModInfo.xml",
+                '<xml><Name value="HonkToOpen" /><DisplayName value="Honk To Open" />'
+                '<Version value="1.0" /></xml>',
+            )
+            archive.writestr("HonkToOpen\\HonkToOpen.dll", b"dll-data")
+            archive.writestr("HonkToOpen\\Config/settings.xml", "<settings />")
+
+    async def test_upload_extracts_windows_paths_and_survives_reload(self) -> None:
+        mod = await self.manager.add(self.archive_path)
+
+        self.assertEqual(mod.name, self.archive_path.stem)
+        self.assertEqual(mod.storage_path, self.mods_dir / self.archive_path.stem)
+        self.assertTrue(mod.exists())
+        self.assertEqual(mod.friendly, "Honk To Open")
+        self.assertEqual(mod.version, "1.0")
+        self.assertEqual((mod.storage_path / "HonkToOpen.dll").read_bytes(), b"dll-data")
+        self.assertTrue((mod.storage_path / "Config/settings.xml").is_file())
+
+        await self.manager.reload_mods()
+
+        reloaded = self.manager.get(mod.name)
+        self.assertEqual(reloaded.storage_path, mod.storage_path)
+        self.assertEqual(reloaded.version, "1.0")
+        self.assertTrue(reloaded.exists())
+
+    async def test_client_upload_extracts_windows_paths_and_marks_modinfo(self) -> None:
+        mod = await self.manager.add(self.archive_path, placement=ModPlacement.CLIENT_ONLY)
+
+        self.assertTrue(mod.storage_path.is_dir())
+        self.assertTrue((mod.storage_path / "ModInfo.xml.client").is_file())
+        self.assertFalse((mod.storage_path / "ModInfo.xml").exists())
+        self.assertTrue((mod.storage_path / "HonkToOpen.dll").is_file())
+        self.assertIs(mod.cfg.placement, ModPlacement.CLIENT_ONLY)
+
+        await self.manager.reload_mods()
+
+        self.assertIs(self.manager.get(mod.name).cfg.placement, ModPlacement.CLIENT_ONLY)
+
+    async def test_upload_rejects_existing_extraction_directory(self) -> None:
+        existing = self.mods_dir / self.archive_path.stem
+        existing.mkdir()
+        mod_info = existing / "ModInfo.xml"
+        mod_info.write_text("<original />", encoding="utf-8")
+
+        with self.assertRaisesRegex(FileExistsError, "physical representation"):
+            await self.manager.add(self.archive_path)
+
+        self.assertEqual(mod_info.read_text(), "<original />")
+        self.assertFalse((existing / "HonkToOpen.dll").exists())
+
+    async def test_upload_rejects_reserved_placement_marker_in_archive_stem(self) -> None:
+        source = self.archive_path.rename(self.archive_path.with_name("HonkToOpen.disabled.zip"))
+
+        with self.assertRaisesRegex(ValueError, "reserved placement marker"):
+            await self.manager.add(source)
+
+    async def test_invalid_uploads_leave_no_installation_and_allow_retry(self) -> None:
+        original_archive = self.archive_path.read_bytes()
+        invalid_archives: tuple[dict[str, bytes], ...] = (
+            {},
+            {"HonkToOpen/HonkToOpen.dll": b"dll-data"},
+            {"HonkToOpen/ModInfo.xml": b"<xml>"},
+            {"HonkToOpen/ModInfo.xml": b"\xff"},
+            {"HonkToOpen/ModInfo.xml/": b""},
+            {
+                "HonkToOpen/ModInfo.xml": b"<xml />",
+                "HonkToOpen/ModInfo.xml.client": b"<xml />",
+            },
+            {"..\\outside.txt": b"unsafe"},
+        )
+        for entries in invalid_archives:
+            with self.subTest(entries=tuple(entries)):
+                with zipfile.ZipFile(self.archive_path, "w") as archive:
+                    for name, contents in entries.items():
+                        archive.writestr(name, contents)
+
+                with self.assertRaises(ValueError):
+                    await self.manager.add(self.archive_path)
+
+                self.assertFalse((self.mods_dir / self.archive_path.stem).exists())
+                self.assertEqual(tuple(self.mods_dir.iterdir()), ())
+                self.assertEqual(self.manager.index, {})
+                self.assertEqual(self.manager.db_path.read_text(), "")
+
+        self.archive_path.write_bytes(original_archive)
+        mod = await self.manager.add(self.archive_path)
+        self.assertTrue(mod.exists())
 
 
 class SevenDaysGameStatParsingTests(unittest.TestCase):
@@ -392,6 +513,19 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             version = detect_sevendays_version(directory=root, server_log=log_path)
 
         self.assertEqual(version, AppVersion(main="3.0", build=259))
+
+    def test_version_detection_stops_reading_once_the_version_is_found(self) -> None:
+        def lines() -> Iterator[str]:
+            yield "2026-06-26T10:01:00 0.030 INF Version: V 2.6 (b14) Compatibility Version: V 2.6\n"
+            self.fail("Version detection must not consume the remaining log after finding its version.")
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log_path = root / "server_stdout.log"
+            log_path.touch()
+            with patch.object(Path, "open", return_value=nullcontext(lines())):
+                version = detect_sevendays_version(directory=root, server_log=log_path)
+        self.assertEqual(version, AppVersion(main="2.6", build=14))
 
     def test_candidate_sevendays_logs_include_timestamped_output_logs(self) -> None:
         with TemporaryDirectory() as tmp:

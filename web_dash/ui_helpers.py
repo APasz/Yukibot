@@ -50,6 +50,18 @@ _LIVE_VALUE_PULSE_CLASSES: tuple[str, str] = (
 _MAIN_CONTENT_ID: Final[str] = "mod-main-content"
 _POINTER_NAVIGATION_CLASS: Final[str] = "mod-pointer-navigation"
 
+
+def distinct_status_detail(*, summary: str, detail: str | None) -> str | None:
+    """Show secondary status text only when it adds to the summary."""
+
+    if detail is None:
+        return None
+    clean_detail = detail.strip()
+    if not clean_detail or clean_detail == summary.strip():
+        return None
+    return detail
+
+
 def copy_text_to_clipboard(
     *,
     ui: ModWebUi,

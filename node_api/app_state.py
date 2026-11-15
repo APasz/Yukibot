@@ -323,6 +323,7 @@ class NodeAppEntry:
     supports_console_actions: bool = False
     supports_chat: bool = False
     supports_updates: bool = False
+    steam_update_supported: bool = field(default=True, kw_only=True)
     supports_sevendays_sandbox_options: bool = False
     client_pack_content_dirty: bool = False
     client_pack_published_version: str | None = None
@@ -383,6 +384,7 @@ class NodeAppEntry:
         supports_console_actions = payload.get("supports_console_actions", False)
         supports_chat = payload.get("supports_chat", False)
         supports_updates = payload.get("supports_updates", False)
+        steam_update_supported = payload.get("steam_update_supported", True)
         supports_sevendays_sandbox_options = payload.get("supports_sevendays_sandbox_options", False)
         client_pack_content_dirty = payload.get("client_pack_content_dirty", False)
         client_pack_published_version = optional_string(payload, "client_pack_published_version")
@@ -452,6 +454,8 @@ class NodeAppEntry:
             raise ValueError("Node app entry supports_chat is invalid.")
         if not isinstance(supports_updates, bool):
             raise ValueError("Node app entry supports_updates is invalid.")
+        if not isinstance(steam_update_supported, bool):
+            raise ValueError("Node app entry steam_update_supported is invalid.")
         if not isinstance(supports_sevendays_sandbox_options, bool):
             raise ValueError("Node app entry supports_sevendays_sandbox_options is invalid.")
         if not isinstance(client_pack_content_dirty, bool):
@@ -579,6 +583,7 @@ class NodeAppEntry:
             supports_console_actions=supports_console_actions,
             supports_chat=supports_chat,
             supports_updates=supports_updates,
+            steam_update_supported=steam_update_supported,
             supports_sevendays_sandbox_options=supports_sevendays_sandbox_options,
             client_pack_content_dirty=client_pack_content_dirty,
             client_pack_published_version=client_pack_published_version,
@@ -658,6 +663,7 @@ class NodeAppEntry:
             "supports_console_actions": self.supports_console_actions,
             "supports_chat": self.supports_chat,
             "supports_updates": self.supports_updates,
+            "steam_update_supported": self.steam_update_supported,
             "supports_sevendays_sandbox_options": self.supports_sevendays_sandbox_options,
             "client_pack_content_dirty": self.client_pack_content_dirty,
             "client_pack_published_version": self.client_pack_published_version,

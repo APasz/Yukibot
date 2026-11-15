@@ -784,6 +784,7 @@ class ModWebBasePageModel:
     can_write_map_annotations: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
     supports_updates: bool = field(default=False, kw_only=True)
+    steam_update_supported: bool = field(default=True, kw_only=True)
     client_pack_content_dirty: bool = field(default=False, kw_only=True)
     client_pack_published_version: str | None = field(default=None, kw_only=True)
     client_pack_next_version: str | None = field(default=None, kw_only=True)

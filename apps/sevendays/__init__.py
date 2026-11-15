@@ -45,6 +45,7 @@ from apps._config import (
     AppVersion,
     KnownModPageProvider,
     Mod_Config,
+    ModDownloadBlockReason,
     ModPageLink,
     ModPlacement,
     ModType,
@@ -75,6 +76,11 @@ from apps._settings import (
 from apps._tailer import Tailer
 from apps._telnet import TelnetClient
 from apps._updater import SteamCmd_Update_Manager
+from apps.sevendays.installation import (
+    UNDEAD_LEGACY_LAUNCHER,
+    load_undead_legacy_installation,
+    sevendays_content_userdata_root,
+)
 from archive_safety import validated_zip_entries
 from config import Activity_Manager
 from relay_notices import (
@@ -616,18 +622,31 @@ def detect_sevendays_version(*, directory: Path, server_log: Path | None) -> App
     version: AppVersion | None = None
     for pointer in _candidate_sevendays_logs(directory=directory, server_log=server_log):
         try:
-            for line in pointer.read_text(config.STR_ENCODE, errors="ignore").splitlines():
-                if match := _SEVENDAYS_VERSION_RE.search(line):
-                    return _app_version_from_sevendays_text(match.group("version").strip())
-                if version is None and (match := _SEVENDAYS_GAME_VERSION_RE.search(line)):
-                    version = AppVersion(main=match.group("version").strip())
+            with pointer.open(encoding=config.STR_ENCODE, errors="ignore") as lines:
+                for line in lines:
+                    if match := _SEVENDAYS_VERSION_RE.search(line):
+                        return _app_version_from_sevendays_text(match.group("version").strip())
+                    if version is None and (match := _SEVENDAYS_GAME_VERSION_RE.search(line)):
+                        version = AppVersion(main=match.group("version").strip())
         except OSError as xcp:
             log.warning("Failed to inspect Seven Days log %s: %s", pointer, xcp)
     return version
 
 
+MOD_INFO_MAX_BYTES = 1024**2
+
+
+def _read_modinfo_root(pointer: Path) -> ET.Element[str]:
+    if pointer.stat().st_size > MOD_INFO_MAX_BYTES:
+        raise ValueError("7D2D mod metadata exceeds the 1 MiB size limit.")
+    try:
+        return ET.fromstring(pointer.read_text(config.STR_ENCODE))
+    except (ET.ParseError, UnicodeError) as xcp:
+        raise ValueError(f"Invalid 7D2D mod metadata in {pointer.name}: {xcp}") from xcp
+
+
 def _read_modinfo_value(pointer: Path, field_name: str) -> str | None:
-    root = ET.fromstring(pointer.read_text(config.STR_ENCODE))
+    root = _read_modinfo_root(pointer)
     for node in root.iter():
         if node.tag.casefold() != field_name.casefold():
             continue
@@ -1407,15 +1426,30 @@ _SEVENDAYS_MOD_INFO_FILENAMES: Mapping[ModPlacement, str] = {
 
 class Mod_7D2D(Mod):
     def __init__(self, cfg: Mod_Config):
+        installation = load_undead_legacy_installation(cfg.directory.parent)
+        self._overhaul_installation = (
+            installation if installation is not None and cfg.name in installation.mod_names else None
+        )
         super().__init__(cfg)
+
+    @staticmethod
+    def name_from_upload(src: Path) -> str:
+        return src.name if src.is_dir() else src.stem
 
     @staticmethod
     def _existing_mod_info_placements(mod_directory: Path) -> tuple[ModPlacement, ...]:
         return tuple(
             placement
             for placement, filename in _SEVENDAYS_MOD_INFO_FILENAMES.items()
-            if (mod_directory / filename).exists()
+            if (mod_directory / filename).is_file()
         )
+
+    @classmethod
+    def _validate_archive_root(cls, mod_directory: Path) -> None:
+        placements = cls._existing_mod_info_placements(mod_directory)
+        if len(placements) != 1:
+            raise ValueError("7D2D mod archive must contain exactly one ModInfo.xml placement at its root.")
+        _read_modinfo_root(mod_directory / _SEVENDAYS_MOD_INFO_FILENAMES[placements[0]])
 
     @classmethod
     def iter_candidates(cls, folder: Path) -> tuple[Path, ...]:
@@ -1481,9 +1515,33 @@ class Mod_7D2D(Mod):
         )
 
     def default_mod_type(self) -> ModType:
-        if self.name in _SEVENDAYS_BUILTIN_MOD_NAMES:
+        if self.name in _SEVENDAYS_BUILTIN_MOD_NAMES or self._managed_overhaul_component:
             return ModType.BUILTIN
         return ModType.REGULAR
+
+    @property
+    def mod_type(self) -> ModType:
+        return ModType.BUILTIN if self._managed_overhaul_component else super().mod_type
+
+    @property
+    def download_block_reason(self) -> ModDownloadBlockReason | None:
+        return ModDownloadBlockReason.BUILTIN if self._managed_overhaul_component else super().download_block_reason
+
+    @property
+    def _managed_overhaul_component(self) -> bool:
+        return self._overhaul_installation is not None
+
+    def _require_mutable_component(self) -> None:
+        if self._managed_overhaul_component:
+            raise ValueError("Undead Legacy components are managed by the instance and cannot be replaced, removed, or disabled as add-on mods.")
+
+    def move_to_placement(self, placement: ModPlacement) -> None:
+        self._require_mutable_component()
+        super().move_to_placement(placement)
+
+    async def uninstall(self, override_coremod: bool = False) -> bool:
+        self._require_mutable_component()
+        return await super().uninstall(override_coremod)
 
     def exists(self) -> bool:
         return self.enabled_path.is_dir() and bool(
@@ -1514,6 +1572,8 @@ class Mod_7D2D(Mod):
         return None if pointer is None else _read_modinfo_value(pointer, field_name)
 
     def detect_version(self) -> str | None:
+        if self._overhaul_installation is not None and self.name == "UndeadLegacy":
+            return self._overhaul_installation.version
         return self._mod_info_value("Version")
 
     def detect_friendly(self) -> str | None:
@@ -1544,10 +1604,15 @@ class Mod_7D2D(Mod):
             return
         self.cfg.mod_pages = (*self.cfg.mod_pages, detected_page)
 
-    async def install(self, src: Path, atomic: bool = True):
-        await self._handle_extr(src, atomic)
+    async def install(self, src: Path, atomic: bool = True) -> None:
+        self._require_mutable_component()
+        await self._handle_extr(src, atomic, validate_root=self._validate_archive_root)
+
+    async def install_client(self, src: Path, atomic: bool = True) -> None:
+        await self.install(src, atomic)
 
     async def _enable_file(self, override_coremod: bool = False) -> Path:
+        self._require_mutable_component()
         if not override_coremod:
             self.is_coremod()
         await run_blocking(File_Utils.move, self.mod_info_disabled_path, self.mod_info_enabled_path)
@@ -1555,6 +1620,7 @@ class Mod_7D2D(Mod):
         return self.enabled_path
 
     async def _disable_file(self, override_coremod: bool = False) -> Path:
+        self._require_mutable_component()
         if not override_coremod:
             self.is_coremod()
         await run_blocking(File_Utils.move, self.mod_info_enabled_path, self.mod_info_disabled_path)
@@ -2203,7 +2269,7 @@ class SevenDays_Settings(App_Settings):
         candidate = Path(raw_value).expanduser()
         if not candidate.is_absolute():
             candidate = (self.pointer.parent / candidate).resolve()
-        return candidate
+        return sevendays_content_userdata_root(directory=self.pointer.parent, userdata_root=candidate)
 
     def _discovered_save_targets(self) -> tuple[tuple[str, str], ...]:
         saves_root = self._settings_userdata_root_path()
@@ -2470,9 +2536,12 @@ class SevenDays(App[App_Config]):
         self.process = None
         file_settings = cfg.directory.absolute() / "serverconfig.xml"
         self.cmd_start = ["bash", "startserver.sh", f"-configfile={file_settings.name}"]
+        overhaul = load_undead_legacy_installation(cfg.directory)
+        if overhaul is not None:
+            self.cmd_start = ["sh", UNDEAD_LEGACY_LAUNCHER]
         super().__init__(bot, am, cfg, SevenDays_Settings(file_settings, version_getter=lambda: cfg.version), Mod_7D2D)
         self.act_err_threshold = 100
-        if cfg.steam_update is not None:
+        if cfg.steam_update is not None and overhaul is None:
             self.updater = SteamCmd_Update_Manager(self)
         self.apply_version(
             detect_sevendays_version(directory=cfg.directory, server_log=cfg.server_log_file),
@@ -2500,6 +2569,10 @@ class SevenDays(App[App_Config]):
 
     def detect_installed_version(self) -> AppVersion | None:
         return detect_sevendays_version(directory=self.cfg.directory, server_log=self.cfg.server_log_file)
+
+    @property
+    def steam_update_supported(self) -> bool:
+        return load_undead_legacy_installation(self.directory) is None
 
     def _is_update_running(self) -> bool:
         status = self.update_status
@@ -2906,7 +2979,7 @@ class SevenDays(App[App_Config]):
         candidate = Path(raw_value or _SEVENDAYS_MANAGED_USERDATA_FOLDER).expanduser()
         if not candidate.is_absolute():
             candidate = (self.directory / candidate).resolve()
-        return candidate
+        return sevendays_content_userdata_root(directory=self.directory, userdata_root=candidate)
 
     def _serverconfig_setting_value(self, key: str) -> str | None:
         raw_value = self._load_serverconfig_snapshot().value(key)
@@ -2953,6 +3026,8 @@ class SevenDays(App[App_Config]):
         if serverconfig_path.is_file():
             _ensure_serverconfig_userdata_redirect(serverconfig_path)
             _ensure_serverconfig_join_port(serverconfig_path, self.cfg.join_port)
+            if load_undead_legacy_installation(self.directory) is not None:
+                _ensure_serverconfig_property(serverconfig_path, property_name="EACEnabled", value="false")
         self._server_ready.clear()
         self._telnet_startup_error = None
         await self._configure_telnet_client()

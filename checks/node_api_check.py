@@ -4345,6 +4345,13 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.save_write_level, Power_Level.sudo)
         self.assertTrue(entry.enabled)
         self.assertFalse(entry.supports_chat)
+        self.assertTrue(entry.steam_update_supported)
+        mapped = entry.to_mapping()
+        mapped["steam_update_supported"] = False
+        self.assertFalse(NodeAppEntry.from_mapping(mapped).steam_update_supported)
+        mapped["steam_update_supported"] = "false"
+        with self.assertRaisesRegex(ValueError, "steam_update_supported"):
+            NodeAppEntry.from_mapping(mapped)
         self.assertIsNone(entry.map_url)
         self.assertIsNone(entry.join_address)
         self.assertIsNone(entry.join_direct_ip_address)
@@ -4655,6 +4662,10 @@ class NodeApiTests(unittest.TestCase):
     def test_build_app_entry_captures_dashboard_metadata(self) -> None:
         class _MappedApp(_DummyApp):
             @property
+            def steam_update_supported(self) -> bool:
+                return False
+
+            @property
             def public_map_url(self) -> str | None:
                 return "https://example.invalid/squaremap/?world=minecraft_overworld"
 
@@ -4696,6 +4707,8 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.player_capacity, 8)
         self.assertEqual(entry.connected_player_names, ("Alice", "Bob"))
         self.assertTrue(entry.supports_chat)
+        self.assertFalse(entry.steam_update_supported)
+        self.assertFalse(NodeAppEntry.from_mapping(entry.to_mapping()).steam_update_supported)
         self.assertEqual(
             entry.map_url,
             "https://example.invalid/squaremap/?world=minecraft_overworld",

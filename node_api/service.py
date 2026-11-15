@@ -573,6 +573,8 @@ class NodeApiService:
             while not self._shutting_down:
                 try:
                     self.system_monitoring.build_summary(force_refresh=True)
+                    await self.app_installer.cleanup_download_cache()
+                    await self._mod_service.cleanup_mod_uploads(self._manager.apps.values() if self._manager is not None else ())
                 except Exception:
                     log.exception(
                         "Node API system history sample failed: node=%s", self.node_name
@@ -588,6 +590,7 @@ class NodeApiService:
         nicegui_app.add_middleware(
             NodeApiRequestBodyLimitMiddleware,
             max_bytes=config.NODE_API_UPLOAD_MAX_BYTES,
+            mod_max_bytes=config.NODE_API_MOD_UPLOAD_MAX_BYTES,
             api_prefix=_NODE_API_PREFIX,
         )
         nicegui_app.add_middleware(
@@ -856,6 +859,7 @@ class NodeApiService:
             ),
             supports_chat=app.supports_chat_relay,
             supports_updates=update_info is not None,
+            steam_update_supported=app.steam_update_supported,
             supports_sevendays_sandbox_options=bool(
                 getattr(app, "supports_sevendays_sandbox_options", False)
             ),

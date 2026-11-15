@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from fastapi import UploadFile
 from modmux.models import Provider
@@ -877,6 +877,43 @@ class ResolvedModUploadFile:
     upload_name: str
 
 
+class NodeModUploadLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_bytes: int = Field(gt=0)
+    max_extracted_bytes: int = Field(gt=0)
+    max_file_bytes: int = Field(gt=0)
+
+
+class NodeModUploadComponent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1)
+    size_bytes: int = Field(ge=0)
+    status: Literal["new", "existing", "protected"]
+
+
+class NodeModUploadPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    upload_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    components: tuple[NodeModUploadComponent, ...] = Field(min_length=1)
+    expires_at: datetime
+
+
+class NodeModUploadSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    names: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("names")
+    @classmethod
+    def unique_names(cls, names: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not name for name in names) or len({name.casefold() for name in names}) != len(names):
+            raise ValueError("Selected mod names must be non-empty and unique.")
+        return names
+
+
 @dataclass(frozen=True, slots=True)
 class TimedModInventory:
     captured_at_seconds: float
@@ -894,6 +931,7 @@ class NodeModList:
     mods: tuple[NodeModEntry, ...]
     app_stats: NodeAppRuntimeSummary | None = None
     source_statuses: tuple[NodeModSourceStatus, ...] = ()
+    upload_limits: NodeModUploadLimits | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeModList:
@@ -934,6 +972,7 @@ class NodeModList:
             mods=tuple(mods),
             app_stats=NodeAppRuntimeSummary.from_mapping(raw_app_stats) if raw_app_stats is not None else None,
             source_statuses=tuple(source_statuses),
+            upload_limits=NodeModUploadLimits.model_validate(payload["upload_limits"]) if payload.get("upload_limits") is not None else None,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -945,6 +984,7 @@ class NodeModList:
             "mods": [mod.to_mapping() for mod in self.mods],
             "app_stats": self.app_stats.to_mapping() if self.app_stats is not None else None,
             "source_statuses": [status.to_mapping() for status in self.source_statuses],
+            "upload_limits": self.upload_limits.model_dump() if self.upload_limits is not None else None,
         }
 
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from collections import deque
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import apps._steam as steam_metadata
 import config
@@ -25,6 +26,8 @@ from apps._updater import (
     SteamCmd_Update_Manager,
     Update_Manager,
     _command_error_text,
+    _consume_steamcmd_stream,
+    format_steamcmd_output,
     run_steamcmd_command,
 )
 
@@ -74,6 +77,105 @@ class _FakeApp:
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_steamcmd_output_formats_the_reported_download(self) -> None:
+        output = format_steamcmd_output(
+            "\x1b[0m Update state (0x61) downloading, progress: 16.83 (2847540397 / 16916605506)\r\n"
+        )
+
+        self.assertEqual(output.text, "Downloading game files — 16.8% (2.65 GiB of 15.75 GiB)")
+        self.assertEqual(output.phase, "Downloading game files")
+        self.assertEqual(output.progress_percent, 16.83)
+
+    def test_steamcmd_output_formats_phases_and_byte_units(self) -> None:
+        cases = (
+            ("reconfiguring, progress: 0.00 (0 / 0)", "Preparing download — 0.0%", 0.0),
+            ("preallocating", "Preparing download", None),
+            ("downloading, progress: 50.00 (512 / 1024)", "Downloading game files — 50.0% (512 B of 1.0 KiB)", 50.0),
+            ("downloading, progress: 25.00 (1048576 / 4194304)", "Downloading game files — 25.0% (1.0 MiB of 4.0 MiB)", 25.0),
+            ("verifying update, progress: 100.00", "Checking installed files — 100.0%", 100.0),
+            ("staging, progress: 30.00", "Applying update — 30.0%", 30.0),
+            ("waiting for network, progress: 0.00", "Waiting for network — 0.0%", 0.0),
+        )
+        for state, expected_text, expected_percent in cases:
+            with self.subTest(state=state):
+                output = format_steamcmd_output(f"Update state (0x61) {state}")
+                self.assertEqual(output.text, expected_text)
+                self.assertEqual(output.progress_percent, expected_percent)
+
+    def test_steamcmd_output_preserves_errors_and_unrecognized_progress(self) -> None:
+        cases = (
+            ("\x1b[31mERROR! Disk write failed\x1b[0m\x07", "ERROR! Disk write failed"),
+            ("\x1b]0;SteamCMD\x07Warning: retrying", "Warning: retrying"),
+            ("\x1b]0;SteamCMD\x1b\\Success! App installed", "Success! App installed"),
+            ("\x9b31mERROR! Login failed\x9b0m", "ERROR! Login failed"),
+            ("ERROR! Update state (0x61) failed", "ERROR! Update state (0x61) failed"),
+            ("Update state (0x61) downloading, progress: 50.00 ERROR! Disk full", "downloading, progress: 50.00 ERROR! Disk full"),
+            ("Update state (0x61) downloading, progress: 150.00", "downloading, progress: 150.00"),
+            ("Update state (0x61) waiting for connection", "waiting for connection"),
+            ("\x1b[0m\x00\x07", ""),
+        )
+        for line, expected_text in cases:
+            with self.subTest(line=line):
+                output = format_steamcmd_output(line)
+                self.assertEqual(output.text, expected_text)
+                self.assertIsNone(output.progress_percent)
+
+    def test_steamcmd_stream_delivers_carriage_return_progress_before_eof(self) -> None:
+        async def run() -> None:
+            stream = asyncio.StreamReader()
+            sink: deque[str] = deque(maxlen=4)
+            received: list[tuple[str, str]] = []
+            first_line = asyncio.Event()
+
+            def on_output(source: str, line: str) -> None:
+                received.append((source, line))
+                first_line.set()
+
+            task = asyncio.create_task(
+                _consume_steamcmd_stream(stream, source="stdout", sink=sink, on_output=on_output)
+            )
+            try:
+                stream.feed_data(b"\x1b[0mUpdate state (0x61) downloading, progress: 16.83\r")
+                await asyncio.wait_for(first_line.wait(), timeout=1)
+                self.assertEqual(received, [("stdout", "Update state (0x61) downloading, progress: 16.83")])
+                stream.feed_data(b"\nchecking\rapplying\nSuccess! App fully installed.")
+                stream.feed_eof()
+                await asyncio.wait_for(task, timeout=1)
+            finally:
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            self.assertEqual(list(sink), [line for _, line in received])
+            self.assertEqual([line for _, line in received][1:], ["checking", "applying", "Success! App fully installed."])
+
+        asyncio.run(run())
+
+    def test_update_status_and_logs_share_friendly_progress_for_update_and_verify(self) -> None:
+        for kind in AppUpdateOperationKind:
+            with self.subTest(kind=kind), TemporaryDirectory() as temp_dir:
+                app = _FakeApp(Path(temp_dir))
+                with patch("apps._updater.config.load_bot_configuration", return_value=config.BotConfiguration()):
+                    updater = SteamCmd_Update_Manager(app)
+                updater._begin_selected_operation(kind)
+                steam_update = app.cfg.steam_update
+                assert steam_update is not None
+                updater._record_output_line(
+                    source="stdout",
+                    line="\x1b[0mUpdate state (0x61) downloading, progress: 16.83 (2847540397 / 16916605506)",
+                    steam_update=steam_update,
+                )
+                status = updater.status()
+                self.assertEqual(status.summary, "Downloading game files — 16.8% (2.65 GiB of 15.75 GiB)")
+                self.assertEqual(status.detail, status.summary)
+                self.assertEqual(status.log_lines, (f"stdout: {status.summary}",))
+                self.assertEqual(status.progress_percent, 16.83)
+                self.assertEqual(status.operation_kind, kind)
+                updater._record_output_line(
+                    source="stderr", line="\x1b[31mERROR! Disk write failed\x1b[0m", steam_update=steam_update
+                )
+                self.assertEqual(updater.status().detail, "ERROR! Disk write failed")
+                self.assertEqual(updater.status().log_lines[-1], "stderr: ERROR! Disk write failed")
+
     def test_base_updater_does_not_advertise_verification(self) -> None:
         with TemporaryDirectory() as temp_dir:
             updater = Update_Manager(_FakeApp(Path(temp_dir)))
@@ -140,6 +242,26 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(process.wait_calls, 1)
 
         asyncio.run(run())
+
+    def test_steamcmd_runner_requires_an_explicit_success_confirmation(self) -> None:
+        async def run(line: str, expected: bool) -> None:
+            stdout, stderr = asyncio.StreamReader(), asyncio.StreamReader()
+            stdout.feed_data(line.encode())
+            stdout.feed_eof()
+            stderr.feed_eof()
+            process = Mock(stdout=stdout, stderr=stderr, returncode=0, wait=AsyncMock(return_value=0))
+            with patch("apps._updater.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)):
+                result = await run_steamcmd_command(command=["steamcmd"], cwd=Path("."))
+            self.assertEqual(result, expected)
+
+        for line, expected in (
+            ("ERROR! App was not fully installed.", False),
+            ("Warning: missing Success! App confirmation.", False),
+            ("  \x1b[0mSuccess! App '123' already up to date.\r", True),
+            ("Success! Verified installation of app '123'.", True),
+        ):
+            with self.subTest(line=line):
+                asyncio.run(run(line, expected))
 
     def test_app_update_info_round_trips_version_branch(self) -> None:
         update_info = AppUpdateInfo(
@@ -503,13 +625,17 @@ Steam> quit
                 "beta-secret",
                 "+quit",
             ],
-            stdout_text="",
-            stderr_text="ERROR! Failed to install app for login-secret with beta-secret",
+            stdout_text="\x1b[0mUpdate state (0x61) downloading, progress: 16.83 (2847540397 / 16916605506)",
+            stderr_text="\x1b[31mERROR! Failed to install app for login-\x1b[0msecret with beta-secret",
         )
 
         self.assertNotIn("login-secret", error)
         self.assertNotIn("beta-secret", error)
         self.assertIn("******", error)
+        self.assertIn("Downloading game files — 16.8% (2.65 GiB of 15.75 GiB)", error)
+        self.assertIn("ERROR! Failed to install app", error)
+        self.assertNotIn("\x1b", error)
+        self.assertNotIn("0x61", error)
 
     def test_verify_selected_requires_app_to_be_stopped(self) -> None:
         with TemporaryDirectory() as temp_dir:

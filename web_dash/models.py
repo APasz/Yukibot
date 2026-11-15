@@ -800,6 +800,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             can_write_map_annotations=page_data.app_entry.map_url is not None and can_manage_app,
             supports_chat=page_data.app_entry.supports_chat,
             supports_updates=page_data.app_entry.supports_updates,
+            steam_update_supported=page_data.app_entry.steam_update_supported,
             client_pack_content_dirty=page_data.app_entry.client_pack_content_dirty,
             client_pack_published_version=page_data.app_entry.client_pack_published_version,
             client_pack_next_version=page_data.app_entry.client_pack_next_version,
@@ -873,6 +874,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             can_write_map_annotations=page_data.app_entry.map_url is not None and can_manage_app,
             supports_chat=page_data.app_entry.supports_chat,
             supports_updates=page_data.app_entry.supports_updates,
+            steam_update_supported=page_data.app_entry.steam_update_supported,
             chat_url=(self.app_chat_path(page_data.app_entry.name) if page_data.app_entry.supports_chat else None),
             update_info=page_data.app_entry.update_info,
             update_status=page_data.app_entry.update_status,
@@ -936,6 +938,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         can_write_map_annotations: bool,
         supports_chat: bool,
         supports_updates: bool,
+        steam_update_supported: bool = True,
         client_pack_content_dirty: bool = False,
         client_pack_published_version: str | None = None,
         client_pack_next_version: str | None = None,
@@ -1008,6 +1011,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     can_write_map_annotations=map_url is not None and can_write_map_annotations,
                     supports_chat=supports_chat,
                     supports_updates=supports_updates,
+                    steam_update_supported=steam_update_supported,
                     client_pack_content_dirty=client_pack_content_dirty,
                     client_pack_published_version=client_pack_published_version,
                     client_pack_next_version=client_pack_next_version,
@@ -1080,6 +1084,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         can_write_map_annotations: bool,
         supports_chat: bool,
         supports_updates: bool,
+        steam_update_supported: bool = True,
         chat_url: str | None,
         update_info: AppUpdateInfo | None,
         update_status: AppUpdateStatus | None,
@@ -1137,6 +1142,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     can_write_map_annotations=map_url is not None and can_write_map_annotations,
                     supports_chat=supports_chat,
                     supports_updates=supports_updates,
+                    steam_update_supported=steam_update_supported,
                     chat_url=chat_url,
                     update_info=update_info,
                     update_status=update_status,
@@ -1612,7 +1618,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             snapshot=snapshot,
         )
 
-    def _remote_mod_uploads(
+    async def _remote_mod_uploads_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -1629,34 +1635,31 @@ class ModWebModelsMixin(ModWebServiceSupport):
         url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/mods/upload"
         opened_handles: list[BinaryIO] = []
         try:
-            request_files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
-            request_data: list[tuple[str, str]] = []
+            form = aiohttp.FormData()
             for upload_name, upload_path in upload_files:
                 handle = upload_path.open("rb")
                 opened_handles.append(handle)
-                request_data.append(("filename", upload_name))
-                request_files.append(("upload", (upload_name, handle, "application/octet-stream")))
-            response: Response = self._remote_sync_http_client().post(
-                url,
-                data=request_data,
-                files=request_files,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-            )
-        except requests.RequestException as xcp:
+                form.add_field("filename", upload_name)
+                form.add_field("upload", handle, filename=upload_name, content_type="application/octet-stream")
+            session = await self._remote_http_client()
+            async with session.post(
+                url, data=form, headers={"Authorization": f"Bearer {token}"},
+                timeout=aiohttp.ClientTimeout(total=None, connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS, sock_connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status >= 400:
+                    raise RuntimeError(
+                        f"Remote node rejected the request: url={url} status={response.status} "
+                        f"detail={await self._aiohttp_response_detail(response)}"
+                    )
+                try:
+                    payload: object = cast(object, await response.json())
+                except (ValueError, aiohttp.ContentTypeError) as xcp:
+                    raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
             raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
         finally:
             for handle in opened_handles:
                 handle.close()
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"Remote node rejected the request: url={url} status={response.status_code} "
-                f"detail={self._response_detail(response)}"
-            )
-        try:
-            payload: object = cast(object, response.json())
-        except ValueError as xcp:
-            raise RuntimeError("Remote node returned invalid JSON.") from xcp
         return NodeModUploadBatchResult.from_mapping(_json_object(payload, context="Remote node response"))
 
     def _remote_mod_link_install(
