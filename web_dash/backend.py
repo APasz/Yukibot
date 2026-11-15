@@ -297,7 +297,7 @@ class ModWebDashboardBackend:
             kind=ModWebNotificationTrayItemKind.UPLOAD,
             filenames=filenames,
             detail_text=detail_text,
-            initial_progress_percent=6.0,
+            initial_progress_percent=0.0,
             node_color_hex=node_color_hex,
             app_color_hex=app_color_hex,
             auto_complete_after_seconds=None,
@@ -347,7 +347,7 @@ class ModWebDashboardBackend:
         self,
         *,
         transfer_id: int,
-        progress_percent: float,
+        progress_percent: float | None,
         detail_text: str | None = None,
         blink: bool | None = None,
     ) -> None:

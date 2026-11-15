@@ -2564,6 +2564,8 @@ NODE_API_MOD_UPLOAD_MAX_BYTES = _parse_positive_int(
 )
 NODE_API_MOD_ARCHIVE_LIMITS = ZipArchiveLimits(
     file_bytes=4 * 1024**3,
+    # Sparse 7D2D prefab data legitimately exceeds the general-purpose 100:1 limit.
+    compression_ratio=1000,
     extracted_bytes=_parse_positive_int(
         _env_settings.node_api_mod_extracted_max_bytes,
         var_name="NODE_API_MOD_EXTRACTED_MAX_BYTES",

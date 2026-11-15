@@ -100,6 +100,29 @@ def test_bundle_detects_wrappers_and_windows_paths(tmp_path: Path) -> None:
     assert all((component.directory / "Resources/asset.unity3d").read_bytes() == b"asset data" for component in prepared.components)
 
 
+def test_mod_upload_allows_sparse_prefabs_without_relaxing_save_limits(tmp_path: Path) -> None:
+    stream = _zip(("First",))
+    data = bytes(64 * 1024)
+    with zipfile.ZipFile(stream, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Wrapper/Mods/First/Prefabs/tile.ins", data)
+    with pytest.raises(ValueError, match="compression ratio"):
+        prepare_mod_archive(stream, "mod.zip", tmp_path, limits=config.NODE_API_ARCHIVE_LIMITS,
+                            cancelled=Event(), validate_root=Mod_7D2D._validate_archive_root)
+    prepared = prepare_mod_archive(stream, "mod.zip", tmp_path, limits=config.NODE_API_MOD_ARCHIVE_LIMITS,
+                                   cancelled=Event(), validate_root=Mod_7D2D._validate_archive_root)
+    assert (prepared.components[0].directory / "Prefabs/tile.ins").read_bytes() == data
+
+
+def test_mod_upload_still_rejects_excessive_compression_ratios(tmp_path: Path) -> None:
+    stream = _zip(("First",))
+    with zipfile.ZipFile(stream, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Wrapper/Mods/First/Prefabs/excessive_ratio.ins", bytes(2 * 1024**2))
+    with pytest.raises(ValueError, match="compression ratio"):
+        prepare_mod_archive(stream, "mod.zip", tmp_path, limits=config.NODE_API_MOD_ARCHIVE_LIMITS,
+                            cancelled=Event(), validate_root=Mod_7D2D._validate_archive_root)
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("member", ["../outside", "C:\\outside", "Wrapper/Mods/First/modinfo.XML", "Wrapper/Mods/First/Resources"])
 def test_archive_rejects_unsafe_and_conflicting_paths(tmp_path: Path, member: str) -> None:
     stream = _zip()

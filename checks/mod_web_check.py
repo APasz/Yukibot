@@ -1100,18 +1100,27 @@ class ModWebTests(unittest.TestCase):
                 self.class_values: list[str] = []
                 self.props_values: list[str] = []
                 self.style_values: list[str] = []
+                self.text = ""
+                self.visible = True
 
-            def classes(self, value: str) -> "FakeElement":
-                self.class_values.append(value)
+            def classes(self, value: str = "", *, replace: str | None = None) -> "FakeElement":
+                self.class_values.append(value if replace is None else replace)
                 return self
 
-            def props(self, value: str) -> "FakeElement":
+            def props(self, value: str, *, remove: str | None = None) -> "FakeElement":
+                del remove
                 self.props_values.append(value)
                 return self
 
-            def style(self, value: str) -> "FakeElement":
-                self.style_values.append(value)
+            def style(self, value: str = "", *, replace: str | None = None) -> "FakeElement":
+                self.style_values.append(value if replace is None else replace)
                 return self
+
+            def set_text(self, value: str) -> None:
+                self.text = value
+
+            def set_visibility(self, visible: bool) -> None:
+                self.visible = visible
 
             def __enter__(self) -> "FakeElement":
                 return self
@@ -1128,27 +1137,62 @@ class ModWebTests(unittest.TestCase):
         class FakeUi:
             def __init__(self) -> None:
                 self.elements: list[FakeElement] = []
+                self.labels: list[str] = []
+                self.teleport = MagicMock()
 
             def element(self, tag: str) -> FakeElement:
                 element = FakeElement(tag=tag)
                 self.elements.append(element)
                 return element
 
+            def label(self, text: str) -> FakeElement:
+                self.labels.append(text)
+                label = self.element("label")
+                label.text = text
+                return label
+
+        class FakeRefreshable:
+            def __init__(self, callback: Callable[[], None], ui: FakeUi) -> None:
+                self.callback = callback
+                self.ui = ui
+                self.refresh_count = 0
+
+            def __call__(self) -> None:
+                self.callback()
+
+            def refresh(self) -> None:
+                self.refresh_count += 1
+                self.ui.elements.clear()
+                self.callback()
+
+        class FakeLiveUi(FakeUi):
+            def __init__(self) -> None:
+                super().__init__()
+                self.context = SimpleNamespace(client=SimpleNamespace(safe_invoke=lambda callback: callback(), on_delete=Mock()))
+                self.overlay: FakeRefreshable | None = None
+
+            def refreshable(self, callback: Callable[[], None]) -> FakeRefreshable:
+                self.overlay = FakeRefreshable(callback, self)
+                return self.overlay
+
         service = ModWebService()
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
-        service._backend.start_transfers(
+        transfer_id = service._backend.start_transfers(
             user_id=user.discord_id,
             kind=ModWebNotificationTrayItemKind.UPLOAD,
             filenames=("archive.zip",),
             detail_text="Uploading archive.",
             initial_progress_percent=37.5,
-        )
+        )[0]
         ui = FakeUi()
 
         service._render_user_transfer_overlay(ui=cast(ModWebUi, cast(object, ui)), user=user)
 
-        self.assertEqual(len(ui.elements), 4)
-        overlay, tracks, track, fill = ui.elements
+        self.assertEqual(len(ui.elements), 5)
+        overlay, tracks, track, fill, detail = ui.elements
+        ui.teleport.assert_called_once_with("body")
+        self.assertEqual(ui.labels, ["archive.zip · 38%"])
+        self.assertEqual(detail.class_values, ["mod-transfer-overlay-detail"])
         self.assertEqual(overlay.tag, "div")
         self.assertEqual(overlay.class_values, ["mod-transfer-overlay"])
         self.assertEqual(overlay.props_values, ["role=status aria-live=polite"])
@@ -1160,7 +1204,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(track.class_values, ["mod-transfer-overlay-track animate-pulse"])
         self.assertEqual(
             track.props_values,
-            ["role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow=37.50"],
+            ['role=progressbar aria-valuemin=0 aria-valuemax=100 aria-label="archive.zip" aria-valuenow=37.50'],
         )
         self.assertEqual(
             track.style_values,
@@ -1174,6 +1218,51 @@ class ModWebTests(unittest.TestCase):
                 " background: var(--mod-transfer-colour);"
             ],
         )
+
+        service._backend.update_transfer_progress(
+            transfer_id=transfer_id, progress_percent=None, detail_text="Preparing mods…",
+        )
+        ui.elements.clear()
+        service._render_user_transfer_overlay(ui=cast(ModWebUi, cast(object, ui)), user=user)
+        self.assertIn("mod-transfer-overlay-track-indeterminate", ui.elements[2].class_values[0])
+        self.assertNotIn("aria-valuenow", ui.elements[2].props_values[0])
+        self.assertEqual(ui.labels[-1], "Preparing mods…")
+
+        service._backend.update_transfer_progress(
+            transfer_id=transfer_id, progress_percent=None, detail_text="Select mods to install.", blink=False,
+        )
+        ui.elements.clear()
+        service._render_user_transfer_overlay(ui=cast(ModWebUi, cast(object, ui)), user=user)
+        self.assertEqual(ui.elements[2].class_values, ["mod-transfer-overlay-track"])
+        self.assertEqual(ui.labels[-1], "Select mods to install.")
+
+        async def check_live_updates() -> None:
+            live_ui = FakeLiveUi()
+            service._render_user_transfer_overlay(ui=cast(ModWebUi, cast(object, live_ui)), user=user)
+            original_elements = tuple(live_ui.elements)
+            service._backend.update_transfer_progress(transfer_id=transfer_id, progress_percent=60, blink=True)
+            await asyncio.sleep(0)
+            self.assertEqual(tuple(live_ui.elements), original_elements)
+            self.assertIn("width: 60.00%", live_ui.elements[3].style_values[-1])
+            self.assertEqual(live_ui.elements[4].text, "archive.zip · 60%")
+            service._backend.update_transfer_progress(transfer_id=transfer_id, progress_percent=None, detail_text="Preparing mods…")
+            await asyncio.sleep(0)
+            self.assertEqual(tuple(live_ui.elements), original_elements)
+            self.assertNotIn("aria-valuenow", live_ui.elements[2].props_values[-1])
+            self.assertIn("aria-valuetext=", live_ui.elements[2].props_values[-1])
+            self.assertEqual(live_ui.elements[4].text, "Preparing mods…")
+            service._backend.complete_transfer(transfer_id=transfer_id)
+            await asyncio.sleep(0)
+            self.assertEqual(tuple(live_ui.elements), original_elements)
+            self.assertFalse(live_ui.elements[4].visible)
+            self.assertIsNotNone(live_ui.overlay)
+            assert live_ui.overlay is not None
+            self.assertEqual(live_ui.overlay.refresh_count, 0)
+            service._backend.clear_user_transfers(user_id=user.discord_id)
+            await asyncio.sleep(0)
+            self.assertEqual(live_ui.overlay.refresh_count, 1)
+
+        asyncio.run(check_live_updates())
 
     def test_dashboard_backend_limits_active_transfers_per_user(self) -> None:
         backend = ModWebDashboardBackend()
@@ -13494,10 +13583,12 @@ class ModWebTests(unittest.TestCase):
                 event_name: str,
                 handler: Callable[[], None],
                 *,
-                args: list[object],
+                args: list[object] | None = None,
+                js_handler: str | None = None,
             ) -> "FakeUpload":
                 self.handlers[event_name] = handler
                 self.props[f"{event_name}-args"] = args
+                self.props[f"{event_name}-js"] = js_handler
                 return self
 
             def run_method(self, method_name: str) -> None:
@@ -14448,10 +14539,12 @@ class ModWebTests(unittest.TestCase):
                 event_name: str,
                 handler: Callable[[], None],
                 *,
-                args: list[object],
+                args: list[object] | None = None,
+                js_handler: str | None = None,
             ) -> "FakeUpload":
                 self.handlers[event_name] = handler
                 self.props[f"{event_name}-args"] = args
+                self.props[f"{event_name}-js"] = js_handler
                 return self
 
             def run_method(self, method_name: str) -> None:
@@ -14481,12 +14574,16 @@ class ModWebTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.buttons: list[FakeButton] = []
                 self.cleanups: list[Callable[..., object]] = []
+                self.javascript_calls: list[str] = []
                 self.context = SimpleNamespace(
                     client=SimpleNamespace(on_delete=lambda cleanup: self.cleanups.append(cleanup))
                 )
                 self.navigate = SimpleNamespace(reload=lambda: None)
                 self.upload_control = FakeUpload()
                 self.upload_kwargs: dict[str, object] = {}
+
+            def run_javascript(self, code: str) -> None:
+                self.javascript_calls.append(code)
 
             def refreshable(self, func: Callable[..., None]) -> FakeRefreshable:
                 return FakeRefreshable(func)
@@ -14653,11 +14750,18 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(ui.upload_control.props["field-name"], "upload")
         self.assertTrue(ui.upload_control.props["batch"])
-        self.assertEqual(set(ui.upload_control.handlers), {"start", "uploaded", "failed", "rejected"})
+        self.assertEqual(set(ui.upload_control.handlers), {"start", "uploading", "uploaded", "failed", "rejected"})
         ui.upload_control.handlers["start"]()
         active_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
         self.assertEqual(active_transfer.label, "Mod upload")
         self.assertIs(active_transfer.state, ModWebNotificationTrayItemState.ACTIVE)
+        upload_progress = cast(Callable[[object], None], ui.upload_control.handlers["uploading"])
+        upload_progress(SimpleNamespace(args=35))
+        self.assertEqual(service._backend.user_transfer_items(user_id=user.discord_id)[0].progress_percent, 35)
+        upload_progress(SimpleNamespace(args=None))
+        processing_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
+        self.assertIsNone(processing_transfer.progress_percent)
+        self.assertIn("Preparing mods", processing_transfer.detail_text or "")
         ui.upload_control.handlers["uploaded"]()
         completed_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
         self.assertIs(completed_transfer.state, ModWebNotificationTrayItemState.SUCCESS)
@@ -15626,10 +15730,12 @@ class ModWebTests(unittest.TestCase):
                 event_name: str,
                 handler: Callable[[], None],
                 *,
-                args: list[object],
+                args: list[object] | None = None,
+                js_handler: str | None = None,
             ) -> "FakeUpload":
                 self.handlers[event_name] = handler
                 self.props[f"{event_name}-args"] = args
+                self.props[f"{event_name}-js"] = js_handler
                 return self
 
             def reset(self) -> None:
@@ -15879,7 +15985,7 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(ui.upload_control.props["accept"], ".zip")
             self.assertEqual(
                 set(ui.upload_control.handlers),
-                {"start", "uploaded", "failed", "rejected"},
+                {"start", "uploading", "uploaded", "failed", "rejected"},
             )
 
             upload_button = next(button for button in ui.buttons if button.text == "Upload Save")
@@ -15888,7 +15994,16 @@ class ModWebTests(unittest.TestCase):
             upload_button.on_click()
             self.assertTrue(ui.dialogs[0].opened)
 
+            ui.upload_control.handlers["start"]()
+            upload_progress = cast(Callable[[object], None], ui.upload_control.handlers["uploading"])
+            upload_progress(SimpleNamespace(args=64))
+            self.assertEqual(service._backend.user_transfer_items(user_id=user.discord_id)[0].progress_percent, 64)
+            upload_progress(SimpleNamespace(args=None))
+            processing_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
+            self.assertIsNone(processing_transfer.progress_percent)
+            self.assertIn("Processing the save", processing_transfer.detail_text or "")
             ui.upload_control.handlers["failed"]()
+            upload_progress(SimpleNamespace(args=None))
             self.assertEqual(ui.upload_control.props["url"], "/_nicegui/save-upload")
             self.assertEqual(ui.upload_control.props["headers"], [])
             self.assertEqual(ui.upload_control.props["form-fields"], [])

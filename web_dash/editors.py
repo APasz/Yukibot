@@ -109,6 +109,7 @@ from .types import (
     _ModWebBadgeSpec,
     _SettingSecretConfig,
 )
+from .upload_progress import bind_direct_upload_progress
 
 _SERVER_RENDERED_LIST_PAGE_SIZE = 40
 
@@ -1287,6 +1288,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         save_upload_control.props["accept"] = ".sii,.dat" if is_scs_truck_simulator_app else ".zip"
                         if show_upload_action:
                             save_upload_control.on("start", direct_save_upload_started, args=[])
+                            bind_direct_upload_progress(
+                                ui=ui,
+                                upload=save_upload_control,
+                                backend=self._backend,
+                                transfer_id=lambda: direct_save_transfer_id,
+                                processing_text=f"Processing the {upload_item_label} for {model.app_friendly}…",
+                            )
                             save_upload_control.on("uploaded", direct_save_upload_succeeded, args=[])
                             save_upload_control.on("failed", direct_save_upload_failed, args=[])
                             save_upload_control.on("rejected", direct_save_upload_rejected, args=[])

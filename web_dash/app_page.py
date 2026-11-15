@@ -164,6 +164,7 @@ from .types import (
     _ModWebTabActionSpec,
 )
 from .ui_helpers import ModWebUiHelpersMixin, copy_text_to_clipboard
+from .upload_progress import bind_direct_upload_progress
 from .utils import _format_player_capacity
 
 if TYPE_CHECKING:
@@ -4702,6 +4703,15 @@ class ModWebAppPageMixin(
                 return
             finish_direct_upload_transfer(error="Mod upload was interrupted because the app page was closed.")
 
+        def update_direct_upload_status(detail_text: str, *, blink: bool = True) -> None:
+            if direct_upload_transfer_id is not None:
+                self._backend.update_transfer_progress(
+                    transfer_id=direct_upload_transfer_id,
+                    progress_percent=None,
+                    detail_text=detail_text,
+                    blink=blink,
+                )
+
         def mod_portal_version_option_label(version: NodeModPortalVersionEntry) -> str:
             return version.version
 
@@ -4756,15 +4766,21 @@ class ModWebAppPageMixin(
                 return
             if inline_upload_control is not None:
                 inline_upload_control.disable()
+            update_direct_upload_status("Select mods to install.", blink=False)
 
             async def apply(names: tuple[str, ...]) -> None:
-                node = self._remote_node_link(model.node_name)
-                payload = await self._remote_json_async(
-                    node=node, app_name=model.app_name,
-                    path=f"/apps/{quote(model.app_name, safe='')}/mods/upload/{preview.upload_id}/apply",
-                    scopes=(NodeApiScope.MODS_WRITE,), user=user, method="POST", json_payload={"names": list(names)},
-                    timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
-                )
+                update_direct_upload_status(f"Installing mods for {model.app_friendly}…")
+                try:
+                    node = self._remote_node_link(model.node_name)
+                    payload = await self._remote_json_async(
+                        node=node, app_name=model.app_name,
+                        path=f"/apps/{quote(model.app_name, safe='')}/mods/upload/{preview.upload_id}/apply",
+                        scopes=(NodeApiScope.MODS_WRITE,), user=user, method="POST", json_payload={"names": list(names)},
+                        timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    update_direct_upload_status("Select mods to retry installation.", blink=False)
+                    raise
                 finish_direct_upload_transfer(error=None)
                 ui.notify(str(payload.get("message", "Installed selected mods.")), type="positive")
                 self._guarded_reload(ui=ui)
@@ -7079,6 +7095,13 @@ class ModWebAppPageMixin(
                     inline_upload_control.props["batch"] = True
                     inline_upload_control.props["field-name"] = "upload"
                     inline_upload_control.on("start", direct_upload_started, args=[])
+                    bind_direct_upload_progress(
+                        ui=ui,
+                        upload=inline_upload_control,
+                        backend=self._backend,
+                        transfer_id=lambda: direct_upload_transfer_id,
+                        processing_text=f"Preparing mods for {model.app_friendly}…",
+                    )
                     if preview_mod_upload:
                         inline_upload_control.on("uploaded", direct_upload_inspected, js_handler="(event) => emit(event.xhr.responseText)")
                     else:
