@@ -30,6 +30,7 @@ from .constants import (
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     log,
 )
+from .download_progress import download_transfer_url
 from .nicegui_protocols import ModWebUi, _value_as_object, _value_as_text
 from .runtime_imports import (
     AppUpdateOperationKind,
@@ -3732,24 +3733,31 @@ class ModWebActionsMixin(ModWebServiceSupport):
         message: str,
         filenames: tuple[str, ...],
     ) -> None:
+        if len(filenames) != 1:
+            raise ValueError("A download request requires exactly one transfer label.")
         try:
-            self._backend.start_download_transfers(
+            transfer_id = self._backend.start_download_transfers(
                 user_id=user.discord_id,
                 filenames=filenames,
                 detail_text=message,
                 node_color_hex=self._node_role_color_hex(node_name=model.node_name),
                 app_color_hex=model.app_color_hex,
-            )
+            )[0]
         except RuntimeError as xcp:
             ui.notify(str(xcp), type="warning")
             return
-        ui.notify(message, type="info")
-        await asyncio.sleep(_DOWNLOAD_FEEDBACK_DELAY_SECONDS)
-        download = getattr(ui, "download", None)
-        if callable(download):
-            download(url)
-            return
-        ui.navigate.to(url)
+        try:
+            ui.notify(message, type="info")
+            await asyncio.sleep(_DOWNLOAD_FEEDBACK_DELAY_SECONDS)
+            tracked_url = download_transfer_url(url, transfer_id)
+            download = getattr(ui, "download", None)
+            if callable(download):
+                download(tracked_url)
+                return
+            ui.navigate.to(tracked_url)
+        except BaseException:
+            self._backend.fail_transfer(transfer_id=transfer_id, detail_text="Could not start the browser download.")
+            raise
 
     @staticmethod
     def _download_feedback_message(

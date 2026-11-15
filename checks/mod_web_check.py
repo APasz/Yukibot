@@ -22,6 +22,7 @@ from aiohttp.client_reqrep import RequestInfo
 from modmux.models import Provider
 from multidict import CIMultiDict, CIMultiDictProxy
 from nicegui.elements.link import Link
+from starlette.types import Message
 from yarl import URL
 
 import config
@@ -249,6 +250,7 @@ from web_dash.constants import (
     _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
     _MOD_WEB_APP_PAGE_RESPONSE_TIMEOUT_SECONDS,
     _PORTAL_HEALTH_PATH,
+    _REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
     _REMOTE_NODE_GET_MAX_ATTEMPTS,
     _REMOTE_NODE_GET_RETRY_DELAY_SECONDS,
     _REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
@@ -1168,7 +1170,7 @@ class ModWebTests(unittest.TestCase):
         class FakeLiveUi(FakeUi):
             def __init__(self) -> None:
                 super().__init__()
-                self.context = SimpleNamespace(client=SimpleNamespace(safe_invoke=lambda callback: callback(), on_delete=Mock()))
+                self.context = SimpleNamespace(client=SimpleNamespace(safe_invoke=Mock(side_effect=lambda callback: callback()), on_delete=Mock()))
                 self.overlay: FakeRefreshable | None = None
 
             def refreshable(self, callback: Callable[[], None]) -> FakeRefreshable:
@@ -1191,7 +1193,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(len(ui.elements), 5)
         overlay, tracks, track, fill, detail = ui.elements
         ui.teleport.assert_called_once_with("body")
-        self.assertEqual(ui.labels, ["archive.zip · 38%"])
+        self.assertEqual(ui.labels, ["Upload · archive.zip · 38%"])
         self.assertEqual(detail.class_values, ["mod-transfer-overlay-detail"])
         self.assertEqual(overlay.tag, "div")
         self.assertEqual(overlay.class_values, ["mod-transfer-overlay"])
@@ -1204,7 +1206,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(track.class_values, ["mod-transfer-overlay-track animate-pulse"])
         self.assertEqual(
             track.props_values,
-            ['role=progressbar aria-valuemin=0 aria-valuemax=100 aria-label="archive.zip" aria-valuenow=37.50'],
+            ['role=progressbar aria-valuemin=0 aria-valuemax=100 aria-label="Upload · archive.zip" aria-valuenow=37.50'],
         )
         self.assertEqual(
             track.style_values,
@@ -1226,7 +1228,7 @@ class ModWebTests(unittest.TestCase):
         service._render_user_transfer_overlay(ui=cast(ModWebUi, cast(object, ui)), user=user)
         self.assertIn("mod-transfer-overlay-track-indeterminate", ui.elements[2].class_values[0])
         self.assertNotIn("aria-valuenow", ui.elements[2].props_values[0])
-        self.assertEqual(ui.labels[-1], "Preparing mods…")
+        self.assertEqual(ui.labels[-1], "Upload · archive.zip · Preparing mods…")
 
         service._backend.update_transfer_progress(
             transfer_id=transfer_id, progress_percent=None, detail_text="Select mods to install.", blink=False,
@@ -1234,7 +1236,7 @@ class ModWebTests(unittest.TestCase):
         ui.elements.clear()
         service._render_user_transfer_overlay(ui=cast(ModWebUi, cast(object, ui)), user=user)
         self.assertEqual(ui.elements[2].class_values, ["mod-transfer-overlay-track"])
-        self.assertEqual(ui.labels[-1], "Select mods to install.")
+        self.assertEqual(ui.labels[-1], "Upload · archive.zip · Select mods to install.")
 
         async def check_live_updates() -> None:
             live_ui = FakeLiveUi()
@@ -1244,23 +1246,32 @@ class ModWebTests(unittest.TestCase):
             await asyncio.sleep(0)
             self.assertEqual(tuple(live_ui.elements), original_elements)
             self.assertIn("width: 60.00%", live_ui.elements[3].style_values[-1])
-            self.assertEqual(live_ui.elements[4].text, "archive.zip · 60%")
+            self.assertEqual(live_ui.elements[4].text, "Upload · archive.zip · 60%")
             service._backend.update_transfer_progress(transfer_id=transfer_id, progress_percent=None, detail_text="Preparing mods…")
             await asyncio.sleep(0)
             self.assertEqual(tuple(live_ui.elements), original_elements)
             self.assertNotIn("aria-valuenow", live_ui.elements[2].props_values[-1])
             self.assertIn("aria-valuetext=", live_ui.elements[2].props_values[-1])
-            self.assertEqual(live_ui.elements[4].text, "Preparing mods…")
+            self.assertEqual(live_ui.elements[4].text, "Upload · archive.zip · Preparing mods…")
             service._backend.complete_transfer(transfer_id=transfer_id)
             await asyncio.sleep(0)
             self.assertEqual(tuple(live_ui.elements), original_elements)
-            self.assertFalse(live_ui.elements[4].visible)
+            self.assertTrue(live_ui.elements[4].visible)
+            self.assertEqual(live_ui.elements[4].text, "Upload · archive.zip · Complete.")
             self.assertIsNotNone(live_ui.overlay)
             assert live_ui.overlay is not None
             self.assertEqual(live_ui.overlay.refresh_count, 0)
             service._backend.clear_user_transfers(user_id=user.discord_id)
             await asyncio.sleep(0)
             self.assertEqual(live_ui.overlay.refresh_count, 1)
+
+            service._backend.start_upload_transfers(user_id=user.discord_id, filenames=("next.zip",), detail_text="Uploading…")
+            live_ui.context.client.on_delete.call_args.args[0]()
+            live_ui.context.client.safe_invoke.reset_mock()
+            await asyncio.sleep(0)
+            live_ui.context.client.safe_invoke.assert_not_called()
+            self.assertEqual(live_ui.overlay.refresh_count, 1)
+            service._backend.clear_user_transfers(user_id=user.discord_id)
 
         asyncio.run(check_live_updates())
 
@@ -5469,6 +5480,8 @@ class ModWebTests(unittest.TestCase):
         assert ui.run_kwargs is not None
         self.assertIn("log_config", ui.run_kwargs)
         self.assertIsNone(ui.run_kwargs["log_config"])
+        self.assertIn("gzip_middleware_factory", ui.run_kwargs)
+        self.assertIsNone(ui.run_kwargs["gzip_middleware_factory"])
 
     def test_external_chat_link_opens_in_new_tab(self) -> None:
         class FakeLink:
@@ -11806,16 +11819,19 @@ class ModWebTests(unittest.TestCase):
                     headers={
                         "Content-Type": "application/octet-stream",
                         "Content-Disposition": 'attachment; filename="mods.zip"',
+                        "Content-Length": "8",
                     },
+                    content_length=8,
                     content=_ResponseContent(),
                 )
 
             async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
                 del exc_type, exc, traceback
+                captured["closed"] = True
 
         class _Session:
-            def get(self, url: str, *, headers: dict[str, str], timeout: object) -> _ResponseContext:
-                captured.update(url=url, headers=headers, timeout=timeout)
+            def get(self, url: str, *, headers: dict[str, str], timeout: object, auto_decompress: bool) -> _ResponseContext:
+                captured.update(url=url, headers=headers, timeout=timeout, auto_decompress=auto_decompress)
                 return _ResponseContext()
 
         async def _request_download() -> tuple[bytes, object]:
@@ -11828,11 +11844,22 @@ class ModWebTests(unittest.TestCase):
                     node=node,
                     app_name="minecraft alpha",
                     path="/apps/minecraft%20alpha/mods/download",
+                    timeout=_REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
                     query={"enabled_only": "true", "mod_name": ["one.jar", "two.jar"]},
                     scopes=(NodeApiScope.MODS_DOWNLOAD,),
                     user=user,
                 )
-                return b"".join([chunk async for chunk in response.body_iterator]), response
+                messages: list[Message] = []
+
+                async def send(message: Message) -> None:
+                    messages.append(message)
+
+                async def receive() -> Message:
+                    await asyncio.Event().wait()
+                    return {"type": "http.disconnect"}
+
+                await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+                return b"".join(message.get("body", b"") for message in messages), response
 
         body, response = asyncio.run(_request_download())
         parsed = urlsplit(cast(str, captured["url"]))
@@ -11854,7 +11881,15 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(query["mod_name"], ["one.jar", "two.jar"])
         self.assertNotIn("access_token", query)
         self.assertEqual(response.headers["referrer-policy"], "no-referrer")
+        self.assertEqual(response.headers["content-length"], "8")
+        self.assertFalse(captured["auto_decompress"])
+        self.assertTrue(captured["closed"])
         self.assertEqual(grant.subject, "web:42")
+        timeout = cast(aiohttp.ClientTimeout, captured["timeout"])
+        self.assertEqual(timeout.connect, 15.0)
+        self.assertEqual(timeout.sock_connect, 15.0)
+        self.assertEqual(timeout.sock_read, 600.0)
+        self.assertIsNone(timeout.total)
 
     def test_direct_upload_targets_point_at_node_with_scoped_tokens(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="yuki", token_secret="shared-secret")

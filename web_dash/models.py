@@ -37,6 +37,7 @@ from .constants import (
     log,
     traffic_log,
 )
+from .download_progress import DOWNLOAD_TRANSFER_QUERY_PARAMETER, DownloadStreamingResponse
 from .home import ModWebHomeMixin
 from .json_helpers import _json_object, _json_request_object
 from .links import mod_web_node_path, mod_web_node_system_path
@@ -109,7 +110,6 @@ from .runtime_imports import (
     Request,
     Response,
     StarletteResponse,
-    StreamingResponse,
     Timer,
     Utilities,
     aiohttp,
@@ -2691,50 +2691,84 @@ class ModWebModelsMixin(ModWebServiceSupport):
         user: ModWebUser,
         query: Mapping[str, object] | None = None,
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+        request: Request | None = None,
     ) -> StarletteResponse:
-        token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
-        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
-        url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
-        if query:
-            url = f"{url}?{urlencode(query, doseq=True)}"
-        session = await self._remote_http_client()
-        response_context = session.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=self._aiohttp_client_timeout(timeout),
-        )
+        transfer_id: int | None = None
+        raw_transfer_id = None if request is None else request.query_params.get(DOWNLOAD_TRANSFER_QUERY_PARAMETER)
+        if raw_transfer_id is not None:
+            try:
+                requested_transfer_id = int(raw_transfer_id)
+            except ValueError as xcp:
+                raise _http_exception(400, "Invalid download transfer identifier.") from xcp
+            if self._backend.claim_download_transfer(transfer_id=requested_transfer_id, user_id=user.discord_id):
+                transfer_id = requested_transfer_id
+
         try:
-            response: aiohttp.ClientResponse = await response_context.__aenter__()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
-            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
-
-        if response.status >= 400:
+            token = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
+            node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+            url = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
+            if query:
+                url = f"{url}?{urlencode(query, doseq=True)}"
+            session = await self._remote_http_client()
+            response_context = session.get(
+                url,
+                headers={"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"},
+                timeout=self._aiohttp_client_timeout(timeout),
+                auto_decompress=False,
+            )
             try:
-                detail = await self._aiohttp_response_detail(response)
-            finally:
-                await response_context.__aexit__(None, None, None)
-            raise RuntimeError(f"Remote node rejected the request: url={url} status={response.status} detail={detail}")
+                response: aiohttp.ClientResponse = await response_context.__aenter__()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
+                raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
 
-        forwarded_headers = {
-            header_name: header_value
-            for header_name in ("Cache-Control", "Content-Disposition", "ETag", "Expires", "Last-Modified")
-            if (header_value := response.headers.get(header_name))
-        }
-        forwarded_headers["Referrer-Policy"] = "no-referrer"
-
-        async def _stream_body() -> AsyncIterator[bytes]:
-            try:
-                async for chunk in response.content.iter_chunked(_REMOTE_NODE_STREAM_CHUNK_SIZE_BYTES):
-                    if chunk:
-                        yield bytes(chunk)
-            finally:
+            async def close_upstream() -> None:
                 await response_context.__aexit__(None, None, None)
 
-        return StreamingResponse(
-            _stream_body(),
-            media_type=response.headers.get("Content-Type"),
-            headers=forwarded_headers,
-        )
+            try:
+                if response.status >= 400:
+                    detail = await self._aiohttp_response_detail(response)
+                    raise RuntimeError(f"Remote node rejected the request: url={url} status={response.status} detail={detail}")
+                forwarded_headers = {
+                    header_name: header_value
+                    for header_name in (
+                        "Cache-Control", "Content-Disposition", "Content-Length", "Content-Encoding",
+                        "ETag", "Expires", "Last-Modified",
+                    )
+                    if (header_value := response.headers.get(header_name))
+                }
+                forwarded_headers["Referrer-Policy"] = "no-referrer"
+                if transfer_id is not None:
+                    self._backend.update_transfer_progress(
+                        transfer_id=transfer_id,
+                        progress_percent=0.0 if response.content_length is not None else None,
+                        detail_text="Sending download…",
+                    )
+
+                async def stream_body() -> AsyncIterator[bytes]:
+                    async for chunk in response.content.iter_chunked(_REMOTE_NODE_STREAM_CHUNK_SIZE_BYTES):
+                        if chunk:
+                            yield chunk
+
+                return DownloadStreamingResponse(
+                    stream_body(),
+                    media_type=response.headers.get("Content-Type"),
+                    headers=forwarded_headers,
+                    close_upstream=close_upstream,
+                    backend=self._backend,
+                    transfer_id=transfer_id,
+                    total_bytes=response.content_length,
+                )
+            except BaseException:
+                await close_upstream()
+                raise
+        except BaseException as xcp:
+            if transfer_id is not None:
+                detail = (
+                    "Download preparation was cancelled." if isinstance(xcp, asyncio.CancelledError)
+                    else "Could not prepare the download. Try downloading again."
+                )
+                self._backend.fail_transfer(transfer_id=transfer_id, detail_text=detail)
+            raise
 
     @staticmethod
     def _aiohttp_client_timeout(timeout: float | tuple[float, float]) -> aiohttp.ClientTimeout:

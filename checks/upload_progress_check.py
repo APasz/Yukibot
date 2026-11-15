@@ -68,6 +68,6 @@ def test_progress_accessibility_labels_preserve_unicode_and_quoted_names() -> No
         detail_text='Préparation des mods 🧟…',
     )
     props = Props.parse(ModWebStatusNotificationsMixin._transfer_overlay_track_props(item))
-    assert props["aria-label"] == item.label
+    assert props["aria-label"] == f"Upload · {item.label}"
     assert props["aria-valuetext"] == item.detail_text
     assert "aria-valuenow" not in props

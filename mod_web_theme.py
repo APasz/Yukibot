@@ -6447,6 +6447,8 @@ class ModWebTheme:
                     background: var(--mod-bg);
                     font-size: 0.72rem;
                     line-height: 1.4;
+                    white-space: pre-line;
+                    overflow-wrap: anywhere;
                 }}
                 .mod-timezone-option .q-btn__content {{
                     width: 100%;

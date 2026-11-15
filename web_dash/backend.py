@@ -32,7 +32,7 @@ from .user_settings import ModWebUserSettings, ModWebUserSettingsStore
 from .utils import _http_exception
 
 _USER_TRANSFER_LIMIT = 3
-_DOWNLOAD_TRANSFER_ACTIVE_SECONDS = 8.0
+_DOWNLOAD_REQUEST_START_TIMEOUT_SECONDS = 60.0
 _TRANSFER_DISPLAY_SECONDS = 10.0
 
 
@@ -45,6 +45,7 @@ class _TransferRecord:
     created_at: float
     active_until: float | None = None
     display_until: float | None = None
+    download_started: bool = False
 
     @property
     def active(self) -> bool:
@@ -214,7 +215,7 @@ class ModWebDashboardBackend:
         kind: ModWebNotificationTrayItemKind,
         filenames: tuple[str, ...],
         detail_text: str,
-        initial_progress_percent: float,
+        initial_progress_percent: float | None,
         node_color_hex: str | None = None,
         app_color_hex: str | None = None,
         auto_complete_after_seconds: float | None = None,
@@ -272,15 +273,51 @@ class ModWebDashboardBackend:
         node_color_hex: str | None = None,
         app_color_hex: str | None = None,
     ) -> tuple[int, ...]:
-        return self.start_transfers(
+        transfer_ids = self.start_transfers(
             user_id=user_id,
             kind=ModWebNotificationTrayItemKind.DOWNLOAD,
             filenames=filenames,
             detail_text=detail_text,
-            initial_progress_percent=4.0,
+            initial_progress_percent=None,
             node_color_hex=node_color_hex,
             app_color_hex=app_color_hex,
-            auto_complete_after_seconds=_DOWNLOAD_TRANSFER_ACTIVE_SECONDS,
+        )
+        with self._transfer_lock:
+            for transfer_id in transfer_ids:
+                record = self._transfer_records.get(transfer_id)
+                if record is None or not record.active or record.download_started:
+                    continue
+                timer = threading.Timer(
+                    _DOWNLOAD_REQUEST_START_TIMEOUT_SECONDS,
+                    self._timeout_pending_download,
+                    kwargs={"transfer_id": transfer_id},
+                )
+                timer.daemon = True
+                self._transfer_expiry_timers[transfer_id] = timer
+                timer.start()
+        return transfer_ids
+
+    def claim_download_transfer(self, *, transfer_id: int, user_id: int) -> bool:
+        """Attach one authenticated request; browser retries may proceed without a stale tracker."""
+        with self._transfer_lock:
+            self._cleanup_transfer_records(now=time.monotonic())
+            record = self._transfer_records.get(transfer_id)
+            if (
+                record is None or record.user_id != user_id or not record.active
+                or record.item.kind is not ModWebNotificationTrayItemKind.DOWNLOAD or record.download_started
+            ):
+                return False
+            record.download_started = True
+            self._cancel_transfer_expiry_timer_locked(transfer_id=transfer_id)
+            return True
+
+    def _timeout_pending_download(self, *, transfer_id: int) -> None:
+        self._finish_transfer(
+            transfer_id=transfer_id,
+            state=ModWebNotificationTrayItemState.ERROR,
+            detail_text="The browser did not start the download. Try downloading again.",
+            progress_percent=100.0,
+            require_pending_download=True,
         )
 
     def start_upload_transfers(
@@ -373,7 +410,8 @@ class ModWebDashboardBackend:
         with self._transfer_lock:
             self._cleanup_transfer_records(now=now)
             records = tuple(record for record in self._transfer_records.values() if record.user_id == user_id)
-        ordered_records = sorted(records, key=lambda record: (-int(record.active), -record.created_at, -record.transfer_id))
+        # Creation order keeps each bar in place while other transfers finish.
+        ordered_records = sorted(records, key=lambda record: (-record.created_at, -record.transfer_id))
         return tuple(self._record_item(record, now=now) for record in ordered_records)
 
     def user_active_transfer_slots(self, *, user_id: int) -> int:
@@ -423,6 +461,7 @@ class ModWebDashboardBackend:
         state: ModWebNotificationTrayItemState,
         detail_text: str | None,
         progress_percent: float,
+        require_pending_download: bool = False,
     ) -> None:
         now = time.monotonic()
         target_user_id: int | None = None
@@ -430,6 +469,10 @@ class ModWebDashboardBackend:
             self._cleanup_transfer_records(now=now)
             record = self._transfer_records.get(transfer_id)
             if record is None:
+                return
+            if require_pending_download and (
+                not record.active or record.download_started or record.item.kind is not ModWebNotificationTrayItemKind.DOWNLOAD
+            ):
                 return
             target_user_id = record.user_id
             record.item = replace(

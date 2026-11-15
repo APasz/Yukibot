@@ -302,6 +302,7 @@ class ModWebService(
                 host=config.MOD_WEB_SERVER.host,
                 port=config.MOD_WEB_SERVER.port,
                 log_config=None,
+                gzip_middleware_factory=None,  # The registered middleware preserves uncompressed download sizes.
                 show=False,
                 reload=False,
                 title="Yukibot Dashboard",

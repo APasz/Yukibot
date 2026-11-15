@@ -8,6 +8,8 @@ from .status_support import *
 if TYPE_CHECKING:
     from nicegui.element import Element
 
+_TRANSFER_OVERLAY_LABEL_MAX_CHARS = 48
+
 
 @dataclass(slots=True)
 class _TransferOverlayTrack:
@@ -70,6 +72,7 @@ class ModWebStatusNotificationsMixin(ModWebStatusFeatureSupport):
         if not callable(safe_invoke):
             return
         loop = asyncio.get_running_loop()
+        closed = False
 
         def _update_items() -> None:
             items = self._user_transfer_overlay_items(user=user)
@@ -91,15 +94,23 @@ class ModWebStatusNotificationsMixin(ModWebStatusFeatureSupport):
 
         def _request_overlay_refresh() -> None:
             def _queue_refresh() -> None:
-                safe_invoke(_update_items)
+                if not closed:
+                    safe_invoke(_update_items)
 
-            loop.call_soon_threadsafe(_queue_refresh)
+            if not closed:
+                loop.call_soon_threadsafe(_queue_refresh)
 
         unsubscribe = self._backend.subscribe_user_transfers(
             user_id=user.discord_id,
             subscriber=_request_overlay_refresh,
         )
-        self._register_client_cleanup(ui=ui, cleanup=unsubscribe)
+
+        def _cleanup() -> None:
+            nonlocal closed
+            closed = True
+            unsubscribe()
+
+        self._register_client_cleanup(ui=ui, cleanup=_cleanup)
 
     def _user_transfer_overlay_items(self, *, user: ModWebUser) -> tuple[_ModWebNotificationTrayItem, ...]:
         return self._backend.user_transfer_items(user_id=user.discord_id)
@@ -117,23 +128,48 @@ class ModWebStatusNotificationsMixin(ModWebStatusFeatureSupport):
                 classes += " mod-transfer-overlay-track-indeterminate"
         return classes
 
-    @staticmethod
-    def _transfer_overlay_track_props(item: _ModWebNotificationTrayItem) -> str:
-        props = f"role=progressbar aria-valuemin=0 aria-valuemax=100 aria-label={json.dumps(item.label, ensure_ascii=False)}"
-        if item.progress_percent is None:
-            props += f" aria-valuetext={json.dumps(item.detail_text or item.label, ensure_ascii=False)}"
-        else:
+    @classmethod
+    def _transfer_overlay_track_props(cls, item: _ModWebNotificationTrayItem) -> str:
+        props = (
+            "role=progressbar aria-valuemin=0 aria-valuemax=100 "
+            f"aria-label={json.dumps(cls._transfer_overlay_label(item), ensure_ascii=False)}"
+        )
+        if item.progress_percent is not None:
             props += f" aria-valuenow={item.progress_percent:.2f}"
+        if item.progress_percent is None or item.state is not ModWebNotificationTrayItemState.ACTIVE:
+            props += f" aria-valuetext={json.dumps(cls._transfer_overlay_status(item), ensure_ascii=False)}"
         return props
 
     @staticmethod
-    def _transfer_overlay_detail(items: tuple[_ModWebNotificationTrayItem, ...]) -> str | None:
-        item = next((item for item in items if item.state is ModWebNotificationTrayItemState.ACTIVE), None)
-        if item is None:
-            return None
-        if item.progress_percent is None:
-            return item.detail_text or item.label
-        return f"{item.label} · {item.progress_percent:.0f}%"
+    def _transfer_overlay_label(item: _ModWebNotificationTrayItem, *, compact: bool = False) -> str:
+        direction = "Transfer" if item.kind is ModWebNotificationTrayItemKind.GENERIC else item.kind.value.capitalize()
+        label = item.label
+        if compact and len(label) > _TRANSFER_OVERLAY_LABEL_MAX_CHARS:
+            suffix_length = _TRANSFER_OVERLAY_LABEL_MAX_CHARS // 3
+            prefix_length = _TRANSFER_OVERLAY_LABEL_MAX_CHARS - suffix_length - 1
+            label = f"{label[:prefix_length]}…{label[-suffix_length:]}"
+        return f"{direction} · {label}"
+
+    @staticmethod
+    def _transfer_overlay_status(item: _ModWebNotificationTrayItem) -> str:
+        match item.state:
+            case ModWebNotificationTrayItemState.ACTIVE:
+                return (item.detail_text or "Working…") if item.progress_percent is None else f"{item.progress_percent:.0f}%"
+            case ModWebNotificationTrayItemState.SUCCESS:
+                return "Transfer sent." if item.kind is ModWebNotificationTrayItemKind.DOWNLOAD else "Complete."
+            case ModWebNotificationTrayItemState.ERROR:
+                return f"Failed: {item.detail_text}" if item.detail_text else "Failed."
+            case ModWebNotificationTrayItemState.WARNING:
+                return f"Warning: {item.detail_text}" if item.detail_text else "Warning."
+            case ModWebNotificationTrayItemState.IDLE:
+                return item.detail_text or "Waiting…"
+        raise ValueError(f"Unsupported transfer state: {item.state!r}")
+
+    @classmethod
+    def _transfer_overlay_detail(cls, items: tuple[_ModWebNotificationTrayItem, ...]) -> str | None:
+        return "\n".join(
+            f"{cls._transfer_overlay_label(item, compact=True)} · {cls._transfer_overlay_status(item)}" for item in items
+        ) or None
 
     @staticmethod
     def _transfer_overlay_track_style(item: _ModWebNotificationTrayItem) -> str:

@@ -20,6 +20,7 @@ from .constants import (
     _MOD_WEB_PAGE_PATH,
     _PORTAL_HEALTH_PATH,
     _PORTAL_NODE_LATENCIES_PATH,
+    _REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     log,
     traffic_log,
@@ -888,6 +889,8 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/mods/download",
                 query=query,
+                request=request,
+                timeout=_REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
                 user=user,
                 scopes=scopes,
             )
@@ -916,6 +919,8 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/configs/roots/{quote(root_id, safe='')}/download",
+                request=request,
+                timeout=_REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
                 user=user,
                 scopes=(NodeApiScope.CONFIGS_READ,),
             )
@@ -942,6 +947,8 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/saves/{quote(save_id, safe='/')}/download",
+                request=request,
+                timeout=_REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
                 user=user,
                 scopes=(NodeApiScope.SAVES_DOWNLOAD,),
             )
@@ -1023,6 +1030,8 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/mods/{quote(mod_name, safe='')}/download",
+                request=request,
+                timeout=_REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
                 user=user,
                 scopes=(NodeApiScope.MODS_DOWNLOAD,),
             )
@@ -1041,6 +1050,8 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/factorio/mod-settings/download",
+                request=request,
+                timeout=_REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
                 user=user,
                 scopes=(NodeApiScope.CONFIGS_READ,),
             )
