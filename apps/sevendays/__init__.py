@@ -2529,14 +2529,14 @@ class SevenDays(App[App_Config]):
     _serverconfig_cache: _SevenDaysServerConfigCache | None = None
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
-        self.manage_embed_color = 0xB91C1C
+        overhaul = load_undead_legacy_installation(cfg.directory)
+        self.manage_embed_color = 0xB91C1C if overhaul is None else 0x73E9B2
         self.proc_name = "7DaysToDie"
         self.proc_cmd = ["7DaysToDieServer", "-nographics"]
 
         self.process = None
         file_settings = cfg.directory.absolute() / "serverconfig.xml"
         self.cmd_start = ["bash", "startserver.sh", f"-configfile={file_settings.name}"]
-        overhaul = load_undead_legacy_installation(cfg.directory)
         if overhaul is not None:
             self.cmd_start = ["sh", UNDEAD_LEGACY_LAUNCHER]
         super().__init__(bot, am, cfg, SevenDays_Settings(file_settings, version_getter=lambda: cfg.version), Mod_7D2D)
