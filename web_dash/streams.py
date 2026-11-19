@@ -11,6 +11,7 @@ from .runtime_imports import (
     App,
     AppUpdateInfo,
     AppUpdateStatus,
+    Awaitable,
     Callable,
     ModWebUser,
     NodeApiScope,
@@ -40,7 +41,7 @@ from .stream_broker import (
 )
 from .remote_node_monitor import RemoteNodeMonitor, RemoteNodeMonitorSnapshot
 from .operation_stream import ModWebNodeOperationSnapshot
-from .types import ModWebNodeLink
+from .types import ModWebConsoleConnectionState, ModWebConsoleStdoutUpdate, ModWebNodeLink
 
 _LOCAL_CONSOLE_STDOUT_SUBSCRIPTION_INTERVAL_SECONDS = 0.5
 
@@ -170,7 +171,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         *,
         app: App,
         max_lines: int,
-        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+        on_update: Callable[[ModWebConsoleStdoutUpdate], None],
     ) -> Callable[[], None]:
         key = ConsoleStreamKey(node=None, app_name=app.name.casefold(), max_lines=max_lines)
         return self._console_stdout_broker.subscribe(
@@ -191,7 +192,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         app_name: str,
         max_lines: int,
         user: ModWebUser,
-        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+        on_update: Callable[[ModWebConsoleStdoutUpdate], None],
     ) -> Callable[[], None]:
         key = ConsoleStreamKey(node=node, app_name=app_name.casefold(), max_lines=max_lines)
         return self._console_stdout_broker.subscribe(
@@ -346,15 +347,18 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         *,
         app: App,
         max_lines: int,
-        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+        on_update: Callable[[ModWebConsoleStdoutUpdate], None],
     ) -> None:
-        previous_snapshot: NodeConsoleStdoutSnapshot | None = None
-        while True:
-            next_snapshot = self._node_api.build_console_stdout_snapshot(app=app, max_lines=max_lines)
-            if next_snapshot != previous_snapshot:
-                on_update(next_snapshot)
-                previous_snapshot = next_snapshot
-            await asyncio.sleep(_LOCAL_CONSOLE_STDOUT_SUBSCRIPTION_INTERVAL_SECONDS)
+        async def read_snapshot() -> NodeConsoleStdoutSnapshot:
+            return self._node_api.build_console_stdout_snapshot(app=app, max_lines=max_lines)
+
+        await self._console_stdout_polling_listener(
+            read_snapshot=read_snapshot,
+            on_update=on_update,
+            interval_seconds=_LOCAL_CONSOLE_STDOUT_SUBSCRIPTION_INTERVAL_SECONDS,
+            node_name=config.NODE_NAME,
+            app_name=app.name,
+        )
 
     async def _remote_console_stdout_stream_listener(
         self,
@@ -363,18 +367,20 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         app_name: str,
         max_lines: int,
         user: ModWebUser,
-        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+        on_update: Callable[[ModWebConsoleStdoutUpdate], None],
     ) -> None:
+        latest_snapshot: NodeConsoleStdoutSnapshot | None = None
+        on_update(ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.CONNECTING, None))
         try:
-            on_update(
-                await self._remote_console_stdout_async(
-                    node,
-                    app_name,
-                    max_lines=max_lines,
-                    user=user,
-                )
+            latest_snapshot = await self._remote_console_stdout_async(
+                node,
+                app_name,
+                max_lines=max_lines,
+                user=user,
             )
+            on_update(ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.LIVE, latest_snapshot))
         except Exception as xcp:
+            on_update(ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.DISCONNECTED, latest_snapshot))
             log.warning(
                 "Remote console stdout initial snapshot failed: node=%s app=%s error=%s",
                 node.node_name,
@@ -414,7 +420,8 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                                     f"expected={app_name!r} got={snapshot.app_name!r}"
                                 )
                             current_snapshot = snapshot
-                            on_update(snapshot)
+                            latest_snapshot = snapshot
+                            on_update(ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.LIVE, latest_snapshot))
                             continue
                         if message.type in {
                             aiohttp.WSMsgType.CLOSE,
@@ -424,6 +431,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                             break
                         if message.type == aiohttp.WSMsgType.ERROR:
                             raise RuntimeError(f"Remote console stdout websocket error: {websocket.exception()}")
+                on_update(ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.RECONNECTING, latest_snapshot))
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
@@ -440,7 +448,9 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                         max_lines=max_lines,
                         user=user,
                         on_update=on_update,
+                        initial_snapshot=latest_snapshot,
                     )
+                on_update(ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.DISCONNECTED, latest_snapshot))
                 log.warning(
                     "Remote console stdout stream failed: node=%s app=%s error=%s",
                     node.node_name,
@@ -456,30 +466,47 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         app_name: str,
         max_lines: int,
         user: ModWebUser,
-        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+        on_update: Callable[[ModWebConsoleStdoutUpdate], None],
+        initial_snapshot: NodeConsoleStdoutSnapshot | None = None,
     ) -> None:
-        previous_snapshot: NodeConsoleStdoutSnapshot | None = None
+        async def read_snapshot() -> NodeConsoleStdoutSnapshot:
+            return await self._remote_console_stdout_async(node, app_name, max_lines=max_lines, user=user)
+
+        await self._console_stdout_polling_listener(
+            read_snapshot=read_snapshot,
+            on_update=on_update,
+            interval_seconds=_APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
+            node_name=node.node_name,
+            app_name=app_name,
+            initial_snapshot=initial_snapshot,
+        )
+
+    @staticmethod
+    async def _console_stdout_polling_listener(
+        *,
+        read_snapshot: Callable[[], Awaitable[NodeConsoleStdoutSnapshot]],
+        on_update: Callable[[ModWebConsoleStdoutUpdate], None],
+        interval_seconds: float,
+        node_name: str,
+        app_name: str,
+        initial_snapshot: NodeConsoleStdoutSnapshot | None = None,
+    ) -> None:
+        latest_snapshot = initial_snapshot
+        previous_update: ModWebConsoleStdoutUpdate | None = None
         while True:
             try:
-                next_snapshot = await self._remote_console_stdout_async(
-                    node,
-                    app_name,
-                    max_lines=max_lines,
-                    user=user,
-                )
-                if next_snapshot != previous_snapshot:
-                    on_update(next_snapshot)
-                    previous_snapshot = next_snapshot
+                latest_snapshot = await read_snapshot()
+                update = ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.LIVE, latest_snapshot)
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
-                log.warning(
-                    "Remote console stdout polling failed: node=%s app=%s error=%s",
-                    node.node_name,
-                    app_name,
-                    xcp,
-                )
-            await asyncio.sleep(_APP_RUNTIME_REFRESH_INTERVAL_SECONDS)
+                if previous_update is None or previous_update.connection is not ModWebConsoleConnectionState.DISCONNECTED:
+                    log.warning("Console stdout polling failed: node=%s app=%s error=%s", node_name, app_name, xcp)
+                update = ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.DISCONNECTED, latest_snapshot)
+            if update != previous_update:
+                on_update(update)
+                previous_update = update
+            await asyncio.sleep(interval_seconds)
 
     async def _remote_app_state_polling_listener(
         self,

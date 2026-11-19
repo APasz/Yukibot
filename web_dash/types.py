@@ -34,6 +34,7 @@ from .runtime_imports import (
     NodeChatRoomSnapshot,
     NodeConfigList,
     NodeConsoleActionList,
+    NodeConsoleStdoutSnapshot,
     NodeDiskManagementState,
     NodeFactorioGenerationState,
     NodeFactorioModSettings,
@@ -62,6 +63,19 @@ class RemoteNodeCircuitOpenError(RuntimeError):
         self.node_name = node_name
         self.retry_after_seconds = retry_after_seconds
         super().__init__(f"Remote node {node_name!r} is temporarily unavailable; retry shortly.")
+
+
+class ModWebConsoleConnectionState(Enum):
+    CONNECTING = "Connecting"
+    LIVE = "Live"
+    RECONNECTING = "Reconnecting"
+    DISCONNECTED = "Disconnected"
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebConsoleStdoutUpdate:
+    connection: ModWebConsoleConnectionState
+    snapshot: NodeConsoleStdoutSnapshot | None
 
 
 @dataclass(slots=True)

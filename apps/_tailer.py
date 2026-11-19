@@ -122,6 +122,26 @@ class Tailer:
         self._running = False
         self._close_readers()
 
+    @property
+    def is_running(self) -> bool:
+        return self._running and self._read_task is not None and not self._read_task.done()
+
+    async def replace_stream_reader(self, reader: StreamReader) -> None:
+        """Rebind a stream tail without losing cached lines or truncating its output."""
+        if self._pointer_kind is not TailReaderKind.STREAM:
+            raise TypeError("Only stream tailers can replace their reader.")
+        if reader is self._pointer_stream and self.is_running:
+            return
+        current_loop = asyncio.get_running_loop()
+        self._request_task_stop(self._read_task, current_loop=current_loop)
+        await self._wait_for_task_stop(self._read_task, current_loop=current_loop, label="reader loop")
+        if self._read_task is not None and not self._read_task.done():
+            raise RuntimeError("Cannot replace a stream reader while its previous task is still running.")
+        self._pointer_stream = reader
+        self.sreader = reader
+        if self._running:
+            self._read_task = asyncio.create_task(self._reader_loop(append_output=True))
+
     def recent_lines(self, count: int = 50) -> list[str]:
         return [self._log[i] for i in sorted(self._log.keys())[-count:]]
 
@@ -255,11 +275,11 @@ class Tailer:
             for k in to_delete:
                 self._log.pop(k, None)
 
-    async def _reader_loop(self):
+    async def _reader_loop(self, *, append_output: bool = False) -> None:
         stdout: TextIOBase | None = None
         if self.output:
             self.output.parent.mkdir(parents=True, exist_ok=True)
-            stdout = self.output.open("w", encoding=config.STR_ENCODE, buffering=1)
+            stdout = self.output.open("a" if append_output else "w", encoding=config.STR_ENCODE, buffering=1)
         try:
             while True:
                 await asyncio.sleep(0.01)

@@ -235,6 +235,14 @@ _SEVENDAYS_VERSION_BUILD_RE = re.compile(
 )
 _SEVENDAYS_READY_RE: Pattern[str] = re.compile(r"\bStartAsServer\b")
 _SEVENDAYS_TELNET_STARTUP_ERROR_RE: Pattern[str] = re.compile(r"\bError in Telnet\.ctor\b", re.IGNORECASE)
+_SEVENDAYS_CONSOLE_LINE_PREFIX = r"^(?:\S+\s+\S+\s+INF\s+)?"
+_SEVENDAYS_PLAYER_COUNT_RE: Pattern[str] = re.compile(
+    _SEVENDAYS_CONSOLE_LINE_PREFIX + r"Total of\s+(?P<count>\d+)\s+in the game\s*$",
+)
+_SEVENDAYS_PLAYER_CAPACITY_RE: Pattern[str] = re.compile(
+    _SEVENDAYS_CONSOLE_LINE_PREFIX
+    + r"(?:Max players\s*:\s*|GamePref\.ServerMaxPlayerCount\s*=\s*)(?P<capacity>\d+)\s*$",
+)
 _SEVENDAYS_TRANSIENT_RE: Pattern[str] = re.compile(r"GMSG: Player '(.+?)' (joined|left) the game", re.IGNORECASE)
 _SEVENDAYS_DEATH_RE: Pattern[str] = re.compile(r"GMSG: Player '(?P<player>.+?)' died\b", re.IGNORECASE)
 _SEVENDAYS_CHAT_RE: Pattern[str] = re.compile(r"Chat.*?:\s*'(.*?)':\s*(.+)", re.IGNORECASE)
@@ -3100,7 +3108,7 @@ class SevenDays(App[App_Config]):
                     timeout_seconds=900.0,
                     ready_label="server readiness",
                 )
-            await self._players.start()
+            await self._players.start(read_telnet=runtime_log is not None)
             await self._activities.start()
             self._running = True
             self._schedule_startup_sandbox_options_request()
@@ -3364,25 +3372,26 @@ class Matchers:
 
 
 class Players:
-    def __init__(self, app: SevenDays):
+    def __init__(self, app: SevenDays) -> None:
         self.app = app
         self._players_task: asyncio.Task[None] | None = None
         self._running = False
         self._online: int | None = None
         self._max: int | None = None
+        self._read_telnet = False
+        self._telnet_reader: asyncio.StreamReader | None = None
+        self._response_tail: Tailer | None = None
         app._tail_matchers.add(self.match_players)
 
-    async def start(self):
-        self._online = None
-        self._max = None
+    async def start(self, *, read_telnet: bool = False) -> None:
         if self._players_task and not self._players_task.done():
             return
+        self._read_telnet = read_telnet
+        self._telnet_reader = None if read_telnet else self.app._relay.reader
         self._running = True
         self._players_task = asyncio.create_task(self._listplayers())
 
-    async def stop(self):
-        self._online = None
-        self._max = None
+    async def stop(self) -> None:
         self._running = False
         if self._players_task:
             self._players_task.cancel()
@@ -3394,37 +3403,48 @@ class Players:
                 log.exception("7D2D player polling task failed before shutdown for %s", self.app.name)
             finally:
                 self._players_task = None
+        try:
+            if self._response_tail is not None:
+                await self._response_tail.stop()
+        finally:
+            self._response_tail = None
+            self._telnet_reader = None
+            self._online = None
+            self._max = None
 
-    async def match_players(self, line: str):
-        current = maximum = None
-        if "Total of" in line:
-            current = self.extract_num(line)
-            if current is not None:
-                self._online = current
-        elif "Max players" in line:
-            maximum = self.extract_num(line)
-            if maximum is not None:
-                self._max = maximum
-        if not config.SILENT_DEBUG:
-            log.debug(f"Match_Players: {current}/{maximum}")
+    async def match_players(self, line: str) -> None:
+        if match := _SEVENDAYS_PLAYER_COUNT_RE.fullmatch(line.strip()):
+            self._online = int(match.group("count"))
+        elif match := _SEVENDAYS_PLAYER_CAPACITY_RE.fullmatch(line.strip()):
+            self._max = int(match.group("capacity"))
 
-    async def _listplayers(self):
+    async def _sync_response_reader(self) -> None:
+        reader = self.app._relay.reader
+        tail = self._response_tail if self._read_telnet else self.app._tail
+        if reader is self._telnet_reader and (tail is None or tail.is_running):
+            return
+        self._online = None
+        if not self._read_telnet:
+            if reader is not None and tail is not None:
+                await tail.replace_stream_reader(reader)
+                self._telnet_reader = reader
+            return
+        if self._response_tail is not None:
+            await self._response_tail.stop()
+            self._response_tail = None
+        self._telnet_reader = None
+        if reader is not None:
+            # The file tail already handles chat and activity; only consume player replies here.
+            self._response_tail = Tailer(self.app.check_running, reader)
+            await self._response_tail.start({self.match_players})
+            self._telnet_reader = reader
+
+    async def _listplayers(self) -> None:
         while self._running:
-            if self._max is None and self.app._tail:
-                log_lines = self.app._tail.specific_lines(0, 500)
-                for line in log_lines:
-                    if "Max players" in line:
-                        log.debug("Found Max Players through log")
-                        await self.match_players(line)
+            if not await self.app._relay.send("listplayers"):
+                self._online = None
+            await self._sync_response_reader()
             await asyncio.sleep(5)
-            await self.app._relay.send("listplayers")
-
-    @staticmethod
-    def extract_num(text: str) -> int | None:
-        for part in text.split(" "):
-            if part.strip().isnumeric():
-                return int(part)
-        return None
 
     async def count(self) -> tuple[int, int] | None:
         if not config.SILENT_DEBUG:

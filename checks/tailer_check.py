@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import unittest
 from pathlib import Path
@@ -10,6 +11,44 @@ from apps._tailer import Tailer
 
 
 class TailerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replacing_stream_reader_preserves_output_and_cached_lines(self) -> None:
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "stdout.log"
+            first = asyncio.StreamReader()
+            second = asyncio.StreamReader()
+            lines: list[str] = []
+
+            async def match(line: str) -> None:
+                lines.append(line)
+
+            tailer = Tailer(lambda: True, first, output)
+            try:
+                await tailer.start({match})
+                first.feed_data(b"before reconnect\n")
+                await self._wait_for_lines(lines, expected_count=1)
+                await tailer.replace_stream_reader(second)
+                first.feed_data(b"obsolete reader\n")
+                second.feed_data(b"after reconnect\n")
+                await self._wait_for_lines(lines, expected_count=2)
+                task = tailer._read_task
+                await tailer.replace_stream_reader(second)
+                self.assertIs(tailer._read_task, task)
+
+                assert task is not None
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                self.assertFalse(tailer.is_running)
+                await tailer.replace_stream_reader(second)
+                second.feed_data(b"after recovery\n")
+                await self._wait_for_lines(lines, expected_count=3)
+                self.assertTrue(tailer.is_running)
+                self.assertEqual(tailer.recent_lines(), lines)
+                self.assertEqual(output.read_text(), "before reconnect\nafter reconnect\nafter recovery\n")
+            finally:
+                await tailer.stop()
+            self.assertFalse(tailer.is_running)
+
     async def test_restarting_path_tailer_reopens_file_from_start(self) -> None:
         with TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "server.log"

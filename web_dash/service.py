@@ -41,7 +41,6 @@ from .runtime_imports import (
     MaintenanceService,
     ModWebUser,
     NodeAppStateStreamEvent,
-    NodeConsoleStdoutSnapshot,
     NodeStateStreamEvent,
     NodeSystemActionHandler,
     RelayTTSQueue,
@@ -67,6 +66,7 @@ from .operation_stream import ModWebNodeOperationSnapshot
 from .streams import ModWebStreamsMixin
 from .tabs import ModWebTabsMixin
 from .types import (
+    ModWebConsoleStdoutUpdate,
     RemoteChatBrokerEvent,
     RemoteNodeCircuitState,
     _ModWebModUpdateCacheEntry,
@@ -132,7 +132,7 @@ class ModWebService(
             RemoteChatStreamKey, RemoteChatBrokerEvent
         ] = SharedAsyncStreamBroker()
         self._console_stdout_broker: SharedAsyncStreamBroker[
-            ConsoleStreamKey, NodeConsoleStdoutSnapshot
+            ConsoleStreamKey, ModWebConsoleStdoutUpdate
         ] = SharedAsyncStreamBroker()
 
     def set_manager(self, manager: App_Manager) -> None:

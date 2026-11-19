@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, Never, cast
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import config
 from _discord import Fileish, OutboundRelayFormatter, RelayMessageReferenceKind, RelayOutboundFormatOptions
@@ -26,12 +26,15 @@ from apps._config import (
 )
 from apps._console import ConsoleResponseSource, execute_console_action
 from apps._mod import Mod_Manager
+from apps._tailer import Tailer
+from apps._telnet import TelnetClient
 from apps.sevendays import (
     Activities as SevenDaysActivities,
 )
 from apps.sevendays import (
     Matchers,
     Mod_7D2D,
+    Players,
     Receiver,
     SevenDays,
     SevenDaysAdminAddRequest,
@@ -1420,6 +1423,141 @@ class SevenDaysConsoleActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed, snapshot)
 
 
+class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _players() -> Players:
+        relay = MagicMock(spec=TelnetClient)
+        relay.send.return_value = True
+        relay.reader = None
+        app = cast(SevenDays, SimpleNamespace(
+            name="sevendays_udl", _tail_matchers=set(), _relay=relay, _tail=None, check_running=lambda: True,
+        ))
+        return Players(app)
+
+    @staticmethod
+    async def _wait_for_count(players: Players, expected: tuple[int, int]) -> None:
+        async def wait() -> None:
+            while await players.count() != expected:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait(), timeout=2)
+
+    async def test_parses_capacity_from_server_preferences_and_telnet_banner(self) -> None:
+        for line in (
+            "GamePref.ServerMaxPlayerCount = 8",
+            "Max players: 8",
+            "2026-11-20T10:15:00 123 INF GamePref.ServerMaxPlayerCount = 8",
+        ):
+            with self.subTest(line=line):
+                players = self._players()
+                await players.match_players(line)
+                await players.match_players("2026-11-20T10:15:00 123 INF Total of 2 in the game")
+                self.assertEqual(await players.count(), (2, 8))
+
+    async def test_ignores_chat_and_unrelated_numbers(self) -> None:
+        players = self._players()
+        await players.match_players("GamePref.ServerMaxPlayerCount = 8")
+        for line in (
+            "Chat: 'APasz': Total of 99 in the game",
+            "2026-11-20T10:15:00 123 INF Chat: 'APasz': Total of 99 in the game",
+            "Total of -1 in the game",
+            "GamePref.ServerReservedSlots = 2",
+        ):
+            await players.match_players(line)
+        self.assertIsNone(await players.count())
+        await players.match_players("Total of 0 in the game")
+        self.assertEqual(await players.count(), (0, 8))
+
+    async def test_polling_preserves_startup_counts_and_is_idempotent(self) -> None:
+        players = self._players()
+        await players.match_players("GamePref.ServerMaxPlayerCount = 8")
+        await players.match_players("Total of 2 in the game")
+        try:
+            await players.start()
+            task = players._players_task
+            await players.start()
+            self.assertIs(players._players_task, task)
+            await asyncio.sleep(0)
+            self.assertEqual(await players.count(), (2, 8))
+        finally:
+            await players.stop()
+        self.assertIsNone(await players.count())
+
+    async def test_reads_telnet_player_replies_without_replaying_chat_matchers(self) -> None:
+        players = self._players()
+        reader = asyncio.StreamReader()
+        players.app._relay.reader = reader
+        chat_matcher = AsyncMock()
+        players.app._tail_matchers.add(chat_matcher)
+        try:
+            await players.start(read_telnet=True)
+            reader.feed_data(b"Max players: 8\nChat: 'APasz': hello\nTotal of 2 in the game\n")
+            await self._wait_for_count(players, (2, 8))
+            players.app._relay.send.assert_awaited_with("listplayers")
+            chat_matcher.assert_not_awaited()
+        finally:
+            await players.stop()
+        self.assertIsNone(players._response_tail)
+        self.assertIsNone(await players.count())
+
+    async def test_reconnect_replaces_the_telnet_reply_reader(self) -> None:
+        players = self._players()
+        old_reader = asyncio.StreamReader()
+        players.app._relay.reader = old_reader
+        try:
+            await players.start(read_telnet=True)
+            old_reader.feed_data(b"Max players: 8\nTotal of 0 in the game\n")
+            await self._wait_for_count(players, (0, 8))
+            new_reader = asyncio.StreamReader()
+            players.app._relay.reader = new_reader
+            await players._sync_response_reader()
+            self.assertIsNone(await players.count())
+            new_reader.feed_data(b"Max players: 16\nTotal of 3 in the game\n")
+            old_reader.feed_data(b"Total of 99 in the game\n")
+            await self._wait_for_count(players, (3, 16))
+            await asyncio.sleep(0.05)
+            self.assertEqual(await players.count(), (3, 16))
+        finally:
+            await players.stop()
+
+    async def test_stream_log_mode_rebinds_the_primary_reader_after_reconnect(self) -> None:
+        players = self._players()
+        first = asyncio.StreamReader()
+        second = asyncio.StreamReader()
+        players.app._relay.reader = first
+        tail = Tailer(lambda: True, first)
+        players.app._tail = tail
+        try:
+            await tail.start(players.app._tail_matchers)
+            await players.start()
+            first.feed_data(b"Max players: 8\nTotal of 1 in the game\n")
+            await self._wait_for_count(players, (1, 8))
+            players.app._relay.reader = second
+            await players._sync_response_reader()
+            self.assertIsNone(players._response_tail)
+            self.assertIs(players.app._tail, tail)
+            self.assertIsNone(await players.count())
+            second.feed_data(b"Total of 2 in the game\n")
+            first.feed_data(b"Total of 99 in the game\n")
+            await self._wait_for_count(players, (2, 8))
+        finally:
+            await players.stop()
+            await tail.stop()
+
+    async def test_stream_log_mode_keeps_a_single_telnet_reader(self) -> None:
+        players = self._players()
+        players.app._relay.reader = asyncio.StreamReader()
+        try:
+            await players.start(read_telnet=False)
+            await asyncio.sleep(0)
+            self.assertIsNone(players._response_tail)
+            await players.match_players("Max players: 8")
+            await players.match_players("Total of 1 in the game")
+            self.assertEqual(await players.count(), (1, 8))
+        finally:
+            await players.stop()
+
+
 class SevenDaysActivityTests(unittest.IsolatedAsyncioTestCase):
     async def test_sevendays_activities_track_started_tasks_and_deregister_provider(self) -> None:
         activity_manager = _RecordingActivityManager()
@@ -1603,7 +1741,8 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs, {"timeout_seconds": 900.0, "ready_label": "server readiness"})
             call_order.append("ready")
 
-        async def start_players() -> None:
+        async def start_players(*, read_telnet: bool) -> None:
+            self.assertFalse(read_telnet)
             call_order.append("players")
 
         async def start_activities() -> None:
@@ -1679,6 +1818,7 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         tailer_cls.assert_called_once()
         self.assertEqual(tailer_cls.call_args.args[1:], (runtime_log, app.file_stdout))
+        app._players.start.assert_awaited_once_with(read_telnet=True)
         link_mock.assert_called_once_with(runtime_log, app.file_stdout.with_name(runtime_log.name))
         self.assertIn(f'name="UserDataFolder" value="{(root / "userdata").as_posix()}"', redirected_config)
         self.assertIn('name="ServerPort" value="26900"', redirected_config)

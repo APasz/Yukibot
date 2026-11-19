@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 import unittest
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -12,7 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -278,6 +278,8 @@ from web_dash.routes import _ModWebGZipMiddleware
 from web_dash.service import ModWebService
 from web_dash.stream_broker import RemoteNodeStreamKey, SharedAsyncStreamBroker
 from web_dash.types import (
+    ModWebConsoleConnectionState,
+    ModWebConsoleStdoutUpdate,
     ModDownloadKind,
     ModWebAppLink,
     ModWebAppSectionKind,
@@ -1918,6 +1920,26 @@ class ModWebTests(unittest.TestCase):
             actions=(),
         )
 
+    @staticmethod
+    def _console_refreshables(ui: MagicMock) -> dict[str, Mock]:
+        bodies: dict[str, Mock] = {}
+
+        def refreshable(callback: Callable[[], None]) -> Mock:
+            body = Mock(side_effect=callback)
+            body.refresh.side_effect = callback
+            bodies[callback.__name__] = body
+            return body
+
+        ui.refreshable.side_effect = refreshable
+        return bodies
+
+    @staticmethod
+    def _console_save_action() -> NodeConsoleActionEntry:
+        return NodeConsoleActionEntry(
+            key="save", label="Save", description="Save the world.", power_level_name="user",
+            power_level_label="User", requires_running=False, can_run=True, parameter=None,
+        )
+
     def test_console_editor_initializes_live_updates_when_opened_after_page_load(self) -> None:
         async def exercise() -> None:
             service = ModWebService()
@@ -1939,12 +1961,18 @@ class ModWebTests(unittest.TestCase):
                     app_name=model.app_name, app_friendly=model.app_friendly, node=model.node_name,
                     lines=("BepInEx loaded", "Server ready"), truncated=False, running=True,
                 )
-                subscribe.call_args.kwargs["on_update"](snapshot)
+                subscribe.call_args.kwargs["on_update"](ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.LIVE, snapshot))
                 await asyncio.sleep(0)
                 feed = ui.html.return_value.classes.return_value
                 update = feed.client.run_javascript.call_args.args[0]
                 self.assertIn("BepInEx loaded\\nServer ready", update)
                 self.assertIn("modWebConsoleFeed?.update", update)
+                feed.client.run_javascript.reset_mock()
+                subscribe.call_args.kwargs["on_update"](ModWebConsoleStdoutUpdate(
+                    ModWebConsoleConnectionState.LIVE, replace(snapshot, running=False, truncated=True),
+                ))
+                await asyncio.sleep(0)
+                feed.client.run_javascript.assert_not_called()
 
         asyncio.run(exercise())
 
@@ -1961,11 +1989,12 @@ class ModWebTests(unittest.TestCase):
                 lines=("Startup failed",), truncated=False, running=False,
             )
             published = asyncio.Event()
-            first: list[NodeConsoleStdoutSnapshot] = []
-            second: list[NodeConsoleStdoutSnapshot] = []
+            update = ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.DISCONNECTED, snapshot)
+            first: list[ModWebConsoleStdoutUpdate] = []
+            second: list[ModWebConsoleStdoutUpdate] = []
 
-            async def listen(*, on_update: Callable[[NodeConsoleStdoutSnapshot], None], **_: object) -> None:
-                on_update(snapshot)
+            async def listen(*, on_update: Callable[[ModWebConsoleStdoutUpdate], None], **_: object) -> None:
+                on_update(update)
                 published.set()
                 await asyncio.Event().wait()
 
@@ -1979,8 +2008,8 @@ class ModWebTests(unittest.TestCase):
                         node=node, app_name=snapshot.app_name, max_lines=200, user=user, on_update=second.append,
                     )
                     try:
-                        self.assertEqual(first, [snapshot])
-                        self.assertEqual(second, [snapshot])
+                        self.assertEqual(first, [update])
+                        self.assertEqual(second, [update])
                     finally:
                         unsubscribe_second()
                 finally:
@@ -1988,6 +2017,352 @@ class ModWebTests(unittest.TestCase):
                     await service._console_stdout_broker.close()
 
         asyncio.run(exercise())
+
+    def test_console_live_updates_preserve_command_controls_and_update_runtime_state(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            ui = MagicMock()
+            bodies = self._console_refreshables(ui)
+            ui.input.return_value.props.return_value.classes.return_value.value = "say Hello"
+            action = NodeConsoleActionEntry(
+                key="command", label="Command", description="Run a command.",
+                power_level_name="user", power_level_label="User", requires_running=True, can_run=True,
+                runtime_running=True,
+                parameter=NodeConsoleActionParameter(
+                    key="command", label="Command", value_type_name="str", description=None,
+                    max_length=200, multiline=False, strict_choice=False, allows_text_input=True,
+                    choices=(), recent_inputs=("help", "list"),
+                ),
+            )
+            running = NodeAppRuntimeSummary(
+                running=True, enabled=True, version=None, player_count=0, player_capacity=10,
+                relay_support=ChatRelaySupport.NONE, storage_percent=None,
+                storage_free_bytes=None, storage_total_bytes=None,
+            )
+            model = replace(
+                self._overview_model_with_config_and_chat(), app_stats=running,
+                console_actions=replace(
+                    self._console_action_list(),
+                    actions=(action, replace(action, key="offline", label="Offline", requires_running=False)),
+                ),
+            )
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            with (
+                patch.object(service, "_render_flat_tab_header"),
+                patch.object(service, "_remote_node_link"),
+                patch.object(service, "_register_client_cleanup"),
+                patch.object(service, "_create_remote_console_stdout_subscription") as subscribe,
+                patch.object(service, "_set_optional_badge_state", wraps=service._set_optional_badge_state) as badge,
+                patch("nicegui.context.context", SimpleNamespace(client=nullcontext())),
+            ):
+                apply_runtime = service._render_console_editor(ui=cast(ModWebUi, ui), model=model, user=user)
+                assert apply_runtime is not None
+                body = bodies["_console_card_body"]
+                input_count = ui.input.call_count
+                select_count = ui.select.call_count
+                run_button = ui.button.return_value.classes.return_value
+                stopped = replace(running, running=False)
+                for stats, can_run, status, badge_text in (
+                    (replace(running, player_count=2, storage_free_bytes=1024), True, "Ready.", "Running"),
+                    (replace(running, transition_state=NodeAppTransitionState.STOPPING), False,
+                     "Minecraft Alpha is stopping.", "Stopping"),
+                    (stopped, False, "Minecraft Alpha must be running before this action can be used.", "Stopped"),
+                    (replace(stopped, transition_state=NodeAppTransitionState.STARTING), False,
+                     "Minecraft Alpha is starting.", "Starting"),
+                    (running, True, "Ready.", "Running"),
+                ):
+                    apply_runtime(replace(model, app_stats=stats))
+                    run_button.set_enabled.assert_called_with(can_run)
+                    ui.label.return_value.classes.return_value.set_text.assert_called_with(status)
+                    self.assertEqual(badge.call_args.args[1].text, badge_text)
+                    subscribe.call_args.kwargs["on_update"](ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.LIVE, NodeConsoleStdoutSnapshot(
+                        app_name=model.app_name, app_friendly=model.app_friendly, node=model.node_name,
+                        lines=(status,), truncated=False, running=stats.running,
+                    )))
+                    await asyncio.sleep(0)
+                    body.refresh.assert_not_called()
+                    self.assertEqual(ui.input.call_count, input_count)
+                    self.assertEqual(ui.select.call_count, select_count)
+
+                ui.select.call_args_list[0].kwargs["on_change"](SimpleNamespace(value="offline"))
+                body.refresh.assert_called_once_with()
+                apply_runtime(replace(model, app_stats=stopped))
+                run_button.set_enabled.assert_called_with(True)
+                self.assertIsNone(badge.call_args.args[1])
+                body.refresh.assert_called_once_with()
+
+        asyncio.run(exercise())
+
+    def test_console_results_are_immediate_and_failures_replace_previous_success(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            ui = MagicMock()
+            bodies = self._console_refreshables(ui)
+            action = self._console_save_action()
+            model = replace(
+                self._overview_model_with_config_and_chat(),
+                console_actions=replace(self._console_action_list(), actions=(action,)),
+            )
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            result = NodeConsoleActionExecutionResult(
+                app_name=model.app_name, app_friendly=model.app_friendly, node=model.node_name,
+                action_key="save", summary="Saved the world.", success=True, text=None,
+                source=ConsoleResponseSource.NONE,
+            )
+            history_started = asyncio.Event()
+            release_history = asyncio.Event()
+
+            async def read_history(**_: object) -> NodeConsoleActionList | None:
+                history_started.set()
+                await release_history.wait()
+                return model.console_actions
+
+            with (
+                patch.object(service, "_render_flat_tab_header"),
+                patch.object(service, "_remote_node_link"),
+                patch.object(service, "_register_client_cleanup"),
+                patch.object(service, "_create_remote_console_stdout_subscription"),
+                patch.object(service, "_execute_console_action", new=AsyncMock(side_effect=[result, RuntimeError("Connection lost")])),
+                patch.object(service, "_read_console_action_list", new=AsyncMock(side_effect=read_history)),
+                patch("nicegui.context.context", SimpleNamespace(client=nullcontext())),
+            ):
+                service._render_console_editor(ui=cast(ModWebUi, ui), model=model, user=user)
+                run_action = ui.button.call_args.kwargs["on_click"]
+                task = asyncio.create_task(run_action())
+                try:
+                    await asyncio.wait_for(history_started.wait(), timeout=1)
+                    self.assertIn(call("Saved the world."), ui.label.call_args_list)
+                    ui.button.return_value.classes.return_value.set_enabled.assert_called_with(True)
+                    bodies["_console_card_body"].refresh.assert_not_called()
+                finally:
+                    release_history.set()
+                    await task
+
+                ui.label.reset_mock()
+                await run_action()
+                self.assertIn(call("Console action failed: Connection lost"), ui.label.call_args_list)
+                self.assertNotIn(call("Saved the world."), ui.label.call_args_list)
+                bodies["_console_card_body"].refresh.assert_not_called()
+                ui.button.return_value.classes.return_value.set_enabled.assert_called_with(True)
+
+        asyncio.run(exercise())
+
+    def test_console_refresh_reconciles_action_changes_and_ignores_stale_history(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            ui = MagicMock()
+            bodies = self._console_refreshables(ui)
+            actions = replace(self._console_action_list(), actions=(self._console_save_action(),))
+            model = replace(self._overview_model_with_config_and_chat(), console_actions=actions)
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            result = NodeConsoleActionExecutionResult(
+                app_name=model.app_name, app_friendly=model.app_friendly, node=model.node_name,
+                action_key="save", summary="Saved.", success=True, text=None, source=ConsoleResponseSource.NONE,
+            )
+            first_history_started = asyncio.Event()
+            release_first_history = asyncio.Event()
+            parameter = NodeConsoleActionParameter(
+                key="message", label="Message", value_type_name="str", description=None,
+                max_length=200, multiline=True, strict_choice=False, allows_text_input=True,
+                choices=(), recent_inputs=(),
+            )
+            latest_action = replace(actions.actions[0], label="Latest save", parameter=parameter)
+            latest_actions = replace(actions, actions=(latest_action,))
+
+            async def first_history(**_: object) -> NodeConsoleActionList:
+                first_history_started.set()
+                await release_first_history.wait()
+                return actions
+
+            history = AsyncMock(side_effect=first_history)
+            execute = AsyncMock(return_value=result)
+            with (
+                patch.object(service, "_render_flat_tab_header"),
+                patch.object(service, "_remote_node_link"),
+                patch.object(service, "_register_client_cleanup"),
+                patch.object(service, "_create_remote_console_stdout_subscription"),
+                patch.object(service, "_execute_console_action", new=execute),
+                patch.object(service, "_read_console_action_list", new=history),
+                patch("nicegui.context.context", SimpleNamespace(client=nullcontext())),
+            ):
+                service._render_console_editor(ui=cast(ModWebUi, ui), model=model, user=user)
+                run_action = ui.button.call_args.kwargs["on_click"]
+                first = asyncio.create_task(run_action())
+                try:
+                    await asyncio.wait_for(first_history_started.wait(), timeout=1)
+                    history.side_effect = None
+                    history.return_value = latest_actions
+                    await run_action()
+                    body = bodies["_console_card_body"]
+                    body.refresh.assert_called_once_with()
+                    self.assertIn(call("Latest save"), ui.label.call_args_list)
+                    self.assertIn(call("Ctrl+Enter to run · ↑/↓ for history at the first/last line"), ui.label.call_args_list)
+                finally:
+                    release_first_history.set()
+                    await first
+                body.refresh.assert_called_once_with()
+                ui.button.return_value.classes.return_value.set_enabled.assert_called_with(True)
+                self.assertEqual(execute.await_count, 2)
+
+                latest_actions = replace(actions, actions=(replace(actions.actions[0], key="backup", label="Backup"),))
+                history.return_value = latest_actions
+                await run_action()
+                self.assertIn(call("Backup"), ui.label.call_args_list)
+                history.return_value = replace(actions, actions=())
+                await run_action()
+                self.assertEqual(execute.call_args.kwargs["action_key"], "backup")
+                self.assertIn(call("No console actions available for this app."), ui.label.call_args_list)
+                executed = execute.await_count
+                await run_action()
+                self.assertEqual(execute.await_count, executed)
+
+        asyncio.run(exercise())
+
+    def test_console_close_ignores_in_flight_results_history_and_queued_updates(self) -> None:
+        async def exercise(phase: Literal["execute", "history"]) -> None:
+            service = ModWebService()
+            ui = MagicMock()
+            bodies = self._console_refreshables(ui)
+            actions = replace(self._console_action_list(), actions=(self._console_save_action(),))
+            model = replace(self._overview_model_with_config_and_chat(), console_actions=actions)
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            result = NodeConsoleActionExecutionResult(
+                app_name=model.app_name, app_friendly=model.app_friendly, node=model.node_name,
+                action_key="save", summary="Saved.", success=True, text=None, source=ConsoleResponseSource.NONE,
+            )
+            started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def execute(**_: object) -> NodeConsoleActionExecutionResult:
+                if phase == "execute":
+                    started.set()
+                    await release.wait()
+                return result
+
+            async def history(**_: object) -> NodeConsoleActionList:
+                started.set()
+                await release.wait()
+                return replace(actions, actions=())
+
+            with (
+                patch.object(service, "_render_flat_tab_header"),
+                patch.object(service, "_remote_node_link"),
+                patch.object(service, "_register_client_cleanup") as cleanup,
+                patch.object(service, "_register_element_cleanup") as element_cleanup,
+                patch.object(service, "_create_remote_console_stdout_subscription") as subscribe,
+                patch.object(service, "_execute_console_action", new=AsyncMock(side_effect=execute)),
+                patch.object(service, "_read_console_action_list", new=AsyncMock(side_effect=history)) as read,
+                patch("nicegui.context.context", SimpleNamespace(client=nullcontext())),
+            ):
+                apply_runtime = service._render_console_editor(ui=cast(ModWebUi, ui), model=model, user=user)
+                task = asyncio.create_task(ui.button.call_args.kwargs["on_click"]())
+                try:
+                    await asyncio.wait_for(started.wait(), timeout=1)
+                    subscribe.call_args.kwargs["on_update"](ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.LIVE, None))
+                    cleanup.call_args.kwargs["cleanup"]()
+                    element_cleanup.call_args.kwargs["cleanup"]()
+                    subscribe.return_value.assert_called_once_with()
+                    for body in bodies.values():
+                        body.refresh.reset_mock()
+                    ui.reset_mock()
+                    assert apply_runtime is not None
+                    apply_runtime(model)
+                finally:
+                    release.set()
+                    await task
+                ui.notify.assert_not_called()
+                ui.label.assert_not_called()
+                ui.button.return_value.classes.return_value.set_enabled.assert_not_called()
+                for body in bodies.values():
+                    body.refresh.assert_not_called()
+                if phase == "execute":
+                    read.assert_not_awaited()
+
+        for phase in ("execute", "history"):
+            with self.subTest(phase=phase):
+                asyncio.run(exercise(phase))
+
+    def test_console_polling_reports_disconnect_and_recovery_without_new_output(self) -> None:
+        async def exercise() -> None:
+            snapshot = NodeConsoleStdoutSnapshot(
+                app_name="minecraft_alpha", app_friendly="Minecraft Alpha", node="yuki",
+                lines=("Server ready",), truncated=False, running=True,
+            )
+            updates: list[ModWebConsoleStdoutUpdate] = []
+            read_snapshot = AsyncMock(side_effect=[
+                snapshot, OSError("Connection lost"), OSError("Still offline"), snapshot, asyncio.CancelledError(),
+            ])
+            with patch("web_dash.streams.log.warning") as warning, self.assertRaises(asyncio.CancelledError):
+                await ModWebService._console_stdout_polling_listener(
+                    read_snapshot=read_snapshot, on_update=updates.append, interval_seconds=0,
+                    node_name=snapshot.node, app_name=snapshot.app_name,
+                )
+            self.assertEqual([update.connection for update in updates], [
+                ModWebConsoleConnectionState.LIVE,
+                ModWebConsoleConnectionState.DISCONNECTED,
+                ModWebConsoleConnectionState.LIVE,
+            ])
+            self.assertTrue(all(update.snapshot == snapshot for update in updates))
+            warning.assert_called_once()
+
+        asyncio.run(exercise())
+
+    def test_console_websocket_reports_connection_lifecycle_and_retains_output(self) -> None:
+        async def exercise(*, initial_failure: bool) -> None:
+            service = ModWebService()
+            node = ModWebNodeLink(
+                node_name="erin", label="Erin", url="/mod-web/nodes/erin/system",
+                api_base_url="https://erin.example.test/api/node", api_url="/api/node/erin", is_current=False,
+            )
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            snapshot = NodeConsoleStdoutSnapshot(
+                app_name="minecraft_alpha", app_friendly="Minecraft Alpha", node="erin",
+                lines=("Server ready",), truncated=False, running=True,
+            )
+            websocket = MagicMock()
+
+            async def messages() -> AsyncIterator[SimpleNamespace]:
+                if initial_failure:
+                    self.assertIsNot(updates[-1].connection, ModWebConsoleConnectionState.LIVE)
+                yield SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data=json.dumps(snapshot.to_mapping()))
+                yield SimpleNamespace(type=aiohttp.WSMsgType.CLOSE)
+
+            websocket.__aiter__.side_effect = messages
+            connected = MagicMock()
+            connected.__aenter__.return_value = websocket
+            disconnected = MagicMock()
+            disconnected.__aenter__.side_effect = OSError("Node offline")
+            cancelled = MagicMock()
+            cancelled.__aenter__.side_effect = asyncio.CancelledError()
+            session = MagicMock()
+            session.ws_connect.side_effect = [connected, disconnected, cancelled]
+            updates: list[ModWebConsoleStdoutUpdate] = []
+            with (
+                patch.object(service, "_remote_console_stdout_async", new=AsyncMock(
+                    side_effect=OSError("Initial fetch failed") if initial_failure else None, return_value=snapshot,
+                )),
+                patch.object(service, "_remote_http_client", new=AsyncMock(return_value=session)),
+                patch.object(service, "_remote_token", return_value="test-token"),
+                patch("web_dash.streams._REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS", 0),
+                self.assertRaises(asyncio.CancelledError),
+            ):
+                await service._remote_console_stdout_stream_listener(
+                    node=node, app_name=snapshot.app_name, max_lines=200, user=user, on_update=updates.append,
+                )
+            self.assertEqual([update.connection for update in updates], [
+                ModWebConsoleConnectionState.CONNECTING,
+                ModWebConsoleConnectionState.DISCONNECTED if initial_failure else ModWebConsoleConnectionState.LIVE,
+                ModWebConsoleConnectionState.LIVE,
+                ModWebConsoleConnectionState.RECONNECTING,
+                ModWebConsoleConnectionState.DISCONNECTED,
+            ])
+            self.assertIsNone(updates[0].snapshot)
+            self.assertTrue(all(update.snapshot == snapshot for update in updates[2:]))
+            self.assertEqual(updates[1].snapshot, None if initial_failure else snapshot)
+
+        for initial_failure in (False, True):
+            with self.subTest(initial_failure=initial_failure):
+                asyncio.run(exercise(initial_failure=initial_failure))
 
     @staticmethod
     def _overview_model_with_config_and_chat() -> ModWebOverviewPageModel:
@@ -20752,16 +21127,17 @@ class ModWebTests(unittest.TestCase):
         live_action = replace(action, runtime_running=True)
         self.assertEqual(
             ModWebService._console_action_runtime_badge(action=live_action, app_stats=stopped_stats),
-            _ModWebBadgeSpec(text="Running", tone="grey"),
+            _ModWebBadgeSpec(text="Stopped", tone="warn"),
         )
-        self.assertTrue(ModWebService._console_action_can_execute(action=live_action, app_stats=stopped_stats))
+        self.assertFalse(ModWebService._console_action_can_execute(action=live_action, app_stats=stopped_stats))
+        self.assertTrue(ModWebService._console_action_can_execute(action=live_action, app_stats=None))
         self.assertEqual(
             ModWebService._console_action_status_text(
                 action=live_action,
                 app_friendly="Minecraft Alpha",
                 app_stats=stopped_stats,
             ),
-            "Ready.",
+            "Minecraft Alpha must be running before this action can be used.",
         )
         self.assertEqual(
             ModWebService._console_action_runtime_badge(action=action, app_stats=starting_stats),

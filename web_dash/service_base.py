@@ -99,6 +99,7 @@ from .stream_broker import (
 from .operation_stream import ModWebNodeOperationSnapshot
 from .remote_node_monitor import RemoteNodeMonitor, RemoteNodeMonitorSnapshot
 from .types import (
+    ModWebConsoleStdoutUpdate,
     ModWebAppLink,
     ModWebAppTabDefinition,
     ModWebBasePageModel,
@@ -171,8 +172,8 @@ class ModWebServiceSupport:
         RemoteChatStreamKey, RemoteChatBrokerEvent
     ] = cast(SharedAsyncStreamBroker[RemoteChatStreamKey, RemoteChatBrokerEvent], cast(object, None))
     _console_stdout_broker: SharedAsyncStreamBroker[
-        ConsoleStreamKey, NodeConsoleStdoutSnapshot
-    ] = cast(SharedAsyncStreamBroker[ConsoleStreamKey, NodeConsoleStdoutSnapshot], cast(object, None))
+        ConsoleStreamKey, ModWebConsoleStdoutUpdate
+    ] = cast(SharedAsyncStreamBroker[ConsoleStreamKey, ModWebConsoleStdoutUpdate], cast(object, None))
 
     @staticmethod
     def _mod_download_unavailable_label(entry: NodeModEntry) -> str:
