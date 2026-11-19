@@ -900,7 +900,9 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             state.step = _AppInstallerWizardStep.SERVER
             render_wizard.refresh()
 
-        def set_text(attribute: _AppInstallerTextField, event: ValueChangeEventArguments[str | None]) -> None:
+        def set_text[ValueT: str | None](
+            attribute: _AppInstallerTextField, event: ValueChangeEventArguments[ValueT]
+        ) -> None:
             if wizard_is_locked():
                 return
             value = "" if event.value is None else event.value
@@ -908,7 +910,9 @@ class ModWebAppInstallerMixin(ModWebServiceSupport):
             if attribute in {"instance_key", "subfolder"}:
                 state.instance_identity_customized = True
 
-        def set_input_value(key: AppInstallInput, event: ValueChangeEventArguments[str | None]) -> None:
+        def set_input_value[ValueT: str | None](
+            key: AppInstallInput, event: ValueChangeEventArguments[ValueT]
+        ) -> None:
             if wizard_is_locked():
                 return
             state.inputs[key] = "" if event.value is None else event.value

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tomllib
 import unittest
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -73,6 +74,14 @@ def _write_sevendays_xml_files(
         encoding="utf-8",
     )
     return server_pointer, rwgmixer_pointer
+
+
+def _sevendays_settings_manager(settings: SevenDays_Settings) -> Settings_Manager:
+    root = settings.pointer.parent
+    return Settings_Manager(
+        App_Config(name="sevendays_alpha", instance_key="alpha", directory=root, apps_dir=root, scope="sevendays"),
+        settings,
+    )
 
 
 class SettingTests(unittest.TestCase):
@@ -999,6 +1008,148 @@ class SettingTests(unittest.TestCase):
             saved = pointer.read_text(encoding="utf-8")
             expected_userdata_path = (pointer.parent / "userdata").resolve()
             self.assertIn(f'name="UserDataFolder" value="{expected_userdata_path}"', saved)
+
+    def test_sevendays_game_name_allows_supported_characters_in_fresh_worlds(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            root = Path(temp_dir)
+            pointer, _ = _write_sevendays_xml_files(
+                root, server_properties={"GameWorld": "RWG", "GameName": "MyGame"}
+            )
+            (root / "userdata" / "GeneratedWorlds" / "Kotavu County").mkdir(parents=True)
+            settings = SevenDays_Settings(pointer)
+            manager = _sevendays_settings_manager(settings)
+            game_world = settings.get_setting("GameWorld")
+            game_name = settings.get_setting("GameName")
+            if game_world is None or game_name is None:
+                raise AssertionError("Missing expected 7D2D world save settings")
+
+            for selection in ("new-rwg", "world:Kotavu%20County"):
+                for value in ("The Leg", "AZaz09._-", "0", "  The Leg  "):
+                    with self.subTest(selection=selection, value=value):
+                        manager.update_setting(actor_user_id=42, setting=game_world, value=selection)
+                        manager.update_setting(actor_user_id=42, setting=game_name, value=value)
+                        manager.save(42)
+                        stored_name = ET.parse(pointer).find("./property[@name='GameName']")
+                        if stored_name is None:
+                            raise AssertionError("Missing saved GameName property")
+                        self.assertEqual(stored_name.get("value"), value.strip())
+                        self.assertEqual(manager.current_input_value(game_name, 42), value.strip())
+
+    def test_sevendays_game_name_rejects_invalid_drafts_without_changing_files(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            root = Path(temp_dir)
+            pointer, rwgmixer_pointer = _write_sevendays_xml_files(
+                root, server_properties={"GameWorld": "RWG", "GameName": "MyGame"}
+            )
+            settings = SevenDays_Settings(pointer)
+            manager = _sevendays_settings_manager(settings)
+            game_name = settings.get_setting("GameName")
+            if game_name is None:
+                raise AssertionError("Missing expected 7D2D GameName setting")
+            original_server = pointer.read_bytes()
+            original_mixer = rwgmixer_pointer.read_bytes()
+
+            invalid_names = (
+                "The Leg!", "Save/name", "Save\\name", "Save:name", "Save?", "café", "Save🔥",
+                "Save\tName", "Save\nName", "Save\x00Name", "\tSave", "Save\n", "", "   ", ".", "..", ".Save",
+            )
+            for value in invalid_names:
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(ValueError, "Save name \\(GameName\\)"):
+                        manager.update_setting(actor_user_id=42, setting=game_name, value=value)
+                    self.assertEqual(manager.pending_change_count(42), 0)
+                    self.assertEqual(game_name.value, "MyGame")
+                    self.assertEqual(pointer.read_bytes(), original_server)
+                    self.assertEqual(rwgmixer_pointer.read_bytes(), original_mixer)
+
+    def test_sevendays_settings_insert_missing_world_save_properties(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            pointer, _ = _write_sevendays_xml_files(
+                Path(temp_dir), server_properties={"ServerName": "Defaults", "UnmanagedProperty": "preserved"}
+            )
+            settings = SevenDays_Settings(pointer)
+
+            settings.save()
+
+            stored = {node.get("name"): node.get("value") for node in ET.parse(pointer).getroot()}
+            self.assertEqual(stored["GameName"], "MyGame")
+            self.assertEqual(stored["GameWorld"], "Navezgane")
+            self.assertEqual(stored["UnmanagedProperty"], "preserved")
+
+    def test_sevendays_settings_validate_both_config_files_before_writing(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            pointer, mixer_pointer = _write_sevendays_xml_files(
+                Path(temp_dir), server_properties={"GameWorld": "RWG", "GameName": "MyGame"}
+            )
+            settings = SevenDays_Settings(pointer)
+            game_name = settings.get_setting("GameName")
+            if game_name is None:
+                raise AssertionError("Missing expected 7D2D GameName setting")
+            game_name.update("NextSave")
+            server_tree = ET.parse(pointer)
+            for node in server_tree.getroot():
+                if node.get("name") == "UserDataFolder":
+                    node.set("value", "/external/userdata")
+            server_tree.write(pointer, encoding="utf-8")
+            mixer_pointer.write_text("<rwgmixer />", encoding="utf-8")
+            original_server = pointer.read_bytes()
+            original_mixer = mixer_pointer.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, "missing prefab_spawn_adjust"):
+                settings.save()
+
+            self.assertEqual(pointer.read_bytes(), original_server)
+            self.assertEqual(mixer_pointer.read_bytes(), original_mixer)
+
+    def test_sevendays_settings_exclude_invalid_discovered_save_names(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            root = Path(temp_dir)
+            pointer, _ = _write_sevendays_xml_files(
+                root, server_properties={"GameWorld": "Kotavu County", "GameName": "GoodSave"}
+            )
+            for name in ("GoodSave", "The Leg!"):
+                (root / "userdata" / "Saves" / "Kotavu County" / name).mkdir(parents=True)
+            settings = SevenDays_Settings(pointer)
+            game_world = settings.get_setting("GameWorld")
+            if game_world is None:
+                raise AssertionError("Missing expected 7D2D GameWorld setting")
+
+            labels = [label for label, _ in game_world.choice_items()]
+
+            self.assertIn("Kotavu County / GoodSave", labels)
+            self.assertNotIn("Kotavu County / The Leg!", labels)
+
+    def test_sevendays_settings_reject_invalid_stored_game_names(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            for value in ("", "   ", "The Leg!", "MyGame&#10;"):
+                with self.subTest(value=value):
+                    pointer, _ = _write_sevendays_xml_files(
+                        Path(temp_dir), server_properties={"GameWorld": "RWG", "GameName": value}
+                    )
+                    with self.assertRaisesRegex(ValueError, "GameName"):
+                        SevenDays_Settings(pointer)
+
+    def test_sevendays_game_name_is_revalidated_before_saving_any_world_selection(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            pointer, rwgmixer_pointer = _write_sevendays_xml_files(
+                Path(temp_dir), server_properties={"GameWorld": "RWG", "GameName": "MyGame"}
+            )
+            settings = SevenDays_Settings(pointer)
+            game_world = settings.get_setting("GameWorld")
+            game_name = settings.get_setting("GameName")
+            if game_world is None or game_name is None:
+                raise AssertionError("Missing expected 7D2D world save settings")
+            original_server = pointer.read_bytes()
+            original_mixer = rwgmixer_pointer.read_bytes()
+
+            for selection in ("new-rwg", "world:Kotavu%20County", "save:Kotavu%20County/The%20Leg%21"):
+                with self.subTest(selection=selection):
+                    game_world.value = selection
+                    game_name.value = "MyGame" if selection.startswith("save:") else "The Leg!"
+                    with self.assertRaisesRegex(ValueError, "may only contain A-Z"):
+                        settings.save()
+                    self.assertEqual(pointer.read_bytes(), original_server)
+                    self.assertEqual(rwgmixer_pointer.read_bytes(), original_mixer)
 
     def test_sevendays_settings_force_userdata_redirect_when_present_with_other_value(self) -> None:
         property_values = {

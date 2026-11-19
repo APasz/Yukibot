@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from _security import Power_Level
 from apps._config_files import (
+    MAX_CONFIG_FILE_BYTES,
     AppConfigFileKind,
     AppConfigFileRoot,
     create_app_config_file,
@@ -281,6 +282,91 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(roots[1].kind, AppConfigFileKind.MOD)
         self.assertEqual(roots[2].kind, AppConfigFileKind.GAME)
         self.assertEqual(roots[2].path, Path(temp_dir) / "world" / "serverconfig")
+
+    def test_sevendays_server_config_rejects_invalid_game_names_before_writing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = object.__new__(SevenDays)
+            app.directory = Path(temp_dir)
+            app.settings = None
+            pointer = app.directory / "serverconfig.xml"
+            original = '<ServerSettings><property name="GameName" value="MyGame" /></ServerSettings>'
+            pointer.write_text(original, encoding="utf-8")
+
+            invalid_values = ("The Leg!", "caf&#233;", "Save&#10;Name", "", "   ", "../Save")
+            for value in invalid_values:
+                with self.subTest(value=value):
+                    content = f'<ServerSettings><property name="GameName" value="{value}" /></ServerSettings>'
+                    with self.assertRaisesRegex(ValueError, "Save name \\(GameName\\)"):
+                        app.write_config_file("server/serverconfig.xml", content)
+                    self.assertEqual(pointer.read_text(encoding="utf-8"), original)
+
+            invalid_documents = (
+                "<ServerSettings />",
+                '<ServerSettings><property name="GameName" /></ServerSettings>',
+                '<ServerSettings><group><property name="GameName" value="MyGame" /></group></ServerSettings>',
+                '<ServerSettings><property name="GameName" value="First" />'
+                '<property name="GameName" value="Second" /></ServerSettings>',
+                '<wrong-root><property name="GameName" value="MyGame" /></wrong-root>',
+            )
+            for content in invalid_documents:
+                with self.subTest(content=content):
+                    with self.assertRaisesRegex(ValueError, "GameName"):
+                        app.write_config_file("server/serverconfig.xml", content)
+                    self.assertEqual(pointer.read_text(encoding="utf-8"), original)
+
+            with self.assertRaisesRegex(ValueError, "content exceeds"):
+                app.write_config_file("server/serverconfig.xml", "<" * (MAX_CONFIG_FILE_BYTES + 1))
+            self.assertEqual(pointer.read_text(encoding="utf-8"), original)
+
+            with self.assertRaisesRegex(ValueError, "Invalid 7D2D server config XML"):
+                app.write_config_file("server/serverconfig.xml", "<ServerSettings>")
+            self.assertEqual(pointer.read_text(encoding="utf-8"), original)
+
+            valid = original.replace("MyGame", "The Leg.2_7-40")
+            updated = app.write_config_file("server/serverconfig.xml", valid)
+            self.assertEqual(updated.content, valid)
+            self.assertEqual(pointer.read_text(encoding="utf-8"), valid)
+
+    def test_sevendays_game_name_validation_is_limited_to_server_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = object.__new__(SevenDays)
+            app.directory = Path(temp_dir)
+            app.settings = None
+            pointer = app.directory / "Data" / "Config" / "rwgmixer.xml"
+            pointer.parent.mkdir(parents=True)
+            pointer.write_text("<rwgmixer />", encoding="utf-8")
+            content = '<rwgmixer><!-- Comment with punctuation! --></rwgmixer>'
+
+            updated = app.write_config_file("rwg-mixer/rwgmixer.xml", content)
+
+            self.assertEqual(updated.content, content)
+            self.assertEqual(pointer.read_text(encoding="utf-8"), content)
+
+    def test_config_content_validation_precedes_file_creation(self) -> None:
+        def reject_content(content: str) -> None:
+            raise ValueError(f"Rejected content: {content}")
+
+        with TemporaryDirectory() as temp_dir:
+            root_path = Path(temp_dir) / "configs"
+            roots = (
+                AppConfigFileRoot(
+                    id="custom",
+                    label="Validated Config",
+                    path=root_path,
+                    kind=AppConfigFileKind.GAME,
+                    allow_file_creation=True,
+                    content_validator=reject_content,
+                ),
+            )
+
+            with self.assertRaisesRegex(ValueError, "Rejected content"):
+                create_app_config_file(
+                    roots, "custom", "config.txt", "invalid",
+                    default_read_level=Power_Level.user,
+                    default_write_level=Power_Level.sudo,
+                )
+
+            self.assertFalse(root_path.exists())
 
     def test_minecraft_exposes_sudo_managed_kubejs_script_roots_when_kubejs_is_enabled(self) -> None:
         with TemporaryDirectory() as temp_dir:

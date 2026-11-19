@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -44,6 +45,7 @@ class AppConfigFileRoot:
     allow_file_deletion: bool = False
     protected_relative_paths: frozenset[str] = frozenset()
     write_notice: str | None = None
+    content_validator: Callable[[str], None] | None = None
 
     def __post_init__(self) -> None:
         if not self.id or "/" in self.id or self.id in {".", ".."}:
@@ -189,6 +191,8 @@ def write_app_config_file(
     encoded = content.encode(config.STR_ENCODE)
     if len(encoded) > MAX_CONFIG_FILE_BYTES:
         raise ValueError(f"Config file content exceeds {MAX_CONFIG_FILE_BYTES} bytes.")
+    if root.content_validator is not None:
+        root.content_validator(content)
     path.write_text(content, config.STR_ENCODE)
     return AppConfigFileContent(
         file=_file_metadata(
@@ -222,6 +226,8 @@ def create_app_config_file(
     encoded = content.encode(config.STR_ENCODE)
     if len(encoded) > MAX_CONFIG_FILE_BYTES:
         raise ValueError(f"Config file content exceeds {MAX_CONFIG_FILE_BYTES} bytes.")
+    if root.content_validator is not None:
+        root.content_validator(content)
 
     root_path = root.resolved_path
     if root_path.exists() and not root_path.is_dir():

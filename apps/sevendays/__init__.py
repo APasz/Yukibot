@@ -195,6 +195,7 @@ _SEVENDAYS_NEW_SAVE_ROOT_PREFIX = "new-save:"
 _SEVENDAYS_NEW_WORLD_ROOT_PREFIX = "new-world:"
 _SEVENDAYS_GAME_WORLD_SETTING_KEY = "GameWorld"
 _SEVENDAYS_GAME_NAME_SETTING_KEY = "GameName"
+_SEVENDAYS_GAME_NAME_CHARACTERS: Final[str] = "A-Z, a-z, 0-9, spaces, dot (.), underscore (_), and dash (-)"
 _SEVENDAYS_NEW_RWG_WORLD_SELECTION = "new-rwg"
 _SEVENDAYS_EXISTING_SAVE_SELECTION_PREFIX = "save:"
 _SEVENDAYS_GENERATED_WORLD_SELECTION_PREFIX = "world:"
@@ -698,21 +699,19 @@ def _read_serverconfig_value(pointer: Path, property_name: str) -> str | None:
     return _SevenDaysServerConfigSnapshot.load(pointer).value(property_name)
 
 
-def _ensure_serverconfig_property(
-    pointer: Path,
+def _set_serverconfig_property(
+    root: ET.Element,
     *,
     property_name: str,
     value: str,
     insert_after: str | None = None,
-) -> None:
-    tree = ET.parse(pointer)
-    root = tree.getroot()
+) -> bool:
     for node in root.findall("property"):
         if node.attrib.get("name") == property_name:
             if node.attrib.get("value") != value:
                 node.attrib["value"] = value
-                tree.write(pointer, encoding=config.STR_ENCODE)
-            return
+                return True
+            return False
 
     insert_index = len(root)
     if insert_after is not None:
@@ -721,7 +720,21 @@ def _ensure_serverconfig_property(
                 insert_index = index + 1
 
     root.insert(insert_index, ET.Element("property", {"name": property_name, "value": value}))
-    tree.write(pointer, encoding=config.STR_ENCODE)
+    return True
+
+
+def _ensure_serverconfig_property(
+    pointer: Path,
+    *,
+    property_name: str,
+    value: str,
+    insert_after: str | None = None,
+) -> None:
+    tree = ET.parse(pointer)
+    if _set_serverconfig_property(
+        tree.getroot(), property_name=property_name, value=value, insert_after=insert_after
+    ):
+        tree.write(pointer, encoding=config.STR_ENCODE)
 
 
 def _ensure_serverconfig_userdata_redirect(pointer: Path) -> None:
@@ -777,17 +790,28 @@ def _normalise_sevendays_save_segment(raw_value: str, *, label: str) -> str:
     return value
 
 
-def _is_valid_sevendays_save_segment(raw_value: str) -> bool:
+def _normalise_sevendays_game_name(raw_value: str) -> str:
+    """Validate a GameName against the game's character and save-path rules."""
+    value = _normalise_sevendays_save_segment(raw_value, label="Save name (GameName)")
+    if re.fullmatch(r"[A-Za-z0-9._ -]+", raw_value) is None:
+        raise ValueError(f"Save name (GameName) may only contain {_SEVENDAYS_GAME_NAME_CHARACTERS}.")
+    return value
+
+
+def _validate_sevendays_serverconfig_content(content: str) -> None:
     try:
-        _normalise_sevendays_save_segment(raw_value, label="Save name")
-    except ValueError:
-        return False
-    return True
+        root = ET.fromstring(content)
+    except ET.ParseError as xcp:
+        raise ValueError(f"Invalid 7D2D server config XML: {xcp}") from xcp
+    game_names = root.findall(f"./property[@name='{_SEVENDAYS_GAME_NAME_SETTING_KEY}']")
+    if root.tag != "ServerSettings" or len(game_names) != 1:
+        raise ValueError("7D2D server config must contain exactly one GameName property under ServerSettings.")
+    _normalise_sevendays_game_name(game_names[0].attrib.get("value", ""))
 
 
 def _sevendays_existing_save_selection(*, game_world: str, game_name: str) -> str:
     normalised_world = _normalise_sevendays_save_segment(game_world, label="Game world")
-    normalised_name = _normalise_sevendays_save_segment(game_name, label="Save name")
+    normalised_name = _normalise_sevendays_game_name(game_name)
     return (
         f"{_SEVENDAYS_EXISTING_SAVE_SELECTION_PREFIX}"
         f"{quote(normalised_world, safe='')}/{quote(normalised_name, safe='')}"
@@ -816,7 +840,7 @@ def _sevendays_save_target_from_selection(selection: str) -> SevenDaysWorldSelec
         raise ValueError("7 Days to Die world save selection is invalid.")
     return SevenDaysWorldSelection(
         game_world=_normalise_sevendays_save_segment(unquote(encoded_world), label="Game world"),
-        game_name=_normalise_sevendays_save_segment(unquote(encoded_name), label="Save name"),
+        game_name=_normalise_sevendays_game_name(unquote(encoded_name)),
     )
 
 
@@ -1895,13 +1919,16 @@ class SevenDays_Settings(App_Settings):
                 desc="Supported RWG world size preset.",
             ),
             Setting[str](
-                StringSettingSpec(raw_validator=_is_valid_sevendays_save_segment),
+                StringSettingSpec(raw_validator=lambda value: bool(_normalise_sevendays_game_name(value))),
                 "Fresh Save Name",
-                "GameName",
+                _SEVENDAYS_GAME_NAME_SETTING_KEY,
                 [],
                 default="MyGame",
                 power_level=Power_Level.sudo,
-                desc="Used only with Generate Fresh Random World. Existing world/save selections set this automatically.",
+                desc=(
+                    "Used with fresh-world options. Existing world/save selections set this automatically. "
+                    f"Allowed characters: {_SEVENDAYS_GAME_NAME_CHARACTERS}."
+                ),
             ),
             *[
                 Setting[str](
@@ -2232,7 +2259,7 @@ class SevenDays_Settings(App_Settings):
             try:
                 choice = (
                     _normalise_sevendays_save_segment(game_world, label="Game world"),
-                    _normalise_sevendays_save_segment(game_name, label="Save name"),
+                    _normalise_sevendays_game_name(game_name),
                 )
             except ValueError:
                 continue
@@ -2407,10 +2434,9 @@ class SevenDays_Settings(App_Settings):
         swap_setting = self._setting_for_key(swap_definition.key)
         super().apply_draft_update(setting=swap_setting, value=current_value, drafts=drafts)
 
-    def load(self):
+    def load(self) -> None:
         data = ET.parse(self.pointer).getroot().findall("property")
-        if not isinstance(data, list):
-            raise ValueError(f"config must be list not `{type(data)}`")
+        settings_by_key = {setting.key: setting for setting in super().options}
 
         stored_world: str | None = None
         stored_name: str | None = None
@@ -2421,29 +2447,32 @@ class SevenDays_Settings(App_Settings):
                 stored_world = raw_value
                 continue
             if property_name == _SEVENDAYS_GAME_NAME_SETTING_KEY:
+                if raw_value is None:
+                    raise ValueError("7D2D setting GameName is missing its value.")
                 stored_name = raw_value
                 continue
-            for opt in self.options:
-                if property_name == opt.key:
-                    if raw_value is None:
-                        raise ValueError(f"7D2D setting {opt.key!r} is missing its value.")
-                    try:
-                        opt.load_value(raw_value)
-                    except ValueError:
-                        if raw_value.strip():
-                            raise
-                        opt.value = opt.default
-                        log.warning(
-                            "7D2D stored setting was blank; keeping default: key=%s label=%s default=%s",
-                            opt.key,
-                            opt.label,
-                            opt.serialise_value(),
-                        )
+            opt = settings_by_key.get(property_name) if property_name is not None else None
+            if opt is None:
+                continue
+            if raw_value is None:
+                raise ValueError(f"7D2D setting {opt.key!r} is missing its value.")
+            try:
+                opt.load_value(raw_value)
+            except ValueError:
+                if raw_value.strip():
+                    raise
+                opt.value = opt.default
+                log.warning(
+                    "7D2D stored setting was blank; keeping default: key=%s label=%s default=%s",
+                    opt.key,
+                    opt.label,
+                    opt.serialise_value(),
+                )
 
         world_setting = self._setting_for_key(_SEVENDAYS_GAME_WORLD_SETTING_KEY)
         name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
         game_world = _normalise_sevendays_save_segment(stored_world or "Navezgane", label="Game world")
-        game_name = _normalise_sevendays_save_segment(stored_name or "MyGame", label="Save name")
+        game_name = _normalise_sevendays_game_name("MyGame" if stored_name is None else stored_name)
         name_setting.load_value(game_name)
         configured_target = (game_world, game_name)
         saved_targets = self._discovered_save_targets()
@@ -2470,25 +2499,18 @@ class SevenDays_Settings(App_Settings):
             self._setting_for_key(definition.key).load_value(biome_value)
         self._validate_trader_biome_assignments()
 
-    def save(self):
+    def save(self) -> list[ET.Element]:
         self._validate_trader_biome_assignments()
-        _ensure_serverconfig_userdata_redirect(self.pointer)
 
         world_setting = self._setting_for_key(_SEVENDAYS_GAME_WORLD_SETTING_KEY)
         name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
         if not isinstance(world_setting.value, str) or not isinstance(name_setting.value, str):
             raise TypeError("7D2D world save settings must be strings.")
         selected_target = _sevendays_save_target_from_selection(world_setting.value)
-        if selected_target.game_world is None:
-            game_world = "RWG"
-            game_name = _normalise_sevendays_save_segment(name_setting.value, label="New save name")
-        elif selected_target.game_name is None:
-            game_world = selected_target.game_world
-            game_name = _normalise_sevendays_save_segment(name_setting.value, label="Fresh save name")
-        else:
-            game_world = selected_target.game_world
-            game_name = selected_target.game_name
-            name_setting.value = game_name
+        game_world = selected_target.game_world or "RWG"
+        game_name = _normalise_sevendays_game_name(
+            name_setting.value if selected_target.game_name is None else selected_target.game_name
+        )
         server_world_values = {
             _SEVENDAYS_GAME_WORLD_SETTING_KEY: game_world,
             _SEVENDAYS_GAME_NAME_SETTING_KEY: game_name,
@@ -2497,15 +2519,20 @@ class SevenDays_Settings(App_Settings):
         tree = ET.parse(self.pointer)
         root = tree.getroot()
         data = root.findall("property")
-        if not isinstance(data, list):
-            raise ValueError(f"config must be list not `{type(data)}`")
-
+        values_by_key = {setting.key: setting.serialise_value() for setting in super().options}
+        values_by_key.update(server_world_values)
         for element in data:
-            for opt in self.options:
-                if element.attrib.get("name") == opt.key:
-                    element.attrib["value"] = server_world_values.get(opt.key, opt.serialise_value())
-
-        tree.write(self.pointer, encoding=config.STR_ENCODE)
+            property_name = element.attrib.get("name")
+            if property_name is not None and property_name in values_by_key:
+                element.attrib["value"] = values_by_key[property_name]
+        for property_name, value in server_world_values.items():
+            _set_serverconfig_property(root, property_name=property_name, value=value)
+        _set_serverconfig_property(
+            root,
+            property_name="UserDataFolder",
+            value=str((self.pointer.parent / _SEVENDAYS_MANAGED_USERDATA_FOLDER).resolve()),
+            insert_after="AdminFileName",
+        )
 
         rwg_tree = self._rwgmixer_tree()
         rwg_root = rwg_tree.getroot()
@@ -2518,8 +2545,10 @@ class SevenDays_Settings(App_Settings):
             if element is None:
                 raise ValueError(f"rwgmixer.xml is missing prefab_spawn_adjust for {definition.partial_name}")
             element.attrib["biomeTags"] = setting.value
+        tree.write(self.pointer, encoding=config.STR_ENCODE)
         rwg_tree.write(self.rwgmixer_pointer, encoding=config.STR_ENCODE)
-        return data
+        name_setting.value = game_name
+        return root.findall("property")
 
 
 class SevenDays(App[App_Config]):
@@ -2637,6 +2666,7 @@ class SevenDays(App[App_Config]):
                 kind=AppConfigFileKind.GAME,
                 recursive=False,
                 suffixes=frozenset({".xml"}),
+                content_validator=_validate_sevendays_serverconfig_content,
             ),
             AppConfigFileRoot(
                 id="rwg-mixer",

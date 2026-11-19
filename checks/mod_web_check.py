@@ -253,6 +253,7 @@ from web_dash.constants import (
     _REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
     _REMOTE_NODE_GET_MAX_ATTEMPTS,
     _REMOTE_NODE_GET_RETRY_DELAY_SECONDS,
+    _REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
     _REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
 )
@@ -14092,6 +14093,10 @@ class ModWebTests(unittest.TestCase):
                 if call_args.kwargs["method"] == "POST"
             ]
             self.assertEqual(len(publish_calls), 1)
+            self.assertEqual(
+                publish_calls[0].kwargs.get("timeout", _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS),
+                (_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS, _REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS),
+            )
             self.assertEqual(
                 publish_calls[0].kwargs["json_payload"]["changelog"],
                 "Shared draft notes.\n\nAdded mods:\n- Alpha Fabric (1.0.0)",

@@ -57,6 +57,7 @@ from .constants import (
     _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
     _REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
     log,
 )
@@ -5577,6 +5578,7 @@ class ModWebAppPageMixin(
                     user=user,
                     method="POST",
                     json_payload={"changelog": changelog},
+                    timeout=(_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS, _REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS),
                 )
             except Exception as xcp:
                 log.warning("Client-pack publication failed for %s: %s", model.app_name, xcp)
