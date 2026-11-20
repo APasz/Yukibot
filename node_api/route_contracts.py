@@ -19,6 +19,7 @@ HttpExceptionFactory: TypeAlias = Callable[[int, str], Exception]
 _DiscordHealthEnum = TypeVar("_DiscordHealthEnum", bound=enum.StrEnum)
 NODE_DISCORD_HEARTBEAT_LATENCY_HEADER: str = "X-Yukibot-Discord-Latency-Ms"
 NODE_DISCORD_SERVICE_STATE_HEADER: str = "X-Yukibot-Discord-Service-State"
+PORTAL_NODE_LATENCY_REFRESH_INTERVAL_SECONDS: float = 15.0
 
 
 class DiscordServiceState(enum.StrEnum):

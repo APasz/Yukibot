@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, overload
 
+from http_sessions import ThreadLocalHttpSessions
 from mirror_service import MirrorService
 from node_api.app_installer import NodeAppInstallStatus
 
@@ -142,10 +143,9 @@ class ModWebServiceSupport:
     _routes_registered: bool = False
     _shutting_down: bool = False
     _remote_http_session: aiohttp.ClientSession | None = None
+    _remote_websocket_session: aiohttp.ClientSession | None = None
     _remote_http_session_loop: AbstractEventLoop | None = None
-    _remote_sync_http_local: threading.local = cast(threading.local, cast(object, None))
-    _remote_sync_http_sessions: list[requests.Session] = cast(list[requests.Session], cast(object, None))
-    _remote_sync_http_sessions_lock: threading.Lock = cast(threading.Lock, cast(object, None))
+    _remote_sync_http_sessions: ThreadLocalHttpSessions = cast(ThreadLocalHttpSessions, cast(object, None))
     _remote_node_circuit_lock: threading.Lock = cast(threading.Lock, cast(object, None))
     _remote_node_circuits: dict[str, RemoteNodeCircuitState] = cast(
         dict[str, RemoteNodeCircuitState], cast(object, None)
@@ -210,11 +210,19 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(
+        self, name: Literal["_remote_websocket_client"]
+    ) -> Callable[[], Awaitable[aiohttp.ClientSession]]: ...
+
+    @overload
+    def __getattr__(
         self, name: Literal["_aiohttp_client_timeout"]
     ) -> Callable[[float | tuple[float, float]], aiohttp.ClientTimeout]: ...
 
     @overload
     def __getattr__(self, name: Literal["_close_remote_http_client"]) -> Callable[[], Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["begin_shutdown"]) -> Callable[[], None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_sync_http_client"]) -> Callable[[], requests.Session]: ...

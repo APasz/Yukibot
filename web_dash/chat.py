@@ -455,7 +455,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                     scopes=(NodeApiScope.CHAT_READ, NodeApiScope.MODS_READ),
                     user=user,
                 )
-                session = await self._remote_http_client()
+                session = await self._remote_websocket_client()
                 async with session.ws_connect(
                     self._remote_chat_stream_url(
                         node=node,

@@ -4869,7 +4869,7 @@ class NodeApiTests(unittest.TestCase):
         )
         response.headers = {"Content-Type": "application/json"}
 
-        with patch("node_api.map_service.requests.get", return_value=response) as get_mock:
+        with patch("node_api.map_service.requests.Session.get", return_value=response) as get_mock:
             manifest = NodeApiService().maps.build_manifest(app)
 
         self.assertEqual(manifest.initial_world_name, "minecraft_nether")
@@ -4949,7 +4949,7 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock())
             app.__class__ = _MappedApp
             app.directory = root_path
-            with patch("node_api.map_service.requests.get") as get_mock:
+            with patch("node_api.map_service.requests.Session.get") as get_mock:
                 manifest = NodeApiService().maps.build_manifest(app)
 
         self.assertEqual(manifest.initial_world_name, "minecraft_nether")
@@ -4974,7 +4974,7 @@ class NodeApiTests(unittest.TestCase):
             app = _build_app(Mock())
             app.__class__ = _MappedApp
             app.directory = root_path
-            with patch("node_api.map_service.requests.get") as get_mock:
+            with patch("node_api.map_service.requests.Session.get") as get_mock:
                 response = NodeApiService().maps.proxy_response(
                     app=app,
                     relative_path="images/icon/registered/squaremap-spawn_icon.png",
@@ -5004,9 +5004,9 @@ class NodeApiTests(unittest.TestCase):
             app.__class__ = _MappedApp
             app.directory = Path(temp_dir)
             service = NodeApiService()
-            with patch("node_api.map_service.requests.get", return_value=live_response):
+            with patch("node_api.map_service.requests.Session.get", return_value=live_response):
                 service.maps.build_manifest(app)
-            with patch("node_api.map_service.requests.get", side_effect=requests.ConnectionError("offline")):
+            with patch("node_api.map_service.requests.Session.get", side_effect=requests.ConnectionError("offline")):
                 cached_manifest = service.maps.build_manifest(app)
 
         self.assertEqual(cached_manifest.initial_world_name, "minecraft_nether")
@@ -5034,13 +5034,13 @@ class NodeApiTests(unittest.TestCase):
             app.__class__ = _MappedApp
             app.directory = Path(temp_dir)
             service = NodeApiService()
-            with patch("node_api.map_service.requests.get", return_value=live_response):
+            with patch("node_api.map_service.requests.Session.get", return_value=live_response):
                 service.maps.proxy_response(
                     app=app,
                     relative_path="tiles/minecraft_overworld/settings.json",
                     allow_stale_on_error=True,
                 )
-            with patch("node_api.map_service.requests.get", side_effect=requests.Timeout("slow")):
+            with patch("node_api.map_service.requests.Session.get", side_effect=requests.Timeout("slow")):
                 cached_response = service.maps.proxy_response(
                     app=app,
                     relative_path="tiles/minecraft_overworld/settings.json",
@@ -5397,26 +5397,16 @@ class NodeApiTests(unittest.TestCase):
         )
 
     def test_portal_latency_probe_reads_node_discord_latency_from_ping_header(self) -> None:
-        class _PingResponse:
-            headers = {"X-Yukibot-Discord-Latency-Ms": "42"}
-
-            def raise_for_status(self) -> None:
-                return None
-
-        with patch("node_api.service.requests.get", return_value=_PingResponse()):
+        response = Mock(spec=requests.Response, headers={"X-Yukibot-Discord-Latency-Ms": "42"})
+        with patch("node_api.service.requests.get", return_value=response):
             probe = NodeApiService._measure_node_latency_probe("https://erin.example/api/node/ping")
 
         self.assertGreaterEqual(probe.latency_ms or 0, 1)
         self.assertEqual(probe.discord_latency_ms, 42)
 
     def test_portal_latency_probe_reads_discord_service_state_from_ping_header(self) -> None:
-        class _PingResponse:
-            headers = {"X-Yukibot-Discord-Service-State": "degraded"}
-
-            def raise_for_status(self) -> None:
-                return None
-
-        with patch("node_api.service.requests.get", return_value=_PingResponse()):
+        response = Mock(spec=requests.Response, headers={"X-Yukibot-Discord-Service-State": "degraded"})
+        with patch("node_api.service.requests.get", return_value=response):
             probe = NodeApiService._measure_node_latency_probe("https://erin.example/api/node/ping")
 
         self.assertEqual(probe.discord_service_state, node_api.DiscordServiceState.DEGRADED)

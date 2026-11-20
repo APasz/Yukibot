@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from _async_utils import run_blocking
+from http_sessions import ThreadLocalHttpSessions
 from mirror_service import MirrorService
 
 from . import avatars as mod_web_avatars
@@ -50,7 +51,6 @@ from .runtime_imports import (
     cast,
     config,
     escape,
-    requests,
     threading,
 )
 from .status import ModWebStatusMixin
@@ -104,10 +104,9 @@ class ModWebService(
         self._routes_registered = False
         self._shutting_down = False
         self._remote_http_session: aiohttp.ClientSession | None = None
+        self._remote_websocket_session: aiohttp.ClientSession | None = None
         self._remote_http_session_loop: AbstractEventLoop | None = None
-        self._remote_sync_http_local = threading.local()
-        self._remote_sync_http_sessions: list[requests.Session] = []
-        self._remote_sync_http_sessions_lock = threading.Lock()
+        self._remote_sync_http_sessions = ThreadLocalHttpSessions()
         self._remote_node_circuit_lock = threading.Lock()
         self._remote_node_circuits: dict[str, RemoteNodeCircuitState] = {}
         self._remote_node_monitors: dict[str, RemoteNodeMonitor] = {}

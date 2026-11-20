@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 import requests
 
 from apps._app import App
+from http_sessions import ThreadLocalHttpSessions
 from map_annotations import (
     AppMapAnnotationStore,
     MapAnnotationDraft,
@@ -48,6 +49,10 @@ class NodeMapService:
         self._node_name = node_name
         self._http_exception = http_exception
         self._log = logger
+        self._http_sessions = ThreadLocalHttpSessions()
+
+    def close(self) -> None:
+        self._http_sessions.close()
 
     def build_manifest(self, app: App) -> MapManifest:
         manifest, _ = self.build_manifest_result(app)
@@ -156,7 +161,7 @@ class NodeMapService:
         params = parse_qs(raw_query, keep_blank_values=True) if raw_query else None
         should_log_failure = not normalized_path.casefold().endswith(".png")
         try:
-            response = requests.get(
+            response = self._http_sessions.session().get(
                 url, params=params, timeout=_SQUAREMAP_REQUEST_TIMEOUT_SECONDS
             )
         except requests.Timeout as xcp:
@@ -199,41 +204,44 @@ class NodeMapService:
             raise self._http_exception(
                 502, f"Squaremap request failed: {type(xcp).__name__}: {xcp}"
             ) from xcp
-        if response.status_code >= 400:
-            if response.status_code != 404 and allow_stale_on_error:
-                cached_response = self._cached_response(app, normalized_path)
-                if cached_response is not None:
-                    if should_log_failure:
-                        self._log.warning(
-                            "Squaremap returned HTTP %s: app=%s url=%s query=%s stale_cache=%s",
-                            response.status_code,
-                            app.name,
-                            url,
-                            raw_query,
-                            True,
-                        )
-                    return cached_response
-            if should_log_failure:
-                self._log.warning(
-                    "Squaremap returned HTTP %s: app=%s url=%s query=%s stale_cache=%s",
-                    response.status_code,
-                    app.name,
-                    url,
-                    raw_query,
-                    False,
+        try:
+            if response.status_code >= 400:
+                if response.status_code != 404 and allow_stale_on_error:
+                    cached_response = self._cached_response(app, normalized_path)
+                    if cached_response is not None:
+                        if should_log_failure:
+                            self._log.warning(
+                                "Squaremap returned HTTP %s: app=%s url=%s query=%s stale_cache=%s",
+                                response.status_code,
+                                app.name,
+                                url,
+                                raw_query,
+                                True,
+                            )
+                        return cached_response
+                if should_log_failure:
+                    self._log.warning(
+                        "Squaremap returned HTTP %s: app=%s url=%s query=%s stale_cache=%s",
+                        response.status_code,
+                        app.name,
+                        url,
+                        raw_query,
+                        False,
+                    )
+                status_code = 404 if response.status_code == 404 else 502
+                raise self._http_exception(
+                    status_code,
+                    f"Squaremap returned HTTP {response.status_code} for {relative_path}.",
                 )
-            status_code = 404 if response.status_code == 404 else 502
-            raise self._http_exception(
-                status_code,
-                f"Squaremap returned HTTP {response.status_code} for {relative_path}.",
+            proxy_response = NodeMapProxyResponse(
+                content=response.content,
+                media_type=response.headers.get("Content-Type"),
+                headers=self._passthrough_headers(response),
             )
-        proxy_response = NodeMapProxyResponse(
-            content=response.content,
-            media_type=response.headers.get("Content-Type"),
-            headers=self._passthrough_headers(response),
-        )
-        self._remember_cache_entry(app, normalized_path, proxy_response)
-        return proxy_response
+            self._remember_cache_entry(app, normalized_path, proxy_response)
+            return proxy_response
+        finally:
+            response.close()
 
     def _require_map_app(self, app: App) -> str:
         public_map_url = app.public_map_url

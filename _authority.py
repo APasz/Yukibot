@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -10,7 +11,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TypeAlias, cast
 
-import requests
+from http_sessions import ThreadLocalHttpSessions
+
+_http_sessions = ThreadLocalHttpSessions()
+atexit.register(_http_sessions.close)
 
 log = logging.getLogger(__name__)
 JsonScalar: TypeAlias = None | bool | int | float | str
@@ -63,19 +67,19 @@ class AuthorityClient:
         return {"Authorization": f"Bearer {self.token}"}
 
     def get_json(self, path: str) -> dict[str, object]:
-        response = requests.get(self._url(path), headers=self._headers, timeout=self.timeout)
-        response.raise_for_status()
-        return _json_object(cast(object, response.json()), label="Authority response")
+        with _http_sessions.session().get(self._url(path), headers=self._headers, timeout=self.timeout) as response:
+            response.raise_for_status()
+            return _json_object(cast(object, response.json()), label="Authority response")
 
     def post_json(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
-        response = requests.post(
+        with _http_sessions.session().post(
             self._url(path),
             json=cast(Mapping[str, JsonValue], dict(payload)),
             headers=self._headers,
             timeout=self.timeout,
-        )
-        response.raise_for_status()
-        return _json_object(cast(object, response.json()), label="Authority response")
+        ) as response:
+            response.raise_for_status()
+            return _json_object(cast(object, response.json()), label="Authority response")
 
 
 def read_json_object(path: Path) -> dict[str, object]:

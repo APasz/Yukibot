@@ -3117,7 +3117,7 @@ class ModWebTests(unittest.TestCase):
         session.get.assert_called_once()
         call_kwargs = session.get.call_args.kwargs
         self.assertEqual(session.get.call_args.args, ("https://erin.example/api/node/ping",))
-        self.assertIsNone(call_kwargs["timeout"].total)
+        self.assertEqual(call_kwargs["timeout"].total, 6.0)
         self.assertEqual(call_kwargs["timeout"].connect, 2.0)
         self.assertEqual(call_kwargs["timeout"].sock_read, 4.0)
 

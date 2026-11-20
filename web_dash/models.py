@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import TYPE_CHECKING, BinaryIO
 
 from apps._mod_catalog import ModAction, ModSourceKind
@@ -219,46 +220,41 @@ class ModWebModelsMixin(ModWebServiceSupport):
     _known_bot_snapshot_cache: _KnownBotSnapshotCache | None = None
 
     def _remote_sync_http_client(self) -> requests.Session:
-        session = cast(requests.Session | None, getattr(self._remote_sync_http_local, "session", None))
-        if session is not None:
-            return session
-        session = requests.Session()
-        self._remote_sync_http_local.session = session
-        with self._remote_sync_http_sessions_lock:
-            self._remote_sync_http_sessions.append(session)
-        return session
+        return self._remote_sync_http_sessions.session()
 
-    async def _remote_http_client(self) -> aiohttp.ClientSession:
+    async def _remote_http_client(self, *, websocket: bool = False) -> aiohttp.ClientSession:
         current_loop = asyncio.get_running_loop()
-        session = self._remote_http_session
-        if session is not None and self._remote_http_session_loop is not current_loop:
-            if not session.closed:
-                await session.close()
-            session = None
+        if self._remote_http_session_loop is not None and self._remote_http_session_loop is not current_loop:
+            await self._close_remote_http_client()
+        session = self._remote_websocket_session if websocket else self._remote_http_session
         if session is None or session.closed:
             session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(
-                    total=None,
-                    connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                    sock_connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                ),
+                timeout=self._aiohttp_client_timeout(_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS, streaming=websocket),
                 connector=aiohttp.TCPConnector(limit=100, limit_per_host=20, ttl_dns_cache=300),
             )
-            self._remote_http_session = session
+            if websocket:
+                self._remote_websocket_session = session
+            else:
+                self._remote_http_session = session
             self._remote_http_session_loop = current_loop
         return session
 
+    async def _remote_websocket_client(self) -> aiohttp.ClientSession:
+        """Keep long-lived streams from consuming HTTP request capacity."""
+        return await self._remote_http_client(websocket=True)
+
     async def _close_remote_http_client(self) -> None:
-        with self._remote_sync_http_sessions_lock:
-            sync_sessions = tuple(self._remote_sync_http_sessions)
-            self._remote_sync_http_sessions.clear()
-        for sync_session in sync_sessions:
-            sync_session.close()
-        session = self._remote_http_session
+        owner_loop = self._remote_http_session_loop
+        if owner_loop is not None and owner_loop is not asyncio.get_running_loop() and owner_loop.is_running():
+            raise RuntimeError("Remote HTTP clients belong to another running event loop.")
+        self._remote_sync_http_sessions.close()
+        sessions = (self._remote_http_session, self._remote_websocket_session)
         self._remote_http_session = None
+        self._remote_websocket_session = None
         self._remote_http_session_loop = None
-        if session is not None and not session.closed:
-            await session.close()
+        for session in sessions:
+            if session is not None and not session.closed:
+                await session.close()
 
     _PORTAL_OWNED_PATH_PREFIXES: tuple[str, ...] = (
         "/auth/",
@@ -2714,7 +2710,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             response_context = session.get(
                 url,
                 headers={"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"},
-                timeout=self._aiohttp_client_timeout(timeout),
+                timeout=self._aiohttp_client_timeout(timeout, streaming=True),
                 auto_decompress=False,
             )
             try:
@@ -2772,20 +2768,22 @@ class ModWebModelsMixin(ModWebServiceSupport):
             raise
 
     @staticmethod
-    def _aiohttp_client_timeout(timeout: float | tuple[float, float]) -> aiohttp.ClientTimeout:
+    def _aiohttp_client_timeout(
+        timeout: float | tuple[float, float], *, streaming: bool = False,
+    ) -> aiohttp.ClientTimeout:
+        """Bound complete API requests while allowing active transfers to continue."""
         if isinstance(timeout, tuple):
             connect_timeout, read_timeout = timeout
-            return aiohttp.ClientTimeout(
-                total=None,
-                connect=connect_timeout,
-                sock_connect=connect_timeout,
-                sock_read=read_timeout,
-            )
+            total_timeout = connect_timeout + read_timeout
+        else:
+            connect_timeout = read_timeout = total_timeout = timeout
+        if not all(isfinite(value) and value > 0 for value in (connect_timeout, read_timeout, total_timeout)):
+            raise ValueError("Remote request timeouts must be positive finite numbers.")
         return aiohttp.ClientTimeout(
-            total=None,
-            connect=timeout,
-            sock_connect=timeout,
-            sock_read=timeout,
+            total=None if streaming else total_timeout,
+            connect=connect_timeout,
+            sock_connect=connect_timeout,
+            sock_read=read_timeout,
         )
 
     @staticmethod

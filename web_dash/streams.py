@@ -224,7 +224,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     scopes=(NodeApiScope.APPS_READ, NodeApiScope.MODS_READ),
                     user=user,
                 )
-                session = await self._remote_http_client()
+                session = await self._remote_websocket_client()
                 async with session.ws_connect(
                     self._remote_app_state_stream_url(node=node, app_name=app_name),
                     headers={"Authorization": f"Bearer {token}"},
@@ -294,7 +294,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     scopes=(NodeApiScope.OPERATIONS_READ,),
                     user=user,
                 )
-                session = await self._remote_http_client()
+                session = await self._remote_websocket_client()
                 async with session.ws_connect(
                     self._remote_operation_stream_url(node=node),
                     headers={"Authorization": f"Bearer {token}"},
@@ -395,7 +395,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     scopes=(NodeApiScope.APP_CONTROL,),
                     user=user,
                 )
-                session = await self._remote_http_client()
+                session = await self._remote_websocket_client()
                 async with session.ws_connect(
                     self._remote_console_stdout_stream_url(node=node, app_name=app_name, max_lines=max_lines),
                     headers={"Authorization": f"Bearer {token}"},
@@ -582,7 +582,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                         user=user,
                     )
                 )
-                session = await self._remote_http_client()
+                session = await self._remote_websocket_client()
                 async with session.ws_connect(
                     self._remote_node_state_stream_url(node=node),
                     headers={"Authorization": f"Bearer {token}"},

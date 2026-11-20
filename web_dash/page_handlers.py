@@ -201,6 +201,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         log.info("Mod web startup event received")
 
     async def _on_shutdown(self) -> None:
+        self.begin_shutdown()
         await self._stop_portal_app_install_recovery()
         with self._remote_node_monitors_lock:
             monitors = tuple(self._remote_node_monitors.values())

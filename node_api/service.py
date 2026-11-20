@@ -102,6 +102,7 @@ from .request_auth import NodeRequestAuth
 from .route_contracts import (
     NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
     NODE_DISCORD_SERVICE_STATE_HEADER,
+    PORTAL_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
     DiscordHealthSnapshot,
     DiscordServiceState,
 )
@@ -146,6 +147,13 @@ class PortalNodeLatencyProbe:
     latency_ms: int | None
     discord_latency_ms: int | None
     discord_service_state: DiscordServiceState | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PortalNodeLatencyBatch:
+    targets: tuple[tuple[str, str], ...]
+    refresh_after_seconds: float
+    task: asyncio.Task[dict[str, PortalNodeLatencyProbe]]
 
 
 _NODE_CHAT_HISTORY_LIMIT = 100
@@ -197,6 +205,9 @@ class NodeApiService:
         self._discord_health_lock = threading.RLock()
         self._discord_service_state: DiscordServiceState | None = None
         self._discord_health: DiscordHealthSnapshot | None = None
+        self._portal_node_latency_lock = threading.Lock()
+        self._portal_node_latency_batch: _PortalNodeLatencyBatch | None = None
+        self._portal_node_latency_tasks: set[asyncio.Task[dict[str, PortalNodeLatencyProbe]]] = set()
         self._acl: Access_Control | None = None
         self.request_auth: NodeRequestAuth = NodeRequestAuth(
             node_name=lambda: self.node_name,
@@ -550,6 +561,19 @@ class NodeApiService:
 
     def begin_shutdown(self) -> None:
         self._shutting_down = True
+        with self._portal_node_latency_lock:
+            self._portal_node_latency_batch = None
+            latency_tasks = tuple(self._portal_node_latency_tasks)
+            self._portal_node_latency_tasks.clear()
+        for task in latency_tasks:
+            loop = task.get_loop()
+            if not task.done() and not loop.is_closed():
+                try:
+                    loop.call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    if not loop.is_closed():
+                        raise
+        self.maps.close()
         history_task = self._system_history_task
         self._system_history_task = None
         self._app_mutations.cancel_pending()
@@ -1193,11 +1217,48 @@ class NodeApiService:
     async def portal_node_latency_probes_async(
         self,
     ) -> dict[str, PortalNodeLatencyProbe]:
-        """Measure the Portal-to-node and node-to-Discord latency for dashboard badges."""
+        """Share one probe batch per refresh interval across dashboard callers."""
 
         if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
             return {}
         targets = self._portal_node_latency_targets()
+        loop = asyncio.get_running_loop()
+        refresh_task: asyncio.Task[dict[str, PortalNodeLatencyProbe]] | None = None
+        with self._portal_node_latency_lock:
+            if self._shutting_down:
+                return {}
+            batch = self._portal_node_latency_batch
+            if batch is not None and batch.targets == targets:
+                if batch.task.done():
+                    if (
+                        not batch.task.cancelled()
+                        and batch.task.exception() is None
+                        and time.monotonic() < batch.refresh_after_seconds
+                    ):
+                        return dict(batch.task.result())
+                elif batch.task.get_loop() is loop:
+                    refresh_task = batch.task
+            if refresh_task is None:
+                refresh_task = loop.create_task(
+                    self._measure_portal_node_latencies(targets),
+                    name="portal-node-latencies",
+                )
+                self._portal_node_latency_tasks.add(refresh_task)
+                refresh_task.add_done_callback(self._discard_portal_node_latency_task)
+                self._portal_node_latency_batch = _PortalNodeLatencyBatch(
+                    targets=targets,
+                    refresh_after_seconds=time.monotonic() + PORTAL_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
+                    task=refresh_task,
+                )
+        return dict(await asyncio.shield(refresh_task))
+
+    def _discard_portal_node_latency_task(self, task: asyncio.Task[dict[str, PortalNodeLatencyProbe]]) -> None:
+        with self._portal_node_latency_lock:
+            self._portal_node_latency_tasks.discard(task)
+
+    async def _measure_portal_node_latencies(
+        self, targets: tuple[tuple[str, str], ...],
+    ) -> dict[str, PortalNodeLatencyProbe]:
         measurements = await asyncio.gather(
             *(
                 run_blocking(self._measure_node_latency_probe, ping_url)
@@ -1235,18 +1296,23 @@ class NodeApiService:
     @staticmethod
     def _measure_node_latency_probe(ping_url: str) -> PortalNodeLatencyProbe:
         started_at = time.perf_counter()
+        response: requests.Response | None = None
         try:
             response = requests.get(
-                ping_url, timeout=_PORTAL_NODE_LATENCY_TIMEOUT_SECONDS
+                ping_url, timeout=_PORTAL_NODE_LATENCY_TIMEOUT_SECONDS, stream=True,
             )
             response.raise_for_status()
+            response_headers = response.headers
         except requests.RequestException:
             return PortalNodeLatencyProbe(
                 latency_ms=None,
                 discord_latency_ms=None,
                 discord_service_state=None,
             )
-        raw_discord_service_state = response.headers.get(
+        finally:
+            if response is not None:
+                response.close()
+        raw_discord_service_state = response_headers.get(
             NODE_DISCORD_SERVICE_STATE_HEADER
         )
         try:
@@ -1257,7 +1323,7 @@ class NodeApiService:
             )
         except ValueError:
             discord_service_state = None
-        raw_discord_latency_ms = response.headers.get(
+        raw_discord_latency_ms = response_headers.get(
             NODE_DISCORD_HEARTBEAT_LATENCY_HEADER
         )
         try:
