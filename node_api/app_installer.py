@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import enum
-import hashlib
 import logging
 import shutil
 import time
@@ -33,6 +32,7 @@ from apps.sevendays.installation import (
     cleanup_install_downloads,
     prepare_undead_legacy_install,
     validate_overhaul_archive_source,
+    undead_legacy_download_cache_directory,
 )
 from apps._steam import cached_steam_update_branches, load_steam_update_branches, merge_steam_update_branches, steam_update_preset_for_scope
 from apps._updater import (
@@ -633,8 +633,7 @@ class NodeAppInstallerService:
 
     @property
     def download_cache_directory(self) -> Path:
-        node_key = hashlib.sha256(self._node_name().encode("utf-8")).hexdigest()[:16]
-        return config.DIR_OPT / "app-install-downloads" / node_key
+        return undead_legacy_download_cache_directory(root=config.DIR_OPT, node_name=self._node_name())
 
     async def cleanup_download_cache(self) -> None:
         now = time.monotonic()

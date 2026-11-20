@@ -27,6 +27,8 @@ from apps._settings import (
 from apps.factorio import Factorio_Settings
 from apps.minecraft import Minecraft_Settings
 from apps.sevendays import SevenDays_Settings
+from apps.sevendays.installation import UNDEAD_LEGACY_MANIFEST, UNDEAD_LEGACY_RELEASE, UndeadLegacyInstallation
+from apps.sevendays.overhaul_settings import SevenDaysSettingGroup
 from cmd_app import AppManageMode, AppManageState, _state_from_value, _state_value
 
 
@@ -1638,6 +1640,153 @@ class SettingTests(unittest.TestCase):
         )
 
         self.assertIsNone(_state_from_value(encoded, 0))
+
+
+class UndeadLegacySettingTests(unittest.TestCase):
+    @staticmethod
+    def _settings(root: Path, **properties: str) -> SevenDays_Settings:
+        pointer, _ = _write_sevendays_xml_files(
+            root,
+            server_properties={
+                "GameWorld": "Navezgane",
+                "GameName": "Review",
+                **properties,
+            },
+        )
+        manifest = root / UNDEAD_LEGACY_MANIFEST
+        manifest.parent.mkdir(exist_ok=True)
+        manifest.write_text(
+            UndeadLegacyInstallation(
+                version=UNDEAD_LEGACY_RELEASE.version,
+                game_version=UNDEAD_LEGACY_RELEASE.game_version,
+                core_sha256=UNDEAD_LEGACY_RELEASE.core_sha256,
+                mod_names=("UndeadLegacy",),
+            ).model_dump_json()
+        )
+        return SevenDays_Settings(pointer, version_getter=lambda: AppVersion(main="2.6"))
+
+    def test_ul_group_is_only_available_for_managed_overhaul_instances(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            settings = self._settings(root)
+            grouped = [
+                setting
+                for setting in settings.settings_page_options
+                if setting.group is SevenDaysSettingGroup.UNDEAD_LEGACY
+            ]
+            self.assertEqual(len(grouped), 18)
+            self.assertEqual({setting.type_name for setting in grouped}, {"int", "bool"})
+            (root / UNDEAD_LEGACY_MANIFEST).unlink()
+            vanilla = SevenDays_Settings(settings.pointer, version_getter=lambda: AppVersion(main="2.6"))
+            self.assertIsNone(vanilla.get_setting("ActionSkillXPMultiplier"))
+
+    def test_save_inserts_ul_preferences_and_preserves_existing_configuration(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp:
+            settings = self._settings(Path(temp), CustomPreference="untouched", OverrideBrightness="-1")
+            manager = _sevendays_settings_manager(settings)
+            for key, value in (
+                ("ActionSkillXPMultiplier", "125"),
+                ("AIHeatMapScoutsEnabled", "false"),
+                ("OverrideBrightness", "-1"),
+            ):
+                setting = settings.get_setting(key)
+                assert setting is not None
+                manager.update_setting(42, setting, value)
+            manager.save(42)
+            persisted = {node.get("name"): node.get("value") for node in ET.parse(settings.pointer).getroot()}
+            self.assertEqual(persisted["ActionSkillXPMultiplier"], "125")
+            self.assertEqual(persisted["AIHeatMapScoutsEnabled"], "false")
+            self.assertEqual(persisted["OverrideBrightness"], "-1")
+            self.assertEqual(persisted["CustomPreference"], "untouched")
+            manager.load()
+            setting = settings.get_setting("ActionSkillXPMultiplier")
+            assert setting is not None
+            self.assertEqual(setting.value, 125)
+
+    def test_wandering_horde_limit_is_checked_before_accepting_a_draft(self) -> None:
+        with TemporaryDirectory() as temp:
+            settings = self._settings(Path(temp))
+            manager = _sevendays_settings_manager(settings)
+            count = settings.get_setting("WanderingHordeEnemyCount")
+            random_range = settings.get_setting("WanderingHordeEnemyRange")
+            assert count is not None and random_range is not None
+            manager.update_setting(42, count, "54")
+            with self.assertRaisesRegex(ValueError, "must not exceed 64"):
+                manager.update_setting(42, random_range, "11")
+            self.assertFalse(manager.has_pending_value(42, random_range))
+            manager.update_setting(42, random_range, "10")
+            manager.save(42)
+            self.assertEqual(count.value, 54)
+
+    def test_unchanged_ul_defaults_are_not_written_to_the_server_config(self) -> None:
+        with TemporaryDirectory() as temp:
+            settings = self._settings(Path(temp))
+            settings.save()
+            stored_keys = {node.get("name") for node in ET.parse(settings.pointer).getroot()}
+            ul_keys = {setting.key for setting in settings.options if setting.group is SevenDaysSettingGroup.UNDEAD_LEGACY}
+            self.assertFalse(stored_keys & ul_keys)
+
+    def test_conflicting_user_drafts_do_not_change_saved_values_after_a_failed_save(self) -> None:
+        with TemporaryDirectory() as temp:
+            settings = self._settings(Path(temp))
+            manager = _sevendays_settings_manager(settings)
+            count = settings.get_setting("WanderingHordeEnemyCount")
+            random_range = settings.get_setting("WanderingHordeEnemyRange")
+            assert count is not None and random_range is not None
+            manager.update_setting(42, count, "54")
+            manager.update_setting(43, random_range, "54")
+            manager.save(42)
+            saved = settings.pointer.read_bytes()
+            with self.assertRaisesRegex(ValueError, "must not exceed 64"):
+                manager.save(43)
+            self.assertEqual((count.value, random_range.value), (54, 10))
+            self.assertEqual(settings.pointer.read_bytes(), saved)
+            self.assertTrue(manager.has_pending_value(43, random_range))
+            manager.update_setting(43, random_range, "8")
+            manager.save(43)
+            self.assertEqual((count.value, random_range.value), (54, 8))
+
+    def test_ul_bounds_and_integer_preferences_reject_invalid_values(self) -> None:
+        with TemporaryDirectory() as temp:
+            settings = self._settings(Path(temp))
+            for key, value in (
+                ("RecipeFilter", "3"),
+                ("DawnTime", "24"),
+                ("POITierLootScale", "101"),
+                ("WanderingHordeFrequency", "0"),
+                ("OverrideBrightness", "1.5"),
+                ("OverrideBrightness", "-2"),
+            ):
+                with self.subTest(key=key, value=value):
+                    setting = settings.get_setting(key)
+                    assert setting is not None
+                    with self.assertRaises((ValueError, IndexError)):
+                        setting.spec.parse_input(value)
+
+    def test_reload_restores_default_when_a_ul_property_is_removed(self) -> None:
+        with TemporaryDirectory() as temp:
+            settings = self._settings(Path(temp), ActionSkillXPMultiplier="150")
+            setting = settings.get_setting("ActionSkillXPMultiplier")
+            assert setting is not None
+            self.assertEqual(setting.value, 150)
+            tree = ET.parse(settings.pointer)
+            for node in tuple(tree.getroot()):
+                if node.get("name") == "ActionSkillXPMultiplier":
+                    tree.getroot().remove(node)
+            tree.write(settings.pointer)
+            settings.load()
+            self.assertEqual(setting.value, 100)
+
+    def test_duplicate_ul_properties_fail_with_a_clear_error(self) -> None:
+        with TemporaryDirectory() as temp:
+            settings = self._settings(Path(temp), ActionSkillXPMultiplier="150")
+            tree = ET.parse(settings.pointer)
+            ET.SubElement(tree.getroot(), "property", {"name": "ActionSkillXPMultiplier", "value": "100"})
+            tree.write(settings.pointer)
+            with self.assertRaisesRegex(ValueError, "Duplicate Undead Legacy setting"):
+                settings.load()
 
 
 if __name__ == "__main__":

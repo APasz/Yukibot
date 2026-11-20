@@ -11,7 +11,7 @@ import subprocess
 from threading import Event
 import time
 from typing import Literal
-from unittest.mock import MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -20,7 +20,7 @@ import pytest
 import config
 from _manager import AppDetailsUpdate, App_Manager
 from archive_safety import ZipArchiveLimits, validated_zip_entries
-from apps._config import App_Config, Mod_Config, ModClassificationOverride, ModDownloadBlockReason, ModPlacement, ModType, SteamUpdateConfig
+from apps._config import AppVersion, App_Config, Mod_Config, ModClassificationOverride, ModDownloadBlockReason, ModPlacement, ModType, SteamUpdateConfig
 from apps.sevendays import Mod_7D2D, SevenDays, SevenDays_Settings
 from apps.sevendays import installation
 
@@ -499,3 +499,357 @@ def test_invalid_profile_component_names_are_rejected(names: tuple[str, ...]) ->
             version=_RELEASE.version, game_version=_RELEASE.game_version,
             core_sha256=_RELEASE.core_sha256, mod_names=names,
         )
+
+
+@pytest.fixture
+def installed_overhaul_archive(tmp_path: Path, app_directory: Path, package_files: dict[str, bytes]) -> Path:
+    archive = _write_zip(tmp_path / "installed-overhaul.zip", package_files)
+    installation._prepare_overhaul_files(app_directory, (archive,), _RELEASE, Event())
+    return archive
+
+
+@pytest.fixture
+def overhaul_app(
+    installed_overhaul_archive: Path,
+    app_directory: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SevenDays:
+    monkeypatch.setattr(config, "DIR_LOG", tmp_path / "logs")
+    cfg = App_Config(
+        name="sevendays_ul_review",
+        instance_key="ul_review",
+        scope="sevendays",
+        directory=app_directory,
+        apps_dir=tmp_path / "apps",
+        mods_dir=app_directory / "Mods",
+        version=AppVersion(main="2.6"),
+    )
+    return SevenDays(Mock(), Mock(), cfg)
+
+
+def test_health_checks_fingerprints_assets_loader_and_game_version(
+    app_directory: Path,
+    installed_overhaul_archive: Path,
+) -> None:
+    version = AppVersion(main="2.6")
+    assert not installation.inspect_undead_legacy_installation(app_directory, game_version=version, deep=True)
+    asset = app_directory / "Mods/UndeadLegacy/Resources/Subquake_Items.ulm"
+    asset.write_bytes(b"version https://git-lfs.github.com/spec/v1\n")
+    loader = app_directory / "BepInEx/core/BepInEx.dll"
+    loader.write_bytes(b"x" * loader.stat().st_size)
+    issues = installation.inspect_undead_legacy_installation(app_directory, game_version=version, deep=True)
+    assert any("Git LFS" in issue.message and issue.repairable for issue in issues)
+    assert any("BepInEx.dll" in issue.message and issue.repairable for issue in issues)
+    issues = installation.inspect_undead_legacy_installation(app_directory, game_version=AppVersion(main="3.4"))
+    assert any("requires 2.6" in issue.message and not issue.repairable for issue in issues)
+
+
+def test_health_uses_the_installed_steam_branch_instead_of_trusting_old_logs(
+    app_directory: Path,
+    installed_overhaul_archive: Path,
+) -> None:
+    manifest = app_directory / "steamapps/appmanifest_294420.acf"
+    manifest.parent.mkdir()
+    manifest.write_text('"AppState" { "UserConfig" { "betakey" "public" } }')
+    issues = installation.inspect_undead_legacy_installation(app_directory, game_version=AppVersion(main="2.6"))
+    assert any("branch is 'public'" in issue.message and not issue.repairable for issue in issues)
+    manifest.write_text('"AppState" { "UserConfig" { "betakey" "v2.6" } }')
+    assert not installation.inspect_undead_legacy_installation(app_directory, game_version=AppVersion(main="2.6"))
+    assert not installation.inspect_undead_legacy_installation(app_directory, game_version=AppVersion(steam_build=123))
+    manifest.write_text('"AppState" { "UserConfig" { "BetaKey" "public" } "MountedConfig" { "BetaKey" "v2.6" } }')
+    assert not installation.inspect_undead_legacy_installation(app_directory, game_version=AppVersion(main="2.6"))
+    manifest.write_text('"AppState" { "UserConfig" { "BetaKey" "v2.6" } "MountedConfig" { "BetaKey" "public" } }')
+    assert installation.inspect_undead_legacy_installation(app_directory, game_version=AppVersion(main="2.6"))
+
+
+def test_repair_restores_only_managed_files_and_keeps_worlds_and_gameplay_configuration(
+    app_directory: Path,
+    installed_overhaul_archive: Path,
+    package_files: dict[str, bytes],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = app_directory / "Mods/UndeadLegacy/Resources/Subquake_Items.ulm"
+    asset.write_bytes(b"broken")
+    preserved = {
+        "Mods/UndeadLegacy/Config/custom.xml": b"custom UL configuration",
+        "Mods/MyAddon/ModInfo.xml": b"add-on",
+        "userdata/UndeadLegacy/Saves/World/Save/main.ttw": b"world progress",
+    }
+    for relative, content in preserved.items():
+        pointer = app_directory / relative
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_bytes(content)
+    config_path = app_directory / "serverconfig.xml"
+    tree = ET.parse(config_path)
+    ET.SubElement(tree.getroot(), "property", {"name": "ActionSkillXPMultiplier", "value": "175"})
+    tree.write(config_path)
+    (app_directory / installation.UNDEAD_LEGACY_LAUNCHER).unlink()
+    download = AsyncMock(return_value=installed_overhaul_archive)
+    monkeypatch.setattr(installation, "_download_archive", download)
+    asyncio.run(
+        installation.repair_undead_legacy_installation(
+            app_directory,
+            game_version=AppVersion(main="2.6"),
+            cache_directory=tmp_path / "cache",
+            report=lambda _: None,
+            release=_RELEASE,
+        )
+    )
+    assert download.await_count == len(_RELEASE.archive_urls)
+    assert asset.read_bytes() == package_files["Mods/UndeadLegacy/Resources/Subquake_Items.ulm"]
+    for relative, content in preserved.items():
+        assert (app_directory / relative).read_bytes() == content
+    assert (
+        next(
+            node.get("value")
+            for node in ET.parse(config_path).getroot()
+            if node.get("name") == "ActionSkillXPMultiplier"
+        )
+        == "175"
+    )
+    assert not installation.inspect_undead_legacy_installation(
+        app_directory, game_version=AppVersion(main="2.6"), deep=True
+    )
+
+
+def test_repair_does_not_download_for_healthy_or_incompatible_installations(
+    app_directory: Path,
+    installed_overhaul_archive: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    download = AsyncMock()
+    monkeypatch.setattr(installation, "_download_archive", download)
+    arguments = dict(cache_directory=tmp_path / "cache", report=lambda _: None, release=_RELEASE)
+    asyncio.run(
+        installation.repair_undead_legacy_installation(app_directory, game_version=AppVersion(main="2.6"), **arguments)
+    )
+    with pytest.raises(ValueError, match="requires attention"):
+        asyncio.run(
+            installation.repair_undead_legacy_installation(
+                app_directory, game_version=AppVersion(main="3.4"), **arguments
+            )
+        )
+    with pytest.raises(ValueError, match="different version"):
+        asyncio.run(
+            installation.repair_undead_legacy_installation(
+                app_directory,
+                game_version=AppVersion(main="2.6"),
+                cache_directory=tmp_path / "cache",
+                report=lambda _: None,
+                release=replace(_RELEASE, version="2.8"),
+            )
+        )
+    download.assert_not_awaited()
+
+
+def test_bad_repair_archive_leaves_the_existing_installation_untouched(
+    app_directory: Path,
+    installed_overhaul_archive: Path,
+    package_files: dict[str, bytes],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asset = app_directory / "Mods/UndeadLegacy/Resources/Subquake_Items.ulm"
+    asset.write_bytes(b"broken")
+    before = (app_directory / installation.UNDEAD_LEGACY_MANIFEST).read_bytes()
+    files = {**package_files, "Mods/UndeadLegacy/UndeadLegacy.dll": b"wrong release"}
+    archive = _write_zip(tmp_path / "bad-repair.zip", files)
+    monkeypatch.setattr(installation, "_download_archive", AsyncMock(return_value=archive))
+    with pytest.raises(ValueError, match="supported Undead Legacy"):
+        asyncio.run(
+            installation.repair_undead_legacy_installation(
+                app_directory,
+                game_version=AppVersion(main="2.6"),
+                cache_directory=tmp_path / "cache",
+                report=lambda _: None,
+                release=_RELEASE,
+            )
+        )
+    assert asset.read_bytes() == b"broken"
+    assert (app_directory / installation.UNDEAD_LEGACY_MANIFEST).read_bytes() == before
+
+
+def test_runtime_configuration_repair_does_not_download_archives(
+    app_directory: Path, installed_overhaul_archive: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (app_directory / installation.UNDEAD_LEGACY_LAUNCHER).write_bytes(b"\xffcorrupt launcher")
+    mono = app_directory / "7DaysToDieServer_Data/MonoBleedingEdge/etc/mono/config"
+    tree = ET.parse(mono)
+    for node in tree.getroot().findall("dllmap"):
+        if node.get("dll") == "dl":
+            node.set("target", "wrong-library")
+    tree.write(mono, xml_declaration=True, encoding="utf-8")
+    serverconfig = app_directory / "serverconfig.xml"
+    tree = ET.parse(serverconfig)
+    ET.SubElement(tree.getroot(), "property", {"name": "EACEnabled", "value": "true"})
+    tree.write(serverconfig)
+    before = (app_directory / installation.UNDEAD_LEGACY_MANIFEST).read_bytes()
+    download = AsyncMock()
+    monkeypatch.setattr(installation, "_download_archive", download)
+    asyncio.run(installation.repair_undead_legacy_installation(
+        app_directory, game_version=AppVersion(main="2.6"), cache_directory=tmp_path / "cache", report=lambda _: None,
+        release=_RELEASE,
+    ))
+    download.assert_not_awaited()
+    assert (app_directory / installation.UNDEAD_LEGACY_MANIFEST).read_bytes() == before
+    assert not installation.inspect_undead_legacy_installation(app_directory, game_version=AppVersion(main="2.6"))
+
+
+@pytest.mark.parametrize("relative", [
+    installation.UNDEAD_LEGACY_LAUNCHER,
+    "serverconfig.xml",
+    "7DaysToDieServer_Data/MonoBleedingEdge/etc/mono/config",
+])
+def test_repair_refuses_paths_outside_the_installation(
+    app_directory: Path, installed_overhaul_archive: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, relative: str,
+) -> None:
+    pointer = app_directory / relative
+    outside = tmp_path / "outside"
+    original = pointer.read_bytes()
+    outside.write_bytes(original)
+    pointer.unlink()
+    pointer.symlink_to(outside)
+    download = AsyncMock()
+    monkeypatch.setattr(installation, "_download_archive", download)
+    issues = installation.inspect_undead_legacy_installation(app_directory, game_version=AppVersion(main="2.6"))
+    assert any("escapes the installation" in issue.message and not issue.repairable for issue in issues)
+    with pytest.raises(ValueError, match="requires attention"):
+        asyncio.run(installation.repair_undead_legacy_installation(
+            app_directory, game_version=AppVersion(main="2.6"), cache_directory=tmp_path / "cache",
+            report=lambda _: None, release=_RELEASE,
+        ))
+    assert outside.read_bytes() == original
+    download.assert_not_awaited()
+
+
+def test_configuration_repair_cancellation_waits_for_the_worker_before_unlocking(
+    overhaul_app: SevenDays, app_directory: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (app_directory / installation.UNDEAD_LEGACY_LAUNCHER).unlink()
+    started = Event()
+    release_worker = Event()
+    stopped = Event()
+
+    def repair_runtime(directory: Path) -> None:
+        started.set()
+        try:
+            assert release_worker.wait(3)
+        finally:
+            stopped.set()
+
+    async def repair(directory: Path, **kwargs: object) -> None:
+        await installation.repair_undead_legacy_installation(
+            directory, game_version=overhaul_app.cfg.version, cache_directory=app_directory / "cache",
+            report=lambda _: None, release=_RELEASE,
+        )
+
+    monkeypatch.setattr(installation, "_repair_runtime_configuration", repair_runtime)
+    monkeypatch.setattr("apps.sevendays.repair_undead_legacy_installation", repair)
+    monkeypatch.setattr(overhaul_app, "check_running", lambda: False)
+    action = next(action for action in overhaul_app.console_actions if action.key == "repair_undead_legacy")
+
+    async def exercise() -> None:
+        task = asyncio.create_task(action.execute(overhaul_app, None))
+        try:
+            async with asyncio.timeout(2):
+                while not started.is_set():
+                    await asyncio.sleep(0.005)
+            task.cancel()
+            await asyncio.sleep(0.03)
+            assert not task.done()
+            assert overhaul_app._maintenance_lock.locked()
+            with pytest.raises(RuntimeError, match="maintenance is already"):
+                await overhaul_app.start()
+            settings = overhaul_app.settings
+            assert settings is not None
+            serverconfig = app_directory / "serverconfig.xml"
+            before = serverconfig.read_bytes()
+            with pytest.raises(RuntimeError, match="maintenance is already"):
+                settings.save(42)
+            assert serverconfig.read_bytes() == before
+        finally:
+            release_worker.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert stopped.is_set()
+        assert not overhaul_app._maintenance_lock.locked()
+
+    asyncio.run(exercise())
+
+
+def test_repair_does_not_overwrite_configuration_through_a_launcher_symlink(
+    app_directory: Path, installed_overhaul_archive: Path, tmp_path: Path,
+) -> None:
+    launcher = app_directory / installation.UNDEAD_LEGACY_LAUNCHER
+    launcher.unlink()
+    launcher.symlink_to("serverconfig.xml")
+    serverconfig = app_directory / "serverconfig.xml"
+    before = serverconfig.read_bytes()
+    with pytest.raises(ValueError, match="must not be a symbolic link"):
+        asyncio.run(installation.repair_undead_legacy_installation(
+            app_directory, game_version=AppVersion(main="2.6"), cache_directory=tmp_path / "cache",
+            report=lambda _: None, release=_RELEASE,
+        ))
+    assert serverconfig.read_bytes() == before
+
+
+def test_version_display_preserves_the_base_version_for_feature_gates(
+    overhaul_app: SevenDays,
+) -> None:
+    assert overhaul_app.version_display == "UL 2.7.40 · Game 2.6"
+    assert overhaul_app.cfg.version == AppVersion(main="2.6")
+    assert {action.key for action in overhaul_app.console_actions} >= {
+        "check_undead_legacy",
+        "repair_undead_legacy",
+    }
+    overhaul_app.cfg.version = None
+    assert overhaul_app.version_display == "UL 2.7.40 · Game Unknown"
+
+
+def test_preflight_rejects_a_broken_ul_installation_before_launch(
+    overhaul_app: SevenDays,
+    app_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (app_directory / "Mods/UndeadLegacy/UndeadLegacy.dll").unlink()
+    launch = AsyncMock()
+    monkeypatch.setattr(overhaul_app, "_std_launch", launch)
+    with pytest.raises(RuntimeError, match="preflight failed"):
+        asyncio.run(overhaul_app.start())
+    launch.assert_not_awaited()
+
+
+def test_repair_refuses_running_servers_and_prevents_concurrent_launch(
+    overhaul_app: SevenDays,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = next(action for action in overhaul_app.console_actions if action.key == "repair_undead_legacy")
+    monkeypatch.setattr(overhaul_app, "check_running", lambda: True)
+    with pytest.raises(RuntimeError, match="Stop the server"):
+        asyncio.run(action.execute(overhaul_app, None))
+    monkeypatch.setattr(overhaul_app, "check_running", lambda: False)
+
+    async def exercise() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def repair(*args: object, **kwargs: object) -> None:
+            started.set()
+            await release.wait()
+
+        monkeypatch.setattr("apps.sevendays.repair_undead_legacy_installation", repair)
+        task = asyncio.create_task(action.execute(overhaul_app, None))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+            with pytest.raises(RuntimeError, match="maintenance is already"):
+                await overhaul_app.start()
+        finally:
+            release.set()
+            await task
+        assert not overhaul_app._maintenance_lock.locked()
+
+    asyncio.run(exercise())

@@ -78,9 +78,14 @@ from apps._telnet import TelnetClient
 from apps._updater import SteamCmd_Update_Manager
 from apps.sevendays.installation import (
     UNDEAD_LEGACY_LAUNCHER,
+    UndeadLegacyInstallation,
+    inspect_undead_legacy_installation,
     load_undead_legacy_installation,
+    repair_undead_legacy_installation,
     sevendays_content_userdata_root,
+    undead_legacy_download_cache_directory,
 )
+from apps.sevendays.overhaul_settings import MAX_WANDERING_HORDE_ENEMIES, SevenDaysSettingGroup, undead_legacy_settings
 from archive_safety import validated_zip_entries
 from config import Activity_Manager
 from relay_notices import (
@@ -242,6 +247,13 @@ _SEVENDAYS_PLAYER_COUNT_RE: Pattern[str] = re.compile(
 _SEVENDAYS_PLAYER_CAPACITY_RE: Pattern[str] = re.compile(
     _SEVENDAYS_CONSOLE_LINE_PREFIX
     + r"(?:Max players\s*:\s*|GamePref\.ServerMaxPlayerCount\s*=\s*)(?P<capacity>\d+)\s*$",
+)
+_UNDEAD_LEGACY_BUSY_MESSAGE = "Undead Legacy startup or maintenance is already in progress."
+_SEVENDAYS_GAME_TIME_RE: Pattern[str] = re.compile(
+    _SEVENDAYS_CONSOLE_LINE_PREFIX + r"Day (?P<day>\d+),\s*(?P<hour>\d{1,2}):(?P<minute>\d{2})$",
+)
+_SEVENDAYS_GAME_STAT_RE: Pattern[str] = re.compile(
+    _SEVENDAYS_CONSOLE_LINE_PREFIX + r"GameStat\.(?P<key>\w+)\s*=\s*(?P<value>.*)$",
 )
 _SEVENDAYS_TRANSIENT_RE: Pattern[str] = re.compile(r"GMSG: Player '(.+?)' (joined|left) the game", re.IGNORECASE)
 _SEVENDAYS_DEATH_RE: Pattern[str] = re.compile(r"GMSG: Player '(?P<player>.+?)' died\b", re.IGNORECASE)
@@ -1366,6 +1378,64 @@ _SEVENDAYS_ADMIN_ADD_PARAMETER = ConsoleActionParameter[SevenDaysAdminAddRequest
     max_length=160,
 )
 
+async def _console_check_undead_legacy(app_obj: object, value: object | None) -> ConsoleActionResult:
+    app = cast(SevenDays, app_obj)
+    if app._maintenance_lock.locked():
+        raise RuntimeError(_UNDEAD_LEGACY_BUSY_MESSAGE)
+    async with app._maintenance_lock:
+        issues = await run_blocking(
+            inspect_undead_legacy_installation,
+            app.directory,
+            game_version=app.cfg.version,
+            deep=True,
+        )
+    return ConsoleActionResult(
+        summary="Undead Legacy is healthy."
+        if not issues
+        else f"Undead Legacy needs attention: {len(issues)} issue(s).",
+        success=not issues,
+        text="\n".join(issue.message for issue in issues)
+        or "Required files, game version, loader and launch configuration checked.",
+    )
+
+
+async def _console_repair_undead_legacy(app_obj: object, value: object | None) -> ConsoleActionResult:
+    app = cast(SevenDays, app_obj)
+    if app.check_running():
+        raise RuntimeError("Stop the server before repairing Undead Legacy.")
+    if app._maintenance_lock.locked():
+        raise RuntimeError(_UNDEAD_LEGACY_BUSY_MESSAGE)
+    async with app._maintenance_lock:
+        messages: list[str] = []
+        await repair_undead_legacy_installation(
+            app.directory,
+            game_version=app.cfg.version,
+            cache_directory=undead_legacy_download_cache_directory(root=config.DIR_OPT, node_name=config.NODE_NAME),
+            report=messages.append,
+        )
+    return ConsoleActionResult(summary="Undead Legacy repair completed.", text="\n".join(messages))
+
+
+_UNDEAD_LEGACY_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
+    ConsoleAction(
+        key="check_undead_legacy",
+        label="Check Undead Legacy",
+        description="Verify the installed UL release, required files and launch configuration.",
+        power_level=Power_Level.user,
+        execute=_console_check_undead_legacy,
+        requires_running=False,
+    ),
+    ConsoleAction(
+        key="repair_undead_legacy",
+        label="Repair Undead Legacy",
+        description="Stop the server first. Restore this release's managed files and loader; keep saves, gameplay settings and add-ons.",
+        power_level=Power_Level.sudo,
+        execute=_console_repair_undead_legacy,
+        requires_running=False,
+    ),
+)
+
+
 _SEVENDAYS_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
     ConsoleAction(
         key="saveworld",
@@ -1667,8 +1737,11 @@ class SevenDays_Settings(App_Settings):
         *,
         rwgmixer_pointer: Path | None = None,
         version_getter: Callable[[], AppVersion | None] | None = None,
+        maintenance_lock: asyncio.Lock | None = None,
     ) -> None:
         _ensure_serverconfig_userdata_redirect(pointer)
+        self._undead_legacy = load_undead_legacy_installation(pointer.parent) is not None
+        self._maintenance_lock = maintenance_lock
         self.rwgmixer_pointer = rwgmixer_pointer or pointer.parent / "Data" / "Config" / "rwgmixer.xml"
         options = [
             Setting[str](
@@ -2222,6 +2295,8 @@ class SevenDays_Settings(App_Settings):
                 max_app_version=AppVersion(main="2.6"),
             ),
         ]
+        if self._undead_legacy:
+            options.extend(undead_legacy_settings())
         super().__init__(pointer, options, version_getter=version_getter)
 
     @property
@@ -2400,6 +2475,10 @@ class SevenDays_Settings(App_Settings):
         value: object,
         drafts: dict[str, DraftSettingValue],
     ) -> None:
+        if setting.key in {"WanderingHordeEnemyCount", "WanderingHordeEnemyRange"}:
+            proposed = dict(drafts)
+            proposed[setting.key] = value
+            self._validate_undead_legacy_settings(proposed)
         if setting.key == _SEVENDAYS_GAME_WORLD_SETTING_KEY:
             if not isinstance(value, str):
                 raise TypeError("7D2D world save selection must be a string.")
@@ -2445,6 +2524,10 @@ class SevenDays_Settings(App_Settings):
     def load(self) -> None:
         data = ET.parse(self.pointer).getroot().findall("property")
         settings_by_key = {setting.key: setting for setting in super().options}
+        seen_ul_keys: set[str] = set()
+        for setting in settings_by_key.values():
+            if setting.group is SevenDaysSettingGroup.UNDEAD_LEGACY:
+                setting.value = setting.default
 
         stored_world: str | None = None
         stored_name: str | None = None
@@ -2462,6 +2545,10 @@ class SevenDays_Settings(App_Settings):
             opt = settings_by_key.get(property_name) if property_name is not None else None
             if opt is None:
                 continue
+            if opt.group is SevenDaysSettingGroup.UNDEAD_LEGACY:
+                if opt.key in seen_ul_keys:
+                    raise ValueError(f"Duplicate Undead Legacy setting in serverconfig.xml: {opt.key}")
+                seen_ul_keys.add(opt.key)
             if raw_value is None:
                 raise ValueError(f"7D2D setting {opt.key!r} is missing its value.")
             try:
@@ -2506,9 +2593,25 @@ class SevenDays_Settings(App_Settings):
                 raise ValueError(f"rwgmixer.xml prefab_spawn_adjust for {definition.partial_name} is missing biomeTags")
             self._setting_for_key(definition.key).load_value(biome_value)
         self._validate_trader_biome_assignments()
+        self._validate_undead_legacy_settings({})
+
+    def _validate_undead_legacy_settings(self, drafts: dict[str, DraftSettingValue]) -> None:
+        if not self._undead_legacy:
+            return
+        count = self._effective_setting_value("WanderingHordeEnemyCount", drafts)
+        random_range = self._effective_setting_value("WanderingHordeEnemyRange", drafts)
+        if type(count) is not int or type(random_range) is not int:
+            raise TypeError("Wandering horde counts must be whole numbers.")
+        if count + random_range > MAX_WANDERING_HORDE_ENEMIES:
+            raise ValueError(
+                f"Wandering horde enemies plus their random range must not exceed {MAX_WANDERING_HORDE_ENEMIES}."
+            )
 
     def save(self) -> list[ET.Element]:
+        if self._maintenance_lock is not None and self._maintenance_lock.locked():
+            raise RuntimeError(_UNDEAD_LEGACY_BUSY_MESSAGE)
         self._validate_trader_biome_assignments()
+        self._validate_undead_legacy_settings({})
 
         world_setting = self._setting_for_key(_SEVENDAYS_GAME_WORLD_SETTING_KEY)
         name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
@@ -2535,6 +2638,12 @@ class SevenDays_Settings(App_Settings):
                 element.attrib["value"] = values_by_key[property_name]
         for property_name, value in server_world_values.items():
             _set_serverconfig_property(root, property_name=property_name, value=value)
+        stored_keys = {element.get("name") for element in data}
+        for setting in super().options:
+            if setting.group is SevenDaysSettingGroup.UNDEAD_LEGACY and (
+                setting.key in stored_keys or setting.value != setting.default
+            ):
+                _set_serverconfig_property(root, property_name=setting.key, value=setting.serialise_value())
         _set_serverconfig_property(
             root,
             property_name="UserDataFolder",
@@ -2564,9 +2673,12 @@ class SevenDays(App[App_Config]):
     relay_notice_player_session_supported = True
     relay_notice_player_death_supported = True
     _serverconfig_cache: _SevenDaysServerConfigCache | None = None
+    _overhaul_installation: UndeadLegacyInstallation | None = None
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         overhaul = load_undead_legacy_installation(cfg.directory)
+        self._overhaul_installation = overhaul
+        self._maintenance_lock = asyncio.Lock()
         self.manage_embed_color = 0xB91C1C if overhaul is None else 0x73E9B2
         self.proc_name = "7DaysToDie"
         self.proc_cmd = ["7DaysToDieServer", "-nographics"]
@@ -2576,7 +2688,10 @@ class SevenDays(App[App_Config]):
         self.cmd_start = ["bash", "startserver.sh", f"-configfile={file_settings.name}"]
         if overhaul is not None:
             self.cmd_start = ["sh", UNDEAD_LEGACY_LAUNCHER]
-        super().__init__(bot, am, cfg, SevenDays_Settings(file_settings, version_getter=lambda: cfg.version), Mod_7D2D)
+        settings = SevenDays_Settings(
+            file_settings, version_getter=lambda: cfg.version, maintenance_lock=self._maintenance_lock,
+        )
+        super().__init__(bot, am, cfg, settings, Mod_7D2D)
         self.act_err_threshold = 100
         if cfg.steam_update is not None and overhaul is None:
             self.updater = SteamCmd_Update_Manager(self)
@@ -2594,6 +2709,7 @@ class SevenDays(App[App_Config]):
         self._relay = TelnetClient(self.check_running, self._telnet_port)
         self._tail: Tailer | None = None
         self._tail_matchers: set[Callable[[str], Awaitable[None]]] = set()
+        self._console_response_matchers: set[Callable[[str], Awaitable[None]]] = set()
         self._server_ready = asyncio.Event()
         self._startup_sandbox_options_task: asyncio.Task[None] | None = None
         self._telnet_startup_error: str | None = None
@@ -2606,6 +2722,13 @@ class SevenDays(App[App_Config]):
 
     def detect_installed_version(self) -> AppVersion | None:
         return detect_sevendays_version(directory=self.cfg.directory, server_log=self.cfg.server_log_file)
+
+    @property
+    def version_display(self) -> str:
+        game_version = super().version_display
+        if self._overhaul_installation is None:
+            return game_version
+        return f"UL {self._overhaul_installation.version} · Game {game_version if game_version != 'none' else 'Unknown'}"
 
     @property
     def steam_update_supported(self) -> bool:
@@ -2662,7 +2785,10 @@ class SevenDays(App[App_Config]):
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
-        return self.available_console_actions(_SEVENDAYS_CONSOLE_ACTIONS)
+        actions = _SEVENDAYS_CONSOLE_ACTIONS
+        if self._overhaul_installation is not None:
+            actions += _UNDEAD_LEGACY_CONSOLE_ACTIONS
+        return self.available_console_actions(actions)
 
     @property
     def config_file_roots(self) -> tuple[AppConfigFileRoot, ...]:
@@ -3059,6 +3185,14 @@ class SevenDays(App[App_Config]):
         await self._cleanup_runtime_component("Telnet", self._relay.teardown)
 
     async def start(self) -> bool:
+        if self._overhaul_installation is None:
+            return await self._start()
+        if self._maintenance_lock.locked():
+            raise RuntimeError(_UNDEAD_LEGACY_BUSY_MESSAGE)
+        async with self._maintenance_lock:
+            return await self._start()
+
+    async def _start(self) -> bool:
         log.info(f"{__name__}.start")
         serverconfig_path = self.directory / "serverconfig.xml"
         if serverconfig_path.is_file():
@@ -3066,6 +3200,13 @@ class SevenDays(App[App_Config]):
             _ensure_serverconfig_join_port(serverconfig_path, self.cfg.join_port)
             if load_undead_legacy_installation(self.directory) is not None:
                 _ensure_serverconfig_property(serverconfig_path, property_name="EACEnabled", value="false")
+        if self._overhaul_installation is not None:
+            issues = await run_blocking(inspect_undead_legacy_installation, self.directory, game_version=self.cfg.version)
+            if issues:
+                raise RuntimeError(
+                    "Undead Legacy preflight failed. Use Check Undead Legacy / Repair Undead Legacy in Console. "
+                    + " ".join(issue.message for issue in issues)
+                )
         self._server_ready.clear()
         self._telnet_startup_error = None
         await self._configure_telnet_client()
@@ -3371,6 +3512,13 @@ class Matchers:
             )
 
 
+def _register_console_response_matchers(
+    app: SevenDays, *matchers: Callable[[str], Awaitable[None]],
+) -> None:
+    app._tail_matchers.update(matchers)
+    app._console_response_matchers.update(matchers)
+
+
 class Players:
     def __init__(self, app: SevenDays) -> None:
         self.app = app
@@ -3381,7 +3529,7 @@ class Players:
         self._read_telnet = False
         self._telnet_reader: asyncio.StreamReader | None = None
         self._response_tail: Tailer | None = None
-        app._tail_matchers.add(self.match_players)
+        _register_console_response_matchers(app, self.match_players)
 
     async def start(self, *, read_telnet: bool = False) -> None:
         if self._players_task and not self._players_task.done():
@@ -3434,9 +3582,9 @@ class Players:
             self._response_tail = None
         self._telnet_reader = None
         if reader is not None:
-            # The file tail already handles chat and activity; only consume player replies here.
+            # Chat notices come from the file tail; command replies need their own stream reader.
             self._response_tail = Tailer(self.app.check_running, reader)
-            await self._response_tail.start({self.match_players})
+            await self._response_tail.start(self.app._console_response_matchers)
             self._telnet_reader = reader
 
     async def _listplayers(self) -> None:
@@ -3492,11 +3640,9 @@ class Provider_Time(AppActivityProvider[SevenDays]):
 
     def __init__(self, app: SevenDays):
         super().__init__(app)
-        self._time = None
-        self._count = 0
+        self._time: tuple[int, int, int] | None = None
         self.stats: dict[str, GameStatValue] = {}
-        app._tail_matchers.add(self.match_time)
-        app._tail_matchers.add(self.match_stats)
+        _register_console_response_matchers(app, self.match_time, self.match_stats)
         self.task_funcs = (self._get_time, self._getgamestats)
 
     async def get(self) -> str | None:
@@ -3504,42 +3650,48 @@ class Provider_Time(AppActivityProvider[SevenDays]):
             return None
         day = self._time[0]
         hour = self._time[1]
-        zhm = self.stats.get("ZombieHordeMeter")
-        # 75% sure ZHM represents the setting which controls the day being coloured red in game on horde day
-        if zhm:
-            bmd = self.stats.get("BloodMoonDay")
-            bmw = self.stats.get("BloodMoonWarning")
-            if isinstance(bmd, int) and isinstance(bmw, int):
-                if day == bmd and hour >= bmw:
-                    return f"!D{day}/H{hour}"
+        blood_moon_day = self.stats.get("BloodMoonDay")
+        warning_hour = self.stats.get("BloodMoonWarning")
+        if type(blood_moon_day) is int and type(warning_hour) is int:
+            if day == blood_moon_day and 0 <= warning_hour <= hour:
+                return f"!D{day}/H{hour:02d}"
         return f"D{day}/H{hour:02d}"
 
     async def _get_time(self):
-        while True:
-            await asyncio.sleep(5)
-            await self.app._relay.send("gettime")
+        try:
+            while True:
+                if not await self.app._relay.send("gettime"):
+                    self._time = None
+                await asyncio.sleep(5)
+        finally:
+            self._time = None
 
-    async def match_time(self, line: str):
-        if not line.startswith("Day"):
+    async def match_time(self, line: str) -> None:
+        match = _SEVENDAYS_GAME_TIME_RE.fullmatch(line.strip())
+        if match is None:
             return
-        day, time = line.split(",")
-        day = day.split(" ")[-1].strip()
-        hour, minute = time.strip().split(":")
-        self._time = (int(day), int(hour), int(minute))
+        day, hour, minute = (int(match.group(key)) for key in ("day", "hour", "minute"))
+        if hour > 23 or minute > 59:
+            raise ValueError(f"Invalid 7D2D game time: {day}, {hour}:{minute}")
+        self._time = (day, hour, minute)
         if not config.SILENT_DEBUG:
             log.debug(f"Match_Time: {self._time}")
 
     async def _getgamestats(self):
-        while True:
-            await asyncio.sleep(60)
-            await self.app._relay.send("getgamestat")
+        try:
+            while True:
+                if not await self.app._relay.send("getgamestat"):
+                    self.stats.clear()
+                await asyncio.sleep(60)
+        finally:
+            self.stats.clear()
 
-    async def match_stats(self, line: str):
-        if not line.startswith("GameStat"):
+    async def match_stats(self, line: str) -> None:
+        match = _SEVENDAYS_GAME_STAT_RE.fullmatch(line.strip())
+        if match is None:
             return
-        stat = line.split(".", 1)[-1].replace(" ", "")
-        key, raw_value = stat.split("=", 1)
-        val = parse_gamestat_value(raw_value)
+        key = match.group("key")
+        val = parse_gamestat_value(match.group("value"))
 
         self.stats[key] = val
         if not config.SILENT_DEBUG:

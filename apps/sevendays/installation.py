@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 import hashlib
@@ -24,6 +24,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from _async_utils import run_blocking, run_blocking_cancellable
 from archive_safety import ZipArchiveLimits, validated_archive_member_path, validated_zip_entries
+from apps._config import AppVersion
+from apps._steam import parse_steam_keyvalues_mapping
 from safe_http import PublicAddressResolver, validate_public_http_url
 
 
@@ -59,18 +61,27 @@ _CACHE_FILENAME = re.compile(r"[a-f0-9]{64}(?:-[a-z0-9_]+)?\.(?:zip|part)\Z")
 _PACKAGE_ROOTS = frozenset({"Mods", "BepInEx", "doorstop_libs"})
 _SUPPORT_FILES = frozenset({"doorstop_config.ini", "run_bepinex.sh", "run_bepinex_server.sh", "winhttp.dll"})
 _DOCUMENTS = frozenset({"README.md", "LICENSE", ".gitattributes", ".gitignore"})
+_SHA256_PATTERN = r"^[a-f0-9]{64}$"
+_CORE_DLL = "Mods/UndeadLegacy/UndeadLegacy.dll"
 _MONO_RUNTIME_DIRECTORY = Path("7DaysToDieServer_Data/MonoBleedingEdge")
+_MONO_CONFIG = _MONO_RUNTIME_DIRECTORY / "etc/mono/config"
+_RUNTIME_CONFIGURATION_FILES = frozenset({_MONO_CONFIG.as_posix(), UNDEAD_LEGACY_LAUNCHER, "serverconfig.xml"})
+_MONO_LIBRARY_TARGETS = {
+    "dl": "libdl.so.2",
+    "System.Native": "libmono-native.so",
+    "System.Net.Security.Native": "libmono-native.so",
+}
 _REQUIRED_GAME_FILES = (
     Path("7DaysToDieServer.x86_64"),
     Path("UnityPlayer.so"),
-    _MONO_RUNTIME_DIRECTORY / "etc/mono/config",
+    _MONO_CONFIG,
     _MONO_RUNTIME_DIRECTORY / "x86_64/libmonobdwgc-2.0.so",
     _MONO_RUNTIME_DIRECTORY / "x86_64/libmono-native.so",
     _MONO_RUNTIME_DIRECTORY / "x86_64/libMonoPosixHelper.so",
 )
 _REQUIRED_FILES = (
     "Mods/UndeadLegacy/ModInfo.xml",
-    "Mods/UndeadLegacy/UndeadLegacy.dll",
+    _CORE_DLL,
     "Mods/UndeadLegacy/Resources/Subquake_Items.ulm",
     "Mods/UndeadLegacy/Resources/Subquake_Core.ulm",
     "Mods/UndeadLegacy/Resources/Subquake_Vehicles.ulm",
@@ -106,14 +117,30 @@ exec sh "$APP_DIR/run_bepinex.sh" "$APP_DIR/7DaysToDieServer.x86_64" \\
 '''
 
 
+class UndeadLegacyManagedFile(BaseModel):
+    path: str
+    size_bytes: int = Field(gt=0)
+    sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, path: str) -> str:
+        if path not in _REQUIRED_FILES:
+            raise ValueError("Unknown managed Undead Legacy file.")
+        return path
+
+
 class UndeadLegacyInstallation(BaseModel):
     """Portable provenance for one completed, managed overhaul installation."""
 
     profile: Literal["undead_legacy"] = "undead_legacy"
     version: str = Field(min_length=1)
     game_version: str = Field(min_length=1)
-    core_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    core_sha256: str = Field(pattern=_SHA256_PATTERN)
     mod_names: tuple[str, ...] = Field(min_length=1)
+    managed_files: tuple[UndeadLegacyManagedFile, ...] = ()
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -127,12 +154,203 @@ class UndeadLegacyInstallation(BaseModel):
                 raise ValueError("Overhaul components must be single folder names.")
         return names
 
+    @field_validator("managed_files")
+    @classmethod
+    def validate_managed_files(cls, files: tuple[UndeadLegacyManagedFile, ...]) -> tuple[UndeadLegacyManagedFile, ...]:
+        if files and {file.path for file in files} != set(_REQUIRED_FILES):
+            raise ValueError("Managed fingerprints must cover all required Undead Legacy files.")
+        if len({file.path for file in files}) != len(files):
+            raise ValueError("Managed Undead Legacy fingerprints must be unique.")
+        return files
+
+
+@dataclass(frozen=True, slots=True)
+class UndeadLegacyHealthIssue:
+    message: str
+    repairable: bool
+    package_file: Path | None = None
+
+
+def undead_legacy_download_cache_directory(*, root: Path, node_name: str) -> Path:
+    node_key = hashlib.sha256(node_name.encode("utf-8")).hexdigest()[:16]
+    return root / "app-install-downloads" / node_key
+
+
+def _file_sha256(pointer: Path) -> str:
+    with pointer.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def _is_git_lfs_pointer(pointer: Path) -> bool:
+    with pointer.open("rb") as source:
+        return source.read(128).startswith(b"version https://git-lfs.github.com/spec/v1")
+
+
+def _managed_path(resolved_directory: Path, relative: str | Path, *, allow_symlink: bool = True) -> Path:
+    pointer = resolved_directory / relative
+    if not pointer.resolve().is_relative_to(resolved_directory):
+        raise ValueError(f"Managed path escapes the installation: {relative}")
+    if not allow_symlink and pointer.is_symlink():
+        raise ValueError(f"Managed configuration must not be a symbolic link: {relative}")
+    return pointer
+
+
+def _managed_file_fingerprints(directory: Path) -> tuple[UndeadLegacyManagedFile, ...]:
+    files: list[UndeadLegacyManagedFile] = []
+    for relative in _REQUIRED_FILES:
+        pointer = directory / relative
+        digest = _file_sha256(pointer)
+        files.append(UndeadLegacyManagedFile(path=relative, size_bytes=pointer.stat().st_size, sha256=digest))
+    return tuple(files)
+
 
 def load_undead_legacy_installation(directory: Path) -> UndeadLegacyInstallation | None:
-    pointer = directory / UNDEAD_LEGACY_MANIFEST
-    if not pointer.exists():
+    pointer = _managed_path(directory.resolve(), UNDEAD_LEGACY_MANIFEST)
+    if not pointer.exists() and not pointer.is_symlink():
         return None
     return UndeadLegacyInstallation.model_validate_json(pointer.read_text(encoding="utf-8"))
+
+
+def inspect_undead_legacy_installation(
+    directory: Path,
+    *,
+    game_version: AppVersion | None,
+    deep: bool = False,
+) -> tuple[UndeadLegacyHealthIssue, ...]:
+    """Check managed files and launch requirements without changing the installation."""
+    installation = load_undead_legacy_installation(directory)
+    if installation is None:
+        raise ValueError("This instance is not a managed Undead Legacy installation.")
+    issues: list[UndeadLegacyHealthIssue] = []
+    resolved_directory = directory.resolve()
+    for relative in (*_REQUIRED_GAME_FILES, *_REQUIRED_FILES, UNDEAD_LEGACY_LAUNCHER, "serverconfig.xml"):
+        try:
+            _managed_path(resolved_directory, relative, allow_symlink=str(relative) not in _RUNTIME_CONFIGURATION_FILES)
+        except ValueError as error:
+            issues.append(UndeadLegacyHealthIssue(str(error), False))
+    if issues:
+        return tuple(issues)
+    manifest = directory / "steamapps/appmanifest_294420.acf"
+    if manifest.is_file():
+        try:
+            state = parse_steam_keyvalues_mapping(
+                manifest.read_text(encoding="utf-8"), source_label="7D2D Steam manifest"
+            ).get("AppState")
+            if not isinstance(state, Mapping):
+                raise ValueError("Missing AppState.")
+            user_config = state.get("MountedConfig", state.get("UserConfig"))
+            branch = (
+                next(
+                    (
+                        value
+                        for key, value in user_config.items()
+                        if isinstance(key, str) and key.casefold() == "betakey"
+                    ),
+                    "public",
+                )
+                if isinstance(user_config, Mapping)
+                else "public"
+            )
+            if not isinstance(branch, str) or not branch.strip():
+                raise ValueError("Invalid game branch.")
+            if branch != f"v{installation.game_version}":
+                issues.append(
+                    UndeadLegacyHealthIssue(
+                        f"Base game branch is {branch!r}; this UL release requires v{installation.game_version}. Restore the matching game runtime.",
+                        False,
+                    )
+                )
+        except (OSError, ValueError) as error:
+            issues.append(UndeadLegacyHealthIssue(f"Cannot read the base game Steam manifest: {error}", False))
+    elif game_version is None or game_version.main is None:
+        issues.append(
+            UndeadLegacyHealthIssue(
+                "Cannot verify the base game version: no Steam manifest or detected game version.",
+                False,
+            )
+        )
+    if game_version is not None and game_version.main is not None and game_version.main != installation.game_version:
+        issues.append(
+            UndeadLegacyHealthIssue(
+                f"Detected game {game_version.display_value}; this UL release requires {installation.game_version}.",
+                False,
+            )
+        )
+
+    fingerprints = {file.path: file for file in installation.managed_files}
+    if deep and not fingerprints:
+        issues.append(
+            UndeadLegacyHealthIssue(
+                "Per-file fingerprints are unavailable for this older installation. Run Repair Undead Legacy to establish them.",
+                True,
+            )
+        )
+    required_files = (
+        *((relative, False) for relative in _REQUIRED_GAME_FILES),
+        *((Path(relative), True) for relative in _REQUIRED_FILES),
+    )
+    for relative, repairable in required_files:
+        pointer = directory / relative
+        if not pointer.is_file() or pointer.stat().st_size == 0:
+            issues.append(UndeadLegacyHealthIssue(
+                f"Missing or empty required file: {relative}", repairable, relative if repairable else None,
+            ))
+            continue
+        if pointer.suffix == ".ulm" and _is_git_lfs_pointer(pointer):
+            issues.append(UndeadLegacyHealthIssue(f"Asset is a Git LFS placeholder: {relative}", True, relative))
+            continue
+        fingerprint = fingerprints.get(str(relative))
+        if fingerprint is not None and pointer.stat().st_size != fingerprint.size_bytes:
+            issues.append(UndeadLegacyHealthIssue(f"Required file has an unexpected size: {relative}", True, relative))
+            continue
+        expected_hash = (
+            installation.core_sha256
+            if str(relative) == _CORE_DLL
+            else (fingerprint.sha256 if deep and fingerprint is not None else None)
+        )
+        if expected_hash is not None:
+            digest = _file_sha256(pointer)
+            if digest != expected_hash:
+                issues.append(
+                    UndeadLegacyHealthIssue(
+                        f"Required file does not match the installed release: {relative}",
+                        True,
+                        relative,
+                    )
+                )
+
+    mono_config = directory / _MONO_CONFIG
+    if mono_config.is_file():
+        try:
+            root = ET.parse(mono_config).getroot()
+            for library, target in _MONO_LIBRARY_TARGETS.items():
+                maps = [node for node in root.findall("dllmap") if node.get("dll") == library]
+                if not maps or any(node.get("target") != target for node in maps):
+                    issues.append(UndeadLegacyHealthIssue(f"Mono library mapping needs repair: {library}", True))
+            if mono_config.read_bytes().startswith(b"<?xml"):
+                issues.append(UndeadLegacyHealthIssue("Mono configuration has an incompatible XML declaration.", True))
+        except (OSError, ET.ParseError) as error:
+            issues.append(
+                UndeadLegacyHealthIssue(
+                    f"Cannot read Mono configuration; restore the matching base game runtime: {error}",
+                    False,
+                )
+            )
+    launcher = directory / UNDEAD_LEGACY_LAUNCHER
+    if (
+        not launcher.is_file()
+        or launcher.read_bytes() != _LAUNCHER.encode("utf-8")
+        or not launcher.stat().st_mode & stat.S_IXUSR
+    ):
+        issues.append(UndeadLegacyHealthIssue("The managed Undead Legacy launcher is missing or modified.", True))
+    try:
+        serverconfig = ET.parse(directory / "serverconfig.xml").getroot()
+        eac_values = [node.get("value") for node in serverconfig.findall("property") if node.get("name") == "EACEnabled"]
+        if len(eac_values) != 1 or eac_values[0] is None or eac_values[0].casefold() != "false":
+            issues.append(UndeadLegacyHealthIssue("Undead Legacy requires one EACEnabled property set to false.", True))
+    except (OSError, ET.ParseError) as error:
+        issues.append(UndeadLegacyHealthIssue(f"Cannot read serverconfig.xml: {error}", False))
+    return tuple(issues)
 
 
 def sevendays_content_userdata_root(*, directory: Path, userdata_root: Path) -> Path:
@@ -234,13 +452,35 @@ def _archive_prefix(paths: tuple[PurePosixPath, ...]) -> tuple[str, ...]:
     return prefixes.pop()
 
 
-def _extract_overhaul_archives(archives: tuple[Path, ...], destination: Path, cancelled: Event) -> None:
+def _overhaul_member_target(path: PurePosixPath, prefix: tuple[str, ...]) -> PurePosixPath | None:
+    if path.parts[: len(prefix)] != prefix:
+        raise ValueError(f"Archive member is outside the overhaul package: {path}")
+    parts = path.parts[len(prefix) :]
+    if not parts:
+        return None
+    relative = PurePosixPath(*parts)
+    if parts[0] in _DOCUMENTS and len(parts) == 1:
+        return PurePosixPath(".yukibot", "undead-legacy-docs", parts[0])
+    if parts[0] not in _PACKAGE_ROOTS and relative.as_posix() not in _SUPPORT_FILES:
+        raise ValueError(f"Unsupported overhaul package member: {path}")
+    return relative
+
+
+def _extract_overhaul_archives(
+    archives: tuple[Path, ...],
+    destination: Path,
+    cancelled: Event,
+    *,
+    selected_files: frozenset[str] | None = None,
+) -> None:
     extracted_bytes = 0
     resolved_destination = destination.resolve()
     reserved_paths: dict[str, PurePosixPath] = {}
     for archive_path in archives:
         entries = validated_zip_entries(
-            archive_path, archive_label="Undead Legacy archive", limits=_ARCHIVE_LIMITS,
+            archive_path,
+            archive_label="Undead Legacy archive",
+            limits=_ARCHIVE_LIMITS,
             allow_windows_separators=True,
         )
         prefix = _archive_prefix(tuple(path for _, path in entries))
@@ -248,22 +488,21 @@ def _extract_overhaul_archives(archives: tuple[Path, ...], destination: Path, ca
         extracted_bytes += archive_bytes
         if extracted_bytes > _ARCHIVE_LIMITS.extracted_bytes:
             raise ValueError("The combined overhaul archives exceed the 16 GiB extracted-size limit.")
-        if shutil.disk_usage(destination).free < archive_bytes:
+        selected_bytes = sum(
+            member.file_size
+            for member, path in entries
+            if (relative := _overhaul_member_target(path, prefix)) is not None
+            and (selected_files is None or relative.as_posix() in selected_files)
+        )
+        if shutil.disk_usage(destination).free < selected_bytes:
             raise ValueError("Insufficient space to extract Undead Legacy.")
         with zipfile.ZipFile(archive_path) as archive:
             for member, path in entries:
                 if cancelled.is_set():
                     raise InterruptedError("Overhaul installation cancelled.")
-                if path.parts[:len(prefix)] != prefix:
-                    raise ValueError(f"Archive member is outside the overhaul package: {path}")
-                parts = path.parts[len(prefix):]
-                if not parts:
+                relative = _overhaul_member_target(path, prefix)
+                if relative is None:
                     continue
-                relative = PurePosixPath(*parts)
-                if parts[0] in _DOCUMENTS and len(parts) == 1:
-                    relative = PurePosixPath(".yukibot", "undead-legacy-docs", parts[0])
-                elif parts[0] not in _PACKAGE_ROOTS and relative.as_posix() not in _SUPPORT_FILES:
-                    raise ValueError(f"Unsupported overhaul package member: {path}")
                 if stat.S_ISLNK(member.external_attr >> 16):
                     raise ValueError(f"Overhaul archives must not contain symbolic links: {path}")
                 for index in range(1, len(relative.parts) + 1):
@@ -271,6 +510,8 @@ def _extract_overhaul_archives(archives: tuple[Path, ...], destination: Path, ca
                     previous = reserved_paths.setdefault(component.as_posix().casefold(), component)
                     if previous != component:
                         raise ValueError(f"Overhaul archive members differ only by case: {path}")
+                if selected_files is not None and relative.as_posix() not in selected_files:
+                    continue
                 target = destination.joinpath(*relative.parts)
                 if not target.resolve().is_relative_to(resolved_destination):
                     raise ValueError(f"Overhaul package member escapes the app directory: {path}")
@@ -280,7 +521,10 @@ def _extract_overhaul_archives(archives: tuple[Path, ...], destination: Path, ca
                         continue
                     target.parent.mkdir(parents=True, exist_ok=True)
                     existing = target.exists()
-                    with archive.open(member) as source, target.open("rb" if existing else "xb") as output:
+                    with (
+                        archive.open(member) as source,
+                        target.open("rb" if existing else "xb") as output,
+                    ):
                         while chunk := source.read(_COPY_CHUNK_BYTES):
                             if cancelled.is_set():
                                 raise InterruptedError("Overhaul installation cancelled.")
@@ -295,20 +539,25 @@ def _extract_overhaul_archives(archives: tuple[Path, ...], destination: Path, ca
                     raise ValueError(f"Overhaul package conflicts with an installed path: {path}") from xcp
 
 
-def _prepare_overhaul_files(directory: Path, archives: tuple[Path, ...], release: UndeadLegacyRelease, cancelled: Event) -> None:
-    _extract_overhaul_archives(archives, directory, cancelled)
+def _validate_overhaul_files(directory: Path, release: UndeadLegacyRelease) -> tuple[UndeadLegacyManagedFile, ...]:
     for relative in _REQUIRED_FILES:
         pointer = directory / relative
         if not pointer.is_file() or pointer.stat().st_size == 0:
             raise ValueError(f"The overhaul package is incomplete: missing {relative}")
-        if pointer.suffix == ".ulm":
-            with pointer.open("rb") as asset:
-                if asset.read(128).startswith(b"version https://git-lfs.github.com/spec/v1"):
-                    raise ValueError(f"The archive contains a Git LFS pointer instead of the required asset: {relative}")
-    with (directory / "Mods/UndeadLegacy/UndeadLegacy.dll").open("rb") as core:
-        core_hash = hashlib.file_digest(core, "sha256").hexdigest()
+        if pointer.suffix == ".ulm" and _is_git_lfs_pointer(pointer):
+            raise ValueError(
+                f"The archive contains a Git LFS pointer instead of the required asset: {relative}"
+            )
+    files = _managed_file_fingerprints(directory)
+    core_hash = next(file.sha256 for file in files if file.path == _CORE_DLL)
     if core_hash != release.core_sha256:
         raise ValueError(f"The overhaul archive does not match supported Undead Legacy {release.version}.")
+    return files
+
+
+def _prepare_overhaul_files(directory: Path, archives: tuple[Path, ...], release: UndeadLegacyRelease, cancelled: Event) -> None:
+    _extract_overhaul_archives(archives, directory, cancelled)
+    files = _validate_overhaul_files(directory, release)
     mod_names: list[str] = []
     for mod_directory in sorted((directory / "Mods").iterdir()):
         if mod_directory.is_dir() and mod_directory.name.startswith("UndeadLegacy"):
@@ -328,29 +577,26 @@ def _prepare_overhaul_files(directory: Path, archives: tuple[Path, ...], release
     (directory / "userdata").mkdir(exist_ok=True)
     _configure_undead_legacy_runtime(directory)
     manifest = UndeadLegacyInstallation(
-        version=release.version, game_version=release.game_version, core_sha256=core_hash,
-        mod_names=tuple(mod_names),
+        version=release.version, game_version=release.game_version, core_sha256=release.core_sha256,
+        mod_names=tuple(mod_names), managed_files=files,
     )
     manifest_path = directory / UNDEAD_LEGACY_MANIFEST
     manifest_path.parent.mkdir(exist_ok=True)
     manifest_path.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
 
 
-def _configure_undead_legacy_runtime(directory: Path) -> None:
+def _configure_undead_legacy_runtime(directory: Path, *, repair: bool = False) -> None:
     """Resolve bundled native libraries before Doorstop starts managed code."""
 
+    resolved_directory = directory.resolve()
+    launcher = _managed_path(resolved_directory, UNDEAD_LEGACY_LAUNCHER, allow_symlink=False)
     for relative in _REQUIRED_GAME_FILES:
-        pointer = directory / relative
+        pointer = _managed_path(resolved_directory, relative, allow_symlink=relative != _MONO_CONFIG)
         if not pointer.is_file() or pointer.stat().st_size == 0:
             raise ValueError(f"The 7D2D game runtime is incomplete: missing or empty {relative}")
-    mono_config = directory / _MONO_RUNTIME_DIRECTORY / "etc/mono/config"
+    mono_config = directory / _MONO_CONFIG
     mono_tree = ET.parse(mono_config)
-    library_targets = {
-        "dl": "libdl.so.2",
-        "System.Native": "libmono-native.so",
-        "System.Net.Security.Native": "libmono-native.so",
-    }
-    for library, target in library_targets.items():
+    for library, target in _MONO_LIBRARY_TARGETS.items():
         maps = [node for node in mono_tree.getroot().findall("dllmap") if node.get("dll") == library]
         if not maps:
             attributes = {"dll": library, "target": target}
@@ -359,13 +605,12 @@ def _configure_undead_legacy_runtime(directory: Path) -> None:
             ET.SubElement(mono_tree.getroot(), "dllmap", attributes)
         for node in maps:
             allowed_targets = {target} if library == "dl" else {target, f"$mono_libdir/{target}"}
-            if node.get("target") not in allowed_targets:
+            if not repair and node.get("target") not in allowed_targets:
                 raise ValueError(f"The installed Mono configuration has an incompatible {library} mapping.")
             # Doorstop loads before Unity establishes Mono's library root.
             node.set("target", target)
     # Unity's Mono ignores mappings when this file has an XML declaration.
     mono_tree.write(mono_config, encoding="utf-8", xml_declaration=False)
-    launcher = directory / UNDEAD_LEGACY_LAUNCHER
     launcher.write_text(_LAUNCHER, encoding="utf-8")
     launcher.chmod(0o755)
 
@@ -391,3 +636,98 @@ async def prepare_undead_legacy_install(
     report("Extracting and configuring Undead Legacy.")
     cancelled = Event()
     await run_blocking_cancellable(cancelled, _prepare_overhaul_files, directory, archives, release, cancelled)
+
+
+def _repair_runtime_configuration(directory: Path) -> None:
+    serverconfig = _managed_path(directory.resolve(), "serverconfig.xml", allow_symlink=False)
+    _configure_undead_legacy_runtime(directory, repair=True)
+    tree = ET.parse(serverconfig)
+    nodes = [node for node in tree.getroot().findall("property") if node.get("name") == "EACEnabled"]
+    if not nodes:
+        nodes = [ET.SubElement(tree.getroot(), "property", {"name": "EACEnabled"})]
+    nodes[0].set("value", "false")
+    for node in nodes[1:]:
+        tree.getroot().remove(node)
+    tree.write(serverconfig, encoding="utf-8", xml_declaration=True)
+
+
+def _repair_overhaul_files(
+    directory: Path,
+    archives: tuple[Path, ...],
+    installation: UndeadLegacyInstallation,
+    release: UndeadLegacyRelease,
+    cancelled: Event,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="ul-repair-", dir=directory / ".yukibot") as temporary:
+        staging = Path(temporary)
+        _extract_overhaul_archives(archives, staging, cancelled, selected_files=frozenset(_REQUIRED_FILES))
+        files = _validate_overhaul_files(staging, release)
+        resolved_directory = directory.resolve()
+        for file in files:
+            if cancelled.is_set():
+                raise InterruptedError("Undead Legacy repair cancelled.")
+            target = _managed_path(resolved_directory, file.path)
+            if target.is_file() and _file_sha256(target) == file.sha256:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            (staging / file.path).replace(target)
+        _repair_runtime_configuration(directory)
+        repaired = installation.model_copy(update={"managed_files": files})
+        staged_manifest = staging / "installation.json"
+        staged_manifest.write_text(repaired.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        staged_manifest.replace(directory / UNDEAD_LEGACY_MANIFEST)
+
+
+async def repair_undead_legacy_installation(
+    directory: Path,
+    *,
+    game_version: AppVersion | None,
+    cache_directory: Path,
+    report: Callable[[str], None],
+    release: UndeadLegacyRelease = UNDEAD_LEGACY_RELEASE,
+) -> None:
+    """Restore this release's managed files; preserve saves, mod configs, and add-ons."""
+    installation = load_undead_legacy_installation(directory)
+    if installation is None:
+        raise ValueError("This instance is not a managed Undead Legacy installation.")
+    if (installation.version, installation.game_version, installation.core_sha256) != (
+        release.version,
+        release.game_version,
+        release.core_sha256,
+    ):
+        raise ValueError("Repair is unavailable for this UL release; it will not install a different version.")
+    issues = await run_blocking(
+        inspect_undead_legacy_installation,
+        directory,
+        game_version=game_version,
+        deep=True,
+    )
+    unrepairable = tuple(issue.message for issue in issues if not issue.repairable)
+    if unrepairable:
+        raise ValueError("Repair requires attention to the base installation first: " + " ".join(unrepairable))
+    if not issues and installation.managed_files:
+        report("Undead Legacy is healthy; no files need repair.")
+        return
+    if installation.managed_files and not any(issue.package_file is not None for issue in issues):
+        report("Repairing Undead Legacy launch configuration.")
+        await run_blocking_cancellable(Event(), _repair_runtime_configuration, directory)
+    else:
+        await run_blocking(cleanup_install_downloads, cache_directory)
+        archives: list[Path] = []
+        for url in release.archive_urls:
+            archives.append(await _download_archive(url, cache_directory, report))
+        report("Restoring managed Undead Legacy files.")
+        cancelled = Event()
+        await run_blocking_cancellable(
+            cancelled,
+            _repair_overhaul_files,
+            directory,
+            tuple(archives),
+            installation,
+            release,
+            cancelled,
+        )
+    remaining = await run_blocking(inspect_undead_legacy_installation, directory, game_version=game_version)
+    if remaining:
+        raise ValueError("Repair incomplete: " + " ".join(issue.message for issue in remaining))
+    report("Undead Legacy repair completed.")

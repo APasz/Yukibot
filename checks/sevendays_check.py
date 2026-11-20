@@ -35,6 +35,7 @@ from apps.sevendays import (
     Matchers,
     Mod_7D2D,
     Players,
+    Provider_Time,
     Receiver,
     SevenDays,
     SevenDaysAdminAddRequest,
@@ -72,6 +73,7 @@ class _SevenDaysActivityAppStub:
         self.activity_manager = activity_manager
         self.name = "sevendays_alpha"
         self._tail_matchers: set[object] = set()
+        self._console_response_matchers: set[object] = set()
         self.providers: list[object] = []
 
     def set_activity_providers(self, providers: Sequence[object]) -> None:
@@ -1430,7 +1432,8 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         relay.send.return_value = True
         relay.reader = None
         app = cast(SevenDays, SimpleNamespace(
-            name="sevendays_udl", _tail_matchers=set(), _relay=relay, _tail=None, check_running=lambda: True,
+            name="sevendays_udl", _tail_matchers=set(), _console_response_matchers=set(),
+            _relay=relay, _tail=None, check_running=lambda: True,
         ))
         return Players(app)
 
@@ -1499,6 +1502,55 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
             await players.stop()
         self.assertIsNone(players._response_tail)
         self.assertIsNone(await players.count())
+
+    async def test_file_log_mode_routes_time_and_horde_replies_without_replaying_chat(self) -> None:
+        players = self._players()
+        clock = Provider_Time(players.app)
+        reader = asyncio.StreamReader()
+        players.app._relay.reader = reader
+        chat = AsyncMock()
+        players.app._tail_matchers.add(chat)
+        try:
+            await players.start(read_telnet=True)
+            reader.feed_data(
+                b"Max players: 8\nTotal of 2 in the game\nDay 14, 18:30\n"
+                b"GameStat.BloodMoonDay = 14\nGameStat.BloodMoonWarning = 8\n"
+                b"GameStat.ZombieHordeMeter = True\nChat: 'APasz': hello\n"
+            )
+            async with asyncio.timeout(2):
+                while await clock.get() != "!D14/H18":
+                    await asyncio.sleep(0.01)
+            self.assertEqual(await players.count(), (2, 8))
+            chat.assert_not_awaited()
+            second = asyncio.StreamReader()
+            players.app._relay.reader = second
+            await players._sync_response_reader()
+            second.feed_data(b"Day 15, 07:00\n")
+            async with asyncio.timeout(2):
+                while await clock.get() != "D15/H07":
+                    await asyncio.sleep(0.01)
+        finally:
+            await players.stop()
+
+    async def test_time_parser_accepts_timestamped_logs_and_ignores_chat(self) -> None:
+        clock = Provider_Time(self._players().app)
+        await clock.match_time("2026-11-20T10:00:00 123 INF Day 14, 18:30")
+        self.assertEqual(await clock.get(), "D14/H18")
+        await clock.match_time("Chat: 'APasz': Day 99, 12:00")
+        self.assertEqual(await clock.get(), "D14/H18")
+        await clock.match_stats("2026-11-20T10:00:00 123 INF GameStat.BloodMoonDay = 14")
+        self.assertEqual(clock.stats["BloodMoonDay"], 14)
+        with self.assertRaises(ValueError):
+            await clock.match_time("Day 14, 25:99")
+
+    async def test_blood_moon_warning_follows_the_announced_schedule(self) -> None:
+        clock = Provider_Time(self._players().app)
+        await clock.match_stats("GameStat.BloodMoonDay = 14")
+        await clock.match_stats("GameStat.ZombieHordeMeter = False")
+        for warning, hour, expected in ((8, 7, "D14/H07"), (8, 8, "!D14/H08"), (-1, 22, "D14/H22")):
+            await clock.match_stats(f"GameStat.BloodMoonWarning = {warning}")
+            await clock.match_time(f"Day 14, {hour:02d}:00")
+            self.assertEqual(await clock.get(), expected)
 
     async def test_reconnect_replaces_the_telnet_reply_reader(self) -> None:
         players = self._players()

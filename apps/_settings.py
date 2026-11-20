@@ -934,12 +934,19 @@ class Settings_Manager:
         self._prune_unsupported_drafts()
         actor_key = self._actor_key(actor_user_id)
         drafts = self._resolved_drafts(actor_user_id)
+        previous_values: list[tuple[Setting[Any], object]] = []
         for setting in self.app.options:
             draft_value = drafts.get(setting.key, hikari.UNDEFINED)
             if isinstance(draft_value, hikari.UndefinedType):
                 continue
+            previous_values.append((setting, setting.value))
             setting.value = cast(Any, draft_value)
-        self.app.save()
+        try:
+            self.app.save()
+        except Exception:
+            for setting, previous_value in previous_values:
+                setting.value = previous_value
+            raise
         self._drafts.pop(actor_key, None)
         self._prune_redundant_drafts()
         audit_log(

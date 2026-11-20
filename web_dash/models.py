@@ -2536,6 +2536,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             user=user,
             method="POST",
             json_payload={"value": raw_value},
+            timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
         )
         return NodeConsoleActionExecutionResult.from_mapping(payload)
 
