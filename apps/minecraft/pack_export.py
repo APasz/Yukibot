@@ -5,16 +5,19 @@ import enum
 import json
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from threading import Event
 
 import httpx
 
 import config
+from _async_utils import run_blocking_cancellable
 from _mod_ops import (
     ArchiveDataEntry,
     ArchiveEntry,
     ModArchiveEntry,
     WritableArchiveEntry,
     compress_archive_entries,
+    validate_archive_entries,
 )
 from apps._config import ClientPackKubeJsScript, ModSide
 
@@ -356,14 +359,12 @@ def _curseforge_entries(
     return (_json_entry("manifest.json", manifest), *archive_entries)
 
 
-async def export_minecraft_pack(
+async def _prepare_minecraft_pack_entries(
     entries: tuple[WritableArchiveEntry, ...],
     spec: MinecraftPackSpec,
-    archive_name: str,
     *,
     http: httpx.AsyncClient | None = None,
-    unique_output: bool = False,
-) -> Path:
+) -> tuple[WritableArchiveEntry, ...]:
     if not entries:
         raise MinecraftPackExportError("Minecraft pack requires at least one entry")
     _validate_purpose(entries, spec.purpose)
@@ -388,6 +389,33 @@ async def export_minecraft_pack(
                         await client.aclose()
         case PackFormat.CURSEFORGE:
             export_entries = _curseforge_entries(entries, spec)
+    return export_entries
+
+
+async def preflight_minecraft_pack(
+    entries: tuple[WritableArchiveEntry, ...],
+    spec: MinecraftPackSpec,
+    *,
+    http: httpx.AsyncClient | None = None,
+) -> None:
+    """Validate a launcher export without building a throwaway archive."""
+    export_entries = await _prepare_minecraft_pack_entries(entries, spec, http=http)
+    cancelled = Event()
+    try:
+        await run_blocking_cancellable(cancelled, validate_archive_entries, export_entries, cancelled=cancelled)
+    except OSError as xcp:
+        raise MinecraftPackExportError(f"Minecraft pack source could not be read: {xcp}") from xcp
+
+
+async def export_minecraft_pack(
+    entries: tuple[WritableArchiveEntry, ...],
+    spec: MinecraftPackSpec,
+    archive_name: str,
+    *,
+    http: httpx.AsyncClient | None = None,
+    unique_output: bool = False,
+) -> Path:
+    export_entries = await _prepare_minecraft_pack_entries(entries, spec, http=http)
     return await compress_archive_entries(
         export_entries,
         archive_name,

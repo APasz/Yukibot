@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection, Mapping
 from dataclasses import replace
 from functools import partial
 import hashlib
@@ -20,7 +20,7 @@ import pytest
 
 import config
 from _manager import AppDetailsUpdate, App_Manager
-from _mod_ops import ArchiveDataEntry, ClientPackSelection, ClientPackValidationError
+from _mod_ops import ArchiveDataEntry, ClientPackSelection, ClientPackValidationError, WritableArchiveEntry, client_pack_content_hash
 from archive_safety import ZipArchiveLimits, validated_zip_entries
 from apps._config import AppVersion, App_Config, Mod_Config, ModClassificationOverride, ModDownloadBlockReason, ModPlacement, ModType, SteamUpdateConfig
 from apps.sevendays import Mod_7D2D, SevenDays, SevenDays_Settings
@@ -920,6 +920,169 @@ def client_pack_service() -> NodeClientPackService:
         invalidate_app_state=lambda _name: None,
         invalidate_mod_inventory=lambda _name: None,
     )
+
+
+@pytest.fixture
+def content_hash_spy(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    spy = Mock(wraps=client_pack_content_hash)
+    monkeypatch.setattr(node_client_pack, "client_pack_content_hash", spy)
+    return spy
+
+
+def test_sevendays_hash_cache_reuses_verified_unchanged_content(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    content_hash_spy: Mock,
+) -> None:
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+    first = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    second = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+
+    assert second == first
+    content_hash_spy.assert_called_once()
+
+
+def test_sevendays_hash_cache_detects_same_size_edits_with_preserved_mtime(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    content_hash_spy: Mock,
+) -> None:
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+    first = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    target = client_pack_app.directory / "Mods/add-on/addon.dll"
+    before = target.stat()
+    target.write_bytes(b"x" * before.st_size)
+    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    second = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+
+    assert second != first
+    assert content_hash_spy.call_count == 2
+
+
+@pytest.mark.parametrize("change", ["add", "remove", "rename", "replace"])
+def test_sevendays_hash_cache_detects_file_layout_and_identity_changes(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    content_hash_spy: Mock,
+    change: Literal["add", "remove", "rename", "replace"],
+) -> None:
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+    first = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    target = client_pack_app.directory / "Mods/add-on/addon.dll"
+    if change == "add":
+        (target.parent / "new.ini").write_text("new content", encoding="utf-8")
+    elif change == "remove":
+        target.unlink()
+    elif change == "rename":
+        target.rename(target.with_suffix(".renamed.dll"))
+    else:
+        replacement = target.with_suffix(".replacement.dll")
+        replacement.write_bytes(target.read_bytes())
+        replacement.replace(target)
+
+    second = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+
+    assert (second == first) is (change == "replace")
+    assert content_hash_spy.call_count == 2
+
+
+def test_sevendays_hash_cache_tracks_pack_metadata_and_generated_files(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    content_hash_spy: Mock,
+) -> None:
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+    first = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    client_pack_app.cfg.notes = "Updated description"
+    second = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    changed_entries = tuple(
+        replace(entry, content=entry.content + b"updated")
+        if isinstance(entry, ArchiveDataEntry) else entry for entry in entries
+    )
+    third = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=changed_entries))
+
+    assert len({first, second, third}) == 3
+    assert content_hash_spy.call_count == 3
+
+
+def test_sevendays_hash_cache_reverifies_modified_managed_assets(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    content_hash_spy: Mock,
+) -> None:
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+    asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    target = client_pack_app.directory / "Mods/UndeadLegacy/Resources/Subquake_Items.ulm"
+    target.write_bytes(b"x" * target.stat().st_size)
+
+    with pytest.raises(ClientPackValidationError, match="does not match.*Subquake_Items.ulm"):
+        asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    assert content_hash_spy.call_count == 2
+
+
+def test_sevendays_hash_cache_tracks_expected_managed_file_digests(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    content_hash_spy: Mock,
+) -> None:
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+    asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    manifest = installation.require_undead_legacy_installation(client_pack_app.directory)
+    changed_files = tuple(
+        file.model_copy(update={"sha256": "0" * 64})
+        if file.path.endswith("Subquake_Items.ulm") else file for file in manifest.managed_files
+    )
+    changed_manifest = manifest.model_copy(update={"managed_files": changed_files})
+    (client_pack_app.directory / installation.UNDEAD_LEGACY_MANIFEST).write_text(
+        changed_manifest.model_dump_json(), encoding="utf-8",
+    )
+
+    with pytest.raises(ClientPackValidationError, match="does not match.*Subquake_Items.ulm"):
+        asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    assert content_hash_spy.call_count == 2
+
+
+def test_sevendays_hash_cache_rejects_new_symlinks(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+) -> None:
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+    asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    folder = client_pack_app.directory / "Mods/add-on"
+    (folder / "linked.dll").symlink_to(folder / "addon.dll")
+
+    with pytest.raises(ClientPackValidationError, match="symbolic links"):
+        asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+
+
+def test_sevendays_hash_cache_rejects_files_changed_during_hashing(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    content_hash_spy: Mock,
+) -> None:
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+
+    def mutate_after_hash(
+        entries: Collection[WritableArchiveEntry], *, format_name: str,
+        expected_file_hashes: Mapping[PurePosixPath, str] | None = None,
+        cancelled: Event | None = None,
+    ) -> str:
+        digest = client_pack_content_hash(
+            entries, format_name=format_name, expected_file_hashes=expected_file_hashes, cancelled=cancelled,
+        )
+        (client_pack_app.directory / "Mods/add-on/addon.dll").write_bytes(b"changed during hashing")
+        return digest
+
+    content_hash_spy.side_effect = mutate_after_hash
+    with pytest.raises(ClientPackValidationError, match="changed while hashing"):
+        asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+
+    content_hash_spy.side_effect = None
+    first = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    second = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    assert second == first
+    assert content_hash_spy.call_count == 2
 
 
 def test_ul_client_archive_is_a_complete_windows_game_root_overlay(

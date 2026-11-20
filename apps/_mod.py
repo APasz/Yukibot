@@ -581,21 +581,23 @@ class Mod_Manager:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self.db_path.write_text("", config.STR_ENCODE)
 
-    def _permit_lookup(self, trans: str, base: str, /) -> None:
+    @staticmethod
+    def _permit_lookup(lookup: dict[str, str], trans: str, base: str, /) -> None:
         if trans:
-            self._lookup[trans] = base
-            self._lookup[trans.lower()] = base
-            self._lookup[trans.upper()] = base
-            self._lookup[trans.title()] = base
-            self._lookup[trans.capitalize()] = base
-            self._lookup[trans.casefold()] = base
-            self._lookup[trans.swapcase()] = base
+            lookup[trans] = base
+            lookup[trans.lower()] = base
+            lookup[trans.upper()] = base
+            lookup[trans.title()] = base
+            lookup[trans.capitalize()] = base
+            lookup[trans.casefold()] = base
+            lookup[trans.swapcase()] = base
 
     def _rebuild_lookup(self) -> None:
-        self._lookup.clear()
+        lookup: dict[str, str] = {}
         for name, mod in self.index.items():
-            self._permit_lookup(mod.name, name)
-            self._permit_lookup(mod.friendly, name)
+            self._permit_lookup(lookup, mod.name, name)
+            self._permit_lookup(lookup, mod.friendly, name)
+        self._lookup = lookup
 
     def _make_slug(self, apps_dir: Path, db_path: Path | None = None):
         resolved = self.folder
@@ -760,7 +762,11 @@ class Mod_Manager:
         )
         return instance_config
 
-    async def load_mods(self):
+    async def load_mods(self) -> None:
+        await self._load_mods(self.index.copy())
+
+    async def _load_mods(self, mods: dict[str, Mod]) -> None:
+        """Prepare an inventory before making it visible to concurrent readers."""
         log.info(f"Loading mod DB for {self.app_name} from {self.db_path}")
         discovery_candidates = self._discovery_candidates()
         self._validate_discovery_conflicts(discovery_candidates)
@@ -781,12 +787,12 @@ class Mod_Manager:
                 mod = self.mod_cls(cfg)
                 mod.sync_metadata()
                 if self._mod_exists(mod):
-                    self.index[cfg.name] = mod
-                elif cfg.name in self.index:
-                    del self.index[cfg.name]
+                    mods[cfg.name] = mod
+                elif cfg.name in mods:
+                    del mods[cfg.name]
 
-        known_files = set(self.index)
-        known_candidate_names = {mod.storage_path.name for mod in self.index.values()}
+        known_files = set(mods)
+        known_candidate_names = {mod.storage_path.name for mod in mods.values()}
         for candidate, cfg in discovery_candidates:
             if candidate.name in known_candidate_names:
                 continue
@@ -796,13 +802,15 @@ class Mod_Manager:
             mod.sync_metadata()
             if not self._mod_exists(mod):
                 continue
-            self.index[mod.name] = mod
+            mods[mod.name] = mod
             known_files.add(mod.name)
             known_candidate_names.add(candidate.name)
 
-        self._migrate_shared_metadata(self.index.values())
-        await self.mod_cls.sync_external_metadata_batch(tuple(self.index.values()))
-        self._migrate_shared_metadata(self.index.values())
+        self._migrate_shared_metadata(mods.values())
+        await self.mod_cls.sync_external_metadata_batch(tuple(mods.values()))
+        self._migrate_shared_metadata(mods.values())
+        self.validate_client_pack_configuration(mods.values())
+        self.index = mods
         self._rebuild_lookup()
         await self.save_mods()
 
@@ -833,10 +841,8 @@ class Mod_Manager:
                     f"Client-pack choice group {group_name!r} requires exactly one default; found {default_count}"
                 )
 
-    async def reload_mods(self):
-        self.index.clear()
-        self._lookup.clear()
-        await self.load_mods()
+    async def reload_mods(self) -> None:
+        await self._load_mods({})
 
     async def add(
         self,

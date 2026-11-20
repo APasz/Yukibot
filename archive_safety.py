@@ -80,6 +80,7 @@ def validated_archive_member_path(member_name: str, *, archive_label: str) -> Pu
     path = PurePosixPath(member_name)
     if (
         not member_name
+        or not path.parts
         or "\x00" in member_name
         or "\\" in member_name
         or path.is_absolute()
@@ -90,30 +91,48 @@ def validated_archive_member_path(member_name: str, *, archive_label: str) -> Pu
     return path
 
 
+class ArchiveMemberLayoutValidator:
+    """Incrementally reject duplicate, conflicting, and nonportable member paths."""
+
+    def __init__(self, *, archive_label: str) -> None:
+        self._archive_label = archive_label
+        self._paths: dict[str, tuple[str, bool]] = {}
+        self._seen: set[str] = set()
+
+    def add(self, member_path: PurePosixPath, *, is_directory: bool) -> None:
+        rendered = member_path.as_posix()
+        validated_archive_member_path(rendered, archive_label=self._archive_label)
+        if len(member_path.parts) > _ARCHIVE_MAX_PATH_DEPTH:
+            raise ValueError(f"{self._archive_label} paths are nested too deeply.")
+        key = rendered.casefold()
+        if key in self._seen:
+            raise ValueError(f"{self._archive_label} contains duplicate paths: {member_path}")
+        self._seen.add(key)
+        prefix = ""
+        for index, part in enumerate(member_path.parts, start=1):
+            prefix = f"{prefix}/{part}" if prefix else part
+            prefix_is_directory = index < len(member_path.parts) or is_directory
+            prefix_key = prefix.casefold()
+            previous = self._paths.get(prefix_key)
+            if previous is None:
+                self._paths[prefix_key] = (prefix, prefix_is_directory)
+            elif previous != (prefix, prefix_is_directory):
+                raise ValueError(f"{self._archive_label} contains conflicting paths: {member_path}")
+
+
 def validate_archive_member_layout(
     members: Iterable[tuple[PurePosixPath, bool]], *, archive_label: str,
 ) -> None:
     """Reject duplicate, conflicting, case-ambiguous, and deeply nested paths."""
-    paths: dict[str, tuple[PurePosixPath, bool]] = {}
-    seen: set[str] = set()
-    for member_path, member_is_directory in members:
-        if len(member_path.parts) > _ARCHIVE_MAX_PATH_DEPTH:
-            raise ValueError(f"{archive_label} paths are nested too deeply.")
-        key = member_path.as_posix().casefold()
-        if key in seen:
-            raise ValueError(f"{archive_label} contains duplicate paths: {member_path}")
-        seen.add(key)
-        for index in range(1, len(member_path.parts) + 1):
-            path = PurePosixPath(*member_path.parts[:index])
-            is_directory = index < len(member_path.parts) or member_is_directory
-            previous = paths.setdefault(path.as_posix().casefold(), (path, is_directory))
-            if previous != (path, is_directory):
-                raise ValueError(f"{archive_label} contains conflicting paths: {member_path}")
+    validator = ArchiveMemberLayoutValidator(archive_label=archive_label)
+    for member_path, is_directory in members:
+        validator.add(member_path, is_directory=is_directory)
 
 
-def _check_archive_cancelled(cancelled: Event | None) -> None:
+def check_archive_cancelled(cancelled: Event | None) -> None:
+    """Stop an archive operation when its owning task has been cancelled."""
     if cancelled is not None and cancelled.is_set():
-        raise InterruptedError("Archive extraction cancelled.")
+        raise InterruptedError("Archive operation cancelled.")
 
 
 def validated_zip_entries(
@@ -164,12 +183,12 @@ def open_rar_archive(
     cancelled: Event | None = None,
 ) -> Generator[RarArchive]:
     """Give RAR backends a reusable path, without recopying a spool per member."""
-    _check_archive_cancelled(cancelled)
+    check_archive_cancelled(cancelled)
     member_count = 0
 
     def validate_header(member: _RarHeader) -> None:
         nonlocal member_count
-        _check_archive_cancelled(cancelled)
+        check_archive_cancelled(cancelled)
         if member.data_offset + member.add_size > archive_bytes:
             raise ValueError(f"{archive_label} contains truncated member data.")
         if (
@@ -203,7 +222,7 @@ def open_rar_archive(
                     ))
                     source.seek(0)
                     while chunk := source.read(_ARCHIVE_COPY_CHUNK_BYTES):
-                        _check_archive_cancelled(cancelled)
+                        check_archive_cancelled(cancelled)
                         temporary.write(chunk)
                     temporary.close()
                     archive_path = Path(temporary.name)
@@ -267,7 +286,7 @@ def extract_rar_entries(
     cancelled: Event | None = None,
 ) -> None:
     """Write validated members ourselves so the backend cannot create links or paths."""
-    _check_archive_cancelled(cancelled)
+    check_archive_cancelled(cancelled)
     if any(member.compress_type != rarfile.RAR_M0 for member, _path in entries):
         tool = cast(_RarTool, cast(object, rarfile.tool_setup()))
         command = tool.open_cmdline(None, archive.filename)
@@ -311,11 +330,11 @@ def _rar_decoder_stream(command: list[str], *, cancelled: Event | None) -> Gener
         try:
             yield stream
             extra_data = stream.read(1)
-            _check_archive_cancelled(cancelled)
+            check_archive_cancelled(cancelled)
             if extra_data:
                 raise ValueError("RAR decoder produced data beyond the declared member sizes.")
             return_code = process.wait()
-            _check_archive_cancelled(cancelled)
+            check_archive_cancelled(cancelled)
             if return_code != 0:
                 raise ValueError(f"RAR archive is damaged or uses unsupported compression (decoder exited {return_code}).")
         finally:
@@ -335,7 +354,7 @@ def _write_rar_entries(
     cancelled: Event | None,
 ) -> None:
     for member, path in entries:
-        _check_archive_cancelled(cancelled)
+        check_archive_cancelled(cancelled)
         target = destination.joinpath(*path.parts)
         try:
             if member.is_dir():
@@ -345,9 +364,9 @@ def _write_rar_entries(
             with (nullcontext(stream) if stream is not None else archive.open(member)) as source, target.open("xb") as output:
                 remaining_bytes = member.file_size
                 while remaining_bytes:
-                    _check_archive_cancelled(cancelled)
+                    check_archive_cancelled(cancelled)
                     chunk = source.read(min(_ARCHIVE_COPY_CHUNK_BYTES, remaining_bytes))
-                    _check_archive_cancelled(cancelled)
+                    check_archive_cancelled(cancelled)
                     if not chunk:
                         raise ValueError(f"RAR member size changed while extracting: {member.filename}")
                     output.write(chunk)

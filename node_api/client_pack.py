@@ -6,13 +6,17 @@ import asyncio
 import json
 import logging
 import struct
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from time import perf_counter
+from threading import Event
 
 from fastapi.responses import FileResponse
 
 import config
-from _async_utils import run_blocking
+from _async_utils import run_blocking, run_blocking_cancellable
 from _authority import AuthorityResource, read_json_object
 from _mod_ops import (
     ArchiveDataEntry,
@@ -25,6 +29,7 @@ from _mod_ops import (
     build_client_pack_entries,
     build_server_pack_entries,
     client_pack_content_hash,
+    client_pack_source_fingerprint,
     compress_mod_archive_entries,
     require_downloadable,
 )
@@ -48,6 +53,7 @@ from apps.minecraft.pack_export import (
     client_pack_kubejs_entries,
     discover_client_pack_kubejs_scripts,
     export_minecraft_pack,
+    preflight_minecraft_pack,
 )
 from apps.sevendays import SevenDays
 from apps.sevendays.client_pack import build_undead_legacy_client_pack_entries, undead_legacy_client_file_hashes
@@ -59,6 +65,12 @@ from .mod import (
     NodeDownloadRequest,
 )
 from .route_contracts import HttpExceptionFactory
+
+
+@dataclass(frozen=True, slots=True)
+class _ClientPackHashCache:
+    source_fingerprint: str
+    content_hash: str
 
 
 class NodeClientPackService:
@@ -79,10 +91,20 @@ class NodeClientPackService:
         self._invalidate_app_state = invalidate_app_state
         self._invalidate_mod_inventory = invalidate_mod_inventory
         self._client_pack_locks: dict[str, asyncio.Lock] = {}
+        self._client_pack_hash_cache: dict[str, _ClientPackHashCache] = {}
+        self._client_pack_hash_locks: dict[str, asyncio.Lock] = {}
         self._log = logging.getLogger(__name__)
 
     def _client_pack_lock(self, app_name: str) -> asyncio.Lock:
-        return self._client_pack_locks.setdefault(app_name, asyncio.Lock())
+        return self._app_lock(self._client_pack_locks, app_name)
+
+    @staticmethod
+    def _app_lock(locks: dict[str, asyncio.Lock], app_name: str) -> asyncio.Lock:
+        lock = locks.get(app_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[app_name] = lock
+        return lock
 
     async def content_hash(
         self,
@@ -107,12 +129,48 @@ class NodeClientPackService:
             undead_legacy_client_file_hashes(app.directory)
             if isinstance(app, SevenDays) and app.undead_legacy_installation is not None else None
         )
-        return await run_blocking(
-            client_pack_content_hash,
-            entries,
-            format_name=json.dumps(hash_context_payload, sort_keys=True),
-            expected_file_hashes=expected_file_hashes,
+        format_name = json.dumps(hash_context_payload, sort_keys=True)
+        async with self._app_lock(self._client_pack_hash_locks, app.name):
+            try:
+                cancelled = Event()
+                return await run_blocking_cancellable(
+                    cancelled, self._cached_content_hash,
+                    app_name=app.name,
+                    entries=entries,
+                    format_name=format_name,
+                    expected_file_hashes=expected_file_hashes,
+                    cancelled=cancelled,
+                )
+            except OSError as xcp:
+                raise ClientPackValidationError(f"Client-pack source could not be read: {xcp}") from xcp
+
+    def _cached_content_hash(
+        self,
+        *,
+        app_name: str,
+        entries: tuple[ArchiveEntry | ArchiveDataEntry, ...],
+        format_name: str,
+        expected_file_hashes: Mapping[PurePosixPath, str] | None,
+        cancelled: Event,
+    ) -> str:
+        fingerprint = client_pack_source_fingerprint(
+            entries, format_name=format_name, expected_file_hashes=expected_file_hashes, cancelled=cancelled,
         )
+        cached = self._client_pack_hash_cache.get(app_name)
+        if cached is not None and cached.source_fingerprint == fingerprint:
+            self._log.debug("Client-pack hash cache hit: app=%s", app_name)
+            return cached.content_hash
+
+        self._client_pack_hash_cache.pop(app_name, None)
+        content_hash = client_pack_content_hash(
+            entries, format_name=format_name, expected_file_hashes=expected_file_hashes, cancelled=cancelled,
+        )
+        if client_pack_source_fingerprint(
+            entries, format_name=format_name, expected_file_hashes=expected_file_hashes, cancelled=cancelled,
+        ) != fingerprint:
+            raise ClientPackValidationError("Client-pack source files changed while hashing; retry publication.")
+        self._client_pack_hash_cache[app_name] = _ClientPackHashCache(fingerprint, content_hash)
+        return content_hash
 
     @staticmethod
     def overrides_dir(app: App) -> Path | None:
@@ -289,9 +347,12 @@ class NodeClientPackService:
         if not app.mod_capabilities.supports_client_pack:
             raise http_exception(400, f"{app.friendly} does not support client pack generation.")
         manager = app.has_mod_manager
-        await manager.reload_mods()
         await acl.perm_check(actor_user_id, Power_Level.admin)
+        started_at = perf_counter()
         async with self._client_pack_lock(app.name):
+            lock_acquired_at = perf_counter()
+            await manager.reload_mods()
+            inventory_loaded_at = perf_counter()
             excluded_kubejs_scripts: tuple[str, ...] | None = None
             if update.metadata is not None and not isinstance(app, Minecraft):
                 raise http_exception(409, "Client-pack metadata is only supported for Minecraft apps.")
@@ -329,11 +390,15 @@ class NodeClientPackService:
         self._invalidate_app_state(app.name)
         self._invalidate_mod_inventory(app.name)
         self._log.info(
-            "Node API client-pack configuration updated: node=%s app=%s mods=%s actor=%s",
+            "Node API client-pack configuration updated: node=%s app=%s mods=%s actor=%s "
+            "wait_ms=%.1f reload_ms=%.1f total_ms=%.1f",
             self._node_name(),
             app.name,
             len(updated_mods),
             actor_user_id,
+            (lock_acquired_at - started_at) * 1000,
+            (inventory_loaded_at - lock_acquired_at) * 1000,
+            (perf_counter() - started_at) * 1000,
         )
         return {
             "app_name": app.name,
@@ -353,13 +418,18 @@ class NodeClientPackService:
         if not app.mod_capabilities.supports_client_pack:
             raise http_exception(400, f"{app.friendly} does not support client pack generation.")
         await acl.perm_check(actor_user_id, Power_Level.admin)
+        started_at = perf_counter()
         async with self._client_pack_lock(app.name):
+            lock_acquired_at = perf_counter()
             await app.has_mod_manager.reload_mods()
+            inventory_loaded_at = perf_counter()
             try:
                 entries = await run_blocking(
                     self.entries, ClientPackSelection(), app=app, include_kubejs_scripts=True,
                 )
+                entries_built_at = perf_counter()
                 content_hash = await self.content_hash(app=app, entries=entries)
+                content_hashed_at = perf_counter()
                 snapshots = self.default_mod_snapshots(app)
             except (
                 ClientPackValidationError,
@@ -385,12 +455,27 @@ class NodeClientPackService:
                     xcp,
                 )
                 raise http_exception(409, f"CurseForge client-pack preflight failed: {xcp}") from xcp
+            validated_at = perf_counter()
             version = app.publish_client_pack(
                 content_hash,
                 changelog=update.changelog,
                 mods=snapshots,
             )
+            published_at = perf_counter()
         self._invalidate_app_state(app.name)
+        self._log.info(
+            "Client-pack published: app=%s version=%s entries=%s actor=%s "
+            "wait_ms=%.1f reload_ms=%.1f prepare_ms=%.1f hash_ms=%.1f validate_ms=%.1f "
+            "persist_ms=%.1f total_ms=%.1f",
+            app.name, version, len(entries), actor_user_id,
+            (lock_acquired_at - started_at) * 1000,
+            (inventory_loaded_at - lock_acquired_at) * 1000,
+            (entries_built_at - inventory_loaded_at) * 1000,
+            (content_hashed_at - entries_built_at) * 1000,
+            (validated_at - content_hashed_at) * 1000,
+            (published_at - validated_at) * 1000,
+            (published_at - started_at) * 1000,
+        )
         return {
             "app_name": app.name,
             "published_version": version,
@@ -405,22 +490,15 @@ class NodeClientPackService:
     ) -> None:
         if not isinstance(app, Minecraft):
             return
-        archive_path: Path | None = None
-        try:
-            archive_path = await export_minecraft_pack(
-                entries,
-                self._minecraft_pack_spec(
-                    app=app,
-                    purpose=PackPurpose.CLIENT,
-                    pack_format=PackFormat.CURSEFORGE,
-                    version_id=app.cfg.client_pack_published_version or app.next_client_pack_version,
-                ),
-                f"{app.name}-curseforge-preflight",
-                unique_output=True,
-            )
-        finally:
-            if archive_path is not None:
-                archive_path.unlink(missing_ok=True)
+        await preflight_minecraft_pack(
+            entries,
+            self._minecraft_pack_spec(
+                app=app,
+                purpose=PackPurpose.CLIENT,
+                pack_format=PackFormat.CURSEFORGE,
+                version_id=app.cfg.client_pack_published_version or app.next_client_pack_version,
+            ),
+        )
 
     def _minecraft_pack_spec(
         self,
@@ -508,112 +586,120 @@ class NodeClientPackService:
                     request=request,
                     _publish_lock_held=True,
                 )
-        await app.has_mod_manager.reload_mods()
+        async with (nullcontext() if _publish_lock_held else self._client_pack_lock(app.name)):
+            await app.has_mod_manager.reload_mods()
 
-        capabilities = app.mod_capabilities
-        pack_purpose = request.resolved_pack_purpose
-        if request.publish_client_pack and pack_purpose is not PackPurpose.CLIENT:
-            raise http_exception(400, "Client-pack publication requires a client-pack request.")
-        if pack_purpose is PackPurpose.CLIENT:
-            if not capabilities.supports_client_pack:
-                raise http_exception(400, f"{app.friendly} does not support client pack generation.")
-            if app.cfg.client_pack_content_dirty and not request.publish_client_pack:
-                raise http_exception(409, "Client pack configuration has unpublished changes.")
-            if request.publish_client_pack and not (request.publish_changelog or "").strip():
-                raise http_exception(400, "Client pack publication requires a changelog.")
-            if request.pack_format is not PackFormat.GENERIC_ZIP and not capabilities.supports_launcher_formats:
-                raise http_exception(400, f"{app.friendly} does not support launcher pack formats.")
-        elif pack_purpose is None and not capabilities.supports_raw_download:
-            raise http_exception(400, f"{app.friendly} does not support raw mod downloads.")
+            capabilities = app.mod_capabilities
+            pack_purpose = request.resolved_pack_purpose
+            if request.publish_client_pack and pack_purpose is not PackPurpose.CLIENT:
+                raise http_exception(400, "Client-pack publication requires a client-pack request.")
+            if pack_purpose is PackPurpose.CLIENT:
+                if not capabilities.supports_client_pack:
+                    raise http_exception(400, f"{app.friendly} does not support client pack generation.")
+                if app.cfg.client_pack_content_dirty and not request.publish_client_pack:
+                    raise http_exception(409, "Client pack configuration has unpublished changes.")
+                if request.publish_client_pack and not (request.publish_changelog or "").strip():
+                    raise http_exception(400, "Client pack publication requires a changelog.")
+                if request.pack_format is not PackFormat.GENERIC_ZIP and not capabilities.supports_launcher_formats:
+                    raise http_exception(400, f"{app.friendly} does not support launcher pack formats.")
+            elif pack_purpose is None and not capabilities.supports_raw_download:
+                raise http_exception(400, f"{app.friendly} does not support raw mod downloads.")
 
-        if request.mod_name is not None:
-            mod = app.has_mod_manager.get(request.mod_name)
-            try:
-                require_downloadable(mod)
-            except NonDownloadableModError as xcp:
-                self._log.warning(
-                    "Node API blocked single mod download: app=%s mod=%s reason=%s",
+            if request.mod_name is not None:
+                mod = app.has_mod_manager.get(request.mod_name)
+                try:
+                    require_downloadable(mod)
+                except NonDownloadableModError as xcp:
+                    self._log.warning(
+                        "Node API blocked single mod download: app=%s mod=%s reason=%s",
+                        app.name,
+                        mod.name,
+                        xcp,
+                    )
+                    raise http_exception(403, str(xcp)) from xcp
+                download = await self.single_mod_download_file(
+                    app=app,
+                    mod=mod,
+                    http_exception=http_exception,
+                )
+                self._log.info(
+                    "Node API sending single mod: app=%s mod=%s path=%s archive=%s",
                     app.name,
                     mod.name,
-                    xcp,
+                    download.path,
+                    download.is_archive,
                 )
+                return FileResponse(path=download.path, filename=download.filename)
+
+            selected_mod_names: tuple[str, ...] | None = (
+                request.mod_names if request.selected_only or request.mod_names else None
+            )
+            if request.excluded_only:
+                if not request.selected_only:
+                    raise http_exception(400, "Excluded mod selection requires selected-only mode.")
+                if pack_purpose is not None:
+                    raise http_exception(
+                        400,
+                        "Excluded mod selection is only supported for raw mod downloads.",
+                    )
+                excluded_names = frozenset(request.mod_names)
+                for excluded_name in excluded_names:
+                    try:
+                        require_downloadable(app.has_mod_manager.get(excluded_name))
+                    except (KeyError, ModuleNotFoundError, NonDownloadableModError) as xcp:
+                        raise http_exception(400, f"Invalid excluded mod selection: {excluded_name}") from xcp
+                selected_mod_names = tuple(
+                    mod.name
+                    for mod in app.has_mod_manager.list_mods()
+                    if mod.downloadable and mod.name not in excluded_names
+                )
+
+            published_entries: tuple[ArchiveEntry | ArchiveDataEntry, ...] = ()
+            entries: tuple[ArchiveEntry | ArchiveDataEntry, ...]
+            try:
+                if pack_purpose is PackPurpose.CLIENT:
+                    entries = await run_blocking(
+                        self.entries,
+                        app=app,
+                        selection=ClientPackSelection(
+                            selected_mod_names=frozenset(selected_mod_names or ()),
+                            supplied=request.selected_only or bool(request.mod_names),
+                        ),
+                        include_kubejs_scripts=request.include_kubejs_scripts,
+                        include_servers_dat=request.include_servers_dat,
+                        include_options_txt=request.include_options_txt,
+                    )
+                    published_entries = await run_blocking(
+                        self.entries,
+                        app=app,
+                        selection=ClientPackSelection(),
+                        include_kubejs_scripts=True,
+                    )
+                elif pack_purpose is PackPurpose.SERVER:
+                    entries = build_server_pack_entries(app.has_mod_manager)
+                elif pack_purpose is PackPurpose.ADMIN:
+                    entries = build_admin_pack_entries(app.has_mod_manager)
+                else:
+                    entries = build_mod_download_entries(
+                        app.has_mod_manager,
+                        selected_mod_names,
+                        default_enabled_only=request.enabled_only,
+                    )
+            except NonDownloadableModError as xcp:
                 raise http_exception(403, str(xcp)) from xcp
-            download = await self.single_mod_download_file(
-                app=app,
-                mod=mod,
-                http_exception=http_exception,
-            )
-            self._log.info(
-                "Node API sending single mod: app=%s mod=%s path=%s archive=%s",
-                app.name,
-                mod.name,
-                download.path,
-                download.is_archive,
-            )
-            return FileResponse(path=download.path, filename=download.filename)
-
-        selected_mod_names: tuple[str, ...] | None = (
-            request.mod_names if request.selected_only or request.mod_names else None
-        )
-        if request.excluded_only:
-            if not request.selected_only:
-                raise http_exception(400, "Excluded mod selection requires selected-only mode.")
-            if pack_purpose is not None:
-                raise http_exception(
-                    400,
-                    "Excluded mod selection is only supported for raw mod downloads.",
+            except ClientPackValidationError as xcp:
+                raise http_exception(400, str(xcp)) from xcp
+            except ModuleNotFoundError as xcp:
+                raise http_exception(404, str(xcp)) from xcp
+            if not entries:
+                detail = self.empty_archive_detail(request)
+                self._log.warning(
+                    "Node API archive request had no paths: app=%s enabled_only=%s selected=%s",
+                    app.name,
+                    request.enabled_only,
+                    len(selected_mod_names) if selected_mod_names is not None else 0,
                 )
-            excluded_names = frozenset(request.mod_names)
-            for excluded_name in excluded_names:
-                try:
-                    require_downloadable(app.has_mod_manager.get(excluded_name))
-                except (KeyError, ModuleNotFoundError, NonDownloadableModError) as xcp:
-                    raise http_exception(400, f"Invalid excluded mod selection: {excluded_name}") from xcp
-            selected_mod_names = tuple(
-                mod.name
-                for mod in app.has_mod_manager.list_mods()
-                if mod.downloadable and mod.name not in excluded_names
-            )
-
-        entries: tuple[ArchiveEntry | ArchiveDataEntry, ...]
-        try:
-            if pack_purpose is PackPurpose.CLIENT:
-                entries = await run_blocking(
-                    self.entries,
-                    app=app,
-                    selection=ClientPackSelection(
-                        selected_mod_names=frozenset(selected_mod_names or ()),
-                        supplied=request.selected_only or bool(request.mod_names),
-                    ),
-                    include_kubejs_scripts=request.include_kubejs_scripts,
-                    include_servers_dat=request.include_servers_dat,
-                    include_options_txt=request.include_options_txt,
-                )
-            elif pack_purpose is PackPurpose.SERVER:
-                entries = build_server_pack_entries(app.has_mod_manager)
-            elif pack_purpose is PackPurpose.ADMIN:
-                entries = build_admin_pack_entries(app.has_mod_manager)
-            else:
-                entries = build_mod_download_entries(
-                    app.has_mod_manager,
-                    selected_mod_names,
-                    default_enabled_only=request.enabled_only,
-                )
-        except NonDownloadableModError as xcp:
-            raise http_exception(403, str(xcp)) from xcp
-        except ClientPackValidationError as xcp:
-            raise http_exception(400, str(xcp)) from xcp
-        except ModuleNotFoundError as xcp:
-            raise http_exception(404, str(xcp)) from xcp
-        if not entries:
-            detail = self.empty_archive_detail(request)
-            self._log.warning(
-                "Node API archive request had no paths: app=%s enabled_only=%s selected=%s",
-                app.name,
-                request.enabled_only,
-                len(selected_mod_names) if selected_mod_names is not None else 0,
-            )
-            raise http_exception(404, detail)
+                raise http_exception(404, detail)
 
         current_hash: str | None = None
         generated_pack_version: str | None = None
@@ -621,12 +707,6 @@ class NodeClientPackService:
         publication_changelog: str | None = None
         if pack_purpose is PackPurpose.CLIENT:
             try:
-                published_entries = await run_blocking(
-                    self.entries,
-                    app=app,
-                    selection=ClientPackSelection(),
-                    include_kubejs_scripts=True,
-                )
                 current_hash = await self.content_hash(app=app, entries=published_entries)
             except ClientPackValidationError as xcp:
                 raise http_exception(400, str(xcp)) from xcp

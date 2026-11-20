@@ -7,16 +7,19 @@ import uuid
 import zipfile
 from collections import Counter
 from collections.abc import Collection, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from threading import Event
+from typing import Never, Protocol
 
 import hikari
 
 import config
-from _async_utils import run_blocking
+from _async_utils import run_blocking_cancellable
 from _file import File_Utils
 from _security import Access_Control
+from archive_safety import ArchiveMemberLayoutValidator, check_archive_cancelled, validated_archive_member_path
 from apps._app import App
 from apps._config import (
     ClientPackPolicy,
@@ -67,6 +70,10 @@ class ArchiveDataEntry:
 type WritableArchiveEntry = ArchiveEntry | ArchiveDataEntry
 
 _ALREADY_COMPRESSED_ARCHIVE_SUFFIXES: frozenset[str] = frozenset({".jar", ".zip", ".mrpack"})
+# Chunk framing is part of the persisted client-pack hash format.
+_CLIENT_PACK_HASH_CHUNK_BYTES = 1024**2
+_ARCHIVE_COPY_CHUNK_BYTES = _CLIENT_PACK_HASH_CHUNK_BYTES
+_ZIP_MEMBER_NAME_MAX_BYTES = (1 << 16) - 1
 
 
 class _HashDigest(Protocol):
@@ -142,27 +149,31 @@ def _client_pack_manifest_metadata(entry: ModArchiveEntry) -> dict[str, object]:
     }
 
 
-def client_pack_content_hash(
+def _client_pack_hash(
     entries: Collection[WritableArchiveEntry],
     *,
     format_name: str,
+    hash_file_contents: bool,
     expected_file_hashes: Mapping[PurePosixPath, str] | None = None,
+    cancelled: Event | None = None,
 ) -> str:
     digest = hashlib.sha256()
+    if not hash_file_contents:
+        _update_content_hash(digest, b"client-pack-source-fingerprint-v1")
     _update_content_hash(digest, format_name.encode("utf-8"))
     seen_archive_roots: set[str] = set()
-    seen_archive_paths: set[str] = set()
-    expected_hashes = expected_file_hashes if expected_file_hashes is not None else {}
+    layout = ArchiveMemberLayoutValidator(archive_label="Client-pack archive")
+    expected_hashes: Mapping[PurePosixPath, str] = expected_file_hashes if expected_file_hashes is not None else {}
     unverified_paths = set(expected_hashes)
 
-    def reserve_archive_path(archive_path: PurePosixPath) -> None:
-        rendered = archive_path.as_posix()
-        key = rendered.casefold().rstrip("/")
-        if key in seen_archive_paths:
-            raise ClientPackValidationError(f"Duplicate client-pack archive member path: {rendered}")
-        seen_archive_paths.add(key)
+    def reserve_archive_path(archive_path: PurePosixPath, *, is_directory: bool = False) -> None:
+        try:
+            layout.add(archive_path, is_directory=is_directory)
+        except ValueError as xcp:
+            raise ClientPackValidationError(str(xcp)) from xcp
 
     for entry in sorted(entries, key=lambda item: item.archive_path.as_posix().casefold()):
+        check_archive_cancelled(cancelled)
         try:
             _validate_archive_path(entry.archive_path)
         except ValueError as xcp:
@@ -189,44 +200,59 @@ def client_pack_content_hash(
         source = entry.source_path
         if source.is_symlink():
             raise ClientPackValidationError(f"Client-pack entry cannot be a symbolic link: {source}")
-        if source.is_dir():
+        source_is_directory = source.is_dir()
+        if source_is_directory:
+            if not hash_file_contents:
+                _update_source_fingerprint(digest, source)
             directories: list[Path] = []
             files: list[Path] = []
-            for path in source.rglob("*"):
-                if path.is_symlink():
-                    raise ClientPackValidationError(
-                        f"Client-pack entry cannot contain symbolic links: {path}"
-                    )
-                if path.is_dir():
+            for root, directory_names, file_names in source.walk(on_error=_raise_archive_scan_error):
+                check_archive_cancelled(cancelled)
+                for name in directory_names:
+                    path = root / name
+                    if path.is_symlink():
+                        raise ClientPackValidationError(f"Client-pack entry cannot contain symbolic links: {path}")
                     directories.append(path)
-                if path.is_file():
+                for name in file_names:
+                    path = root / name
+                    if path.is_symlink():
+                        raise ClientPackValidationError(f"Client-pack entry cannot contain symbolic links: {path}")
+                    if not path.is_file():
+                        raise ClientPackValidationError(f"Unsupported client-pack source: {path}")
                     files.append(path)
-                elif not path.is_dir():
-                    raise ClientPackValidationError(f"Unsupported client-pack source: {path}")
             for path in sorted(directories, key=lambda item: item.as_posix()):
                 relative = PurePosixPath(path.relative_to(source).as_posix())
                 archive_path = entry.archive_path / relative
-                reserve_archive_path(archive_path)
+                reserve_archive_path(archive_path, is_directory=True)
                 _update_content_hash(digest, b"directory")
                 _update_content_hash(digest, archive_path.as_posix().encode("utf-8"))
+                if not hash_file_contents:
+                    _update_source_fingerprint(digest, path)
             files.sort(key=lambda path: path.as_posix())
         elif source.is_file():
             files = [source]
         else:
             raise ClientPackValidationError(f"Client-pack entry is missing: {source}")
         for path in files:
+            check_archive_cancelled(cancelled)
             archive_path = (
                 entry.archive_path_for_relative(PurePosixPath(path.relative_to(source).as_posix()))
-                if source.is_dir()
+                if source_is_directory
                 else entry.archive_path
             )
             reserve_archive_path(archive_path)
             _update_content_hash(digest, b"file")
             _update_content_hash(digest, archive_path.as_posix().encode("utf-8"))
             expected_hash = expected_hashes.get(archive_path)
+            if not hash_file_contents:
+                _update_source_fingerprint(digest, path)
+                _update_content_hash(digest, json.dumps(expected_hash).encode("utf-8"))
+                unverified_paths.discard(archive_path)
+                continue
             file_digest = hashlib.sha256() if expected_hash is not None else None
             with path.open("rb") as handle:
-                while chunk := handle.read(1024 * 1024):
+                while chunk := handle.read(_CLIENT_PACK_HASH_CHUNK_BYTES):
+                    check_archive_cancelled(cancelled)
                     _update_content_hash(digest, chunk)
                     if file_digest is not None:
                         file_digest.update(chunk)
@@ -238,6 +264,42 @@ def client_pack_content_hash(
         missing = ", ".join(str(path) for path in sorted(unverified_paths))
         raise ClientPackValidationError(f"Required client-pack files are missing: {missing}")
     return digest.hexdigest()
+
+
+def client_pack_content_hash(
+    entries: Collection[WritableArchiveEntry],
+    *,
+    format_name: str,
+    expected_file_hashes: Mapping[PurePosixPath, str] | None = None,
+    cancelled: Event | None = None,
+) -> str:
+    return _client_pack_hash(
+        entries, format_name=format_name, hash_file_contents=True, expected_file_hashes=expected_file_hashes,
+        cancelled=cancelled,
+    )
+
+
+def client_pack_source_fingerprint(
+    entries: Collection[WritableArchiveEntry],
+    *,
+    format_name: str,
+    expected_file_hashes: Mapping[PurePosixPath, str] | None = None,
+    cancelled: Event | None = None,
+) -> str:
+    """Identify an unchanged pack using its metadata and filesystem signatures."""
+    return _client_pack_hash(
+        entries, format_name=format_name, hash_file_contents=False, expected_file_hashes=expected_file_hashes,
+        cancelled=cancelled,
+    )
+
+
+def _update_source_fingerprint(digest: _HashDigest, path: Path) -> None:
+    stat = path.stat()
+    signature = (
+        path.absolute().as_posix(), stat.st_dev, stat.st_ino, stat.st_mode,
+        stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+    )
+    _update_content_hash(digest, json.dumps(signature, separators=(",", ":")).encode("utf-8"))
 
 
 def _update_content_hash(digest: _HashDigest, content: bytes) -> None:
@@ -411,18 +473,25 @@ def build_admin_pack_entries(manager: Mod_Manager) -> tuple[ModArchiveEntry, ...
 
 
 def _validate_archive_path(archive_path: PurePosixPath) -> None:
-    if archive_path.is_absolute() or not archive_path.parts or ".." in archive_path.parts:
-        raise ValueError(f"Invalid archive path: {archive_path}")
+    validated_archive_member_path(archive_path.as_posix(), archive_label="Archive")
 
 
 def _validate_archive_relative_path(relative_path: PurePosixPath) -> None:
-    if relative_path.is_absolute() or not relative_path.parts or ".." in relative_path.parts:
-        raise ValueError(f"Invalid archive relative path: {relative_path}")
+    validated_archive_member_path(relative_path.as_posix(), archive_label="Archive relative")
 
 
-def _write_mod_archive(entries: Collection[WritableArchiveEntry], archive_path: Path) -> None:
+def _raise_archive_scan_error(error: OSError) -> Never:
+    """Prevent unreadable directories from producing incomplete packs."""
+    raise error
+
+
+def _process_archive_entries(
+    entries: Collection[WritableArchiveEntry], *, archive_path: Path | None, cancelled: Event | None = None,
+) -> None:
+    """Validate members and optionally stream them into a ZIP using the same rules."""
     seen_archive_roots: set[str] = set()
     for entry in entries:
+        check_archive_cancelled(cancelled)
         _validate_archive_path(entry.archive_path)
         archive_root_key = entry.archive_path.as_posix().casefold()
         if archive_root_key in seen_archive_roots:
@@ -432,18 +501,17 @@ def _write_mod_archive(entries: Collection[WritableArchiveEntry], archive_path: 
             continue
         File_Utils.ensure_valid_path(entry.source_path)
         if entry.source_path.is_symlink():
-            raise ValueError(f"Archive source cannot be a symbolic link: {entry.source_path}")
+            raise ValueError(f"Archive source cannot use symbolic links: {entry.source_path}")
         if not entry.source_path.is_file() and not entry.source_path.is_dir():
             raise ValueError(f"Unsupported mod archive source: {entry.source_path}")
 
-    written_paths: set[str] = set()
+    layout = ArchiveMemberLayoutValidator(archive_label="Archive")
 
-    def reserve_archive_path(pointer: PurePosixPath) -> str:
-        rendered = pointer.as_posix()
-        key = rendered.casefold().rstrip("/")
-        if key in written_paths:
-            raise ValueError(f"Duplicate archive member path: {rendered}")
-        written_paths.add(key)
+    def reserve_archive_path(pointer: PurePosixPath, *, is_directory: bool = False) -> str:
+        layout.add(pointer, is_directory=is_directory)
+        rendered = pointer.as_posix() + ("/" if is_directory else "")
+        if len(rendered.encode("utf-8")) > _ZIP_MEMBER_NAME_MAX_BYTES:
+            raise ValueError("Archive member path exceeds the ZIP filename size limit.")
         return rendered
 
     def compression_for(archive_member_path: PurePosixPath) -> int:
@@ -451,23 +519,42 @@ def _write_mod_archive(entries: Collection[WritableArchiveEntry], archive_path: 
             return zipfile.ZIP_STORED
         return zipfile.ZIP_DEFLATED
 
-    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+    with (
+        zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED)
+        if archive_path is not None else nullcontext()
+    ) as archive:
+        def process_file(source: Path, member_path: PurePosixPath) -> None:
+            if source.is_symlink():
+                raise ValueError(f"Archive source cannot use symbolic links: {source}")
+            if not source.is_file():
+                raise ValueError(f"Unsupported mod archive source: {source}")
+            name = reserve_archive_path(member_path)
+            info = zipfile.ZipInfo.from_file(source, name)
+            if info.date_time[0] > 2107:
+                raise ValueError("ZIP timestamps must be between 1980 and 2107.")
+            if archive is not None:
+                info.compress_type = compression_for(member_path)
+                with source.open("rb") as source_file, archive.open(info, "w") as destination:
+                    while chunk := source_file.read(_ARCHIVE_COPY_CHUNK_BYTES):
+                        check_archive_cancelled(cancelled)
+                        destination.write(chunk)
+
         for entry in entries:
+            check_archive_cancelled(cancelled)
             if isinstance(entry, ArchiveDataEntry):
-                archive.writestr(reserve_archive_path(entry.archive_path), entry.content)
+                member_path = reserve_archive_path(entry.archive_path)
+                if archive is not None:
+                    archive.writestr(member_path, entry.content)
                 continue
             source_path = entry.source_path
             if source_path.is_file():
-                archive.write(
-                    source_path,
-                    reserve_archive_path(entry.archive_path),
-                    compress_type=compression_for(entry.archive_path),
-                )
+                process_file(source_path, entry.archive_path)
                 continue
 
             seen_directories: set[tuple[int, int]] = set()
-            for root, directories, files in source_path.walk(follow_symlinks=False):
-                root_path = Path(root)
+            for root, directories, files in source_path.walk(on_error=_raise_archive_scan_error):
+                check_archive_cancelled(cancelled)
+                root_path = root
                 stat = root_path.stat()
                 directory_key = (stat.st_dev, stat.st_ino)
                 if directory_key in seen_directories:
@@ -479,19 +566,28 @@ def _write_mod_archive(entries: Collection[WritableArchiveEntry], archive_path: 
                     source_directory = root_path / directory
                     if source_directory.is_symlink():
                         raise ValueError(f"Archive directory cannot contain symbolic links: {source_directory}")
-                    directory_path = PurePosixPath((archive_root / directory).as_posix().rstrip("/"))
-                    archive.writestr(reserve_archive_path(directory_path) + "/", "")
+                    directory_path = archive_root / directory
+                    member_path = reserve_archive_path(directory_path, is_directory=True)
+                    if archive is not None:
+                        archive.writestr(member_path, "")
                 for file_name in files:
                     source_file = root_path / file_name
-                    if source_file.is_symlink():
-                        raise ValueError(f"Archive directory cannot contain symbolic links: {source_file}")
                     relative_file = PurePosixPath(source_file.relative_to(source_path).as_posix())
                     archive_file = entry.archive_path_for_relative(relative_file)
-                    archive.write(
-                        source_file,
-                        reserve_archive_path(archive_file),
-                        compress_type=compression_for(archive_file),
-                    )
+                    process_file(source_file, archive_file)
+
+
+def validate_archive_entries(
+    entries: Collection[WritableArchiveEntry], *, cancelled: Event | None = None,
+) -> None:
+    """Apply archive layout and source validation without copying file contents."""
+    _process_archive_entries(entries, archive_path=None, cancelled=cancelled)
+
+
+def _write_mod_archive(
+    entries: Collection[WritableArchiveEntry], archive_path: Path, *, cancelled: Event | None = None,
+) -> None:
+    _process_archive_entries(entries, archive_path=archive_path, cancelled=cancelled)
 
 
 async def compress_archive_entries(
@@ -518,8 +614,9 @@ async def compress_archive_entries(
             raise FileExistsError(f"Mod archive already exists: {archive_path}")
         archive_path.unlink()
     try:
-        await run_blocking(_write_mod_archive, ordered_entries, archive_path)
-    except Exception:
+        cancelled = Event()
+        await run_blocking_cancellable(cancelled, _write_mod_archive, ordered_entries, archive_path, cancelled=cancelled)
+    except BaseException:
         archive_path.unlink(missing_ok=True)
         raise
     return archive_path

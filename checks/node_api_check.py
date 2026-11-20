@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
+from collections.abc import Collection, Mapping
 import json
 import struct
 import unittest
@@ -10,6 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 from typing import Any, cast, get_type_hints
 from unittest.mock import AsyncMock, Mock, call, patch
@@ -25,7 +27,7 @@ from modmux.models import Provider
 import config
 import node_api.service as node_api
 from _manager import AppStartBlocker, AppStartBlockerKind
-from _mod_ops import ArchiveDataEntry, ClientPackSelection
+from _mod_ops import ArchiveDataEntry, ArchiveEntry, ClientPackSelection, WritableArchiveEntry, client_pack_content_hash
 from _security import Access_Control, Power_Level
 from apps._app import (
     App,
@@ -429,7 +431,7 @@ class _DummySettingsApp(App_Settings):
         self.saved = True
 
 
-def _build_app(mod_manager: object) -> _DummyApp:
+def _build_app(mod_manager: object, *, running: bool = False) -> _DummyApp:
     app = object.__new__(_DummyApp)
     app.name = "minecraft_alpha"
     app.friendly = "Minecraft Alpha"
@@ -447,7 +449,7 @@ def _build_app(mod_manager: object) -> _DummyApp:
         apps_dir=Path("."),
         scope=app.scope,
     )
-    app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+    app.check_running = Mock(return_value=running)  # type: ignore[method-assign]
     return app
 
 
@@ -6534,7 +6536,7 @@ class NodeApiTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_update_client_pack_config_uses_admin_access_and_single_bulk_write(
+    def test_update_client_pack_config_while_running_uses_admin_access_and_single_bulk_write(
         self,
     ) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -6545,7 +6547,7 @@ class NodeApiTests(unittest.TestCase):
             manager = Mock()
             manager.reload_mods = AsyncMock()
             manager.update_client_pack_configs = AsyncMock(return_value=(alpha, beta))
-            app = _build_app(manager)
+            app = _build_app(manager, running=True)
             app.cfg.client_pack_current_hash = "a" * 64
             app.cfg.client_pack_published_hash = "a" * 64
             app.cfg.client_pack_published_version = "2026-07-03"
@@ -6610,6 +6612,74 @@ class NodeApiTests(unittest.TestCase):
         self.assertIs(raised.exception, acl_error)
         require_acl.assert_called_once_with()
         manager.reload_mods.assert_not_awaited()
+
+    def test_client_pack_configuration_checks_permission_before_loading_mods(self) -> None:
+        manager = Mock(reload_mods=AsyncMock())
+        acl = Mock(perm_check=AsyncMock(side_effect=PermissionError("Admin access required")))
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+        with self.assertRaises(PermissionError):
+            asyncio.run(service.update_client_pack_config(
+                app=_build_app(manager), update=NodeClientPackConfigUpdateRequest(mods=()), actor_user_id=42,
+            ))
+        manager.reload_mods.assert_not_awaited()
+
+    def test_client_pack_configuration_waits_for_publication_before_reloading_mods(self) -> None:
+        async def exercise() -> None:
+            manager = Mock(reload_mods=AsyncMock(), update_client_pack_configs=AsyncMock(return_value=()))
+            app = _build_app(manager)
+            acl = Mock(perm_check=AsyncMock())
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+            async with service._client_packs._client_pack_lock(app.name):
+                update = asyncio.create_task(service.update_client_pack_config(
+                    app=app, update=NodeClientPackConfigUpdateRequest(mods=()), actor_user_id=42,
+                ))
+                await asyncio.sleep(0.02)
+                manager.reload_mods.assert_not_awaited()
+            await update
+            manager.reload_mods.assert_awaited_once()
+        asyncio.run(exercise())
+
+    def test_mod_download_waits_for_publication_before_reloading_mods(self) -> None:
+        async def exercise() -> None:
+            manager = Mock(reload_mods=AsyncMock())
+            manager.list_mods.return_value = ()
+            app = _build_app(manager)
+            service = NodeApiService()
+            async with service._client_packs._client_pack_lock(app.name):
+                download = asyncio.create_task(service.build_mod_download_response(app=app, request=NodeDownloadRequest()))
+                await asyncio.sleep(0.02)
+                manager.reload_mods.assert_not_awaited()
+            with self.assertRaises(HTTPException) as raised:
+                await download
+            self.assertEqual(raised.exception.status_code, 404)
+            manager.reload_mods.assert_awaited_once()
+        asyncio.run(exercise())
+
+    def test_mod_download_releases_inventory_lock_before_building_archive(self) -> None:
+        async def exercise(root: Path) -> None:
+            source = root / "example.jar"
+            source.write_bytes(b"example")
+            mod = _TestMod(Mod_Config(name=source.name, directory=root))
+            manager = Mock(reload_mods=AsyncMock())
+            manager.list_mods.return_value = (mod,)
+            app = _build_app(manager)
+            service = NodeApiService()
+
+            async def compress(
+                entries: Collection[WritableArchiveEntry], archive_name: str, *, unique_output: bool,
+            ) -> Path:
+                del entries, archive_name, unique_output
+                self.assertFalse(service._client_packs._client_pack_lock(app.name).locked())
+                return root / "download.zip"
+
+            with patch("node_api.client_pack.compress_mod_archive_entries", side_effect=compress):
+                response = await service.build_mod_download_response(app=app, request=NodeDownloadRequest())
+            self.assertIsInstance(response, FileResponse)
+
+        with TemporaryDirectory() as temp_dir:
+            asyncio.run(exercise(Path(temp_dir)))
 
     def test_update_client_pack_config_persists_minecraft_kubejs_exclusions(
         self,
@@ -6887,6 +6957,7 @@ class NodeApiTests(unittest.TestCase):
 
     def test_minecraft_client_pack_content_hash_includes_pack_author(self) -> None:
         app = Mock(spec=Minecraft)
+        app.name = "minecraft_alpha"
         app.friendly = "Minecraft Alpha"
         app.cfg = SimpleNamespace(
             version=AppVersion(main="1.21.1", loader="fabric", framework="0.16.10"),
@@ -6911,6 +6982,76 @@ class NodeApiTests(unittest.TestCase):
         second_hash = asyncio.run(service.content_hash(app=cast(App, app), entries=entries))
 
         self.assertNotEqual(first_hash, second_hash)
+
+    def test_client_pack_hash_cache_is_shared_across_game_types_and_keeps_apps_separate(self) -> None:
+        service = NodeApiService()._client_packs
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "mod.bin"
+            source.write_bytes(b"mod content")
+            entries = (ArchiveEntry(source, PurePosixPath("mod.bin")),)
+            apps: list[App] = []
+            for app_type, scope in ((Minecraft, "minecraft"), (SevenDays, "sevendays")):
+                app = Mock(spec=app_type)
+                app.name = f"{scope}_alpha"
+                app.friendly = "Example Pack"
+                app.undead_legacy_installation = None
+                app.cfg = App_Config(
+                    name=app.name, instance_key="alpha", scope=scope,
+                    directory=root, apps_dir=root,
+                )
+                apps.append(cast(App, app))
+
+            with patch("node_api.client_pack.client_pack_content_hash", wraps=client_pack_content_hash) as compute:
+                first_hashes = tuple(asyncio.run(service.content_hash(app=app, entries=entries)) for app in apps)
+                cached_hashes = tuple(asyncio.run(service.content_hash(app=app, entries=entries)) for app in apps)
+
+            self.assertEqual(cached_hashes, first_hashes)
+            self.assertEqual(compute.call_count, len(apps))
+
+    def test_client_pack_hash_cache_coalesces_concurrent_requests_and_retains_cancelled_workers(self) -> None:
+        async def exercise(*, cancel_first: bool) -> None:
+            service = NodeApiService()._client_packs
+            app = _build_app(Mock())
+            entries = (ArchiveDataEntry(PurePosixPath("example.bin"), b"content"),)
+            started, release = Event(), Event()
+
+            def compute(
+                entries: Collection[WritableArchiveEntry], *, format_name: str,
+                expected_file_hashes: Mapping[PurePosixPath, str] | None = None,
+                cancelled: Event | None = None,
+            ) -> str:
+                started.set()
+                if not release.wait(timeout=2):
+                    raise TimeoutError("Test did not release hashing worker")
+                return client_pack_content_hash(
+                    entries, format_name=format_name, expected_file_hashes=expected_file_hashes, cancelled=cancelled,
+                )
+
+            with patch("node_api.client_pack.client_pack_content_hash", side_effect=compute) as calculate:
+                first = asyncio.create_task(service.content_hash(app=app, entries=entries))
+                second: asyncio.Task[str] | None = None
+                try:
+                    self.assertTrue(await asyncio.to_thread(started.wait, 1))
+                    if cancel_first:
+                        first.cancel()
+                    second = asyncio.create_task(service.content_hash(app=app, entries=entries))
+                    await asyncio.sleep(0.02)
+                    self.assertEqual(calculate.call_count, 1)
+                finally:
+                    release.set()
+                    tasks = (first,) if second is None else (first, second)
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                if cancel_first:
+                    self.assertIsInstance(results[0], asyncio.CancelledError)
+                else:
+                    self.assertEqual(results[0], results[1])
+                self.assertIsInstance(results[1], str)
+                self.assertEqual(calculate.call_count, 2 if cancel_first else 1)
+
+        for cancel_first in (False, True):
+            with self.subTest(cancel_first=cancel_first):
+                asyncio.run(exercise(cancel_first=cancel_first))
 
     def test_client_pack_changes_are_dirty_before_first_publication(self) -> None:
         app = _build_app(Mock())
@@ -6944,12 +7085,12 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 400)
 
-    def test_publish_client_pack_config_saves_default_pack_without_downloading(
+    def test_publish_client_pack_config_while_running_saves_default_pack_without_downloading(
         self,
     ) -> None:
         manager = Mock()
         manager.reload_mods = AsyncMock()
-        app = _build_app(manager)
+        app = _build_app(manager, running=True)
         acl = Mock()
         acl.perm_check = AsyncMock()
         service = NodeApiService()
@@ -7039,11 +7180,11 @@ class NodeApiTests(unittest.TestCase):
                 return_value=(),
             ),
             patch(
-                "node_api.client_pack.export_minecraft_pack",
+                "node_api.client_pack.preflight_minecraft_pack",
                 new=AsyncMock(
                     side_effect=MinecraftPackExportError("Unsupported CurseForge loader: unsupported")
                 ),
-            ) as export_pack,
+            ) as preflight_pack,
         ):
             with self.assertRaisesRegex(HTTPException, "CurseForge client-pack preflight failed") as raised:
                 asyncio.run(
@@ -7056,8 +7197,8 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         acl.perm_check.assert_awaited_once_with(42, Power_Level.admin)
-        export_pack.assert_awaited_once()
-        export_spec = export_pack.await_args.args[1]
+        preflight_pack.assert_awaited_once()
+        export_spec = preflight_pack.await_args.args[1]
         self.assertEqual(export_spec.format, PackFormat.CURSEFORGE)
         self.assertEqual(export_spec.purpose, PackPurpose.CLIENT)
         app.publish_client_pack.assert_not_called()

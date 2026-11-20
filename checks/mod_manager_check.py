@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from modmux.models import Provider
 
@@ -333,6 +334,45 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(reloaded.cfg.placement, ModPlacement.SERVER_DISABLED)
         self.assertEqual(reloaded.path.name, "example.zip.disabled")
         self.assertEqual(manager.list_names(False), ["example.zip"])
+
+    async def test_reload_keeps_previous_inventory_available_until_metadata_is_ready(self) -> None:
+        manager = self._build_manager()
+        original = await manager.add(self._write_source_file())
+        inventory = manager.index
+        metadata_started = asyncio.Event()
+        release_metadata = asyncio.Event()
+
+        async def sync_metadata(mods: tuple[Mod, ...]) -> None:
+            self.assertEqual(tuple(mod.name for mod in mods), (original.name,))
+            metadata_started.set()
+            await release_metadata.wait()
+
+        with patch.object(_FileMod, "sync_external_metadata_batch", side_effect=sync_metadata):
+            reload = asyncio.create_task(manager.reload_mods())
+            try:
+                await asyncio.wait_for(metadata_started.wait(), timeout=1)
+                self.assertIs(manager.index, inventory)
+                self.assertIs(manager.get(original.name), original)
+                self.assertEqual(manager.list_mods(), [original])
+            finally:
+                release_metadata.set()
+                await reload
+
+        self.assertIsNot(manager.index, inventory)
+        self.assertIsNot(manager.get(original.name), original)
+        self.assertEqual(inventory, {original.name: original})
+
+    async def test_interrupted_reload_preserves_previous_inventory(self) -> None:
+        manager = self._build_manager()
+        original = await manager.add(self._write_source_file())
+        inventory = manager.index
+        for error in (RuntimeError("metadata failed"), asyncio.CancelledError()):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(_FileMod, "sync_external_metadata_batch", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        await manager.reload_mods()
+                self.assertIs(manager.index, inventory)
+                self.assertIs(manager.get(original.name), original)
 
     async def test_set_enabled_is_idempotent_when_mod_is_already_enabled(self) -> None:
         manager = self._build_manager()

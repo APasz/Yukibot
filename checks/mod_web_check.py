@@ -14178,6 +14178,17 @@ class ModWebTests(unittest.TestCase):
                 self.javascript_calls.append(script)
 
         service = ModWebService()
+        runtime = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version=None,
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
         model = ModWebPageModel(
             node_name="yuki",
             app_name="minecraft_alpha",
@@ -14197,7 +14208,7 @@ class ModWebTests(unittest.TestCase):
                 configs=(),
             ),
             saves=None,
-            app_stats=None,
+            app_stats=runtime,
             app_start_blocked=False,
             settings=None,
             console_actions=None,
@@ -14225,7 +14236,7 @@ class ModWebTests(unittest.TestCase):
                     ),
                     self._mod_entry(name="beta-forge.jar", friendly="Beta Forge"),
                 ),
-                app_stats=None,
+                app_stats=runtime,
             ),
             download_all_url="/mods/download",
             download_enabled_url="/mods/download?enabled_only=true",
@@ -14401,6 +14412,7 @@ class ModWebTests(unittest.TestCase):
             changelog_handler(SimpleNamespace(value="Persisted after Save."))
             ui.checkboxes["server_scripts/events.js"].value = False
             save_button = next(button for button in ui.buttons if button.text == "Save")
+            self.assertTrue(save_button.enabled)
             self.assertIsNotNone(save_button.on_click)
             assert save_button.on_click is not None
             asyncio.run(cast(Any, save_button.on_click()))
@@ -14455,6 +14467,7 @@ class ModWebTests(unittest.TestCase):
             changelog_handler(SimpleNamespace(value="Shared draft notes."))
             remote_json.reset_mock()
             publish_button = next(button for button in ui.buttons if button.text == "Publish")
+            self.assertTrue(publish_button.enabled)
             self.assertIsNotNone(publish_button.on_click)
             assert publish_button.on_click is not None
             asyncio.run(cast(Any, publish_button.on_click()))
