@@ -30,7 +30,7 @@ from _discord import (
     RelayOutboundFormatOptions,
     render_plain_reference_prefix,
 )
-from _file import File_Utils
+from _file import File_Utils, atomic_write_files
 from _security import Power_Level
 from apps._app import (
     AM_Receiver,
@@ -2521,19 +2521,41 @@ class SevenDays_Settings(App_Settings):
         swap_setting = self._setting_for_key(swap_definition.key)
         super().apply_draft_update(setting=swap_setting, value=current_value, drafts=drafts)
 
+    @staticmethod
+    def _load_serverconfig_setting[T](setting: Setting[T], raw_value: str | None) -> None:
+        if raw_value is None:
+            raise ValueError(f"7D2D setting {setting.key!r} is missing its value.")
+        try:
+            setting.load_value(raw_value)
+        except ValueError:
+            if raw_value.strip():
+                raise
+            setting.value = setting.default
+            log.warning(
+                "7D2D stored setting was blank; keeping default: key=%s label=%s",
+                setting.key,
+                setting.label,
+            )
+
     def load(self) -> None:
         data = ET.parse(self.pointer).getroot().findall("property")
         settings_by_key = {setting.key: setting for setting in super().options}
-        seen_ul_keys: set[str] = set()
+        seen_keys: set[str] = set()
         for setting in settings_by_key.values():
-            if setting.group is SevenDaysSettingGroup.UNDEAD_LEGACY:
-                setting.value = setting.default
+            setting.value = setting.default
 
         stored_world: str | None = None
         stored_name: str | None = None
         for element in data:
             property_name = element.attrib.get("name")
             raw_value = element.attrib.get("value")
+            opt = settings_by_key.get(property_name) if property_name is not None else None
+            if opt is None:
+                continue
+            if opt.key in seen_keys:
+                label = "Undead Legacy" if opt.group is SevenDaysSettingGroup.UNDEAD_LEGACY else "7D2D"
+                raise ValueError(f"Duplicate {label} setting in serverconfig.xml: {opt.key}")
+            seen_keys.add(opt.key)
             if property_name == _SEVENDAYS_GAME_WORLD_SETTING_KEY:
                 stored_world = raw_value
                 continue
@@ -2542,27 +2564,7 @@ class SevenDays_Settings(App_Settings):
                     raise ValueError("7D2D setting GameName is missing its value.")
                 stored_name = raw_value
                 continue
-            opt = settings_by_key.get(property_name) if property_name is not None else None
-            if opt is None:
-                continue
-            if opt.group is SevenDaysSettingGroup.UNDEAD_LEGACY:
-                if opt.key in seen_ul_keys:
-                    raise ValueError(f"Duplicate Undead Legacy setting in serverconfig.xml: {opt.key}")
-                seen_ul_keys.add(opt.key)
-            if raw_value is None:
-                raise ValueError(f"7D2D setting {opt.key!r} is missing its value.")
-            try:
-                opt.load_value(raw_value)
-            except ValueError:
-                if raw_value.strip():
-                    raise
-                opt.value = opt.default
-                log.warning(
-                    "7D2D stored setting was blank; keeping default: key=%s label=%s default=%s",
-                    opt.key,
-                    opt.label,
-                    opt.serialise_value(),
-                )
+            self._load_serverconfig_setting(opt, raw_value)
 
         world_setting = self._setting_for_key(_SEVENDAYS_GAME_WORLD_SETTING_KEY)
         name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
@@ -2630,19 +2632,29 @@ class SevenDays_Settings(App_Settings):
         tree = ET.parse(self.pointer)
         root = tree.getroot()
         data = root.findall("property")
-        values_by_key = {setting.key: setting.serialise_value() for setting in super().options}
-        values_by_key.update(server_world_values)
+        settings_by_key = {setting.key: setting for setting in super().options if setting.key not in _TRADER_BIOME_KEYS}
+        seen_keys: set[str] = set()
         for element in data:
             property_name = element.attrib.get("name")
-            if property_name is not None and property_name in values_by_key:
-                element.attrib["value"] = values_by_key[property_name]
+            setting = settings_by_key.get(property_name) if property_name is not None else None
+            if setting is not None:
+                if setting.key in seen_keys:
+                    raise ValueError(f"Duplicate 7D2D setting in serverconfig.xml: {setting.key}")
+                seen_keys.add(setting.key)
+            if setting is not None and setting.key not in server_world_values:
+                if isinstance(setting.value, hikari.UndefinedType):
+                    # Version discovery can expose settings skipped during the initial load.
+                    self._load_serverconfig_setting(setting, element.attrib.get("value"))
+                element.attrib["value"] = setting.serialise_value()
         for property_name, value in server_world_values.items():
             _set_serverconfig_property(root, property_name=property_name, value=value)
         stored_keys = {element.get("name") for element in data}
-        for setting in super().options:
-            if setting.group is SevenDaysSettingGroup.UNDEAD_LEGACY and (
-                setting.key in stored_keys or setting.value != setting.default
-            ):
+        for setting in settings_by_key.values():
+            if setting.key in server_world_values or setting.key in stored_keys:
+                continue
+            if isinstance(setting.value, hikari.UndefinedType):
+                setting.value = setting.default
+            if setting.value != setting.default:
                 _set_serverconfig_property(root, property_name=setting.key, value=setting.serialise_value())
         _set_serverconfig_property(
             root,
@@ -2662,8 +2674,10 @@ class SevenDays_Settings(App_Settings):
             if element is None:
                 raise ValueError(f"rwgmixer.xml is missing prefab_spawn_adjust for {definition.partial_name}")
             element.attrib["biomeTags"] = setting.value
-        tree.write(self.pointer, encoding=config.STR_ENCODE)
-        rwg_tree.write(self.rwgmixer_pointer, encoding=config.STR_ENCODE)
+        atomic_write_files({
+            self.pointer: ET.tostring(root, encoding=config.STR_ENCODE),
+            self.rwgmixer_pointer: ET.tostring(rwg_root, encoding=config.STR_ENCODE),
+        })
         name_setting.value = game_name
         return root.findall("property")
 
@@ -3404,11 +3418,14 @@ class Matchers:
         app._tail_matchers.add(self.match_sandbox_options)
 
     async def match_version(self, line: str) -> None:
-        if match := _SEVENDAYS_VERSION_RE.search(line):
-            self.app.apply_version(_app_version_from_sevendays_text(match.group("version").strip()), persist=True)
+        match = _SEVENDAYS_VERSION_RE.search(line) or _SEVENDAYS_GAME_VERSION_RE.search(line)
+        if match is None:
             return
-        if match := _SEVENDAYS_GAME_VERSION_RE.search(line):
-            self.app.apply_version(match.group("version"), persist=True)
+        version = _app_version_from_sevendays_text(match.group("version").strip())
+        current_version = self.app.cfg.version
+        if version.build is None and current_version is not None and current_version.main == version.main:
+            return
+        self.app.apply_version(version, persist=True)
 
     async def match_ready(self, line: str) -> None:
         if _SEVENDAYS_READY_RE.search(line):

@@ -36,7 +36,7 @@ from _discord import (
     URLVariant,
     render_plain_reference_prefix,
 )
-from _file import File_Utils
+from _file import File_Utils, atomic_write_files
 from _minecraft_heads import minecraft_avatar_uri
 from _security import Power_Level
 from apps._app import (
@@ -82,6 +82,7 @@ from apps._settings import (
     StringSettingSpec,
 )
 from apps._tailer import Tailer
+from apps.minecraft.properties import parse_properties, replace_properties
 from config import Activity_Manager
 from relay_notices import (
     GameDeathKind,
@@ -1903,14 +1904,7 @@ def _parse_optional_server_int(raw: str | None, *, key: str) -> int | None:
 
 
 def _load_server_properties_map(pointer: Path) -> dict[str, str]:
-    properties: dict[str, str] = {}
-    for line in pointer.read_text(config.STR_ENCODE).splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        properties[key.strip()] = value.strip()
-    return properties
+    return {entry.key: entry.value for entry in parse_properties(pointer.read_text(config.STR_ENCODE))}
 
 
 def _describe_secret_state(raw: str | None) -> str:
@@ -3157,6 +3151,7 @@ class Minecraft_Settings(App_Settings):
             binding.setting.key.casefold(): binding for binding in self._computer_craft_bindings
         }
         self._loaded_computer_craft_pointer: Path | None = None
+        self._loaded_computer_craft_values: dict[str, _ComputerCraftTomlScalar] = {}
         options = [
             Setting[int](
                 IntSettingSpec(),
@@ -3270,7 +3265,7 @@ class Minecraft_Settings(App_Settings):
                 default="easy",
             ),
         ]
-        self._server_setting_keys = frozenset(setting.key.casefold() for setting in options)
+        self._server_setting_keys = frozenset(setting.key for setting in options)
         options.extend(binding.setting for binding in self._computer_craft_bindings)
         super().__init__(pointer, options, version_getter=version_getter)
 
@@ -3283,13 +3278,13 @@ class Minecraft_Settings(App_Settings):
 
     @property
     def _computer_craft_available(self) -> bool:
-        return self._loaded_computer_craft_pointer is not None or self._computer_craft_config_path().is_file()
+        return self._loaded_computer_craft_pointer == self._computer_craft_config_path()
 
     def _computer_craft_config_path(self) -> Path:
         level_name = "world"
         level_name_setting = self._settings_by_key.get("level-name")
         if level_name_setting is not None and isinstance(level_name_setting.value, str):
-            level_name = level_name_setting.value.strip() or level_name
+            level_name = level_name_setting.value
         return self.pointer.parent / level_name / "serverconfig" / _COMPUTERCRAFT_CONFIG_FILE_NAME
 
     def get_setting(self, ident: str) -> Setting | None:
@@ -3305,18 +3300,22 @@ class Minecraft_Settings(App_Settings):
         if not data:
             raise ValueError("config must not be empty")
 
-        for line in data.splitlines():
-            key, separator, value = line.partition("=")
-            if not separator or key.lstrip().startswith("#"):
+        for setting in self._options:
+            setting.value = setting.default
+        seen_keys: set[str] = set()
+        for entry in parse_properties(data):
+            if entry.key not in self._server_setting_keys:
                 continue
-            setting = self._settings_by_key.get(key.strip().casefold())
-            if setting is None or setting.key.casefold() not in self._server_setting_keys:
-                continue
-            setting.load_value(value.strip())
+            setting = self._settings_by_key[entry.key]
+            if setting.key in seen_keys:
+                raise ValueError(f"Duplicate Minecraft server property: {setting.key}")
+            seen_keys.add(setting.key)
+            setting.load_value(entry.value if setting.value_type is str else entry.value.strip())
 
         computer_craft_pointer = self._computer_craft_config_path()
-        self._loaded_computer_craft_pointer = None
         if not computer_craft_pointer.is_file():
+            self._loaded_computer_craft_pointer = None
+            self._loaded_computer_craft_values = {}
             return
 
         computer_craft_data = cast(
@@ -3326,41 +3325,52 @@ class Minecraft_Settings(App_Settings):
             value = _computer_craft_toml_value(computer_craft_data, binding.target)
             binding.setting.load_value(_toml_scalar_to_text(value))
         self._loaded_computer_craft_pointer = computer_craft_pointer
+        self._loaded_computer_craft_values = self._computer_craft_values()
+
+    def _computer_craft_values(self) -> dict[str, _ComputerCraftTomlScalar]:
+        return {binding.setting.key: binding.setting.require_value() for binding in self._computer_craft_bindings}
 
     def save(self) -> str:
         data: str = self.pointer.read_text(config.STR_ENCODE)
         if not data:
             raise ValueError("config must not be empty")
 
-        lines: list[str] = data.split("\n")
-        for idx, line in enumerate[str](lines):
-            key, separator, _ = line.partition("=")
-            if not separator or key.lstrip().startswith("#"):
-                continue
-            setting = self._settings_by_key.get(key.strip().casefold())
-            if setting is None or setting.key.casefold() not in self._server_setting_keys:
-                continue
-            lines[idx] = f"{key.strip()}={setting.serialise_value()}"
+        stored_keys = {entry.key for entry in parse_properties(data)}
+        values = {
+            setting.key: setting.serialise_value()
+            for setting in self._options
+            if setting.key in self._server_setting_keys
+            and (setting.key in stored_keys or setting.value != setting.default)
+        }
 
-        self._save_computer_craft_settings()
-
-        string: str = "\n".join(lines)
-        self.pointer.write_text(string, config.STR_ENCODE)
+        string = replace_properties(data, values)
+        computer_craft_values = self._computer_craft_values()
+        contents = self._computer_craft_settings_contents(computer_craft_values)
+        contents[self.pointer] = string.encode(config.STR_ENCODE)
+        atomic_write_files(contents)
+        if self._computer_craft_available:
+            self._loaded_computer_craft_values = computer_craft_values
+        elif self._loaded_computer_craft_pointer is not None:
+            self._loaded_computer_craft_pointer = None
+            self._loaded_computer_craft_values = {}
+            log.info("Minecraft world changed; reload required for ComputerCraft settings: file=%s", self.pointer)
         return data
 
-    def _save_computer_craft_settings(self) -> None:
+    def _computer_craft_settings_contents(self, values: Mapping[str, _ComputerCraftTomlScalar]) -> dict[Path, bytes]:
         computer_craft_pointer = self._loaded_computer_craft_pointer
         if computer_craft_pointer is None:
-            return
+            return {}
+        if not self._computer_craft_available:
+            if values != self._loaded_computer_craft_values:
+                raise ValueError("Save the Level Name change and reload settings before editing ComputerCraft settings.")
+            return {}
 
         source = computer_craft_pointer.read_text(config.STR_ENCODE)
         computer_craft_data = cast(Mapping[str, object], tomllib.loads(source))
         updated_source = source
         for binding in self._computer_craft_bindings:
             current_value = _computer_craft_toml_value(computer_craft_data, binding.target)
-            setting_value = binding.setting.value
-            if isinstance(setting_value, hikari.UndefinedType):
-                raise ValueError(f"ComputerCraft setting {binding.setting.label!r} has not been loaded.")
+            setting_value = values[binding.setting.key]
             if type(current_value) is type(setting_value) and current_value == setting_value:
                 continue
             updated_source = _replace_computer_craft_toml_value(
@@ -3370,7 +3380,8 @@ class Minecraft_Settings(App_Settings):
             )
 
         if updated_source != source:
-            computer_craft_pointer.write_text(updated_source, config.STR_ENCODE)
+            return {computer_craft_pointer: updated_source.encode(config.STR_ENCODE)}
+        return {}
 
 
 class Minecraft_Config(App_Config):

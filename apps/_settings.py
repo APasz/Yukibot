@@ -420,7 +420,7 @@ class Setting(Generic[T]):
         if (
             self.min_app_version is not None
             and self.max_app_version is not None
-            and self.min_app_version.compare_main_and_build(self.max_app_version) > 0
+            and not self.min_app_version.is_at_most(self.max_app_version)
         ):
             raise ValueError("Setting minimum app version must not exceed maximum app version.")
         self._recent_inputs = []
@@ -454,9 +454,10 @@ class Setting(Generic[T]):
         return value
 
     def set(self, data: dict[str, Any]) -> None:
+        value = self.require_value()
         for key in self.path:
             data = data.setdefault(key, {})
-        data[self.key] = self.value
+        data[self.key] = value
 
     def normalise_input(self, value: str) -> str:
         return self.spec.normalise_input(value)
@@ -474,7 +475,12 @@ class Setting(Generic[T]):
         return self.spec.display_value(self.value)
 
     def serialise_value(self) -> str:
-        return self.spec.serialise_value(self.value)
+        return self.spec.serialise_value(self.require_value())
+
+    def require_value(self) -> T:
+        if isinstance(self.value, hikari.UndefinedType):
+            raise ValueError(f"Setting {self.key!r} has not been loaded.")
+        return self.value
 
     @property
     def recent_inputs(self) -> tuple[str, ...]:
@@ -533,12 +539,19 @@ class Setting(Generic[T]):
         self._recent_inputs.insert(0, recent_value)
         del self._recent_inputs[25:]
 
-    def update(self, value: str, *, remember_input: bool = False) -> None:
+    def parse_input(self, value: str) -> T:
+        """Validate an edit without changing the loaded value or draft state."""
         try:
-            self.value = self.spec.parse_input(value)
+            parsed_value = self.spec.parse_input(value)
         except Exception as xcp:
-            log.exception(f"Casting Setting value Failed: {type(value)} > {self.type_name}")
-            raise ValueError(f"Invalid value for {self.label}: {xcp}")
+            log.warning("Invalid setting input: key=%s type=%s", self.key, self.type_name)
+            raise ValueError(f"Invalid value for {self.label}: {xcp}") from xcp
+        if not value.strip() and not self.allows_blank_input:
+            raise ValueError("Setting value must not be empty.")
+        return parsed_value
+
+    def update(self, value: str, *, remember_input: bool = False) -> None:
+        self.value = self.parse_input(value)
         if remember_input:
             self._remember_input(self.serialise_value())
 
@@ -546,7 +559,7 @@ class Setting(Generic[T]):
         try:
             self.value = self.spec.parse_loaded_input(value)
         except Exception as xcp:
-            log.exception("Loading stored setting value failed: %s > %s", type(value), self.type_name)
+            log.warning("Invalid stored setting: key=%s type=%s", self.key, self.type_name)
             raise ValueError(f"Invalid stored value for {self.label}: {xcp}") from xcp
 
     def __str__(self) -> str:
@@ -792,10 +805,14 @@ class Settings_Manager:
     def _prune_unsupported_drafts(self) -> None:
         supported_keys = {setting.key for setting in self.app.options}
         for actor_key, drafts in tuple(self._drafts.items()):
-            for setting_key in tuple(drafts):
-                if setting_key in supported_keys:
-                    continue
-                drafts.pop(setting_key, None)
+            unsupported_keys = drafts.keys() - supported_keys
+            for setting_key in unsupported_keys:
+                drafts.pop(setting_key)
+            if unsupported_keys:
+                log.info(
+                    "Discarded unavailable setting drafts: app=%s actor=%s setting_keys=%s",
+                    self.config.name, actor_key, sorted(unsupported_keys),
+                )
             if not drafts:
                 self._drafts.pop(actor_key, None)
 
@@ -894,11 +911,9 @@ class Settings_Manager:
         remember_input: bool = False,
     ) -> None:
         self._prune_unsupported_drafts()
-        try:
-            parsed_value = setting.spec.parse_input(value)
-        except Exception as xcp:
-            log.exception(f"Casting Setting value Failed: {type(value)} > {setting.type_name}")
-            raise ValueError(f"Invalid value for {setting.label}: {xcp}")
+        if self.app.get_setting(setting.key) is not setting:
+            raise ValueError(f"Setting {setting.key!r} is no longer available. Reload settings.")
+        parsed_value = setting.parse_input(value)
         draft_bucket = self._draft_bucket(actor_user_id)
         self.app.apply_draft_update(setting=setting, value=parsed_value, drafts=draft_bucket)
         self._delete_empty_bucket(actor_user_id)
@@ -916,7 +931,14 @@ class Settings_Manager:
         )
 
     def load(self, actor_user_id: int | None = None) -> None:
-        self.app.load()
+        previous_values = [(setting, setting.value) for setting in self.app._options]
+        try:
+            self.app.load()
+        except Exception:
+            for setting, previous_value in previous_values:
+                setting.value = previous_value
+            log.error("Settings reload failed; restored loaded values: app=%s file=%s", self.config.name, self.app.pointer)
+            raise
         self._prune_redundant_drafts()
         if actor_user_id is None:
             self._drafts.clear()
@@ -934,18 +956,21 @@ class Settings_Manager:
         self._prune_unsupported_drafts()
         actor_key = self._actor_key(actor_user_id)
         drafts = self._resolved_drafts(actor_user_id)
-        previous_values: list[tuple[Setting[Any], object]] = []
+        previous_values = [(setting, setting.value) for setting in self.app._options]
         for setting in self.app.options:
             draft_value = drafts.get(setting.key, hikari.UNDEFINED)
             if isinstance(draft_value, hikari.UndefinedType):
                 continue
-            previous_values.append((setting, setting.value))
             setting.value = cast(Any, draft_value)
         try:
             self.app.save()
         except Exception:
             for setting, previous_value in previous_values:
                 setting.value = previous_value
+            log.error(
+                "Settings save failed; restored loaded values and retained drafts: app=%s file=%s setting_keys=%s",
+                self.config.name, self.app.pointer, sorted(drafts),
+            )
             raise
         self._drafts.pop(actor_key, None)
         self._prune_redundant_drafts()

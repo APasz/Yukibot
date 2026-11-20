@@ -287,6 +287,19 @@ def _build_channel_resolution_bot(channel_guild_ids: dict[int, int]) -> Mock:
 
 
 class AppManageTests(unittest.TestCase):
+    def test_instance_metadata_write_failure_preserves_the_original_file(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer = Path(temporary) / "instances.json"
+            original = b'{"alpha": {"enabled": true}}'
+            pointer.write_bytes(original)
+
+            with patch.object(Path, "replace", side_effect=OSError("write failed")):
+                with self.assertRaisesRegex(OSError, "write failed"):
+                    App_Manager._write_json_object(pointer, {"alpha": {"enabled": False}})
+
+            self.assertEqual(pointer.read_bytes(), original)
+            self.assertEqual(list(pointer.parent.iterdir()), [pointer])
+
     def test_editor_session_namespace_invalidates_custom_ids_from_previous_startup(self) -> None:
         older = EditorSessionNamespace(token="oldtoken")
         newer = EditorSessionNamespace(token="newtoken")

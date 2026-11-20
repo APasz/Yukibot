@@ -134,7 +134,7 @@ class ConsoleAction:
         if (
             min_app_version is not None
             and max_app_version is not None
-            and min_app_version.compare_main_and_build(max_app_version) > 0
+            and not min_app_version.is_at_most(max_app_version)
         ):
             raise ValueError("Console action minimum app version must not exceed maximum app version.")
 

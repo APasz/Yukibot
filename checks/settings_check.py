@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from _security import Power_Level
 from apps._config import App_Config, AppVersion
@@ -86,7 +87,193 @@ def _sevendays_settings_manager(settings: SevenDays_Settings) -> Settings_Manage
     )
 
 
+def _write_computercraft_config(root: Path, *, level_name: str = "world") -> Path:
+    pointer = root / level_name / "serverconfig" / "computercraft-server.toml"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(
+        "\n".join((
+            "[http]",
+            "enabled = true",
+            "websocket_enabled = true",
+            "",
+            "[http.proxy]",
+            'type = "HTTP"',
+            'host = "" # Proxy hostname',
+            "port = 8080",
+            "",
+            "[[http.rules]]",
+            'host = "$private"',
+            'action = "deny"',
+            "",
+            "[[http.rules]]",
+            'host = "*"',
+            'action = "allow"',
+            "",
+            "[peripheral]",
+            "command_block_enabled = false",
+            "modem_range = 64",
+            "modem_high_altitude_range = 384",
+            "modem_range_during_storm = 64",
+            "modem_high_altitude_range_during_storm = 384",
+            'unmanaged_setting = "preserved"',
+        )),
+        encoding="utf-8",
+    )
+    return pointer
+
+
+def _factorio_settings_with_instance_config(root: Path) -> tuple[Factorio_Settings, App_Config, Path]:
+    pointer = root / "data" / "server-settings.json"
+    pointer.parent.mkdir()
+    pointer.write_text("{}", encoding="utf-8")
+    cfg = App_Config(name="factorio_alpha", instance_key="alpha", directory=root, apps_dir=root, scope="factorio")
+    instances = root / "instances.json"
+    instances.write_text(json.dumps({"alpha": {"enabled": True}, "other": {"enabled": False}}))
+    return Factorio_Settings(pointer, saves_directory=root / "saves", cfg=cfg), cfg, instances
+
+
 class SettingTests(unittest.TestCase):
+    def test_required_text_rejects_blank_direct_updates_without_losing_loaded_value(self) -> None:
+        setting = Setting(StringSettingSpec(), "Name", "name", [], default="Name")
+        setting.load_value("Loaded")
+        for blank in ("", " ", "\n"):
+            with self.subTest(blank=blank), self.assertRaisesRegex(ValueError, "must not be empty"):
+                setting.update(blank)
+            self.assertEqual(setting.value, "Loaded")
+
+    def test_invalid_setting_logs_identify_the_key_without_exposing_the_value(self) -> None:
+        setting = Setting(IntSettingSpec(is_sensitive=True), "Secret", "secret", [], default=0)
+        for parse in (setting.update, setting.load_value):
+            with self.subTest(parse=parse), self.assertLogs("apps._settings", level="WARNING") as captured:
+                with self.assertRaises(ValueError):
+                    parse("private-invalid-value")
+            self.assertIn("key=secret", " ".join(captured.output))
+            self.assertNotIn("private-invalid-value", " ".join(captured.output))
+
+    def test_settings_manager_rejects_blank_required_text_without_losing_the_previous_draft(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer, _ = _write_sevendays_xml_files(Path(temporary), server_properties={"ServerName": "Before"})
+            settings = SevenDays_Settings(pointer)
+            manager = _sevendays_settings_manager(settings)
+            name = settings.get_setting("ServerName")
+            assert name is not None
+            manager.update_setting(42, name, "Pending")
+
+            for blank in ("", " ", "\n"):
+                with self.subTest(blank=blank), self.assertRaisesRegex(ValueError, "must not be empty"):
+                    manager.update_setting(42, name, blank)
+
+            self.assertEqual(name.value, "Before")
+            self.assertEqual(manager.current_input_value(name, 42), "Pending")
+
+    def test_unloaded_settings_cannot_be_serialised_or_persisted(self) -> None:
+        setting = Setting(IntSettingSpec(), "Count", "count", [], default=10)
+        with self.assertRaisesRegex(ValueError, "not been loaded"):
+            setting.serialise_value()
+        data: dict[str, object] = {}
+        with self.assertRaisesRegex(ValueError, "not been loaded"):
+            setting.set(data)
+        self.assertEqual(data, {})
+
+    def test_failed_reload_preserves_loaded_values_and_user_drafts(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pointer = root / "server.properties"
+            pointer.write_text("max-players=20\nwhite-list=false\nmotd=Old\n")
+            settings = Minecraft_Settings(pointer)
+            manager = Settings_Manager(
+                App_Config(name="minecraft_alpha", instance_key="alpha", directory=root, apps_dir=root, scope="minecraft"),
+                settings,
+            )
+            maximum, motd = settings.get_setting("max-players"), settings.get_setting("motd")
+            assert maximum is not None and motd is not None
+            manager.update_setting(42, motd, "Pending")
+            pointer.write_text("max-players=99\nwhite-list=invalid\nmotd=New\n")
+
+            with self.assertRaises(ValueError):
+                manager.load(42)
+
+            self.assertEqual(maximum.value, 20)
+            self.assertEqual(motd.value, "Old")
+            self.assertEqual(manager.current_input_value(motd, 42), "Pending")
+
+    def test_missing_minecraft_properties_reset_to_defaults_and_can_be_saved(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer = Path(temporary) / "server.properties"
+            pointer.write_text("motd=Custom\nmax-players=8\n")
+            settings = Minecraft_Settings(pointer)
+            pointer.write_text("# Properties removed externally\n")
+
+            settings.load()
+
+            maximum = settings.get_setting("max-players")
+            assert maximum is not None
+            self.assertEqual(maximum.value, maximum.default)
+            maximum.update("42")
+            settings.save()
+            self.assertIn("max-players=42\n", pointer.read_text())
+            self.assertIn("# Properties removed externally", pointer.read_text())
+
+    def test_missing_sevendays_properties_reset_to_defaults_and_can_be_saved(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pointer, _ = _write_sevendays_xml_files(root, server_properties={"GameDifficulty": "4"})
+            settings = SevenDays_Settings(pointer, version_getter=lambda: AppVersion(main="2.6"))
+            _write_sevendays_xml_files(root, server_properties={"GameName": "MyGame"})
+
+            settings.load()
+
+            difficulty = settings.get_setting("GameDifficulty")
+            assert difficulty is not None
+            self.assertEqual(difficulty.value, difficulty.default)
+            difficulty.update("5")
+            settings.save()
+            persisted = {node.get("name"): node.get("value") for node in ET.parse(pointer).getroot()}
+            self.assertEqual(persisted["GameDifficulty"], "5")
+            self.assertNotIn("TraderRektBiome", persisted)
+
+    def test_duplicate_managed_properties_fail_on_load_and_save(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            minecraft_pointer = root / "server.properties"
+            minecraft_pointer.write_text("max-players=20\n")
+            minecraft = Minecraft_Settings(minecraft_pointer)
+            sevendays_pointer, _ = _write_sevendays_xml_files(root, server_properties={"GameName": "MyGame"})
+            sevendays = SevenDays_Settings(sevendays_pointer)
+            minecraft_pointer.write_text("max-players=20\nmax-players=30\n")
+            tree = ET.parse(sevendays_pointer)
+            ET.SubElement(tree.getroot(), "property", name="GameName", value="Another")
+            tree.write(sevendays_pointer)
+
+            for settings in (minecraft, sevendays):
+                original = settings.pointer.read_bytes()
+                for operation in (settings.load, settings.save):
+                    with self.subTest(app=type(settings).__name__, operation=operation.__name__):
+                        with self.assertRaisesRegex(ValueError, "Duplicate"):
+                            operation()
+                        self.assertEqual(settings.pointer.read_bytes(), original)
+
+    def test_sevendays_file_replacement_failure_rolls_back_both_config_files(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer, mixer = _write_sevendays_xml_files(Path(temporary), server_properties={"ServerName": "Before"})
+            settings = SevenDays_Settings(pointer)
+            name = settings.get_setting("ServerName")
+            assert name is not None
+            name.update("After")
+            original_server, original_mixer = pointer.read_bytes(), mixer.read_bytes()
+            original_replace = Path.replace
+
+            def replace(source: Path, target: Path) -> Path:
+                if target == mixer:
+                    raise OSError("write failed")
+                return original_replace(source, target)
+
+            with patch.object(Path, "replace", new=replace), self.assertRaisesRegex(OSError, "write failed"):
+                settings.save()
+
+            self.assertEqual(pointer.read_bytes(), original_server)
+            self.assertEqual(mixer.read_bytes(), original_mixer)
+
     def test_choice_labels_are_accepted_and_displayed(self) -> None:
         setting: Setting[bool] = Setting[bool](
             BoolSettingSpec(ChoiceSpec(ChoiceOption("true", "Public"), ChoiceOption("false", "Private"))),
@@ -414,6 +601,16 @@ class SettingTests(unittest.TestCase):
             self.assertEqual([setting.key for setting in settings.options], ["always"])
             self.assertIsNone(settings.get_setting("experimental"))
 
+    def test_setting_bounds_allow_a_build_minimum_and_main_version_maximum(self) -> None:
+        setting = Setting(
+            BoolSettingSpec(), "Feature", "feature", [], default=False,
+            min_app_version=AppVersion(main="2.6", build=10), max_app_version=AppVersion(main="2.6"),
+        )
+
+        self.assertFalse(setting.supports_app_version(AppVersion(main="2.6", build=9)))
+        self.assertTrue(setting.supports_app_version(AppVersion(main="2.6", build=14)))
+        self.assertFalse(setting.supports_app_version(AppVersion(main="3.0")))
+
     def test_settings_manager_discards_drafts_for_now_unsupported_settings(self) -> None:
         class _VersionAwareSettings(App_Settings):
             def load(self) -> None:
@@ -449,6 +646,9 @@ class SettingTests(unittest.TestCase):
 
             config.version = AppVersion(main="1.0.9")
 
+            self.assertEqual(manager.pending_change_count(42), 0)
+            with self.assertRaisesRegex(ValueError, "no longer available"):
+                manager.update_setting(actor_user_id=42, setting=gated_setting, value="enabled")
             self.assertEqual(manager.pending_change_count(42), 0)
 
     def test_settings_manager_applies_forced_setting_states(self) -> None:
@@ -682,39 +882,7 @@ class SettingTests(unittest.TestCase):
             root = Path(temp_dir)
             pointer = root / "server.properties"
             pointer.write_text("level-name=world\n", encoding="utf-8")
-            computer_craft_pointer = root / "world" / "serverconfig" / "computercraft-server.toml"
-            computer_craft_pointer.parent.mkdir(parents=True)
-            computer_craft_pointer.write_text(
-                "\n".join(
-                    (
-                        "[http]",
-                        "enabled = true",
-                        "websocket_enabled = true",
-                        "",
-                        "[http.proxy]",
-                        'type = "HTTP"',
-                        'host = "" # Proxy hostname',
-                        "port = 8080",
-                        "",
-                        "[[http.rules]]",
-                        'host = "$private"',
-                        'action = "deny"',
-                        "",
-                        "[[http.rules]]",
-                        'host = "*"',
-                        'action = "allow"',
-                        "",
-                        "[peripheral]",
-                        "command_block_enabled = false",
-                        "modem_range = 64",
-                        "modem_high_altitude_range = 384",
-                        "modem_range_during_storm = 64",
-                        "modem_high_altitude_range_during_storm = 384",
-                        'unmanaged_setting = "preserved"',
-                    )
-                ),
-                encoding="utf-8",
-            )
+            computer_craft_pointer = _write_computercraft_config(root)
 
             settings = Minecraft_Settings(pointer)
             updates = {
@@ -738,6 +906,20 @@ class SettingTests(unittest.TestCase):
                 if setting is None:
                     raise AssertionError(f"Missing setting {key}")
                 setting.update(value)
+
+            original_properties = pointer.read_bytes()
+            original_computercraft = computer_craft_pointer.read_bytes()
+            original_replace = Path.replace
+
+            def replace(source: Path, target: Path) -> Path:
+                if target == pointer:
+                    raise OSError("write failed")
+                return original_replace(source, target)
+
+            with patch.object(Path, "replace", new=replace), self.assertRaisesRegex(OSError, "write failed"):
+                settings.save()
+            self.assertEqual(pointer.read_bytes(), original_properties)
+            self.assertEqual(computer_craft_pointer.read_bytes(), original_computercraft)
 
             settings.save()
 
@@ -770,6 +952,65 @@ class SettingTests(unittest.TestCase):
                 },
             )
             self.assertIn('# Proxy hostname', saved_source)
+
+    def test_minecraft_world_switch_requires_reload_before_computercraft_edits(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pointer = root / "server.properties"
+            pointer.write_text("level-name=world\n")
+            old_config = _write_computercraft_config(root)
+            new_config = _write_computercraft_config(root, level_name="new-world")
+            original_config = old_config.read_bytes()
+            settings = Minecraft_Settings(pointer)
+            manager = Settings_Manager(
+                App_Config(name="minecraft_alpha", instance_key="alpha", directory=root, apps_dir=root, scope="minecraft"),
+                settings,
+            )
+            level_name = settings.get_setting("level-name")
+            http_enabled = settings.get_setting("computercraft.http.enabled")
+            assert level_name is not None and http_enabled is not None
+            manager.update_setting(42, level_name, "new-world")
+            manager.update_setting(42, http_enabled, "false")
+
+            with self.assertRaisesRegex(ValueError, "reload settings before editing ComputerCraft"):
+                manager.save(42)
+
+            self.assertEqual(pointer.read_text(), "level-name=world\n")
+            self.assertEqual(old_config.read_bytes(), original_config)
+            self.assertEqual(new_config.read_bytes(), original_config)
+            self.assertEqual(manager.pending_change_count(42), 2)
+            self.assertIs(http_enabled.value, True)
+
+            manager.update_setting(42, http_enabled, "true")
+            manager.save(42)
+            self.assertIn("level-name=new-world\n", pointer.read_text())
+            self.assertIsNone(settings.get_setting(http_enabled.key))
+            with self.assertRaisesRegex(ValueError, "no longer available"):
+                manager.update_setting(42, http_enabled, "false")
+
+            manager.load(42)
+            reloaded_http = settings.get_setting(http_enabled.key)
+            assert reloaded_http is not None
+            manager.update_setting(42, reloaded_http, "false")
+            manager.save(42)
+
+            self.assertIs(tomllib.loads(new_config.read_text())["http"]["enabled"], False)
+            self.assertEqual(old_config.read_bytes(), original_config)
+
+    def test_computercraft_uses_the_exact_world_folder_name(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pointer = root / "server.properties"
+            pointer.write_text("level-name=world \\u0020\n")
+            computer_craft_pointer = _write_computercraft_config(root, level_name="world  ")
+            settings = Minecraft_Settings(pointer)
+            http_enabled = settings.get_setting("computercraft.http.enabled")
+            assert http_enabled is not None
+            http_enabled.update("false")
+
+            settings.save()
+
+            self.assertIs(tomllib.loads(computer_craft_pointer.read_text())["http"]["enabled"], False)
 
     def test_minecraft_settings_hide_computercraft_controls_without_config(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1322,6 +1563,44 @@ class SettingTests(unittest.TestCase):
             saved = pointer.read_text(encoding="utf-8")
             self.assertIn('name="CameraRestrictionMode" value="0"', saved)
 
+    def test_sevendays_save_loads_settings_when_the_version_becomes_supported(self) -> None:
+        properties = {"BiomeProgression": "false", "GameDifficulty": "4", "XPMultiplier": "150"}
+        for initial_version in (None, AppVersion(main="3.0")):
+            with self.subTest(initial_version=initial_version), TemporaryDirectory() as temp:
+                pointer, _ = _write_sevendays_xml_files(Path(temp), server_properties=properties)
+                version = initial_version
+                settings = SevenDays_Settings(pointer, version_getter=lambda: version)
+                self.assertIsNone(settings.get_setting("BiomeProgression"))
+
+                version = AppVersion(main="2.6")
+                settings.save()
+
+                persisted = {node.get("name"): node.get("value") for node in ET.parse(pointer).getroot()}
+                for key, value in properties.items():
+                    self.assertEqual(persisted[key], value, key)
+
+    def test_sevendays_save_rejects_invalid_newly_supported_settings_before_writing(self) -> None:
+        with TemporaryDirectory() as temp:
+            pointer, rwgmixer = _write_sevendays_xml_files(
+                Path(temp), server_properties={"XPMultiplier": "150", "BiomeProgression": "invalid"},
+            )
+            version = AppVersion(main="3.0")
+            settings = SevenDays_Settings(pointer, version_getter=lambda: version)
+            manager = _sevendays_settings_manager(settings)
+            original_config = pointer.read_bytes()
+            original_rwgmixer = rwgmixer.read_bytes()
+
+            manager.config.version = AppVersion(main="2.6")
+            xp_multiplier = settings.get_setting("XPMultiplier")
+            assert xp_multiplier is not None
+            previous_value = xp_multiplier.value
+            with self.assertRaisesRegex(ValueError, "Biome Progression"):
+                manager.save(42)
+
+            self.assertEqual(pointer.read_bytes(), original_config)
+            self.assertEqual(rwgmixer.read_bytes(), original_rwgmixer)
+            self.assertIs(xp_multiplier.value, previous_value)
+
     def test_sevendays_sandbox_code_requires_version_three(self) -> None:
         property_values = {
             "SandboxCode": "AAAJABJACJADJARFBNC",
@@ -1570,24 +1849,10 @@ class SettingTests(unittest.TestCase):
     def test_factorio_settings_selects_a_discovered_save_without_modifying_server_settings(self) -> None:
         with TemporaryDirectory[str]() as temp_dir:
             root = Path(temp_dir)
-            pointer = root / "data" / "server-settings.json"
-            pointer.parent.mkdir()
-            pointer.write_text("{}", encoding="utf-8")
             saves_directory = root / "saves"
             saves_directory.mkdir()
             (saves_directory / "Alpha.zip").write_bytes(b"save")
-            selected_save: list[str | None] = [None]
-            create_fresh_world: list[bool] = [False]
-
-            settings = Factorio_Settings(
-                pointer,
-                saves_directory=saves_directory,
-                save_file_getter=lambda: selected_save[0],
-                save_selection_setter=lambda filename, create: (
-                    selected_save.__setitem__(0, filename),
-                    create_fresh_world.__setitem__(0, create),
-                ),
-            )
+            settings, cfg, instances = _factorio_settings_with_instance_config(root)
             selection = settings.get_setting("factorio_save_selection")
             if selection is None:
                 raise AssertionError("Missing Factorio save selection setting")
@@ -1599,9 +1864,9 @@ class SettingTests(unittest.TestCase):
             selection.update("Alpha.zip")
             settings.save()
 
-            self.assertEqual(selected_save[0], "Alpha.zip")
-            self.assertFalse(create_fresh_world[0])
-            self.assertNotIn("factorio_save_selection", json.loads(pointer.read_text(encoding="utf-8")))
+            self.assertEqual(cfg.factorio_save_file, "Alpha.zip")
+            self.assertFalse(cfg.factorio_create_fresh_world)
+            self.assertNotIn("factorio_save_selection", json.loads(settings.pointer.read_text(encoding="utf-8")))
 
             fresh_save_name = settings.get_setting("factorio_fresh_save_file")
             if fresh_save_name is None:
@@ -1610,8 +1875,50 @@ class SettingTests(unittest.TestCase):
             fresh_save_name.update("Orbit")
             settings.save()
 
-            self.assertEqual(selected_save[0], "Orbit.zip")
-            self.assertTrue(create_fresh_world[0])
+            self.assertEqual(cfg.factorio_save_file, "Orbit.zip")
+            self.assertTrue(cfg.factorio_create_fresh_world)
+            self.assertEqual(cfg.factorio_fresh_save_file, "Orbit")
+            self.assertEqual(json.loads(instances.read_text()), {
+                "alpha": {
+                    "enabled": True, "factorio_save_file": "Orbit.zip", "factorio_create_fresh_world": True,
+                    "factorio_fresh_save_file": "Orbit",
+                },
+                "other": {"enabled": False},
+            })
+
+    def test_failed_factorio_world_selection_preserves_both_files_config_and_drafts(self) -> None:
+        original_replace = Path.replace
+        for fail_replacement in (False, True):
+            with self.subTest(fail_replacement=fail_replacement), TemporaryDirectory() as temporary:
+                settings, cfg, instances = _factorio_settings_with_instance_config(Path(temporary))
+                manager = Settings_Manager(cfg, settings)
+                for key, value in {
+                    "name": "Changed server", "factorio_save_selection": "Create Fresh World",
+                    "factorio_fresh_save_file": "Orbit",
+                }.items():
+                    setting = settings.get_setting(key)
+                    assert setting is not None
+                    manager.update_setting(42, setting, value)
+                if not fail_replacement:
+                    instances.write_text("{}")
+                original_server, original_instances = settings.pointer.read_bytes(), instances.read_bytes()
+
+                def replace(source: Path, target: Path) -> Path:
+                    if fail_replacement and target == instances:
+                        raise OSError("write failed")
+                    return original_replace(source, target)
+
+                with patch.object(Path, "replace", new=replace), self.assertRaises(
+                    OSError if fail_replacement else ValueError,
+                ):
+                    manager.save(42)
+
+                self.assertEqual(settings.pointer.read_bytes(), original_server)
+                self.assertEqual(instances.read_bytes(), original_instances)
+                self.assertIsNone(cfg.factorio_save_file)
+                self.assertFalse(cfg.factorio_create_fresh_world)
+                self.assertEqual(cfg.factorio_fresh_save_file, "New World.zip")
+                self.assertEqual(manager.pending_change_count(42), 3)
 
     def test_settings_state_round_trips(self) -> None:
         state: AppManageState = AppManageState(
@@ -1664,6 +1971,45 @@ class UndeadLegacySettingTests(unittest.TestCase):
             ).model_dump_json()
         )
         return SevenDays_Settings(pointer, version_getter=lambda: AppVersion(main="2.6"))
+
+    def test_ul_gameplay_settings_survive_build_and_main_only_version_reports(self) -> None:
+        properties = {
+            "BiomeProgression": "false",
+            "GameDifficulty": "4",
+            "DayNightLength": "90",
+            "XPMultiplier": "150",
+            "AirDropMarker": "false",
+            "ServerWebsiteURL": "",
+        }
+        with TemporaryDirectory() as temp:
+            pointer = self._settings(Path(temp), **properties).pointer
+            version = AppVersion(main="2.6", build=14)
+            settings = SevenDays_Settings(pointer, version_getter=lambda: version)
+            settings.save()
+            version = AppVersion(main="2.6")
+            settings.save()
+
+            persisted = {node.get("name"): node.get("value") for node in ET.parse(pointer).getroot()}
+            for key, value in properties.items():
+                self.assertEqual(persisted[key], value, key)
+
+    def test_ul_built_version_loads_and_repairs_blank_gameplay_preferences(self) -> None:
+        with TemporaryDirectory() as temp:
+            pointer = self._settings(Path(temp), BiomeProgression="", GameDifficulty="").pointer
+            settings = SevenDays_Settings(pointer, version_getter=lambda: AppVersion(main="2.6", build=14))
+            biome_progression = settings.get_setting("BiomeProgression")
+            difficulty = settings.get_setting("GameDifficulty")
+            self.assertIsNotNone(biome_progression)
+            self.assertIsNotNone(difficulty)
+            assert biome_progression is not None and difficulty is not None
+            self.assertIs(biome_progression.value, True)
+            self.assertEqual(difficulty.value, 1)
+
+            settings.save()
+
+            persisted = {node.get("name"): node.get("value") for node in ET.parse(pointer).getroot()}
+            self.assertEqual(persisted["BiomeProgression"], "true")
+            self.assertEqual(persisted["GameDifficulty"], "1")
 
     def test_ul_group_is_only_available_for_managed_overhaul_instances(self) -> None:
         with TemporaryDirectory() as temp:

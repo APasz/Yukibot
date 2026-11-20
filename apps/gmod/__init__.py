@@ -22,6 +22,7 @@ import hikari
 
 import config
 from _async_utils import run_blocking
+from _file import atomic_write_files
 from _security import Power_Level
 from apps._app import App, AppPortClaim, AppRuntimeFault, AppRuntimeFaultCode, AppRuntimeFaultKind, NetworkProtocol
 from apps._config import App_Config, AppVersion, SteamUpdatePreset
@@ -657,14 +658,17 @@ class _GmodWorkshopItemListSettingSpec(SettingSpec[tuple[str, ...]]):
     """Parse a user-editable list of Workshop IDs into safe Lua data values."""
 
     def __init__(self, *, item_label: str, list_label: str) -> None:
-        super().__init__(tuple)
+        super().__init__(tuple, allow_blank=True)
         self._item_label = item_label
         self._list_label = list_label
+
+    def blank_value(self) -> tuple[str, ...]:
+        return ()
 
     def parse(self, raw_value: str) -> tuple[str, ...]:
         value = raw_value.strip()
         if not value:
-            return ()
+            return self.blank_value()
         return _normalise_gmod_workshop_item_ids(
             _GMOD_WORKSHOP_ITEM_ID_LIST_SEPARATOR_RE.split(value),
             item_label=self._item_label,
@@ -774,7 +778,7 @@ class Gmod_Settings(App_Settings):
         payload.pop("client_content_workshop_excluded_ids", None)
         for setting in self.options:
             setting.set(payload)
-        self.pointer.write_text(json.dumps(payload, indent=4) + "\n", config.STR_ENCODE)
+        atomic_write_files({self.pointer: (json.dumps(payload, indent=4) + "\n").encode(config.STR_ENCODE)})
         return payload
 
     @property

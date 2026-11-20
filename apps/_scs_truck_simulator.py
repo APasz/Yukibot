@@ -18,6 +18,7 @@ import hikari
 
 import config
 from _discord import DC_Bound, DC_Relay
+from _file import atomic_write_files
 from _security import Power_Level
 from apps._app import App, AppPortClaim, tcp_udp_port_claims
 from apps._config import App_Config, AppVersion, SteamUpdatePreset
@@ -1196,7 +1197,7 @@ class ScsTruckSimulatorSettings(App_Settings):
                 block=block,
                 last_setting_location=last_setting_location,
             )
-        self.pointer.write_text("".join(lines), config.STR_ENCODE)
+        atomic_write_files({self.pointer: "".join(lines).encode(config.STR_ENCODE)})
         return data
 
 

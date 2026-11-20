@@ -739,6 +739,45 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cache_payload["server_options"]["autosave_interval_seconds"], 900)
         self.assertIs(cache_payload["advanced_game_settings"]["no_power"], False)
 
+    def test_failed_password_save_preserves_config_cache_and_credentials(self) -> None:
+        self._setting("admin_password").update("new-secret")
+        self._setting("FG.AutosaveInterval").update("900")
+        original_cache = self.cache_path.read_bytes()
+        self.instances_path.write_text("{}")
+
+        with self.assertRaisesRegex(ValueError, "missing instance"):
+            self.settings.save()
+
+        self.assertEqual(self.cfg.admin_password, "secret")
+        self.assertEqual(self.cache_path.read_bytes(), original_cache)
+        self.assertEqual(self.instances_path.read_text(), "{}")
+
+    def test_password_file_replacement_failure_rolls_back_cache_and_credentials(self) -> None:
+        self._setting("admin_password").update("new-secret")
+        original_cache, original_instances = self.cache_path.read_bytes(), self.instances_path.read_bytes()
+        original_replace = Path.replace
+
+        def replace(source: Path, target: Path) -> Path:
+            if target == self.instances_path:
+                raise OSError("write failed")
+            return original_replace(source, target)
+
+        with patch.object(Path, "replace", new=replace), self.assertRaisesRegex(OSError, "write failed"):
+            self.settings.save()
+
+        self.assertEqual(self.cfg.admin_password, "secret")
+        self.assertEqual(self.cache_path.read_bytes(), original_cache)
+        self.assertEqual(self.instances_path.read_bytes(), original_instances)
+
+    async def test_failed_refresh_does_not_replace_loaded_values(self) -> None:
+        self._running = True
+        original_cache = self.cache_path.read_bytes()
+        with patch("apps.satisfactory.atomic_write_files", side_effect=OSError("write failed")):
+            with self.assertRaisesRegex(OSError, "write failed"):
+                await self.settings.refresh_from_server()
+        self.assertIs(self._setting("FG.DSAutoPause").value, True)
+        self.assertEqual(self.cache_path.read_bytes(), original_cache)
+
     async def test_refresh_and_apply_round_trip_through_bridge(self) -> None:
         self._running = True
         await self.settings.refresh_from_server()

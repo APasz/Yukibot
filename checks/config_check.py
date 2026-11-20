@@ -523,6 +523,31 @@ class ConfigLoggingTests(unittest.TestCase):
 
 
 class AppVersionTests(unittest.TestCase):
+    def test_main_version_maximum_includes_all_builds_of_that_version(self) -> None:
+        maximum = AppVersion(main="2.6")
+        for version, supported in (
+            (AppVersion(main="2.5", build=99), True),
+            (AppVersion(main="2.6"), True),
+            (AppVersion(main="2.6", build=0), True),
+            (AppVersion(main="2.6", build=14), True),
+            (AppVersion(main="2.7", build=1), False),
+            (AppVersion(main="3.0"), False),
+        ):
+            with self.subTest(version=version.display_value):
+                self.assertEqual(version.is_at_most(maximum), supported)
+
+    def test_explicit_build_maximum_remains_inclusive(self) -> None:
+        maximum = AppVersion(main="2.6", build=14)
+        for version, supported in (
+            (AppVersion(main="2.5", build=99), True),
+            (AppVersion(main="2.6", build=13), True),
+            (AppVersion(main="2.6", build=14), True),
+            (AppVersion(main="2.6", build=15), False),
+            (AppVersion(main="2.7", build=1), False),
+        ):
+            with self.subTest(version=version.display_value):
+                self.assertEqual(version.is_at_most(maximum), supported)
+
     def test_display_value_supports_steam_build_only_versions(self) -> None:
         version = AppVersion(steam_branch="public", steam_build=987654)
 

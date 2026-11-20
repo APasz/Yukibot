@@ -17,6 +17,7 @@ import lightbulb
 import config
 from _async_utils import run_blocking
 from _discord import App_Bound, DC_Bound, DC_Relay, RelayEmbedPayload
+from _file import atomic_write_files
 from _utils import format_player_capacity
 from apps._app import App, AppPortClaim, AppRuntimeFault, AppRuntimeFaultKind, NetworkProtocol
 from apps._config import (
@@ -2607,7 +2608,7 @@ class App_Manager(metaclass=config.Singleton):
     @staticmethod
     def _write_json_object(path: Path, payload: Mapping[str, object]) -> None:
         path.parent.mkdir(exist_ok=True, parents=True)
-        path.write_text(json.dumps(payload, indent=4) + "\n", config.STR_ENCODE)
+        atomic_write_files({path: (json.dumps(payload, indent=4) + "\n").encode(config.STR_ENCODE)})
 
     @staticmethod
     def _as_json_object(value: object) -> JsonObject | None:

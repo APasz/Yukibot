@@ -1020,6 +1020,17 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.actions[0].key, "say")
         self.assertTrue(app.supports_console_actions)
 
+    def test_console_action_bounds_allow_a_build_minimum_and_main_version_maximum(self) -> None:
+        action = ConsoleAction(
+            key="say", label="Say", description="Broadcast to all players.", power_level=Power_Level.user,
+            execute=AsyncMock(return_value=ConsoleActionResult(summary="ok")),
+            min_app_version=AppVersion(main="2.6", build=10), max_app_version=AppVersion(main="2.6"),
+        )
+
+        self.assertFalse(action.supports_app_version(AppVersion(main="2.6", build=9)))
+        self.assertTrue(action.supports_app_version(AppVersion(main="2.6", build=14)))
+        self.assertFalse(action.supports_app_version(AppVersion(main="3.0")))
+
     def test_execute_console_action_returns_structured_result_and_tracks_recent_inputs(
         self,
     ) -> None:

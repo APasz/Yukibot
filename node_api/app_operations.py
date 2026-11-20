@@ -102,9 +102,6 @@ class NodeAppOperationsService:
         settings_manager = self.require_settings_manager(app)
 
         resolved_value = value.strip()
-        if not resolved_value and not setting.allows_blank_input:
-            raise self._http_exception(400, "Setting value must not be empty.")
-
         try:
             settings_manager.update_setting(
                 actor_user_id, setting, resolved_value, remember_input=True

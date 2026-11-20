@@ -1738,6 +1738,41 @@ class SevenDaysActivityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_version_reports_preserve_known_builds_until_a_new_version_is_reported(self) -> None:
+        for current, line, expected in (
+            (None, "INF GamePref.GameVersion = V 2.6", AppVersion(main="2.6")),
+            (AppVersion(main="2.5", build=9), "INF GamePref.GameVersion = V 2.6", AppVersion(main="2.6")),
+            (
+                AppVersion(main="2.6", build=14),
+                "INF GamePref.GameVersion = V 2.6",
+                AppVersion(main="2.6", build=14),
+            ),
+            (
+                AppVersion(main="3.0", build=259),
+                "INF GamePref.GameVersion = V 3.0",
+                AppVersion(main="3.0", build=259),
+            ),
+            (
+                AppVersion(main="2.6", build=14),
+                "INF Version: V 2.6 (b15) Compatibility Version: V 2.6",
+                AppVersion(main="2.6", build=15),
+            ),
+        ):
+            with self.subTest(current=current, line=line), TemporaryDirectory() as temp:
+                root = Path(temp)
+                app = cast(SevenDays, object.__new__(SevenDays))
+                app.cfg = App_Config(
+                    name="sevendays_demo", instance_key="demo", directory=root, apps_dir=root,
+                    scope="sevendays", version=current,
+                )
+                app._tail_matchers = set()
+                app._instance_config_change_handler = None
+                matcher = Matchers(app)
+
+                await matcher.match_version(line)
+
+                self.assertEqual(app.cfg.version, expected)
+
     async def test_match_death_relays_player_death(self) -> None:
         app = cast(Any, object.__new__(SevenDays))
         app.name = "sevendays_demo"

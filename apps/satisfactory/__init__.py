@@ -34,7 +34,7 @@ from satisfactory_api_client.exceptions import APIError
 
 import config
 from _discord import DC_Bound, DC_Relay
-from _file import File_Utils
+from _file import File_Utils, atomic_write_files
 from _security import Power_Level
 from apps._app import (
     App,
@@ -61,6 +61,7 @@ from apps._blueprint_files import (
     validate_blueprint_upload_pair,
 )
 from apps._config import App_Config, AppVersion, SteamUpdatePreset, normalise_optional_port, resolve_config_path
+from apps._config_files import prepare_instance_config_update
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._save_files import AppSaveEntry, AppSaveEntryKind, AppSaveRoot, AppSaveRootMode
 from apps._settings import (
@@ -1460,7 +1461,7 @@ class SatisfactorySettings(App_Settings):
 
     def _write_snapshot(self, snapshot: SatisfactorySettingsSnapshot) -> dict[str, object]:
         payload = snapshot.model_dump(mode="json", exclude_none=True)
-        self.pointer.write_text(json.dumps(payload, indent=4), config.STR_ENCODE)
+        atomic_write_files({self.pointer: json.dumps(payload, indent=4).encode(config.STR_ENCODE)})
         return payload
 
     def load(self) -> None:
@@ -1473,34 +1474,24 @@ class SatisfactorySettings(App_Settings):
         self._apply_local_settings()
 
     def save(self) -> dict[str, object]:
-        payload: dict[str, object] = self._write_snapshot(self._snapshot_from_settings())
-        self._persist_admin_password()
-        if self._is_running():
-            self._schedule_apply()
-        return payload
-
-    def _persist_admin_password(self) -> None:
+        payload = self._snapshot_from_settings().model_dump(mode="json", exclude_none=True)
+        contents = {self.pointer: json.dumps(payload, indent=4).encode(config.STR_ENCODE)}
         password: str | None = self._optional_setting_value(self._admin_password, str)
         if password is None:
             raise ValueError("admin_password must not be empty")
-        if password == self._cfg.admin_password:
-            return
+        if password != self._cfg.admin_password:
+            contents[self._instances_path] = prepare_instance_config_update(
+                self._instances_path, self._cfg.instance_key, {"admin_password": password},
+            )
 
-        self._cfg.admin_password = password
-        if isinstance(self._bridge, SatisfactoryBridge):
-            self._bridge.update_password(password)
-
-        raw = _string_object_mapping(
-            json.loads(self._instances_path.read_text(config.STR_ENCODE)),
-            label=str(self._instances_path),
-        )
-        instance_payload: object | None = raw.get(self._cfg.instance_key)
-        if not isinstance(instance_payload, Mapping):
-            raise ValueError(f"{self._instances_path} is missing instance {self._cfg.instance_key!r}")
-        next_payload: dict[str, object] = _string_object_mapping(instance_payload, label="instance payload")
-        next_payload["admin_password"] = password
-        raw[self._cfg.instance_key] = next_payload
-        self._instances_path.write_text(json.dumps(raw, indent=4) + "\n", config.STR_ENCODE)
+        atomic_write_files(contents)
+        if password != self._cfg.admin_password:
+            self._cfg.admin_password = password
+            if isinstance(self._bridge, SatisfactoryBridge):
+                self._bridge.update_password(password)
+        if self._is_running():
+            self._schedule_apply()
+        return payload
 
     def _schedule_apply(self) -> None:
         try:
@@ -1525,8 +1516,8 @@ class SatisfactorySettings(App_Settings):
             self._bridge.read_settings,
             unavailable_detail=f"{self._cfg.friendly_name} API is unavailable.",
         )
-        self._apply_snapshot(snapshot)
         self._write_snapshot(snapshot)
+        self._apply_snapshot(snapshot)
         self._apply_local_settings()
         return snapshot
 

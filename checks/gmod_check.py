@@ -19,6 +19,7 @@ from _manager import AppInstallInput, App_Manager
 from apps._app import AppPortClaim, AppRuntimeFault, AppRuntimeFaultCode, AppRuntimeFaultKind, NetworkProtocol
 from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
 from apps._mod_catalog import ModSourceKind
+from apps._settings import Settings_Manager
 from apps._updater import SteamCmd_Update_Manager
 from apps._steam import STEAM_GAME_SERVER_LOGIN_TOKEN_MANAGEMENT_URL
 from apps.gmod import (
@@ -125,6 +126,27 @@ async def _create_source_query_responder(
 
 
 class GmodSettingsTests(unittest.TestCase):
+    def test_workshop_item_list_can_be_cleared_through_settings_drafts(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            ensure_gmod_managed_files(directory)
+            settings = Gmod_Settings(gmod_settings_path(directory))
+            item_ids = settings.get_setting("client_content_workshop_ids")
+            assert item_ids is not None
+            self.assertTrue(item_ids.allows_blank_input)
+            item_ids.update("123456789")
+            settings.save()
+            manager = Settings_Manager(
+                App_Config(name="gmod_alpha", instance_key="alpha", directory=directory, apps_dir=directory, scope="gmod"),
+                settings,
+            )
+
+            manager.update_setting(42, item_ids, "")
+            manager.save(42)
+
+            self.assertEqual(settings.client_content_workshop_ids, ())
+            self.assertEqual(Gmod_Settings(gmod_settings_path(directory)).client_content_workshop_ids, ())
+
     def test_default_launch_settings_are_persisted_with_sensible_values(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)

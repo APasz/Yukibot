@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,6 +14,7 @@ from apps._config_files import (
     create_app_config_file,
     delete_app_config_file,
     list_app_config_files,
+    prepare_instance_config_update,
     read_app_config_file,
     resolve_app_config_path,
     write_app_config_file,
@@ -25,6 +27,29 @@ from apps.sevendays import SevenDays
 
 
 class ConfigFileTests(unittest.TestCase):
+    def test_instance_config_update_prepares_changes_without_writing(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer = Path(temporary) / "instances.json"
+            original = b'{"alpha": {"enabled": true}, "beta": {"enabled": false}}'
+            pointer.write_bytes(original)
+
+            updated = prepare_instance_config_update(pointer, "alpha", {"factorio_save_file": "Orbit.zip"})
+
+            self.assertEqual(pointer.read_bytes(), original)
+            self.assertEqual(json.loads(updated), {
+                "alpha": {"enabled": True, "factorio_save_file": "Orbit.zip"}, "beta": {"enabled": False},
+            })
+
+    def test_instance_config_update_rejects_invalid_objects(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer = Path(temporary) / "instances.json"
+            for source in ("[]", "null", "{}", '{"alpha": []}', '{"alpha": null}', "{broken"):
+                with self.subTest(source=source):
+                    pointer.write_text(source)
+                    with self.assertRaises(ValueError):
+                        prepare_instance_config_update(pointer, "alpha", {"enabled": True})
+                    self.assertEqual(pointer.read_text(), source)
+
     def test_lists_reads_and_writes_allowed_config_files(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root_path = Path(temp_dir) / "config"

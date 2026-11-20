@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
+from typing import cast
 
 import config
+from _file import atomic_write_files
 from _security import Power_Level
 
 DEFAULT_CONFIG_FILE_SUFFIXES = frozenset(
@@ -93,6 +96,19 @@ class AppConfigFileContent:
     file: AppConfigFile
     content: str
     warning: str | None = None
+
+
+def prepare_instance_config_update(pointer: Path, instance_key: str, updates: Mapping[str, object]) -> bytes:
+    """Prepare instance metadata for a batch commit with the associated game settings."""
+    raw: object = json.loads(pointer.read_text(config.STR_ENCODE))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{pointer} must contain a JSON object.")
+    payload = cast(dict[str, object], raw)
+    instance = payload.get(instance_key)
+    if not isinstance(instance, dict):
+        raise ValueError(f"{pointer} is missing instance {instance_key!r}")
+    payload[instance_key] = {**cast(dict[str, object], instance), **updates}
+    return (json.dumps(payload, indent=4) + "\n").encode(config.STR_ENCODE)
 
 
 def effective_config_root_read_level(*, root: AppConfigFileRoot, default: Power_Level) -> Power_Level:
@@ -193,7 +209,7 @@ def write_app_config_file(
         raise ValueError(f"Config file content exceeds {MAX_CONFIG_FILE_BYTES} bytes.")
     if root.content_validator is not None:
         root.content_validator(content)
-    path.write_text(content, config.STR_ENCODE)
+    atomic_write_files({path: encoded})
     return AppConfigFileContent(
         file=_file_metadata(
             root=root,

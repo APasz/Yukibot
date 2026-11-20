@@ -24,6 +24,7 @@ from _discord import (
     RelayOutboundFormatOptions,
     render_plain_reference_prefix,
 )
+from _file import atomic_write_files
 from _security import Power_Level
 from apps._app import App, AppPortClaim, NetworkProtocol, tcp_udp_port_claims
 from apps._config import App_Config, AppVersion, Mod_Config, ModPageLink
@@ -404,7 +405,7 @@ class BeamMP_Settings(App_Settings):
             opt.set(data)
 
         string: str = tomli_w.dumps(data)
-        self.pointer.write_text(string, config.STR_ENCODE)
+        atomic_write_files({self.pointer: string.encode(config.STR_ENCODE)})
         return data
 
 

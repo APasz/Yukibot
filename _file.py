@@ -4,10 +4,11 @@ import importlib.util
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import zipfile
-from collections.abc import AsyncIterator, Callable, Collection
+from collections.abc import AsyncIterator, Callable, Collection, Mapping
 from logging import Logger
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -38,17 +39,80 @@ def require_free_disk_space(directory: Path, required_bytes: int) -> None:
         raise InsufficientDiskSpaceError("Insufficient free disk space for the upload and its temporary files.")
 
 
-def atomic_write_bytes(pointer: Path, contents: bytes) -> None:
-    """Replace a small state file only after its complete contents are written."""
+def _stage_file_bytes(pointer: Path, contents: bytes) -> Path:
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(prefix=f".{pointer.name}-", dir=pointer.parent, delete=False) as handle:
             temporary = Path(handle.name)
             handle.write(contents)
-        temporary.replace(pointer)
-    finally:
+            if pointer.exists():
+                temporary.chmod(stat.S_IMODE(pointer.stat().st_mode))
+        return temporary
+    except BaseException:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_bytes(pointer: Path, contents: bytes) -> None:
+    """Replace a small file after staging its contents, preserving its permissions."""
+    temporary = _stage_file_bytes(pointer, contents)
+    try:
+        temporary.replace(pointer)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def atomic_write_files(contents: Mapping[Path, bytes]) -> None:
+    """Stage related small files and roll back replacements if a later replacement fails."""
+    destinations: dict[Path, bytes] = {}
+    for pointer, data in contents.items():
+        destination = pointer.resolve()
+        if destination in destinations:
+            raise ValueError(f"Multiple writes target the same file: {pointer}")
+        destinations[destination] = data
+    if len(destinations) == 1:
+        pointer, data = next(iter(destinations.items()))
+        atomic_write_bytes(pointer, data)
+        return
+
+    staged: dict[Path, Path] = {}
+    backups: dict[Path, Path | None] = {}
+    replaced: list[Path] = []
+    try:
+        for pointer, data in destinations.items():
+            backups[pointer] = _stage_file_bytes(pointer, pointer.read_bytes()) if pointer.exists() else None
+            staged[pointer] = _stage_file_bytes(pointer, data)
+        failed_pointer: Path | None = None
+        try:
+            for pointer, temporary in staged.items():
+                failed_pointer = pointer
+                temporary.replace(pointer)
+                replaced.append(pointer)
+        except BaseException as error:
+            errors: list[BaseException] = [error]
+            for pointer in reversed(replaced):
+                try:
+                    backup = backups[pointer]
+                    if backup is None:
+                        pointer.unlink()
+                    else:
+                        backup.replace(pointer)
+                except OSError as rollback_error:
+                    backup = backups.pop(pointer)
+                    if backup is not None:
+                        rollback_error.add_note(f"Original contents retained at {backup}.")
+                    log.error("File rollback failed: file=%s recovery_copy=%s", pointer, backup)
+                    errors.append(rollback_error)
+            if len(errors) > 1:
+                raise BaseExceptionGroup("File replacement and rollback failed", errors) from None
+            if replaced:
+                log.warning("File update rolled back: restored_files=%s failed_file=%s", len(replaced), failed_pointer)
+            raise
+    finally:
+        for temporary in (*staged.values(), *backups.values()):
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 class ArchiveKind(enum.StrEnum):

@@ -11,11 +11,94 @@ import hikari
 
 import config
 
-from _file import File_Utils
+from _file import File_Utils, atomic_write_bytes, atomic_write_files
 from checks.rar_helpers import RAR_FIXTURES, UNRAR_AVAILABLE, stored_rar
 
 
 class FileUtilsTests(unittest.TestCase):
+    def test_atomic_write_preserves_existing_permissions(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer = Path(temporary) / "settings.json"
+            pointer.write_bytes(b"old")
+            pointer.chmod(0o640)
+
+            atomic_write_bytes(pointer, b"new")
+
+            self.assertEqual(pointer.read_bytes(), b"new")
+            self.assertEqual(pointer.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(list(pointer.parent.iterdir()), [pointer])
+
+    def test_file_batch_stages_every_file_before_replacing_any(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            first.write_bytes(b"original")
+            with self.assertRaises(OSError):
+                atomic_write_files({first: b"updated", root / "missing/second": b"second"})
+            self.assertEqual(first.read_bytes(), b"original")
+            self.assertEqual(list(root.iterdir()), [first])
+
+    def test_file_batch_rolls_back_existing_and_new_files_on_replace_failure(self) -> None:
+        original_replace = Path.replace
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, new, last = (root / name for name in ("first", "new", "last"))
+            first.write_bytes(b"original first")
+            first.chmod(0o640)
+            last.write_bytes(b"original last")
+
+            def replace(source: Path, target: Path) -> Path:
+                if target == last:
+                    raise OSError("replacement failed")
+                return original_replace(source, target)
+
+            with patch.object(Path, "replace", new=replace), self.assertRaisesRegex(OSError, "replacement failed"):
+                atomic_write_files({first: b"changed", new: b"created", last: b"changed"})
+
+            self.assertEqual(first.read_bytes(), b"original first")
+            self.assertEqual(first.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(last.read_bytes(), b"original last")
+            self.assertEqual(set(root.iterdir()), {first, last})
+
+    def test_file_batch_preserves_symlinks_and_rejects_aliased_destinations(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target, link = root / "settings", root / "link"
+            target.write_bytes(b"old")
+            link.symlink_to(target)
+
+            atomic_write_files({link: b"new"})
+
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_bytes(), b"new")
+            with self.assertRaisesRegex(ValueError, "same file"):
+                atomic_write_files({link: b"one", target: b"two"})
+            self.assertEqual(target.read_bytes(), b"new")
+
+    def test_file_batch_retains_recovery_copy_if_rollback_also_fails(self) -> None:
+        original_replace = Path.replace
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, last = root / "first", root / "last"
+            first.write_bytes(b"original first")
+            last.write_bytes(b"original last")
+            replacement_count = 0
+
+            def replace(source: Path, target: Path) -> Path:
+                nonlocal replacement_count
+                replacement_count += 1
+                if replacement_count > 1:
+                    raise OSError("replacement failed")
+                return original_replace(source, target)
+
+            with patch.object(Path, "replace", new=replace), self.assertRaises(ExceptionGroup) as raised:
+                atomic_write_files({first: b"changed", last: b"changed"})
+
+            self.assertEqual(len(raised.exception.exceptions), 2)
+            recovery_copies = [path for path in root.iterdir() if path not in (first, last)]
+            self.assertEqual(len(recovery_copies), 1)
+            self.assertEqual(recovery_copies[0].read_bytes(), b"original first")
+
     @unittest.skipUnless(UNRAR_AVAILABLE, "Compressed RAR checks require unrar")
     def test_extract_compressed_rar_uses_the_shared_backend(self) -> None:
         with TemporaryDirectory() as temporary:

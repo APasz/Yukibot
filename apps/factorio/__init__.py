@@ -39,7 +39,7 @@ from _discord import (
     RelayOutboundFormatOptions,
     render_plain_reference_prefix,
 )
-from _file import File_Utils
+from _file import File_Utils, atomic_write_files
 from _security import Power_Level, _owner_group
 from apps._app import (
     AM_Receiver,
@@ -61,7 +61,7 @@ from apps._config import (
     ModPageLink,
     known_mod_page_provider_for_url,
 )
-from apps._config_files import AppConfigFileKind, AppConfigFileRoot
+from apps._config_files import AppConfigFileKind, AppConfigFileRoot, prepare_instance_config_update
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleExecutor, ConsoleResponseSource
 from apps._mod import Mod, humanise_mod_identifier
 from apps._rcon import RconClient
@@ -177,14 +177,6 @@ _FACTORIO_UPDATE_BRANCHES: tuple[FactorioUpdateBranch, ...] = (
     FactorioUpdateBranch.STABLE,
     FactorioUpdateBranch.EXPERIMENTAL,
 )
-
-
-def _ignore_save_selection(_filename: str | None, _create_fresh_world: bool) -> None:
-    return None
-
-
-def _ignore_fresh_save_file(_filename: str) -> None:
-    return None
 
 
 def _json_object(value: object, *, label: str) -> dict[str, object]:
@@ -1480,20 +1472,12 @@ class Factorio_Settings(App_Settings):
         pointer: Path,
         *,
         saves_directory: Path | None = None,
-        save_file_getter: Callable[[], str | None] | None = None,
-        create_fresh_world_getter: Callable[[], bool] | None = None,
-        save_selection_setter: Callable[[str | None, bool], None] | None = None,
-        fresh_save_file_getter: Callable[[], str] | None = None,
-        fresh_save_file_setter: Callable[[str], None] | None = None,
+        cfg: App_Config | None = None,
         version_getter: Callable[[], AppVersion | None] | None = None,
     ) -> None:
         self._definitions: tuple[_FactorioSettingDefinitionItem, ...] = _FACTORIO_SETTING_DEFINITIONS
         self._saves_directory = saves_directory or pointer.parent.parent / "saves"
-        self._save_file_getter = save_file_getter or (lambda: None)
-        self._create_fresh_world_getter = create_fresh_world_getter or (lambda: False)
-        self._save_selection_setter = save_selection_setter or _ignore_save_selection
-        self._fresh_save_file_getter = fresh_save_file_getter or (lambda: "New World.zip")
-        self._fresh_save_file_setter = fresh_save_file_setter or _ignore_fresh_save_file
+        self._cfg = cfg
         self._save_selection_setting = Setting[str](
             StringSettingSpec(
                 ChoiceSpec(
@@ -1533,13 +1517,13 @@ class Factorio_Settings(App_Settings):
         return super().options
 
     def _refresh_save_selection_choices(self) -> None:
-        configured_filename = self._save_file_getter()
+        configured_filename = self._cfg.factorio_save_file if self._cfg is not None else None
         filenames = {
             _normalise_factorio_save_filename(path.name)
             for path in self._saves_directory.glob("*.zip")
             if path.is_file()
         } if self._saves_directory.is_dir() else set[str]()
-        if configured_filename is not None and not self._create_fresh_world_getter():
+        if configured_filename is not None and self._cfg is not None and not self._cfg.factorio_create_fresh_world:
             filenames.add(_normalise_factorio_save_filename(configured_filename))
         choices = [
             ChoiceOption(_FACTORIO_LOAD_LATEST_SELECTION, "Latest Save"),
@@ -1578,11 +1562,13 @@ class Factorio_Settings(App_Settings):
         self._refresh_save_selection_choices()
         selection = (
             _FACTORIO_CREATE_FRESH_WORLD_SELECTION
-            if self._create_fresh_world_getter()
-            else _factorio_save_selection(self._save_file_getter())
+            if self._cfg is not None and self._cfg.factorio_create_fresh_world
+            else _factorio_save_selection(self._cfg.factorio_save_file if self._cfg is not None else None)
         )
         self._save_selection_setting.load_value(selection)
-        self._fresh_save_file_setting.load_value(self._fresh_save_file_getter())
+        self._fresh_save_file_setting.load_value(
+            self._cfg.factorio_fresh_save_file if self._cfg is not None else self._fresh_save_file_setting.default
+        )
 
     def save(self) -> dict[str, object]:
         data = _load_json_object(self.pointer.read_text(config.STR_ENCODE), label="Factorio server settings")
@@ -1592,22 +1578,33 @@ class Factorio_Settings(App_Settings):
                 raise ValueError(f"Missing Factorio setting definition for {definition.key}")
             setting.set(data)
 
-        string: str = json.dumps(data, indent=4)
-        self.pointer.write_text(string, config.STR_ENCODE)
         fresh_save_file = self._fresh_save_file_setting.value
         if not isinstance(fresh_save_file, str):
             raise TypeError("Factorio fresh save name must be a string.")
-        self._fresh_save_file_setter(fresh_save_file)
-        if self._save_selection_setting.value == _FACTORIO_CREATE_FRESH_WORLD_SELECTION:
-            self._save_selection_setter(
-                _normalise_factorio_fresh_save_filename(fresh_save_file),
-                True,
+        create_fresh_world = self._save_selection_setting.value == _FACTORIO_CREATE_FRESH_WORLD_SELECTION
+        save_filename = (
+            _normalise_factorio_fresh_save_filename(fresh_save_file)
+            if create_fresh_world else _factorio_save_filename_from_selection(self._save_selection_setting.value)
+        )
+        contents = {self.pointer: json.dumps(data, indent=4).encode(config.STR_ENCODE)}
+        if self._cfg is not None and (
+            self._cfg.factorio_save_file != save_filename
+            or self._cfg.factorio_create_fresh_world != create_fresh_world
+            or self._cfg.factorio_fresh_save_file != fresh_save_file
+        ):
+            instances_path = self._cfg.apps_dir / "instances.json"
+            contents[instances_path] = prepare_instance_config_update(
+                instances_path, self._cfg.instance_key, {
+                    "factorio_save_file": save_filename,
+                    "factorio_create_fresh_world": create_fresh_world,
+                    "factorio_fresh_save_file": fresh_save_file,
+                },
             )
-        else:
-            self._save_selection_setter(
-                _factorio_save_filename_from_selection(self._save_selection_setting.value),
-                False,
-            )
+        atomic_write_files(contents)
+        if self._cfg is not None:
+            self._cfg.factorio_save_file = save_filename
+            self._cfg.factorio_create_fresh_world = create_fresh_world
+            self._cfg.factorio_fresh_save_file = fresh_save_file
         return data
 
 
@@ -1939,11 +1936,7 @@ class Factorio(App[App_Config]):
             Factorio_Settings(
                 file_settings,
                 saves_directory=cfg.directory / "saves",
-                save_file_getter=lambda: cfg.factorio_save_file,
-                create_fresh_world_getter=lambda: cfg.factorio_create_fresh_world,
-                save_selection_setter=self._set_configured_save_selection,
-                fresh_save_file_getter=lambda: cfg.factorio_fresh_save_file,
-                fresh_save_file_setter=self._set_configured_fresh_save_file,
+                cfg=cfg,
                 version_getter=lambda: cfg.version,
             ),
             Mod_Factorio,
@@ -2122,22 +2115,6 @@ class Factorio(App[App_Config]):
                 f"{self.friendly} has not received a map generation snapshot from {_FACTORIO_YUKI_BRIDGE_MOD_ID}."
             )
         return map_exchange_string
-
-    def _set_configured_save_selection(self, filename: str | None, create_fresh_world: bool) -> None:
-        if (
-            self.cfg.factorio_save_file == filename
-            and self.cfg.factorio_create_fresh_world == create_fresh_world
-        ):
-            return
-        self.cfg.factorio_save_file = filename
-        self.cfg.factorio_create_fresh_world = create_fresh_world
-        self.persist_instance_config_overrides()
-
-    def _set_configured_fresh_save_file(self, filename: str) -> None:
-        if self.cfg.factorio_fresh_save_file == filename:
-            return
-        self.cfg.factorio_fresh_save_file = filename
-        self.persist_instance_config_overrides()
 
     async def post_init(self) -> None:
         await super().post_init()

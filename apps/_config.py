@@ -1966,8 +1966,11 @@ class AppVersion(BaseModel):
         return self.compare_main_and_build(minimum) >= 0
 
     def is_at_most(self, maximum: "AppVersion") -> bool:
+        """Include every build of the maximum main version unless a build is specified."""
         if self.main is None:
             return False
+        if maximum.build is None:
+            return _compare_app_version_main(self.semantic_main, maximum.semantic_main) <= 0
         return self.compare_main_and_build(maximum) <= 0
 
     @field_validator("main", "framework", "steam_branch", mode="before")
