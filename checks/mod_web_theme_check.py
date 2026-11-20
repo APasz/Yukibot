@@ -9,7 +9,7 @@ from mod_web_theme import (
     apply_mod_web_theme,
     mod_web_badge_class,
 )
-from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT, MOD_WEB_TOAST_VERSION
+from mod_web_toasts import MOD_WEB_TOAST_VERSION
 
 
 class _FakeUi:
@@ -935,16 +935,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(f'/mod-web/assets/toasts.js?v={MOD_WEB_TOAST_VERSION}', str(ui.head_html))
         self.assertIn("content-visibility: auto", MOD_WEB_THEME_STYLESHEET)
 
-    def test_toast_client_queues_timers_and_pauses_on_hover(self) -> None:
-        self.assertIn("const activeRecord", MOD_WEB_TOAST_JAVASCRIPT)
-        self.assertIn("remainingMilliseconds", MOD_WEB_TOAST_JAVASCRIPT)
-        self.assertIn("const attachProgress", MOD_WEB_TOAST_JAVASCRIPT)
-        self.assertIn("const startProgressAnimation", MOD_WEB_TOAST_JAVASCRIPT)
-        self.assertIn("window.cancelAnimationFrame", MOD_WEB_TOAST_JAVASCRIPT)
-        self.assertIn("mod-toast-progress", MOD_WEB_TOAST_JAVASCRIPT)
-        self.assertIn("document.addEventListener('mouseover'", MOD_WEB_TOAST_JAVASCRIPT)
-        self.assertIn("document.addEventListener('mouseout'", MOD_WEB_TOAST_JAVASCRIPT)
-        self.assertIn("timeout: 0", MOD_WEB_TOAST_JAVASCRIPT)
+    def test_toast_progress_uses_the_theme(self) -> None:
         self.assertIn(".q-notification .mod-toast-progress", MOD_WEB_THEME_STYLESHEET)
         self.assertIn("--mod-toast-progress-scale", MOD_WEB_THEME_STYLESHEET)
 

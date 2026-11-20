@@ -247,7 +247,6 @@ from web_dash.assets import (
 )
 from web_dash.backend import ModWebDashboardBackend
 from web_dash.constants import (
-    _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
     _MOD_WEB_APP_PAGE_RESPONSE_TIMEOUT_SECONDS,
     _PORTAL_HEALTH_PATH,
     _REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
@@ -9320,10 +9319,7 @@ class ModWebTests(unittest.TestCase):
         ui.button_handlers["Grouped Duplicate"](None)
         self.assertEqual(len(ui.notifications), 2)
         self.assertEqual(ui.notifications[0], ui.notifications[1])
-        self.assertEqual(
-            ui.notifications[0]["timeout"],
-            _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
-        )
+        self.assertIsNone(ui.notifications[0]["timeout"])
 
         ui.button_handlers["Long Multiline"](None)
         self.assertIs(ui.notifications[-1]["multi_line"], True)

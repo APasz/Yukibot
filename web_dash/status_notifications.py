@@ -22,11 +22,13 @@ class ModWebStatusNotificationsMixin(ModWebStatusFeatureSupport):
     def _render_user_transfer_overlay(self, *, ui: ModWebUi, user: ModWebUser) -> None:
         tracks: list[_TransferOverlayTrack] = []
         detail_label: Label | None = None
+        has_failures = False
 
         def _render_items(items: tuple[_ModWebNotificationTrayItem, ...]) -> None:
-            nonlocal detail_label
+            nonlocal detail_label, has_failures
             tracks.clear()
             detail_label = None
+            has_failures = any(item.state is ModWebNotificationTrayItemState.ERROR for item in items)
             if not items:
                 return
             with (
@@ -48,8 +50,13 @@ class ModWebStatusNotificationsMixin(ModWebStatusFeatureSupport):
                             )
                             tracks.append(_TransferOverlayTrack(item=item, track=track, fill=fill))
                 detail = self._transfer_overlay_detail(items)
-                detail_label = ui.label(detail or "").classes("mod-transfer-overlay-detail")
+                detail_label = ui.label(detail or "").classes("mod-transfer-overlay-detail").props("tabindex=0")
                 detail_label.set_visibility(detail is not None)
+                if has_failures:
+                    ui.button(
+                        "Dismiss failed transfers",
+                        on_click=lambda: self._backend.clear_user_transfers(user_id=user.discord_id, failed_only=True),
+                    ).classes("mod-list-button secondary mod-transfer-overlay-dismiss")
 
         refreshable = getattr(ui, "refreshable", None)
         if not callable(refreshable):
@@ -76,7 +83,8 @@ class ModWebStatusNotificationsMixin(ModWebStatusFeatureSupport):
 
         def _update_items() -> None:
             items = self._user_transfer_overlay_items(user=user)
-            if len(items) != len(tracks):
+            next_has_failures = any(item.state is ModWebNotificationTrayItemState.ERROR for item in items)
+            if len(items) != len(tracks) or next_has_failures != has_failures:
                 _overlay.refresh()
                 return
             for item, binding in zip(items, tracks, strict=True):

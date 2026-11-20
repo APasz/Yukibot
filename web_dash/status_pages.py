@@ -763,18 +763,13 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
                     ui.label("Toast Previews").classes("mod-stat-label")
 
                     def _show_notification_preview(preview: _ModWebNotificationPreviewSpec) -> None:
-                        timeout_milliseconds: int = (
-                            _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS
-                            if preview.timeout_milliseconds is None
-                            else preview.timeout_milliseconds
-                        )
                         for _ in range(preview.repeat_count):
                             ui.notify(
                                 preview.message,
                                 close_button=preview.close_button,
                                 multi_line=preview.multi_line,
                                 type=preview.notification_type,
-                                timeout=timeout_milliseconds,
+                                timeout=preview.timeout_milliseconds,
                             )
 
                     def _notification_preview_handler(

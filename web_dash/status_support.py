@@ -58,7 +58,6 @@ from unit_conversion import (
 
 from . import avatars as mod_web_avatars
 from .constants import (
-    _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
     _MOD_WEB_REPOSITORY_URL,
     log,
 )
@@ -245,7 +244,6 @@ __all__ = (
     "UnitConversion",
     "UnitDefinition",
     "WebChatRelayPublisher",
-    "_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS",
     "_AliasDraft",
     "_DISCORD_SNOWFLAKE_MAX",
     "_LOGIN_ADMINISTRATOR_LEVELS",

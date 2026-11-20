@@ -48,7 +48,6 @@ from .app_page_sevendays import ModWebAppPageSevenDaysMixin
 from .app_page_updates import ModWebAppPageUpdateMixin
 from .assets import extract_html_tag_contents
 from .constants import (
-    _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
     _APP_MOD_SORT_QUERY_PARAM,
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     _APP_SEARCH_QUERY_PARAM,
@@ -72,6 +71,7 @@ from .nicegui_protocols import (
     _value_as_object,
     _value_as_text,
 )
+from .notifications import dismiss_operation_notification, finish_operation_notification, start_operation_notification
 from .runtime_imports import (
     AbstractEventLoop,
     AppVersionSource,
@@ -171,6 +171,7 @@ from .utils import _format_player_capacity
 if TYPE_CHECKING:
     from nicegui.element import Element
     from nicegui.elements.dialog import Dialog
+    from nicegui.elements.notification import Notification
     from nicegui.elements.tabs import Tab
     from nicegui.elements.tooltip import Tooltip
     from nicegui.events import TableSelectionEventArguments
@@ -4461,17 +4462,39 @@ class ModWebAppPageMixin(
                 return
             checking_all_mod_updates = True
             total_mod_count = len(update_check_entries)
-            ui.notify(
-                f"Checking {total_mod_count} mod{'s' if total_mod_count != 1 else ''} for updates…",
-                type="info",
-            )
+            notification: Notification | None = None
             try:
+                notification = start_operation_notification(
+                    ui=ui,
+                    message=f"Checking {total_mod_count} mod{'s' if total_mod_count != 1 else ''} for updates…",
+                )
                 batch_result = await self._check_all_mod_updates(
                     model=model,
                     entries=update_check_entries,
                     user=user,
                     on_checking=set_current_update_check,
                 )
+                available_update_mod_ids.clear()
+                available_update_mod_ids.update(batch_result.update_mod_ids)
+                _mod_download_rows.refresh(current_search_query)
+                available_update_count = len(batch_result.update_mod_ids)
+                failure_count = len(batch_result.failed_mod_ids)
+                message = (
+                    f"Checked {batch_result.checked_mod_count} mod"
+                    f"{'s' if batch_result.checked_mod_count != 1 else ''}: "
+                    f"{available_update_count} update{'s' if available_update_count != 1 else ''} available."
+                )
+                if failure_count:
+                    message = (
+                        f"{message} {failure_count} mod"
+                        f"{'s' if failure_count != 1 else ''} could not be checked."
+                    )
+                finish_operation_notification(
+                    ui=ui, notification=notification, message=message, tone="warning" if failure_count else "positive",
+                )
+            except asyncio.CancelledError:
+                dismiss_operation_notification(notification)
+                raise
             except Exception as xcp:
                 log.warning(
                     "Bulk mod update check failed: node=%s app=%s error=%s",
@@ -4479,27 +4502,13 @@ class ModWebAppPageMixin(
                     model.app_name,
                     xcp,
                 )
-                ui.notify(f"Mod update checks failed: {xcp}", type="negative")
+                finish_operation_notification(
+                    ui=ui, notification=notification, message=f"Mod update checks failed: {xcp}", tone="negative",
+                )
                 return
             finally:
                 checking_all_mod_updates = False
                 set_current_update_check(None)
-            available_update_mod_ids.clear()
-            available_update_mod_ids.update(batch_result.update_mod_ids)
-            _mod_download_rows.refresh(current_search_query)
-            available_update_count = len(batch_result.update_mod_ids)
-            failure_count = len(batch_result.failed_mod_ids)
-            message = (
-                f"Checked {batch_result.checked_mod_count} mod"
-                f"{'s' if batch_result.checked_mod_count != 1 else ''}: "
-                f"{available_update_count} update{'s' if available_update_count != 1 else ''} available."
-            )
-            if failure_count:
-                message = (
-                    f"{message} {failure_count} mod"
-                    f"{'s' if failure_count != 1 else ''} could not be checked."
-                )
-            ui.notify(message, type="warning" if failure_count else "positive")
 
         def selected_downloadable_mod_ids_in_page_order() -> tuple[str, ...]:
             return tuple(
@@ -6241,7 +6250,6 @@ class ModWebAppPageMixin(
                         ui.button("Close", on_click=modlist_dialog.close).classes("mod-list-button secondary")
 
         async def start_bulk_mod_metadata_discovery() -> NodeOperationView:
-            ui.notify("Scanning local mod identities and provider metadata…", type="info")
             operation = await self._start_bulk_mod_metadata_discovery(
                 model=model,
                 user=user,
@@ -8094,14 +8102,15 @@ class ModWebAppPageMixin(
                 elif action is NodeAppMutationAction.KILL and pending_label is not None:
                     kill_button.set_text(pending_label)
                     kill_button.disable()
-            if pending_message is not None:
-                ui.notify(
-                    pending_message,
-                    type="info",
-                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
-                )
+            notification: Notification | None = None
             try:
+                if pending_message is not None:
+                    notification = start_operation_notification(ui=ui, message=pending_message)
                 result = await self._mutate_app(model=current_runtime_model, action=action, user=user)
+            except asyncio.CancelledError:
+                dismiss_operation_notification(notification)
+                _apply_runtime_control_model(current_runtime_model, force=True)
+                raise
             except Exception as xcp:
                 log.warning(
                     "App mutation failed: node=%s app=%s action=%s error=%s",
@@ -8111,22 +8120,23 @@ class ModWebAppPageMixin(
                     xcp,
                 )
                 _apply_runtime_control_model(current_runtime_model, force=True)
-                ui.notify(
-                    f"App action failed: {xcp}",
-                    type="negative",
-                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+                finish_operation_notification(
+                    ui=ui,
+                    notification=notification,
+                    message=f"App action failed: {xcp}",
+                    tone="negative",
                 )
                 return
             completion_message = self._app_action_completion_message(
                 pending_message=pending_message,
                 result_message=result.message,
             )
-            if completion_message is not None:
-                ui.notify(
-                    completion_message,
-                    type="positive",
-                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
-                )
+            finish_operation_notification(
+                ui=ui,
+                notification=notification,
+                message=result.message,
+                tone="info" if completion_message is None else "positive",
+            )
             await asyncio.sleep(_DOWNLOAD_FEEDBACK_DELAY_SECONDS)
             if refresh_async_runtime_model is not None:
                 try:

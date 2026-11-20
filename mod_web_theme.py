@@ -6409,12 +6409,18 @@ class ModWebTheme:
                 .mod-transfer-overlay {{
                     display: flex;
                     flex-direction: column;
+                    max-height: min(50dvh, 24rem);
                 }}
                 .mod-transfer-overlay-tracks {{
                     display: flex;
                     flex-direction: column;
                     width: 100%;
                     min-width: 0;
+                    max-height: min(15dvh, 6rem);
+                    flex-shrink: 0;
+                    overflow-y: auto;
+                    overscroll-behavior: contain;
+                    pointer-events: auto;
                     gap: 1px;
                 }}
                 .mod-transfer-overlay-track {{
@@ -6440,6 +6446,10 @@ class ModWebTheme:
                 .mod-transfer-overlay-detail {{
                     align-self: flex-end;
                     max-width: min(90vw, 32rem);
+                    min-height: 0;
+                    overflow-y: auto;
+                    overscroll-behavior: contain;
+                    pointer-events: auto;
                     padding: 0.2rem 0.6rem;
                     border: 1px solid var(--mod-border);
                     border-top: 0;
@@ -6449,6 +6459,12 @@ class ModWebTheme:
                     line-height: 1.4;
                     white-space: pre-line;
                     overflow-wrap: anywhere;
+                }}
+                .mod-transfer-overlay-dismiss {{
+                    align-self: flex-end;
+                    flex-shrink: 0;
+                    pointer-events: auto;
+                    font-size: 0.75rem;
                 }}
                 .mod-timezone-option .q-btn__content {{
                     width: 100%;

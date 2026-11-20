@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mod_web_toasts import ModWebNotificationType
+
 from .runtime_imports import (
     TYPE_CHECKING,
     Button,
@@ -13,7 +15,6 @@ from .runtime_imports import (
     Html,
     Input,
     Label,
-    Literal,
     MutableMapping,
     ParamSpec,
     Protocol,
@@ -23,7 +24,6 @@ from .runtime_imports import (
     Table,
     Timer,
     Tooltip,
-    TypeAlias,
     TypeVar,
     Upload,
     cast,
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from nicegui.elements.dialog import Dialog
     from nicegui.elements.grid import Grid
     from nicegui.elements.link import Link
+    from nicegui.elements.notification import Notification
     from nicegui.elements.row import Row
     from nicegui.elements.switch import Switch
     from nicegui.elements.textarea import Textarea
@@ -45,7 +46,6 @@ RefreshableReturn = TypeVar("RefreshableReturn", covariant=True)
 RefreshableValue = TypeVar("RefreshableValue")
 ModWebRouteCallable = TypeVar("ModWebRouteCallable", bound=Callable[..., object])
 type AsyncRefresh = Callable[[], Coroutine[None, None, None]]
-ModWebNotificationType: TypeAlias = Literal["positive", "negative", "warning", "info", "ongoing"]
 
 
 class ModWebNavigate(Protocol):
@@ -119,6 +119,16 @@ class ModWebUi(Protocol):
         type: ModWebNotificationType | None = None,
         timeout: int | None = None,
     ) -> None: ...
+
+    def notification(
+        self,
+        message: str,
+        *,
+        type: ModWebNotificationType | None = None,
+        spinner: bool = False,
+        timeout: float | None = 5.0,
+        close_button: bool | str = False,
+    ) -> Notification: ...
 
     def download(self, src: object, filename: str | None = None, media_type: str = "") -> None: ...
 

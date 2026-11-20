@@ -2988,11 +2988,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
             with action_client:
                 ui.notify(message, type="positive")
 
-        def _notify_ongoing(message: str) -> None:
+        def _notify_scheduled(message: str) -> None:
             if actions_closed:
                 return
             with action_client:
-                ui.notify(message, type="ongoing", close_button=True, timeout=15_000)
+                ui.notify(message, type="info")
 
         def _create_confirm_handler(
             *,
@@ -3026,7 +3026,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 if actions_closed:
                     return
                 dialog.close()
-                _notify_ongoing(result.message)
+                _notify_scheduled(result.message)
 
             return _confirm
 

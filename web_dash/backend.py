@@ -49,7 +49,7 @@ class _TransferRecord:
 
     @property
     def active(self) -> bool:
-        return self.display_until is None
+        return self.item.state is ModWebNotificationTrayItemState.ACTIVE
 
 
 class ModWebDashboardBackend:
@@ -420,12 +420,13 @@ class ModWebDashboardBackend:
             self._cleanup_transfer_records(now=now)
             return self._active_transfer_slots_locked(user_id=user_id)
 
-    def clear_user_transfers(self, *, user_id: int) -> None:
+    def clear_user_transfers(self, *, user_id: int, failed_only: bool = False) -> None:
         with self._transfer_lock:
             transfer_ids = tuple(
                 transfer_id
                 for transfer_id, record in self._transfer_records.items()
                 if record.user_id == user_id
+                and (not failed_only or record.item.state is ModWebNotificationTrayItemState.ERROR)
             )
             for transfer_id in transfer_ids:
                 self._cancel_transfer_timers_locked(transfer_id=transfer_id)
@@ -468,10 +469,10 @@ class ModWebDashboardBackend:
         with self._transfer_lock:
             self._cleanup_transfer_records(now=now)
             record = self._transfer_records.get(transfer_id)
-            if record is None:
+            if record is None or not record.active:
                 return
             if require_pending_download and (
-                not record.active or record.download_started or record.item.kind is not ModWebNotificationTrayItemKind.DOWNLOAD
+                record.download_started or record.item.kind is not ModWebNotificationTrayItemKind.DOWNLOAD
             ):
                 return
             target_user_id = record.user_id
@@ -483,9 +484,10 @@ class ModWebDashboardBackend:
                 blink=False,
             )
             record.active_until = None
-            record.display_until = now + _TRANSFER_DISPLAY_SECONDS
-            self._cancel_transfer_auto_complete_timer_locked(transfer_id=transfer_id)
-            self._schedule_transfer_expiry_locked(transfer_id=transfer_id, delay_seconds=_TRANSFER_DISPLAY_SECONDS)
+            record.display_until = None if state is ModWebNotificationTrayItemState.ERROR else now + _TRANSFER_DISPLAY_SECONDS
+            self._cancel_transfer_timers_locked(transfer_id=transfer_id)
+            if record.display_until is not None:
+                self._schedule_transfer_expiry_locked(transfer_id=transfer_id, delay_seconds=_TRANSFER_DISPLAY_SECONDS)
         if target_user_id is not None:
             self._notify_transfer_subscribers(user_id=target_user_id)
 
@@ -524,7 +526,7 @@ class ModWebDashboardBackend:
         target_user_id: int | None = None
         with self._transfer_lock:
             record = self._transfer_records.get(transfer_id)
-            if record is None:
+            if record is None or record.display_until is None:
                 return
             target_user_id = record.user_id
             self._cancel_transfer_timers_locked(transfer_id=transfer_id)
