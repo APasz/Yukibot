@@ -1,0 +1,3 @@
+# Preserve the official configuration bytes used by release fingerprint checks.
+BepInEx/config/BepInEx.cfg -text
+doorstop_config.ini -text

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import unittest
 import zipfile
@@ -500,6 +501,24 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
                     ArchiveEntry(conflicting_file, PurePosixPath("overrides/nested")),
                 ),
                 format_name="test",
+            )
+
+    def test_client_pack_hash_verifies_expected_file_digests_without_changing_the_pack_hash(self) -> None:
+        source = self.root / "asset.bin"
+        content = b"verified asset"
+        source.write_bytes(content)
+        path = PurePosixPath("Mods/example/asset.bin")
+        entries = (ArchiveEntry(source, path),)
+        original = client_pack_content_hash(entries, format_name="test")
+        verified = client_pack_content_hash(
+            entries, format_name="test", expected_file_hashes={path: hashlib.sha256(content).hexdigest()},
+        )
+        self.assertEqual(original, verified)
+        with self.assertRaisesRegex(ClientPackValidationError, "does not match.*asset.bin"):
+            client_pack_content_hash(entries, format_name="test", expected_file_hashes={path: "0" * 64})
+        with self.assertRaisesRegex(ClientPackValidationError, "missing.*absent.bin"):
+            client_pack_content_hash(
+                entries, format_name="test", expected_file_hashes={PurePosixPath("absent.bin"): "0" * 64},
             )
 
     async def test_client_export_includes_server_only_entry(self) -> None:

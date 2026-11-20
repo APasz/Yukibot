@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from functools import partial
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import stat
 import subprocess
 from threading import Event
@@ -19,10 +20,15 @@ import pytest
 
 import config
 from _manager import AppDetailsUpdate, App_Manager
+from _mod_ops import ArchiveDataEntry, ClientPackSelection, ClientPackValidationError
 from archive_safety import ZipArchiveLimits, validated_zip_entries
 from apps._config import AppVersion, App_Config, Mod_Config, ModClassificationOverride, ModDownloadBlockReason, ModPlacement, ModType, SteamUpdateConfig
 from apps.sevendays import Mod_7D2D, SevenDays, SevenDays_Settings
 from apps.sevendays import installation
+from apps.sevendays import client_pack
+from node_api import client_pack as node_client_pack
+from node_api.client_pack import NodeClientPackService
+from node_api.mod import NodeDownloadRequest
 
 
 _CORE = b"supported overhaul core"
@@ -501,6 +507,12 @@ def test_invalid_profile_component_names_are_rejected(names: tuple[str, ...]) ->
         )
 
 
+@pytest.mark.parametrize("path", [".", "../outside", "BepInEx/../../outside", "unmanaged.txt"])
+def test_managed_file_paths_fail_with_validation_errors(path: str) -> None:
+    with pytest.raises(ValueError):
+        installation.UndeadLegacyManagedFile(path=path, size_bytes=1, sha256="0" * 64)
+
+
 @pytest.fixture
 def installed_overhaul_archive(tmp_path: Path, app_directory: Path, package_files: dict[str, bytes]) -> Path:
     archive = _write_zip(tmp_path / "installed-overhaul.zip", package_files)
@@ -853,3 +865,251 @@ def test_repair_refuses_running_servers_and_prevents_concurrent_launch(
         assert not overhaul_app._maintenance_lock.locked()
 
     asyncio.run(exercise())
+
+
+@pytest.fixture
+def client_release(package_files: dict[str, bytes]) -> installation.UndeadLegacyRelease:
+    package_files["winhttp.dll"] = b"windows doorstop"
+    files: list[installation.UndeadLegacyManagedFile] = []
+    for file in _RELEASE.windows_runtime_files:
+        if Path(file.path).suffix in {".cfg", ".ini"}:
+            package_files[file.path] = (client_pack._RUNTIME_DEFAULTS / file.path).read_bytes()
+        content = package_files[file.path]
+        files.append(file.model_copy(update={"size_bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}))
+    return replace(_RELEASE, windows_runtime_files=tuple(files))
+
+
+@pytest.fixture
+def client_pack_app(
+    client_release: installation.UndeadLegacyRelease,
+    overhaul_app: SevenDays,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SevenDays:
+    mods_directory = overhaul_app.directory / "Mods"
+    mods = {"UndeadLegacy": Mod_7D2D(Mod_Config(name="UndeadLegacy", directory=mods_directory))}
+    for name, placement in (("add-on", ModPlacement.SERVER_ENABLED), ("client-addon", ModPlacement.CLIENT_ONLY)):
+        folder = mods_directory / name
+        folder.mkdir()
+        filename = "ModInfo.xml.client" if placement is ModPlacement.CLIENT_ONLY else "ModInfo.xml"
+        (folder / filename).write_text(f'<xml><Name value="{name}"/></xml>', encoding="utf-8")
+        (folder / "addon.dll").write_bytes(b"add-on code")
+        mods[name] = Mod_7D2D(Mod_Config(name=name, directory=mods_directory, placement=placement))
+    manager = Mock()
+    manager.list_mods.return_value = tuple(mods.values())
+    manager.get.side_effect = mods.__getitem__
+    manager.reload_mods = AsyncMock()
+    overhaul_app.mods = manager
+    overrides = overhaul_app.directory / "client-overrides"
+    (overrides / "Config").mkdir(parents=True)
+    (overrides / "Config/client.ini").write_text("client options", encoding="utf-8")
+    overhaul_app.cfg.client_overrides_dir = overrides
+    monkeypatch.setattr(
+        node_client_pack,
+        "build_undead_legacy_client_pack_entries",
+        partial(client_pack.build_undead_legacy_client_pack_entries, release=client_release),
+    )
+    return overhaul_app
+
+
+@pytest.fixture
+def client_pack_service() -> NodeClientPackService:
+    return NodeClientPackService(
+        node_name=lambda: "test",
+        require_acl=Mock(),
+        http_exception=lambda status, detail: RuntimeError(f"{status}: {detail}"),
+        invalidate_app_state=lambda _name: None,
+        invalidate_mod_inventory=lambda _name: None,
+    )
+
+
+def test_ul_client_archive_is_a_complete_windows_game_root_overlay(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    client_release: installation.UndeadLegacyRelease,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for relative in ("BepInEx/LogOutput.log", "BepInEx/cache/private.cache", "BepInEx/plugins/server.dll"):
+        pointer = client_pack_app.directory / relative
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_bytes(b"server-only generated data")
+    (client_pack_app.directory / "BepInEx/config/BepInEx.cfg").write_bytes(b"custom server settings")
+    (client_pack_app.directory / "doorstop_config.ini").write_bytes(b"custom server loader settings")
+    monkeypatch.setattr(config, "DIR_ZIPS", tmp_path / "zips")
+    request = NodeDownloadRequest(
+        client_pack=True, publish_client_pack=True, publish_changelog="Complete Windows and Proton client.",
+    )
+    response = asyncio.run(client_pack_service.build_mod_download_response(app=client_pack_app, request=request))
+    with zipfile.ZipFile(response.path) as archive:
+        files = {name for name in archive.namelist() if not name.endswith("/")}
+        assert {
+            "Mods/UndeadLegacy/UndeadLegacy.dll",
+            "Mods/UndeadLegacy/Resources/Subquake_Items.ulm",
+            "Mods/add-on/ModInfo.xml",
+            "Mods/client-addon/ModInfo.xml",
+            "Mods/client-addon/addon.dll",
+            "Config/client.ini",
+            "Start Undead Legacy.cmd",
+            "README-Undead-Legacy.txt",
+            *(file.path for file in client_release.windows_runtime_files),
+        }.issubset(files)
+        assert files == {
+            str(path.relative_to(client_pack_app.directory))
+            for path in (client_pack_app.directory / "Mods").rglob("*")
+            if path.is_file() and path.name != "ModInfo.xml.client"
+        } | {
+            "Mods/client-addon/ModInfo.xml", "Config/client.ini",
+            "Start Undead Legacy.cmd", "README-Undead-Legacy.txt",
+            *(file.path for file in client_release.windows_runtime_files),
+        }
+        assert archive.read("BepInEx/config/BepInEx.cfg") == (client_pack._RUNTIME_DEFAULTS / "BepInEx/config/BepInEx.cfg").read_bytes()
+        assert archive.read("doorstop_config.ini") == (client_pack._RUNTIME_DEFAULTS / "doorstop_config.ini").read_bytes()
+        guide = archive.read("README-Undead-Legacy.txt").decode()
+        assert 'WINEDLLOVERRIDES="winhttp.dll=n,b" %command%' in guide
+        assert client_release.version in guide and client_release.steam_branch in guide
+    core = client_pack_app.has_mod_manager.get("UndeadLegacy")
+    assert not core.downloadable and core.is_protected
+    assert not core.cfg.client_pack.included_in_client
+    assert "UndeadLegacy" in {mod.name for mod in client_pack_app.cfg.client_pack_published_mods}
+
+
+@pytest.mark.parametrize("relative,damage", [
+    ("winhttp.dll", "missing"),
+    ("BepInEx/core/BepInEx.dll", "modified"),
+    ("Mods/UndeadLegacy/UndeadLegacy.dll", "modified"),
+    ("Mods/UndeadLegacy/Resources/Subquake_Items.ulm", "lfs"),
+    ("Mods/UndeadLegacy/Resources/Subquake_Power.ulm", "missing"),
+])
+def test_ul_client_export_rejects_missing_or_invalid_required_files(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    relative: str,
+    damage: Literal["missing", "lfs", "modified"],
+) -> None:
+    target = client_pack_app.directory / relative
+    if damage == "missing":
+        target.unlink()
+    elif damage == "lfs":
+        target.write_bytes(b"version https://git-lfs.github.com/spec/v1\n")
+    else:
+        target.write_bytes(b"x" * target.stat().st_size)
+    with pytest.raises(ClientPackValidationError):
+        client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+
+
+def test_ul_client_export_rejects_loader_symlinks(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    tmp_path: Path,
+) -> None:
+    target = client_pack_app.directory / "winhttp.dll"
+    outside = tmp_path / "outside-loader.dll"
+    target.rename(outside)
+    target.symlink_to(outside)
+    with pytest.raises(ClientPackValidationError, match="escapes|symbolic link"):
+        client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+
+
+def test_ul_client_overrides_cannot_replace_managed_runtime_files(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+) -> None:
+    overrides = client_pack_app.cfg.client_overrides_dir
+    assert overrides is not None
+    (overrides / "WINHTTP.DLL").write_bytes(b"conflicting override")
+    with pytest.raises(ClientPackValidationError, match="[Dd]uplicate"):
+        entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+        asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+
+
+def test_ul_client_asset_digest_is_checked_during_publication_hashing(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+) -> None:
+    target = client_pack_app.directory / "Mods/UndeadLegacy/Resources/Subquake_Items.ulm"
+    target.write_bytes(b"x" * target.stat().st_size)
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+    with pytest.raises(ClientPackValidationError, match="Subquake_Items.ulm"):
+        asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+
+
+def test_ul_client_export_requires_the_known_managed_manifest(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+) -> None:
+    (client_pack_app.directory / installation.UNDEAD_LEGACY_MANIFEST).unlink()
+    with pytest.raises(ClientPackValidationError, match="managed Undead Legacy"):
+        client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+
+
+@pytest.mark.parametrize("relative", ["BepInEx/core", "bepinex/custom.ini", "CON.txt", "winhttp.dll.", "bad:stream"])
+def test_ul_client_export_rejects_windows_path_conflicts(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    relative: str,
+) -> None:
+    overrides = client_pack_app.cfg.client_overrides_dir
+    assert overrides is not None
+    target = overrides / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"invalid Windows overlay")
+    with pytest.raises(ClientPackValidationError):
+        entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+        asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+
+
+def test_ul_client_changelog_does_not_read_runtime_binaries(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_hash(_path: Path) -> str:
+        pytest.fail("Metadata previews must not hash client runtime files.")
+    monkeypatch.setattr(client_pack, "_file_sha256", unexpected_hash)
+    snapshots = client_pack_service.default_mod_snapshots(client_pack_app)
+    assert {mod.name for mod in snapshots} == {"UndeadLegacy", "add-on", "client-addon"}
+
+
+def test_ul_client_hash_tracks_runtime_and_generated_launch_support(
+    client_pack_app: SevenDays,
+    client_pack_service: NodeClientPackService,
+) -> None:
+    entries = client_pack_service.entries(ClientPackSelection(), app=client_pack_app, include_kubejs_scripts=False)
+    original = asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries))
+    for path in ("Start Undead Legacy.cmd", "README-Undead-Legacy.txt"):
+        changed = tuple(
+            replace(entry, content=entry.content + b"changed")
+            if isinstance(entry, ArchiveDataEntry) and entry.archive_path == PurePosixPath(path) else entry
+            for entry in entries
+        )
+        assert asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=changed)) != original
+    loader = client_pack_app.directory / "winhttp.dll"
+    loader.write_bytes(b"x" * loader.stat().st_size)
+    assert asyncio.run(client_pack_service.content_hash(app=client_pack_app, entries=entries)) != original
+
+
+def test_bundled_ul_client_configuration_matches_pinned_official_release() -> None:
+    for file in installation.UNDEAD_LEGACY_RELEASE.windows_runtime_files:
+        if Path(file.path).suffix not in {".cfg", ".ini"}:
+            continue
+        content = (client_pack._RUNTIME_DEFAULTS / file.path).read_bytes()
+        assert len(content) == file.size_bytes
+        assert hashlib.sha256(content).hexdigest() == file.sha256
+
+
+def test_vanilla_sevendays_client_layout_is_unchanged(
+    tmp_path: Path,
+    client_pack_service: NodeClientPackService,
+) -> None:
+    manager = Mock()
+    manager.list_mods.return_value = ()
+    app = Mock(spec=SevenDays)
+    app.directory = tmp_path
+    app.has_mod_manager = manager
+    app.undead_legacy_installation = None
+    app.mod_capabilities.include_client_overrides = False
+    app.cfg = App_Config(
+        name="sevendays_vanilla", instance_key="vanilla", scope="sevendays", directory=tmp_path,
+        apps_dir=tmp_path, version=AppVersion(main="2.6"),
+    )
+    assert client_pack_service.entries(ClientPackSelection(), app=app, include_kubejs_scripts=False) == ()

@@ -49,6 +49,8 @@ from apps.minecraft.pack_export import (
     discover_client_pack_kubejs_scripts,
     export_minecraft_pack,
 )
+from apps.sevendays import SevenDays
+from apps.sevendays.client_pack import build_undead_legacy_client_pack_entries, undead_legacy_client_file_hashes
 from .app_state import ClientPackFilePreview
 from .mod import (
     NodeClientPackConfigUpdateRequest,
@@ -101,10 +103,15 @@ class NodeClientPackService:
             hash_context_payload["filename_template"] = metadata.filename_template
             hash_context_payload["include_servers_dat"] = metadata.include_servers_dat
             hash_context_payload["include_options_txt"] = metadata.include_options_txt
+        expected_file_hashes = (
+            undead_legacy_client_file_hashes(app.directory)
+            if isinstance(app, SevenDays) and app.undead_legacy_installation is not None else None
+        )
         return await run_blocking(
             client_pack_content_hash,
             entries,
             format_name=json.dumps(hash_context_payload, sort_keys=True),
+            expected_file_hashes=expected_file_hashes,
         )
 
     @staticmethod
@@ -219,6 +226,10 @@ class NodeClientPackService:
             *build_client_pack_entries(app.has_mod_manager, selection, client_overrides_dir=None),
             *self._override_entries(app=app, metadata=metadata),
         )
+        if isinstance(app, SevenDays) and app.undead_legacy_installation is not None:
+            return build_undead_legacy_client_pack_entries(
+                app.directory, app.has_mod_manager, entries, game_version=app.cfg.version,
+            )
         if not isinstance(app, Minecraft):
             return entries
         if metadata is not None:
@@ -237,13 +248,14 @@ class NodeClientPackService:
         )
 
     def default_mod_snapshots(self, app: App) -> tuple[ClientPackModSnapshot, ...]:
-        entries = self.entries(
-            ClientPackSelection(),
-            app=app,
-            include_kubejs_scripts=False,
-            include_servers_dat=False,
-            include_options_txt=False,
+        entries = build_client_pack_entries(
+            app.has_mod_manager, ClientPackSelection(), client_overrides_dir=None,
         )
+        if isinstance(app, SevenDays) and (installation := app.undead_legacy_installation) is not None:
+            entries = (
+                *(ModArchiveEntry.from_mod(app.has_mod_manager.get(name)) for name in installation.mod_names),
+                *entries,
+            )
         snapshots: list[ClientPackModSnapshot] = []
         for entry in entries:
             if isinstance(entry, ModArchiveEntry):
@@ -344,7 +356,9 @@ class NodeClientPackService:
         async with self._client_pack_lock(app.name):
             await app.has_mod_manager.reload_mods()
             try:
-                entries = self.entries(ClientPackSelection(), app=app, include_kubejs_scripts=True)
+                entries = await run_blocking(
+                    self.entries, ClientPackSelection(), app=app, include_kubejs_scripts=True,
+                )
                 content_hash = await self.content_hash(app=app, entries=entries)
                 snapshots = self.default_mod_snapshots(app)
             except (
@@ -564,7 +578,8 @@ class NodeClientPackService:
         entries: tuple[ArchiveEntry | ArchiveDataEntry, ...]
         try:
             if pack_purpose is PackPurpose.CLIENT:
-                entries = self.entries(
+                entries = await run_blocking(
+                    self.entries,
                     app=app,
                     selection=ClientPackSelection(
                         selected_mod_names=frozenset(selected_mod_names or ()),
@@ -606,7 +621,8 @@ class NodeClientPackService:
         publication_changelog: str | None = None
         if pack_purpose is PackPurpose.CLIENT:
             try:
-                published_entries = self.entries(
+                published_entries = await run_blocking(
+                    self.entries,
                     app=app,
                     selection=ClientPackSelection(),
                     include_kubejs_scripts=True,

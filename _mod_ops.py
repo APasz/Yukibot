@@ -6,7 +6,7 @@ import json
 import uuid
 import zipfile
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -142,11 +142,18 @@ def _client_pack_manifest_metadata(entry: ModArchiveEntry) -> dict[str, object]:
     }
 
 
-def client_pack_content_hash(entries: Collection[WritableArchiveEntry], *, format_name: str) -> str:
+def client_pack_content_hash(
+    entries: Collection[WritableArchiveEntry],
+    *,
+    format_name: str,
+    expected_file_hashes: Mapping[PurePosixPath, str] | None = None,
+) -> str:
     digest = hashlib.sha256()
     _update_content_hash(digest, format_name.encode("utf-8"))
     seen_archive_roots: set[str] = set()
     seen_archive_paths: set[str] = set()
+    expected_hashes = expected_file_hashes if expected_file_hashes is not None else {}
+    unverified_paths = set(expected_hashes)
 
     def reserve_archive_path(archive_path: PurePosixPath) -> None:
         rendered = archive_path.as_posix()
@@ -216,9 +223,20 @@ def client_pack_content_hash(entries: Collection[WritableArchiveEntry], *, forma
             reserve_archive_path(archive_path)
             _update_content_hash(digest, b"file")
             _update_content_hash(digest, archive_path.as_posix().encode("utf-8"))
+            expected_hash = expected_hashes.get(archive_path)
+            file_digest = hashlib.sha256() if expected_hash is not None else None
             with path.open("rb") as handle:
                 while chunk := handle.read(1024 * 1024):
                     _update_content_hash(digest, chunk)
+                    if file_digest is not None:
+                        file_digest.update(chunk)
+            if file_digest is not None:
+                if file_digest.hexdigest() != expected_hash:
+                    raise ClientPackValidationError(f"Client-pack file does not match the installed release: {archive_path}")
+                unverified_paths.remove(archive_path)
+    if unverified_paths:
+        missing = ", ".join(str(path) for path in sorted(unverified_paths))
+        raise ClientPackValidationError(f"Required client-pack files are missing: {missing}")
     return digest.hexdigest()
 
 

@@ -29,27 +29,6 @@ from apps._steam import parse_steam_keyvalues_mapping
 from safe_http import PublicAddressResolver, validate_public_http_url
 
 
-@dataclass(frozen=True, slots=True)
-class UndeadLegacyRelease:
-    version: str
-    game_version: str
-    steam_branch: str
-    archive_urls: tuple[str, ...]
-    core_sha256: str
-
-
-UNDEAD_LEGACY_RELEASE = UndeadLegacyRelease(
-    version="2.7.40",
-    game_version="2.6",
-    steam_branch="v2.6",
-    archive_urls=(
-        "https://gitlab.com/subquakesgroup/UndeadLegacyExperimentalPart1/-/archive/"
-        "2a188174cf9b6be70cdb9864cb6ea74f917a38b5/UndeadLegacyExperimentalPart1.zip",
-        "https://gitlab.com/subquakesgroup/UndeadLegacyExperimentalPart2/-/archive/"
-        "39e80938f70ba253aedb2c71c70d6ecf6886a7b3/UndeadLegacyExperimentalPart2.zip",
-    ),
-    core_sha256="69446cfa36e04513cb435abce3b6f5561c2bd25e1278317893ffb993e8edf511",
-)
 INSTALL_DOWNLOAD_RETENTION_SECONDS = 72 * 60 * 60
 UNDEAD_LEGACY_MANIFEST = Path(".yukibot") / "undead-legacy.json"
 UNDEAD_LEGACY_LAUNCHER = "start_undead_legacy.sh"
@@ -79,30 +58,6 @@ _REQUIRED_GAME_FILES = (
     _MONO_RUNTIME_DIRECTORY / "x86_64/libmono-native.so",
     _MONO_RUNTIME_DIRECTORY / "x86_64/libMonoPosixHelper.so",
 )
-_REQUIRED_FILES = (
-    "Mods/UndeadLegacy/ModInfo.xml",
-    _CORE_DLL,
-    "Mods/UndeadLegacy/Resources/Subquake_Items.ulm",
-    "Mods/UndeadLegacy/Resources/Subquake_Core.ulm",
-    "Mods/UndeadLegacy/Resources/Subquake_Vehicles.ulm",
-    "Mods/UndeadLegacy/Resources/Subquake_Power.ulm",
-    "BepInEx/core/BepInEx.Preloader.dll",
-    "BepInEx/core/0Harmony.dll",
-    "BepInEx/core/0Harmony20.dll",
-    "BepInEx/core/BepInEx.dll",
-    "BepInEx/core/BepInEx.Harmony.dll",
-    "BepInEx/core/HarmonyXInterop.dll",
-    "BepInEx/core/Mono.Cecil.dll",
-    "BepInEx/core/Mono.Cecil.Mdb.dll",
-    "BepInEx/core/Mono.Cecil.Pdb.dll",
-    "BepInEx/core/Mono.Cecil.Rocks.dll",
-    "BepInEx/core/MonoMod.RuntimeDetour.dll",
-    "BepInEx/core/MonoMod.Utils.dll",
-    "BepInEx/patchers/BepInEx.MultiFolderLoader.dll",
-    "doorstop_libs/libdoorstop_x64.so",
-    "doorstop_config.ini",
-    "run_bepinex.sh",
-)
 _LAUNCHER = f'''#!/bin/sh
 set -eu
 APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -127,9 +82,114 @@ class UndeadLegacyManagedFile(BaseModel):
     @field_validator("path")
     @classmethod
     def validate_path(cls, path: str) -> str:
-        if path not in _REQUIRED_FILES:
+        relative = validated_archive_member_path(path, archive_label="Managed Undead Legacy file")
+        if not relative.parts or relative.as_posix() != path or (
+            relative.parts[0] not in _PACKAGE_ROOTS and path not in _SUPPORT_FILES
+        ):
             raise ValueError("Unknown managed Undead Legacy file.")
         return path
+
+
+@dataclass(frozen=True, slots=True)
+class UndeadLegacyRelease:
+    version: str
+    game_version: str
+    steam_branch: str
+    archive_urls: tuple[str, ...]
+    core_sha256: str
+    windows_runtime_files: tuple[UndeadLegacyManagedFile, ...]
+
+
+UNDEAD_LEGACY_RELEASE = UndeadLegacyRelease(
+    version="2.7.40",
+    game_version="2.6",
+    steam_branch="v2.6",
+    archive_urls=(
+        "https://gitlab.com/subquakesgroup/UndeadLegacyExperimentalPart1/-/archive/"
+        "2a188174cf9b6be70cdb9864cb6ea74f917a38b5/UndeadLegacyExperimentalPart1.zip",
+        "https://gitlab.com/subquakesgroup/UndeadLegacyExperimentalPart2/-/archive/"
+        "39e80938f70ba253aedb2c71c70d6ecf6886a7b3/UndeadLegacyExperimentalPart2.zip",
+    ),
+    core_sha256="69446cfa36e04513cb435abce3b6f5561c2bd25e1278317893ffb993e8edf511",
+    windows_runtime_files=(
+        UndeadLegacyManagedFile(
+            path="BepInEx/config/BepInEx.cfg", size_bytes=5421,
+            sha256="c6d0ed0992df62c51a6a57da3c3347ee988eec3943e25810c4ded6afdd2993f4",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/0Harmony.dll", size_bytes=204800,
+            sha256="1a21cc03424fc82c3dd1346905d16494536b9595ae4162228d99fb7c285c1031",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/0Harmony20.dll", size_bytes=112640,
+            sha256="c755a5ab2712915a32f9a850d580a8c1b70ff1653bc76600f2767aa8ffccc663",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/BepInEx.Harmony.dll", size_bytes=6656,
+            sha256="00c8f2ac48593e4d45ce4eb26ce4e68b18113c5c489b38b8bf0850f65830d601",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/BepInEx.Preloader.dll", size_bytes=43008,
+            sha256="55d3895351a9d16b63b6f35f1c01b44ac650979e853d0bd3a442b92a082af64f",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/BepInEx.dll", size_bytes=128512,
+            sha256="8255b28902886085c578b9e427d3073c97002db85176d2090cdeda90ef14ce70",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/HarmonyXInterop.dll", size_bytes=23552,
+            sha256="7ce1342d3afa0334b59a3e38c0aed15e162b9abe9d46f95f34be44af47f3b493",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/Mono.Cecil.Mdb.dll", size_bytes=43008,
+            sha256="5896d1898f616701fff18f3b2c71e6b844d2390ef9f41e1c5fccce8cb27c698e",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/Mono.Cecil.Pdb.dll", size_bytes=86528,
+            sha256="174db44a067f58561510af746f3caeb032037762c57a31c8d9ee32db25174984",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/Mono.Cecil.Rocks.dll", size_bytes=27648,
+            sha256="54ac539fb5ddc8b44c0e9acd0fcb7324f89d1a072edf8ebc1b06dd691e3d3927",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/Mono.Cecil.dll", size_bytes=339456,
+            sha256="7ae470288fff4a402899c254d0a76cefef55877f5c54f96e83c797cc5bb6e2f6",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/MonoMod.RuntimeDetour.dll", size_bytes=105984,
+            sha256="40e49bb314391cd7bddc2644f8553eeba92c194b940836b103df16955c464e0c",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/core/MonoMod.Utils.dll", size_bytes=187904,
+            sha256="9d1495f147ac93c4f81f84538c1a326e8f8a6aefc78d6289d798f3ce1162c5e9",
+        ),
+        UndeadLegacyManagedFile(
+            path="BepInEx/patchers/BepInEx.MultiFolderLoader.dll", size_bytes=15872,
+            sha256="64d81ca49ecd2f37b3497bf56c3a7a83a3db29d889c4c8352b9ec9be03d253f2",
+        ),
+        UndeadLegacyManagedFile(
+            path="doorstop_config.ini", size_bytes=1571,
+            sha256="491e66f3337f273ed1dd9e2e5ce61dd0e8b197ba9f7d6e1878de85f3dfba6326",
+        ),
+        UndeadLegacyManagedFile(
+            path="winhttp.dll", size_bytes=26112,
+            sha256="8c6cdbc38836dee87e3368f5de1994d7c0ccebf29e4ce7aba3c0981f9375412c",
+        ),
+    ),
+)
+_REQUIRED_FILES = (
+    "Mods/UndeadLegacy/ModInfo.xml",
+    _CORE_DLL,
+    "Mods/UndeadLegacy/Resources/Subquake_Items.ulm",
+    "Mods/UndeadLegacy/Resources/Subquake_Core.ulm",
+    "Mods/UndeadLegacy/Resources/Subquake_Vehicles.ulm",
+    "Mods/UndeadLegacy/Resources/Subquake_Power.ulm",
+    *(file.path for file in UNDEAD_LEGACY_RELEASE.windows_runtime_files if file.path.startswith(("BepInEx/core/", "BepInEx/patchers/"))),
+    "doorstop_libs/libdoorstop_x64.so",
+    "doorstop_config.ini",
+    "run_bepinex.sh",
+)
 
 
 class UndeadLegacyInstallation(BaseModel):
@@ -211,6 +271,13 @@ def load_undead_legacy_installation(directory: Path) -> UndeadLegacyInstallation
     return UndeadLegacyInstallation.model_validate_json(pointer.read_text(encoding="utf-8"))
 
 
+def require_undead_legacy_installation(directory: Path) -> UndeadLegacyInstallation:
+    installation = load_undead_legacy_installation(directory)
+    if installation is None:
+        raise ValueError("This instance is not a managed Undead Legacy installation.")
+    return installation
+
+
 def inspect_undead_legacy_installation(
     directory: Path,
     *,
@@ -218,9 +285,7 @@ def inspect_undead_legacy_installation(
     deep: bool = False,
 ) -> tuple[UndeadLegacyHealthIssue, ...]:
     """Check managed files and launch requirements without changing the installation."""
-    installation = load_undead_legacy_installation(directory)
-    if installation is None:
-        raise ValueError("This instance is not a managed Undead Legacy installation.")
+    installation = require_undead_legacy_installation(directory)
     issues: list[UndeadLegacyHealthIssue] = []
     resolved_directory = directory.resolve()
     for relative in (*_REQUIRED_GAME_FILES, *_REQUIRED_FILES, UNDEAD_LEGACY_LAUNCHER, "serverconfig.xml"):
@@ -687,9 +752,7 @@ async def repair_undead_legacy_installation(
     release: UndeadLegacyRelease = UNDEAD_LEGACY_RELEASE,
 ) -> None:
     """Restore this release's managed files; preserve saves, mod configs, and add-ons."""
-    installation = load_undead_legacy_installation(directory)
-    if installation is None:
-        raise ValueError("This instance is not a managed Undead Legacy installation.")
+    installation = require_undead_legacy_installation(directory)
     if (installation.version, installation.game_version, installation.core_sha256) != (
         release.version,
         release.game_version,

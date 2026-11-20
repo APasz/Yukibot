@@ -2724,6 +2724,10 @@ class SevenDays(App[App_Config]):
         return detect_sevendays_version(directory=self.cfg.directory, server_log=self.cfg.server_log_file)
 
     @property
+    def undead_legacy_installation(self) -> UndeadLegacyInstallation | None:
+        return self._overhaul_installation
+
+    @property
     def version_display(self) -> str:
         game_version = super().version_display
         if self._overhaul_installation is None:
@@ -2732,7 +2736,7 @@ class SevenDays(App[App_Config]):
 
     @property
     def steam_update_supported(self) -> bool:
-        return load_undead_legacy_installation(self.directory) is None
+        return self.undead_legacy_installation is None
 
     def _is_update_running(self) -> bool:
         status = self.update_status
