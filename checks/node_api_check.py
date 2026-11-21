@@ -158,6 +158,7 @@ from apps.satisfactory import (
     SatisfactoryServerState,
 )
 from apps.sevendays import (
+    Players as SevenDaysPlayers,
     SevenDays,
     SevenDaysSandboxOption,
     SevenDaysSandboxOptionsSnapshot,
@@ -5112,6 +5113,30 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].player_count, 3)
         self.assertEqual(entries[0].player_capacity, 20)
+
+    def test_player_snapshot_includes_sevendays_names_from_completed_telnet_response(self) -> None:
+        app = object.__new__(SevenDays)
+        app.name = "sevendays_udl"
+        app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        app._tail_matchers = set()
+        app._console_response_matchers = set()
+        app._players = SevenDaysPlayers(app)
+        service = NodeApiService()
+
+        async def check_snapshot() -> None:
+            for line in (
+                "Max players: 4",
+                "0. id=177, CustardCreamTV, pos=(1, 2, 3), rot=(0, 0, 0)",
+                "Total of 1 in the game",
+            ):
+                await app._players.match_players(line)
+            snapshot = await service._app_player_snapshot(app)
+            assert snapshot is not None
+            self.assertEqual(snapshot.player_count, 1)
+            self.assertEqual(snapshot.player_capacity, 4)
+            self.assertEqual(snapshot.connected_player_names, ("CustardCreamTV",))
+
+        asyncio.run(check_snapshot())
 
     def test_list_apps_includes_cached_transition_state(self) -> None:
         app = _build_app(Mock())

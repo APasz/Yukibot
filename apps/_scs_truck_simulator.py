@@ -9,20 +9,29 @@ import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, ClassVar, Final, cast
+from typing import Any, ClassVar, Final, Literal, cast
 
 import hikari
 
 import config
+from _async_utils import run_blocking
 from _discord import DC_Bound, DC_Relay
 from _file import atomic_write_files
 from _security import Power_Level
 from apps._app import App, AppPortClaim, AppRuntimeFault, AppRuntimeFaultCode, AppRuntimeFaultKind, tcp_udp_port_claims
-from apps._config import App_Config, AppVersion, SteamUpdatePreset
+from apps._config import App_Config, AppVersion, ClientPackConfig, ModPageLink, ModPlacement, ModType, SteamUpdatePreset
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._mod import Mod
+from apps._mod_catalog import (
+    ModInventoryEntry,
+    ModReference,
+    ModSourceKind,
+    ModSourceRefreshPolicy,
+    ModSourceStatus,
+)
 from apps._save_files import (
     AppSaveEntry,
     AppSaveRoot,
@@ -81,6 +90,16 @@ _SCS_SERVER_CONFIG_ASSIGNMENT_RE = re.compile(
     r"^(?P<prefix>\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*)(?P<value>.*)$"
 )
 _SCS_SERVER_CONFIG_BARE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_SCS_PACKAGE_UNIT_RE = re.compile(
+    r"(?P<kind>server_packages_info|server_mod_detail)\s*:\s*(?P<name>[\w.]+)\s*\{"
+)
+_SCS_PACKAGE_FIELD_RE = re.compile(r"(?P<key>\w+(?:\[\d+\])?)\s*:\s*(?P<value>.+)")
+_SCS_STRING_TOKEN_RE = re.compile(
+    r'(?P<literal>[^"\\]+)|\\x(?P<byte>[0-9a-fA-F]{2})|\\(?P<escape>[\\"nrt])'
+)
+_SCS_STRING_ESCAPES: Final[Mapping[str, bytes]] = MappingProxyType(
+    {"n": b"\n", "r": b"\r", "t": b"\t", '"': b'"', "\\": b"\\"}
+)
 _SCS_GAME_VERSION_RE = re.compile(r"\[MP\]\s+Game version:\s*(?P<version>\S+)", re.IGNORECASE)
 _SCS_PACKSET_VERSION_RE = re.compile(r"Loaded pack set version\s+(?P<version>\S+)", re.IGNORECASE)
 _SCS_GSLT_EXPIRED_RE = re.compile(
@@ -923,6 +942,239 @@ def detect_scs_version(
     return version
 
 
+@dataclass(frozen=True, slots=True)
+class _ScsPackageUnit:
+    kind: Literal["server_packages_info", "server_mod_detail"]
+    name: str
+    fields: Mapping[str, str]
+
+    def require(self, key: str) -> str:
+        value = self.fields.get(key)
+        if value is None:
+            raise ValueError(f"{self.kind} {self.name} is missing {key}.")
+        return value
+
+    def integer(self, key: str) -> int:
+        value = self.require(key)
+        if not value.isascii() or not value.isdecimal():
+            raise ValueError(f"{self.kind} {key} must be a non-negative integer.")
+        return int(value)
+
+    def boolean(self, key: str) -> bool:
+        value = self.require(key)
+        if value not in ("true", "false"):
+            raise ValueError(f"{self.kind} {key} must be true or false.")
+        return value == "true"
+
+    def string(self, key: str, *, allow_truncated_utf8: bool = False) -> str:
+        value = self.require(key)
+        if len(value) < 2 or not value.startswith('"') or not value.endswith('"'):
+            raise ValueError(f"{self.kind} {key} must be quoted text.")
+        content = value[1:-1]
+        decoded = bytearray()
+        position = 0
+        while position < len(content):
+            match = _SCS_STRING_TOKEN_RE.match(content, position)
+            if match is None:
+                raise ValueError(f"{self.kind} {key} has an invalid string escape.")
+            if (literal := match.group("literal")) is not None:
+                decoded.extend(literal.encode("utf-8"))
+            elif (byte := match.group("byte")) is not None:
+                decoded.append(int(byte, 16))
+            else:
+                decoded.extend(_SCS_STRING_ESCAPES[match.group("escape")])
+            position = match.end()
+        try:
+            return decoded.decode("utf-8")
+        except UnicodeDecodeError as xcp:
+            if not allow_truncated_utf8 or xcp.reason != "unexpected end of data":
+                raise ValueError(f"{self.kind} {key} contains invalid UTF-8.") from xcp
+            # The game may truncate a display name partway through its final character.
+            return decoded[: xcp.start].decode("utf-8") + "\N{REPLACEMENT CHARACTER}"
+
+
+def _parse_scs_package_units(text: str) -> tuple[_ScsPackageUnit, ...]:
+    lines: list[str] = []
+    in_block_comment = False
+    for line in text.lstrip("\ufeff").splitlines():
+        code, in_block_comment = _mask_scs_server_config_comments(
+            line, in_block_comment=in_block_comment
+        )
+        if code.strip():
+            lines.append(code.strip())
+    if in_block_comment:
+        raise ValueError("Server packages contain an unterminated block comment.")
+    if len(lines) < 3 or lines[:2] != ["SiiNunit", "{"] or lines[-1] != "}":
+        raise ValueError("Server packages must be a complete SiiNunit document.")
+    units: list[_ScsPackageUnit] = []
+    unit_names: set[str] = set()
+    declaration: re.Match[str] | None = None
+    fields: dict[str, str] = {}
+    for line in lines[2:-1]:
+        if declaration is None:
+            declaration = _SCS_PACKAGE_UNIT_RE.fullmatch(line)
+            if declaration is None:
+                raise ValueError("Server packages contain an invalid unit declaration.")
+            unit_name = declaration.group("name")
+            if unit_name in unit_names:
+                raise ValueError(f"Server packages contain duplicate unit {unit_name}.")
+            unit_names.add(unit_name)
+            fields = {}
+        elif line == "}":
+            units.append(
+                _ScsPackageUnit(
+                    cast(
+                        Literal["server_packages_info", "server_mod_detail"],
+                        declaration.group("kind"),
+                    ),
+                    declaration.group("name"),
+                    fields,
+                )
+            )
+            declaration = None
+        else:
+            assignment = _SCS_PACKAGE_FIELD_RE.fullmatch(line)
+            if assignment is None:
+                raise ValueError("Server packages contain an invalid field.")
+            key = assignment.group("key")
+            if key in fields:
+                raise ValueError(f"Server packages contain duplicate {key} fields.")
+            fields[key] = assignment.group("value").strip()
+    if declaration is not None:
+        raise ValueError("Server packages contain an unterminated unit.")
+    return tuple(units)
+
+
+class ScsServerPackageModSource:
+    """Read the exported Convoy mod list without managing client mod files."""
+
+    kind = ModSourceKind.SCS_SERVER_PACKAGES
+    label = ModSourceKind.SCS_SERVER_PACKAGES.label
+    refresh_policy = ModSourceRefreshPolicy.FAIL_FAST
+
+    def __init__(self, directory: Path, *, profile: ScsTruckSimulatorProfile) -> None:
+        self._directory = directory
+        self._profile = profile
+        self._entries: tuple[ModInventoryEntry, ...] = ()
+        self._status = ModSourceStatus.ready(self.kind)
+
+    @property
+    def status(self) -> ModSourceStatus:
+        return self._status
+
+    def list_entries(self) -> tuple[ModInventoryEntry, ...]:
+        return self._entries
+
+    async def refresh(self) -> None:
+        package_path, _ = scs_server_package_paths(
+            self._directory, profile=self._profile
+        )
+        try:
+            entries = await run_blocking(self._read_entries, package_path)
+        except (FileNotFoundError, ValueError) as xcp:
+            # Never show stale requirements after an export was removed or replaced.
+            self._entries = ()
+            warning = (
+                "Upload server_packages.sii and server_packages.dat in Saves to view the exported mod list."
+                if isinstance(xcp, FileNotFoundError)
+                and xcp.filename == str(package_path)
+                else f"Cannot read the server package mod list: {xcp}"
+            )
+            self._status = ModSourceStatus.unavailable(self.kind, warning=warning)
+            return
+        self._entries = entries
+        self._status = ModSourceStatus.ready(self.kind)
+
+    def _read_entries(self, package_path: Path) -> tuple[ModInventoryEntry, ...]:
+        units = _parse_scs_package_units(package_path.read_text(config.STR_ENCODE))
+        info_units = tuple(
+            unit for unit in units if unit.kind == "server_packages_info"
+        )
+        if len(info_units) != 1:
+            raise ValueError(
+                "Server packages require exactly one server_packages_info unit."
+            )
+        info = info_units[0]
+        if info.integer("version") != 1:
+            raise ValueError("Unsupported server packages version.")
+        details = {
+            unit.name: unit for unit in units if unit.kind == "server_mod_detail"
+        }
+        count = info.integer("mod_list")
+        references = {key for key in info.fields if key.startswith("mod_list[")}
+        if len(references) != count:
+            raise ValueError(
+                "Server packages mod_list count does not match its entries."
+            )
+        added = datetime.fromtimestamp(package_path.stat().st_mtime, tz=timezone.utc)
+        config_path = scs_server_config_path(self._directory, profile=self._profile)
+        optional_setting = _read_scs_server_config_field(
+            config_path=config_path,
+            key="mods_optioning",
+            profile=self._profile,
+        )
+        if optional_setting not in (None, "true", "false"):
+            raise ValueError("Server config mods_optioning must be true or false.")
+        entries: list[ModInventoryEntry] = []
+        packages: set[str] = set()
+        for index in range(count):
+            unit_name = info.require(f"mod_list[{index}]")
+            detail = details.get(unit_name)
+            if detail is None:
+                raise ValueError(
+                    f"Server packages mod_list[{index}] references a missing mod detail."
+                )
+            package_name = detail.string("package_name")
+            full_name = detail.boolean("full_name")
+            name = detail.string("mod_name", allow_truncated_utf8=not full_name)
+            if not package_name.strip() or not name.strip() or package_name in packages:
+                raise ValueError(
+                    "Server packages require unique package names and non-empty mod names."
+                )
+            packages.add(package_name)
+            workshop = detail.boolean("workshop_mod")
+            mod_id = detail.integer("mod_id")
+            if workshop and mod_id == 0:
+                raise ValueError("Workshop mod IDs must be positive.")
+            optional = detail.boolean("optional_mod") and optional_setting == "true"
+            description = f"Export order: {index + 1}. {'Optional' if optional else 'Required'} for players."
+            if not full_name:
+                description += " The exported display name is truncated."
+            entries.append(
+                ModInventoryEntry(
+                    reference=ModReference(self.kind, package_name),
+                    available_actions=frozenset(),
+                    name=package_name,
+                    friendly=name,
+                    enabled=True,
+                    mod_type=ModType.REGULAR,
+                    coremod=False,
+                    downloadable=False,
+                    download_block_reason=None,
+                    download_block_label=None,
+                    origin="Steam Workshop" if workshop else "Manual mod",
+                    version=None,
+                    added=added,
+                    placement=ModPlacement.SERVER_ENABLED,
+                    server_loadable=True,
+                    client_pack_eligible=False,
+                    artifact=None,
+                    client_required=not optional,
+                    description=description,
+                    mod_pages=(
+                        ModPageLink(
+                            name="Workshop",
+                            url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod_id}",
+                        ),
+                    )
+                    if workshop
+                    else (),
+                    client_pack=ClientPackConfig(included_in_client=False),
+                )
+            )
+        return tuple(entries)
+
+
 class ScsTruckSimulatorMod(Mod):
     async def install(self, src: Path, atomic: bool = True) -> None:
         await self._handle_drop(src, atomic)
@@ -1234,6 +1486,7 @@ class ScsTruckSimulator(App[App_Config]):
             cfg,
             ScsTruckSimulatorSettings(file_settings, profile=self.profile, version_getter=lambda: cfg.version),
         )
+        self.add_mod_source(ScsServerPackageModSource(cfg.directory, profile=self.profile))
         self.act_err_threshold = 100
         if cfg.steam_update is not None:
             self.updater = SteamCmd_Update_Manager(self)

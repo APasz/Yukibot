@@ -186,12 +186,20 @@ class ModWebServiceSupport:
         return "Unavailable"
 
     @staticmethod
+    def _mod_client_requirement(entry: NodeModEntry) -> Literal["Required", "Optional"] | None:
+        if entry.client_required:
+            return "Required"
+        if entry.source is ModSourceKind.SCS_SERVER_PACKAGES:
+            return "Optional"
+        return None
+
+    @staticmethod
     def _mod_source_page(entry: NodeModEntry) -> ModPageLink | None:
         """Return the canonical external page for a remote mod entry."""
 
         if entry.source is ModSourceKind.LOCAL:
             return None
-        if entry.source is ModSourceKind.STEAM_WORKSHOP:
+        if entry.source in (ModSourceKind.STEAM_WORKSHOP, ModSourceKind.SCS_SERVER_PACKAGES):
             return next(
                 (
                     page

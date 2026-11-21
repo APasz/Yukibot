@@ -38,6 +38,7 @@ class ModSourceKind(StrEnum):
 
     LOCAL = "local"
     STEAM_WORKSHOP = "steam_workshop"
+    SCS_SERVER_PACKAGES = "scs_server_packages"
 
     @property
     def label(self) -> str:
@@ -48,6 +49,8 @@ class ModSourceKind(StrEnum):
                 return "Local"
             case ModSourceKind.STEAM_WORKSHOP:
                 return "Steam Workshop"
+            case ModSourceKind.SCS_SERVER_PACKAGES:
+                return "Server packages"
 
 
 class ModSourceRefreshPolicy(StrEnum):

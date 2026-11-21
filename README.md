@@ -144,6 +144,8 @@ SCS requires a package pair exported by a matching game client. Enable the devel
 
 For a persistent Steam server identity, create a Steam Game Server Login Token from **Properties → Steam Game Server Login Token**. Tokens must use the game App ID, not the dedicated-server App ID: ETS2 is `227300` (server `1948160`), and ATS is `270880` (server `2239530`).
 
+The **Mods** tab lists mods from `server_packages.sii`, including Workshop links and whether players need each mod. Names may be truncated by the game export. This list is read-only; change your in-game mod setup, export again, then replace both package files in **Saves**. Optional mods are shown as optional only when **Settings → Optional Mods** (`mods_optioning`) is enabled.
+
 ### Type Checking
 
 ```bash

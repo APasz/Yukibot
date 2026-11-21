@@ -244,6 +244,9 @@ _SEVENDAYS_CONSOLE_LINE_PREFIX = r"^(?:\S+\s+\S+\s+INF\s+)?"
 _SEVENDAYS_PLAYER_COUNT_RE: Pattern[str] = re.compile(
     _SEVENDAYS_CONSOLE_LINE_PREFIX + r"Total of\s+(?P<count>\d+)\s+in the game\s*$",
 )
+_SEVENDAYS_PLAYER_DETAIL_RE: Pattern[str] = re.compile(
+    _SEVENDAYS_CONSOLE_LINE_PREFIX + r"(?P<index>\d+)\. id=\d+,\s*(?P<player>.+), pos=\(.*$",
+)
 _SEVENDAYS_PLAYER_CAPACITY_RE: Pattern[str] = re.compile(
     _SEVENDAYS_CONSOLE_LINE_PREFIX
     + r"(?:Max players\s*:\s*|GamePref\.ServerMaxPlayerCount\s*=\s*)(?P<capacity>\d+)\s*$",
@@ -3304,6 +3307,9 @@ class SevenDays(App[App_Config]):
     async def player_count(self) -> tuple[int, int] | None:
         return await self._players.count()
 
+    def connected_player_names(self) -> tuple[str, ...]:
+        return self._players.connected_player_names()
+
     @property
     def sandbox_options_path(self) -> Path:
         return self.directory / _SEVENDAYS_YUKIBOT_DATA_RELATIVE_PATH / _SEVENDAYS_SANDBOX_OPTIONS_FILE_NAME
@@ -3548,6 +3554,8 @@ class Players:
         self._running = False
         self._online: int | None = None
         self._max: int | None = None
+        self._player_names: tuple[str, ...] = ()
+        self._pending_player_names: dict[int, str] = {}
         self._read_telnet = False
         self._telnet_reader: asyncio.StreamReader | None = None
         self._response_tail: Tailer | None = None
@@ -3579,21 +3587,41 @@ class Players:
         finally:
             self._response_tail = None
             self._telnet_reader = None
-            self._online = None
+            self._clear_player_snapshot()
             self._max = None
 
+    def _clear_player_snapshot(self) -> None:
+        self._online = None
+        self._player_names = ()
+        self._pending_player_names.clear()
+
     async def match_players(self, line: str) -> None:
-        if match := _SEVENDAYS_PLAYER_COUNT_RE.fullmatch(line.strip()):
+        line = line.strip()
+        if match := _SEVENDAYS_PLAYER_COUNT_RE.fullmatch(line):
             self._online = int(match.group("count"))
-        elif match := _SEVENDAYS_PLAYER_CAPACITY_RE.fullmatch(line.strip()):
+            if len(self._pending_player_names) == self._online and all(
+                index in self._pending_player_names for index in range(self._online)
+            ):
+                self._player_names = tuple(sorted(self._pending_player_names.values(), key=str.casefold))
+            else:
+                self._player_names = ()
+            self._pending_player_names.clear()
+        elif match := _SEVENDAYS_PLAYER_CAPACITY_RE.fullmatch(line):
             self._max = int(match.group("capacity"))
+        elif match := _SEVENDAYS_PLAYER_DETAIL_RE.fullmatch(line):
+            index = int(match.group("index"))
+            if index == 0:
+                self._pending_player_names.clear()
+            player = match.group("player").strip()
+            if player:
+                self._pending_player_names[index] = player
 
     async def _sync_response_reader(self) -> None:
         reader = self.app._relay.reader
         tail = self._response_tail if self._read_telnet else self.app._tail
         if reader is self._telnet_reader and (tail is None or tail.is_running):
             return
-        self._online = None
+        self._clear_player_snapshot()
         if not self._read_telnet:
             if reader is not None and tail is not None:
                 await tail.replace_stream_reader(reader)
@@ -3611,8 +3639,9 @@ class Players:
 
     async def _listplayers(self) -> None:
         while self._running:
+            self._pending_player_names.clear()
             if not await self.app._relay.send("listplayers"):
-                self._online = None
+                self._clear_player_snapshot()
             await self._sync_response_reader()
             await asyncio.sleep(5)
 
@@ -3622,6 +3651,9 @@ class Players:
         if self._online is not None and self._max is not None:
             return (self._online, self._max)
         return None
+
+    def connected_player_names(self) -> tuple[str, ...]:
+        return self._player_names
 
 
 class Activities:

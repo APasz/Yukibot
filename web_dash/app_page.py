@@ -212,7 +212,7 @@ class _VirtualModRow(TypedDict):
     show_download_block: bool
     show_placement: bool
     show_policy: bool
-    show_client_required: bool
+    client_requirement_label: str | None
     state_class: str
 
 
@@ -4004,6 +4004,9 @@ class ModWebAppPageMixin(
         )
 
         def is_optional(entry: NodeModEntry) -> bool:
+            client_requirement = ModWebServiceSupport._mod_client_requirement(entry)
+            if client_requirement is not None:
+                return client_requirement == "Optional"
             return entry.client_pack.policy is ClientPackPolicy.OPTIONAL
 
         def structured_item(entry: NodeModEntry) -> dict[str, object]:
@@ -4170,7 +4173,7 @@ class ModWebAppPageMixin(
         show_sort: bool = len(mod_options) > 1
         current_search_query: str = model.search_query
         current_sort_order: ModWebModSortOrder = model.mod_sort_order
-        has_legacy_local_source: bool = not model.mods.source_statuses or any(
+        has_legacy_local_source: bool = (not model.mods.source_statuses and not model.mods.mods) or any(
             status.source is ModSourceKind.LOCAL for status in model.mods.source_statuses
         ) or any(entry.source is ModSourceKind.LOCAL for entry in model.mods.mods)
         downloadable_entries_by_id: dict[str, NodeModEntry] = {
@@ -6679,6 +6682,11 @@ class ModWebAppPageMixin(
                         title="Mods",
                         description=mods_description,
                     )
+                if any(status.source is ModSourceKind.SCS_SERVER_PACKAGES for status in model.mods.source_statuses):
+                    ui.label(
+                        "Mods from the server package export. To change this list, export your updated "
+                        "game setup and upload both server_packages.sii and server_packages.dat in Saves."
+                    ).classes("mod-subtitle text-sm")
                 for source_status in model.mods.source_statuses:
                     if (
                         source_status.source is ModSourceKind.STEAM_WORKSHOP
@@ -6794,7 +6802,7 @@ class ModWebAppPageMixin(
                                 ),
                                 "show_placement": entry.placement is ModPlacement.CLIENT_ONLY,
                                 "show_policy": entry.client_pack.policy is not ClientPackPolicy.REQUIRED,
-                                "show_client_required": entry.client_required,
+                                "client_requirement_label": self._mod_client_requirement(entry),
                                 "state_class": (
                                     "blocked"
                                     if entry.download_is_policy_blocked
@@ -6917,8 +6925,8 @@ class ModWebAppPageMixin(
                                     <div class="mod-row-file">{{ props.row.file }}</div>
                                   </div>
                                   <div class="mod-row-meta">
-                                    <span v-if="props.row.show_client_required" class="mod-pill size">
-                                      Client required
+                                    <span v-if="props.row.client_requirement_label" class="mod-pill size">
+                                      Client {{ props.row.client_requirement_label.toLowerCase() }}
                                     </span>
                                     <span v-if="props.row.show_source" class="mod-pill">{{ props.row.source }}</span>
                                     <span class="mod-pill size">{{ props.row.size }}</span>
@@ -8229,8 +8237,10 @@ class ModWebAppPageMixin(
     ) -> _ModWebModToolbarBindings:
         can_upload_mod: bool = upload_mod is not None and self._user_has_level(user, Power_Level.user)
         can_add_mod_link: bool = add_mod_link is not None and self._user_has_level(user, Power_Level.user)
-        can_delete_mods: bool = self._user_has_level(user, Power_Level.sudo) and any(
-            not self._is_builtin_mod(entry) for entry in model.mods.mods
+        mod_actions = cast(_ModActionAvailability, cast(object, self))
+        can_delete_mods: bool = any(
+            NodeModMutationAction.DELETE in mod_actions._available_mod_actions(user=user, entry=entry)
+            for entry in model.mods.mods
         )
         show_bulk_mod_actions: bool = bool(model.mods.mods)
         if (

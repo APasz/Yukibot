@@ -3152,11 +3152,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         self._render_mod_detail_item(ui=ui, label="Origin", value=entry.origin)
                         self._render_mod_detail_item(ui=ui, label="Added", value=entry.added)
                         self._render_mod_detail_item(ui=ui, label="File download", value=download_text)
-                        if entry.client_required or can_update_client_required:
+                        client_requirement = self._mod_client_requirement(entry)
+                        if client_requirement is not None or can_update_client_required:
                             self._render_mod_detail_item(
                                 ui=ui,
                                 label="Client content",
-                                value="Required" if entry.client_required else "Optional",
+                                value=client_requirement or "Optional",
                             )
                         if supports_client_pack:
                             self._render_mod_detail_item(
@@ -3668,8 +3669,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.label(entry.friendly).classes("mod-row-title")
                 ui.label(entry.name).classes("mod-row-file")
             with ui.row().classes("mod-row-meta"):
-                if entry.client_required:
-                    ui.label("Client required").classes("mod-pill size")
+                client_requirement = self._mod_client_requirement(entry)
+                if client_requirement is not None:
+                    ui.label(f"Client {client_requirement.lower()}").classes("mod-pill size")
                 if not show_source_page_link:
                     ui.label(entry.source.label).classes("mod-pill")
                 ui.label(entry.size_text).classes("mod-pill size")

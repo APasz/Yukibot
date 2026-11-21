@@ -1,0 +1,44 @@
+SiiNunit
+{
+server_packages_info : _nameless.info {
+ version: 1
+ dlc_essential_list: 0
+ dlc_non_essential_list: 1
+ dlc_non_essential_list[0]: 2583912098162477
+ mod_list: 3
+ mod_list[0]: _nameless.required
+ mod_list[1]: _nameless.manual
+ mod_list[2]: _nameless.optional
+ map_name: "/map/europe.mbd"
+}
+
+server_mod_detail : _nameless.optional {
+ package_name: "mod_workshop_package.00000000425D388B"
+ mod_name: "Doubles Anywhere"
+ checksum: 5035448519581460243
+ mod_id: 1113405579
+ workshop_mod: true
+ optional_mod: true
+ full_name: true
+}
+
+server_mod_detail : _nameless.required {
+ package_name: "mod_workshop_package.00000000C498A41E"
+ mod_name: "No Damage/Hasars\xc4\xb1z"
+ checksum: 4472886254409546713
+ mod_id: 3298337822
+ workshop_mod: true
+ optional_mod: false
+ full_name: false
+}
+
+server_mod_detail : _nameless.manual {
+ package_name: "promods-eu-map-v280"
+ mod_name: "ProMods Map Package"
+ checksum: 13419250343300028785
+ mod_id: 11503941015904001313
+ workshop_mod: false
+ optional_mod: false
+ full_name: true
+}
+}

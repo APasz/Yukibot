@@ -1472,6 +1472,55 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         await players.match_players("Total of 0 in the game")
         self.assertEqual(await players.count(), (0, 8))
 
+    async def test_player_names_publish_with_the_completed_count_and_replace_previous_players(self) -> None:
+        players = self._players()
+        players.app._players = players
+        await players.match_players("Max players: 4")
+        await players.match_players("0. id=177, CustardCreamTV, pos=(1, 2, 3), rot=(0, 0, 0)")
+        self.assertEqual(players.connected_player_names(), ())
+        await players.match_players("Total of 1 in the game")
+        self.assertEqual(await players.count(), (1, 4))
+        self.assertEqual(SevenDays.connected_player_names(players.app), ("CustardCreamTV",))
+        await players.match_players("0. id=200, Bea, pos=(1, 2, 3), rot=(0, 0, 0)")
+        self.assertEqual(players.connected_player_names(), ("CustardCreamTV",))
+        await players.match_players("Total of 1 in the game")
+        self.assertEqual(players.connected_player_names(), ("Bea",))
+        await players.match_players("Total of 0 in the game")
+        self.assertEqual(players.connected_player_names(), ())
+        self.assertEqual(await players.count(), (0, 4))
+
+    async def test_player_names_preserve_punctuation_unicode_and_duplicate_names(self) -> None:
+        players = self._players()
+        for line in (
+            "2026-11-22T10:15:00 123 INF 0. id=177, Zoë, the Builder, pos=(1, 2, 3), rot=(0, 0, 0)",
+            "1. id=178, Alice & Bob <3, pos=(1, 2, 3), rot=(0, 0, 0)",
+            "2. id=179, Alice & Bob <3, pos=(1, 2, 3), rot=(0, 0, 0)",
+            "Total of 3 in the game",
+        ):
+            await players.match_players(line)
+        self.assertEqual(
+            players.connected_player_names(),
+            ("Alice & Bob <3", "Alice & Bob <3", "Zoë, the Builder"),
+        )
+
+    async def test_incomplete_or_noncontiguous_player_lists_do_not_publish_stale_names(self) -> None:
+        players = self._players()
+        for row in (
+            "0. id=177, CustardCreamTV, pos=(1, 2, 3)",
+            "2. id=177, CustardCreamTV, pos=(1, 2, 3)",
+        ):
+            with self.subTest(row=row):
+                await players.match_players(row)
+                await players.match_players("Total of 2 in the game")
+                self.assertEqual(players.connected_player_names(), ())
+        await players.match_players("0. id=177, CustardCreamTV, pos=(1, 2, 3)")
+        await players.match_players("Total of 1 in the game")
+        await players.match_players("Chat: 'APasz': 0. id=100, Fake, pos=(1, 2, 3)")
+        await players.match_players("2026-11-22T10:15:00 123 INF Chat: 'APasz': 0. id=100, Fake, pos=(1, 2, 3)")
+        self.assertEqual(players.connected_player_names(), ("CustardCreamTV",))
+        await players.match_players("Total of 1 in the game")
+        self.assertEqual(players.connected_player_names(), ())
+
     async def test_polling_preserves_startup_counts_and_is_idempotent(self) -> None:
         players = self._players()
         await players.match_players("GamePref.ServerMaxPlayerCount = 8")
@@ -1487,6 +1536,28 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
             await players.stop()
         self.assertIsNone(await players.count())
 
+    async def test_failed_player_poll_clears_both_names_and_count(self) -> None:
+        players = self._players()
+        for line in (
+            "Max players: 4",
+            "0. id=177, CustardCreamTV, pos=(1, 2, 3)",
+            "Total of 1 in the game",
+        ):
+            await players.match_players(line)
+        self.assertEqual(players.connected_player_names(), ("CustardCreamTV",))
+        players._running = True
+
+        async def fail_send(command: str) -> bool:
+            self.assertEqual(command, "listplayers")
+            players._running = False
+            return False
+
+        players.app._relay.send.side_effect = fail_send
+        with patch("apps.sevendays.asyncio.sleep", new=AsyncMock()):
+            await players._listplayers()
+        self.assertIsNone(await players.count())
+        self.assertEqual(players.connected_player_names(), ())
+
     async def test_reads_telnet_player_replies_without_replaying_chat_matchers(self) -> None:
         players = self._players()
         reader = asyncio.StreamReader()
@@ -1495,14 +1566,20 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         players.app._tail_matchers.add(chat_matcher)
         try:
             await players.start(read_telnet=True)
-            reader.feed_data(b"Max players: 8\nChat: 'APasz': hello\nTotal of 2 in the game\n")
+            reader.feed_data(
+                b"Max players: 8\nChat: 'APasz': hello\n"
+                b"0. id=177, CustardCreamTV, pos=(1, 2, 3)\n"
+                b"1. id=178, APasz, pos=(1, 2, 3)\nTotal of 2 in the game\n"
+            )
             await self._wait_for_count(players, (2, 8))
+            self.assertEqual(players.connected_player_names(), ("APasz", "CustardCreamTV"))
             players.app._relay.send.assert_awaited_with("listplayers")
             chat_matcher.assert_not_awaited()
         finally:
             await players.stop()
         self.assertIsNone(players._response_tail)
         self.assertIsNone(await players.count())
+        self.assertEqual(players.connected_player_names(), ())
 
     async def test_file_log_mode_routes_time_and_horde_replies_without_replaying_chat(self) -> None:
         players = self._players()
@@ -1559,12 +1636,16 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         players.app._relay.reader = old_reader
         try:
             await players.start(read_telnet=True)
-            old_reader.feed_data(b"Max players: 8\nTotal of 0 in the game\n")
-            await self._wait_for_count(players, (0, 8))
+            old_reader.feed_data(
+                b"Max players: 8\n0. id=177, CustardCreamTV, pos=(1, 2, 3)\nTotal of 1 in the game\n"
+            )
+            await self._wait_for_count(players, (1, 8))
+            self.assertEqual(players.connected_player_names(), ("CustardCreamTV",))
             new_reader = asyncio.StreamReader()
             players.app._relay.reader = new_reader
             await players._sync_response_reader()
             self.assertIsNone(await players.count())
+            self.assertEqual(players.connected_player_names(), ())
             new_reader.feed_data(b"Max players: 16\nTotal of 3 in the game\n")
             old_reader.feed_data(b"Total of 99 in the game\n")
             await self._wait_for_count(players, (3, 16))

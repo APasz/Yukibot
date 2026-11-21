@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from _async_utils import run_blocking
 from apps._blueprint_files import BlueprintUploadPair, classify_blueprint_upload_filenames
 from apps._console import ConsoleResponseSource
+from apps._mod_catalog import ModSourceKind
 from apps._scs_truck_simulator import SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE
 from apps.sevendays import SevenDaysSaveArchiveInspection, inspect_sevendays_save_archive
 from node_api.console import NodeConsoleActionExecuteRequest
@@ -4152,6 +4153,16 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _mod_search_text(entry: NodeModEntry) -> str:
+        client_requirement = ModWebServiceSupport._mod_client_requirement(entry)
+        client_pack_terms: tuple[str | None, ...] = (
+            (
+                entry.client_pack.policy.value,
+                entry.client_pack.policy.label,
+                entry.client_pack.choice_group,
+            )
+            if entry.source is ModSourceKind.LOCAL or entry.client_pack_eligible
+            else ()
+        )
         terms: tuple[str, ...] = tuple(
             filter(
                 None,
@@ -4176,15 +4187,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         if entry.downloadable
                         else ModWebServiceSupport._mod_download_unavailable_label(entry).casefold()
                     ),
-                    "client required" if entry.client_required else "",
+                    f"client {client_requirement}" if client_requirement is not None else "",
                     entry.origin,
                     entry.version,
                     entry.size_text,
                     entry.download_block_label,
                     entry.download_block_reason,
-                    entry.client_pack.policy.value,
-                    entry.client_pack.policy.label,
-                    entry.client_pack.choice_group,
+                    *client_pack_terms,
                 ),
             )
         )

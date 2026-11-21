@@ -12904,6 +12904,52 @@ class ModWebTests(unittest.TestCase):
             js_handler="(event) => event.stopPropagation()",
         )
 
+    def test_scs_mod_rows_show_client_requirements_and_workshop_links_without_mutations(
+        self,
+    ) -> None:
+        service = ModWebService()
+        workshop_url = (
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=1113405579"
+        )
+        user = ModWebUser(
+            discord_id=42, username="sudo", global_name=None, avatar_hash=None
+        )
+        for required in (True, False):
+            with self.subTest(required=required):
+                entry = self._mod_entry(
+                    name="mod_workshop_package.00000000425D388B",
+                    friendly="Doubles Anywhere",
+                    source=ModSourceKind.SCS_SERVER_PACKAGES,
+                    downloadable=False,
+                    artifact_available=False,
+                    client_required=required,
+                    mod_pages=(ModPageLink(name="Workshop", url=workshop_url),),
+                )
+                ui = MagicMock()
+                service._render_mod_download_row(
+                    ui=cast(ModWebUi, ui),
+                    entry=entry,
+                    download_url=None,
+                    on_change=Mock(),
+                    can_select=False,
+                    show_selection=False,
+                    app_friendly="ETS2",
+                    model=cast(ModWebPageModel, object()),
+                    user=user,
+                )
+                requirement = "Required" if required else "Optional"
+                self.assertIn(
+                    call(f"Client {requirement.lower()}"), ui.label.call_args_list
+                )
+                ui.link.assert_called_once_with("Workshop", workshop_url, new_tab=True)
+                labels = self._render_mod_info_dialog_labels(entry)
+                self.assertIn("Client content", labels)
+                self.assertIn(requirement, labels)
+                with patch.object(service, "_user_has_level", return_value=True):
+                    self.assertEqual(
+                        service._available_mod_actions(user=user, entry=entry), ()
+                    )
+
     def test_mod_download_row_client_mod_uses_default_row_border_classes(self) -> None:
         service = ModWebService()
         ui = MagicMock()
@@ -12932,6 +12978,145 @@ class ModWebTests(unittest.TestCase):
         self.assertNotIn("mod-row-client-only", row_classes)
         self.assertIn("mod-row-clickable", row_classes)
 
+    def test_scs_mod_search_uses_client_requirements_without_client_pack_defaults(
+        self,
+    ) -> None:
+        service = ModWebService()
+        required = self._mod_entry(
+            name="alpha",
+            source=ModSourceKind.SCS_SERVER_PACKAGES,
+            downloadable=False,
+            client_required=True,
+            client_pack_eligible=False,
+        )
+        optional = replace(
+            required, name="beta", friendly="Beta", client_required=False
+        )
+        mods = (required, optional)
+        options = service._mod_options(mods)
+        for query, expected in (
+            ("required", required),
+            ("client required", required),
+            ("optional", optional),
+            ("client optional", optional),
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    service._filter_mod_entries(
+                        mods=mods, options=options, search_query=query
+                    ),
+                    (expected,),
+                )
+
+    def test_scs_mods_toolbar_omits_delete_for_read_only_entries(self) -> None:
+        service = ModWebService()
+        ui = MagicMock()
+        entry = self._mod_entry(
+            name="manual-package",
+            source=ModSourceKind.SCS_SERVER_PACKAGES,
+            downloadable=False,
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(
+                object,
+                SimpleNamespace(
+                    mods=self._mod_list(mods=(entry,)),
+                    client_pack_content_dirty=False,
+                ),
+            ),
+        )
+        user = ModWebUser(
+            discord_id=42, username="sudo", global_name=None, avatar_hash=None
+        )
+        with patch.object(service, "_user_has_level", return_value=True):
+            service._render_mod_toolbar(
+                ui=cast(ModWebUi, ui),
+                model=model,
+                user=user,
+                selection_mode=False,
+                select_all=lambda: None,
+                clear_selection=lambda: None,
+                cancel_selection=lambda: None,
+                download_selected=None,
+                delete_selected=lambda: None,
+                open_modlist=lambda: None,
+            )
+        self.assertNotIn(
+            "Delete", tuple(item.args[0] for item in ui.menu_item.call_args_list)
+        )
+        self.assertNotIn(
+            "Delete", tuple(item.args[0] for item in ui.button.call_args_list)
+        )
+
+    def test_scs_mods_section_omits_upload_controls_with_or_without_source_statuses(
+        self,
+    ) -> None:
+        service = ModWebService()
+        entry = self._mod_entry(
+            name="manual-package",
+            source=ModSourceKind.SCS_SERVER_PACKAGES,
+            downloadable=False,
+            artifact_available=False,
+        )
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="ets_test",
+            app_friendly="ETS2",
+            app_color_hex=None,
+            app_scope="ets",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=True,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="ets_test", app_friendly="ETS2", node="yuki", configs=()
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=self._mod_list(app_name="ets_test", mods=(entry,)),
+            download_all_url=None,
+            download_enabled_url=None,
+            mod_download_urls={},
+        )
+        source_status = NodeModSourceStatus(
+            source=ModSourceKind.SCS_SERVER_PACKAGES,
+            label=ModSourceKind.SCS_SERVER_PACKAGES.label,
+        )
+        user = ModWebUser(
+            discord_id=42, username="sudo", global_name=None, avatar_hash=None
+        )
+        for statuses in ((), (source_status,)):
+            with self.subTest(statuses=statuses):
+                ui = MagicMock()
+                ui.refreshable.side_effect = lambda function: function
+                ui.select.return_value.props.return_value.classes.return_value.value = (
+                    ModWebModlistFormat.PLAINTEXT.value
+                )
+                with (
+                    patch.object(service, "_user_has_level", return_value=True),
+                    patch.object(
+                        service,
+                        "_render_mod_toolbar",
+                        wraps=service._render_mod_toolbar,
+                    ) as toolbar,
+                ):
+                    service._render_mods_section(
+                        ui=cast(ModWebUi, ui),
+                        user=user,
+                        model=replace(
+                            model, mods=replace(model.mods, source_statuses=statuses)
+                        ),
+                    )
+                self.assertIsNone(toolbar.call_args.kwargs["upload_mod"])
+                self.assertIsNone(toolbar.call_args.kwargs["start_selection"])
+                ui.upload.assert_not_called()
+
     def test_large_mod_list_uses_virtual_scroll_table(self) -> None:
         service = ModWebService()
         workshop_url = "https://steamcommunity.com/sharedfiles/filedetails/?id=200"
@@ -12948,7 +13133,14 @@ class ModWebTests(unittest.TestCase):
                 available_actions=(),
                 client_required=True,
             ),
-            *(self._mod_entry(name=f"mod-{index}.jar", friendly=f"Mod {index}") for index in range(1, 50)),
+            self._mod_entry(
+                name="manual-package",
+                friendly="Optional manual mod",
+                downloadable=False,
+                source=ModSourceKind.SCS_SERVER_PACKAGES,
+                artifact_available=False,
+            ),
+            *(self._mod_entry(name=f"mod-{index}.jar", friendly=f"Mod {index}") for index in range(2, 50)),
         )
         model = ModWebPageModel(
             node_name="yuki",
@@ -13048,9 +13240,9 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("data-mod-download", virtual_row_template)
         self.assertIn('v-else-if="props.row.source_page_url"', virtual_row_template)
         self.assertIn('v-if="props.row.show_source"', virtual_row_template)
-        self.assertIn('v-if="props.row.show_client_required" class="mod-pill size"', virtual_row_template)
+        self.assertIn('v-if="props.row.client_requirement_label" class="mod-pill size"', virtual_row_template)
         self.assertLess(
-            virtual_row_template.index('v-if="props.row.show_client_required"'),
+            virtual_row_template.index('v-if="props.row.client_requirement_label"'),
             virtual_row_template.index('v-if="props.row.show_source"'),
         )
         self.assertIn("@click.stop", virtual_row_template)
@@ -13062,7 +13254,9 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(workshop_row["source_page_label"], "Workshop")
         self.assertEqual(workshop_row["source_page_url"], workshop_url)
         self.assertFalse(workshop_row["show_source"])
-        self.assertTrue(workshop_row["show_client_required"])
+        self.assertEqual(workshop_row["client_requirement_label"], "Required")
+        optional_row = next(row for row in rows if row["id"] == mods[1].id)
+        self.assertEqual(optional_row["client_requirement_label"], "Optional")
         self.assertIn("'mod-setting-badge', 'mod-mod-type-badge'", virtual_row_template)
         table.on.assert_called_once()
         self.assertEqual(table.on.call_args.args[0], "click")
@@ -18575,6 +18769,40 @@ class ModWebTests(unittest.TestCase):
             ModWebService._mod_client_pack_summary(builtin),
             "Excluded — Built-in",
         )
+
+    def test_scs_modlist_exports_preserve_optional_client_requirements(self) -> None:
+        required = self._mod_entry(
+            name="required-package",
+            friendly="Required",
+            source=ModSourceKind.SCS_SERVER_PACKAGES,
+            downloadable=False,
+            client_required=True,
+            client_pack=ClientPackConfig(included_in_client=False),
+            client_pack_eligible=False,
+        )
+        optional = replace(required, name="optional-package", friendly="Optional", client_required=False)
+        for output_format in ModWebModlistFormat:
+            with self.subTest(output_format=output_format):
+                rendered = ModWebService._render_modlist(
+                    (required, optional),
+                    instance_name="ETS2",
+                    pack_version=None,
+                    output_format=output_format,
+                    include_version=False,
+                    include_filename=False,
+                    include_pack_version=False,
+                )
+                expected_items = [{"name": "Optional", "optional": True}, {"name": "Required"}]
+                if output_format is ModWebModlistFormat.JSON:
+                    self.assertEqual(json.loads(rendered), expected_items)
+                elif output_format is ModWebModlistFormat.JSONL:
+                    self.assertEqual([json.loads(line) for line in rendered.splitlines()], expected_items)
+                elif output_format is ModWebModlistFormat.CSV:
+                    self.assertEqual(rendered, "name,optional\nOptional,True\nRequired,")
+                else:
+                    self.assertEqual(rendered.count("[Optional]"), 1)
+                    self.assertIn("Optional", rendered)
+                    self.assertIn("Required", rendered)
 
     def test_render_modlist_supports_all_formats_and_field_options(self) -> None:
         alpha = self._mod_entry(
