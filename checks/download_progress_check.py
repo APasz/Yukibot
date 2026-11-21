@@ -64,7 +64,7 @@ def service(backend: ModWebDashboardBackend) -> ModWebService:
 
 
 def _request(transfer_id: int) -> Request:
-    return Request({"type": "http", "query_string": f"{DOWNLOAD_TRANSFER_QUERY_PARAMETER}={transfer_id}".encode()})
+    return Request({"type": "http", "headers": [], "query_string": f"{DOWNLOAD_TRANSFER_QUERY_PARAMETER}={transfer_id}".encode()})
 
 
 def test_download_url_keeps_repeated_queries_blanks_and_fragment() -> None:
@@ -170,7 +170,7 @@ def test_stream_progress_counts_sent_bytes_and_throttles_updates(backend: ModWeb
             assert item.state is ModWebNotificationTrayItemState.ACTIVE
             progress_before_send.append(item.progress_percent)
 
-    with patch("web_dash.download_progress.time", SimpleNamespace(monotonic=Mock(side_effect=[0.0, 0.1, 0.3]))):
+    with patch("web_dash.download_progress.time", SimpleNamespace(monotonic=Mock(side_effect=[0.0, 0.1, 0.3]), perf_counter=lambda: 0.0)):
         asyncio.run(response(_scope(), _receive, send))
     assert progress_before_send == [0, 20, 20, 100]
     close.assert_awaited_once()

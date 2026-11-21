@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from fastapi import Request, UploadFile, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from _audit import audit_log
@@ -45,6 +45,7 @@ from .mod import (
     NodeModUploadSelection,
 )
 from .client_pack import NodeClientPackService
+from .downloads import NodeDownloadStore
 from .mod_service import NodeModService
 from .operation_service import NodeOperationApiService
 from .operations import NodeOperationKind
@@ -62,8 +63,10 @@ def register_mod_routes(
     client_packs: NodeClientPackService,
     api_prefix: str,
     traffic_log: logging.Logger,
+    downloads: NodeDownloadStore | None = None,
 ) -> None:
     """Register all app-scoped mod and client-pack endpoints."""
+    download_store = downloads if downloads is not None else NodeDownloadStore()
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/mods/sources/{{source}}/refresh")
     async def _refresh_mod_source(
@@ -295,7 +298,7 @@ def register_mod_routes(
         include_servers_dat: bool = True,
         include_options_txt: bool = True,
         access_token: str | None = None,
-    ) -> FileResponse:
+    ) -> Response:
         mod_names = tuple(request.query_params.getlist("mod_name"))
         traffic_log.info(
             "Node API mods archive request: node=%s app=%s enabled_only=%s selected_only=%s "
@@ -313,11 +316,11 @@ def register_mod_routes(
         required_scopes = (NodeApiScope.MODS_DOWNLOAD,)
         if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN} or publish_client_pack:
             required_scopes = (NodeApiScope.MODS_DOWNLOAD, NodeApiScope.MODS_WRITE)
-        auth.require_access(request, access_token, app_name=app_name, scopes=required_scopes)
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=required_scopes)
         app = resolve_app(app_name)
-        return await client_packs.build_mod_download_response(
-            app=app,
-            request=NodeDownloadRequest(
+        return await download_store.response(
+            request=request, context=context,
+            build=lambda: client_packs.build_mod_download_response(app=app, request=NodeDownloadRequest(
                 enabled_only=enabled_only,
                 mod_names=mod_names,
                 selected_only=selected_only,
@@ -330,7 +333,7 @@ def register_mod_routes(
                 include_kubejs_scripts=include_kubejs_scripts,
                 include_servers_dat=include_servers_dat,
                 include_options_txt=include_options_txt,
-            ),
+            )),
         )
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/mods/{{mod_name}}/download")
@@ -339,23 +342,23 @@ def register_mod_routes(
         mod_name: str,
         request: Request,
         access_token: str | None = None,
-    ) -> FileResponse:
+    ) -> Response:
         traffic_log.info(
             "Node API single mod request: node=%s app=%s mod=%s",
             auth.node_name,
             app_name,
             mod_name,
         )
-        auth.require_access(
+        context = auth.require_access(
             request,
             access_token,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_DOWNLOAD,),
         )
         app = resolve_app(app_name)
-        return await client_packs.build_mod_download_response(
-            app=app,
-            request=NodeDownloadRequest(mod_name=mod_name),
+        return await download_store.response(
+            request=request, context=context,
+            build=lambda: client_packs.build_mod_download_response(app=app, request=NodeDownloadRequest(mod_name=mod_name)),
         )
 
     async def _receive_mod_upload(

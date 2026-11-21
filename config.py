@@ -133,6 +133,7 @@ class EnvSettings(BaseSettings):
     node_api_public_base_url: str | None = None
     mod_web_bind_host: str | None = None
     mod_web_port: str | None = None
+    mod_web_reconnect_timeout_seconds: str | None = None
     mod_web_public_base_url: str | None = None
     mod_web_discord_client_id: str | None = None
     mod_web_discord_client_secret: str | None = None
@@ -1738,6 +1739,9 @@ class AuthorityServerBinding:
     port: int
 
 
+_DEFAULT_MOD_WEB_RECONNECT_TIMEOUT_SECONDS = 30
+
+
 @dataclass(frozen=True, slots=True)
 class ModWebServerConfig:
     node_name: str
@@ -1746,6 +1750,7 @@ class ModWebServerConfig:
     public_base_url: str
     node_api_base_url: str
     token_secret: str | None
+    reconnect_timeout_seconds: int = _DEFAULT_MOD_WEB_RECONNECT_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -2601,6 +2606,10 @@ MOD_WEB_SERVER = ModWebServerConfig(
     public_base_url=MOD_WEB_PUBLIC_BASE_URL,
     node_api_base_url=PUBLISHED_NODE_API_BASE_URL,
     token_secret=NODE_API_TOKEN_SECRET,
+    reconnect_timeout_seconds=_parse_positive_int(
+        _env_settings.mod_web_reconnect_timeout_seconds, var_name="MOD_WEB_RECONNECT_TIMEOUT_SECONDS",
+        default=_DEFAULT_MOD_WEB_RECONNECT_TIMEOUT_SECONDS,
+    ),
 )
 NODE_API_SERVER = (
     NodeApiServerConfig(

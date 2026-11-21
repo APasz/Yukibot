@@ -2955,8 +2955,9 @@ class SevenDays(App[App_Config]):
             (save_path, generated_world_path),
             archive_name,
             arc_base=userdata_root,
+            unique_output=True,
         )
-        return (archive_path.name, archive_path)
+        return (archive_name, archive_path)
 
     @staticmethod
     def new_save_upload_root_id(*, game_world: str, game_name: str) -> str:

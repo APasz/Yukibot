@@ -1140,12 +1140,13 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             with patch("apps.sevendays.File_Utils.compress", new=AsyncMock(return_value=archive_path)) as compress:
                 filename, downloaded_archive_path = asyncio.run(app.download_save_archive(save_id))
 
-            self.assertEqual(filename, archive_path.name)
+            self.assertEqual(filename, "sevendays_test_Wizefoco Mountains_woabewbies.zip")
             self.assertEqual(downloaded_archive_path, archive_path)
             compress.assert_awaited_once_with(
                 (save_dir, generated_world_dir),
                 "sevendays_test_Wizefoco Mountains_woabewbies.zip",
                 arc_base=userdata_dir,
+                unique_output=True,
             )
 
     def test_upload_generated_world_without_save_leaves_fresh_save_path_empty(self) -> None:

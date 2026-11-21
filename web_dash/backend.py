@@ -297,19 +297,31 @@ class ModWebDashboardBackend:
                 timer.start()
         return transfer_ids
 
-    def claim_download_transfer(self, *, transfer_id: int, user_id: int) -> bool:
-        """Attach one authenticated request; browser retries may proceed without a stale tracker."""
+    def claim_download_transfer(self, *, transfer_id: int, user_id: int, resume: bool = False) -> bool:
+        """Attach one authenticated request, allowing a finished attempt to resume within the slot limit."""
+        resumed = False
         with self._transfer_lock:
             self._cleanup_transfer_records(now=time.monotonic())
             record = self._transfer_records.get(transfer_id)
             if (
-                record is None or record.user_id != user_id or not record.active
-                or record.item.kind is not ModWebNotificationTrayItemKind.DOWNLOAD or record.download_started
+                record is None or record.user_id != user_id
+                or record.item.kind is not ModWebNotificationTrayItemKind.DOWNLOAD
             ):
+                return False
+            if record.download_started:
+                if not resume or record.active or self._active_transfer_slots_locked(user_id=user_id) + record.reserved_slots > _USER_TRANSFER_LIMIT:
+                    return False
+                record.item = replace(record.item, state=ModWebNotificationTrayItemState.ACTIVE,
+                                      detail_text="Resuming download…", progress_percent=None)
+                record.display_until = None
+                resumed = True
+            elif not record.active:
                 return False
             record.download_started = True
             self._cancel_transfer_expiry_timer_locked(transfer_id=transfer_id)
-            return True
+        if resumed:
+            self._notify_transfer_subscribers(user_id=user_id)
+        return True
 
     def _timeout_pending_download(self, *, transfer_id: int) -> None:
         self._finish_transfer(

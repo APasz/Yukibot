@@ -99,6 +99,7 @@ from .node_routes import register_node_management_routes
 from .operations_routes import register_operation_routes
 from .realtime_service import NodeRealtimeService
 from .request_auth import NodeRequestAuth
+from .downloads import NodeDownloadStore
 from .route_contracts import (
     NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
     NODE_DISCORD_SERVICE_STATE_HEADER,
@@ -202,6 +203,7 @@ def _validated_steam_game_server_login_token_status(
 class NodeApiService:
     def __init__(self) -> None:
         self._manager: App_Manager | None = None
+        self._downloads = NodeDownloadStore()
         self._discord_health_lock = threading.RLock()
         self._discord_service_state: DiscordServiceState | None = None
         self._discord_health: DiscordHealthSnapshot | None = None
@@ -574,6 +576,7 @@ class NodeApiService:
                     if not loop.is_closed():
                         raise
         self.maps.close()
+        self._downloads.close()
         history_task = self._system_history_task
         self._system_history_task = None
         self._app_mutations.cancel_pending()
@@ -598,6 +601,7 @@ class NodeApiService:
                 try:
                     self.system_monitoring.build_summary(force_refresh=True)
                     await self.app_installer.cleanup_download_cache()
+                    await self._downloads.cleanup()
                     await self._mod_service.cleanup_mod_uploads(self._manager.apps.values() if self._manager is not None else ())
                 except Exception:
                     log.exception(
@@ -714,6 +718,7 @@ class NodeApiService:
             traffic_log=traffic_log,
         )
 
+        downloads = self._downloads
         register_mod_routes(
             nicegui_app,
             auth=self.request_auth,
@@ -723,6 +728,7 @@ class NodeApiService:
             client_packs=self._client_packs,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
+            downloads=downloads,
         )
 
         register_storage_routes(
@@ -735,6 +741,7 @@ class NodeApiService:
             api_prefix=_NODE_API_PREFIX,
             http_exception=_http_exception,
             traffic_log=traffic_log,
+            downloads=downloads,
         )
 
         register_settings_routes(

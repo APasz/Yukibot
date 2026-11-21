@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
-from fastapi import File, Form, Request, UploadFile
+from fastapi import File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
+from starlette.datastructures import FormData, UploadFile as StarletteUploadFile
 
 from _audit import audit_log
 from _security import Power_Level
@@ -27,12 +28,39 @@ from .files import (
     NodeSaveUploadTransport,
 )
 from .storage_service import NodeStorageService
+from .downloads import NodeDownloadStore
 from .route_contracts import HttpExceptionFactory, NodeAuthenticatedRouteService
 from node_auth import NodeApiScope
 
 
 FACTORIO_MOD_SETTINGS_ACCESS_LEVEL = Power_Level.sudo
 FACTORIO_GENERATION_ACCESS_LEVEL = Power_Level.sudo
+
+
+def _upload_form_text(form: FormData, name: str, *, required: bool = False) -> str | None:
+    value = form.get(name)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or (required and not value):
+        raise HTTPException(422, f"Upload field {name!r} must be text{' and must not be empty' if required else ''}.")
+    return value
+
+
+def _save_upload_files(form: FormData, *, multiple: bool) -> list[UploadFile]:
+    values = form.getlist("upload")
+    if not values or (not multiple and len(values) != 1) or any(
+        not isinstance(value, StarletteUploadFile) for value in values
+    ):
+        raise HTTPException(422, "Select one or more save files." if multiple else "Select exactly one save file.")
+    return cast(list[UploadFile], values)
+
+
+def _save_upload_transport(form: FormData) -> NodeSaveUploadTransport:
+    value = _upload_form_text(form, "upload_transport")
+    try:
+        return NodeSaveUploadTransport.DIRECT if value is None else NodeSaveUploadTransport(value)
+    except ValueError as xcp:
+        raise HTTPException(422, "Invalid save upload transport.") from xcp
 
 
 def register_storage_routes(
@@ -46,8 +74,10 @@ def register_storage_routes(
     api_prefix: str,
     http_exception: HttpExceptionFactory,
     traffic_log: logging.Logger,
+    downloads: NodeDownloadStore | None = None,
 ) -> None:
     """Register all app-scoped storage and file-management endpoints."""
+    download_store = downloads if downloads is not None else NodeDownloadStore()
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/configs")
     async def _list_configs(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
         traffic_log.info("Node API config list request: node=%s app=%s", auth.node_name, app_name)
@@ -362,10 +392,11 @@ def register_storage_routes(
             required_level,
         )
         actor_user_id = auth.resolve_actor_if_available(context).actor_user_id
-        return await storage.build_config_root_download_response(
-            app=app,
-            root_id=root_id,
-            actor_user_id=actor_user_id,
+        return await download_store.response(
+            request=request, context=context,
+            build=lambda: storage.build_config_root_download_response(
+                app=app, root_id=root_id, actor_user_id=actor_user_id,
+            ),
         )
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/configs/{{config_id:path}}")
@@ -483,27 +514,19 @@ def register_storage_routes(
         traffic_log.info(
             "Node API save download request: node=%s app=%s save=%s", auth.node_name, app_name, save_id
         )
-        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_DOWNLOAD,))
+        context = auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_DOWNLOAD,))
         app = resolve_app(app_name)
-        return await storage.build_save_download_response(app=app, save_id=save_id)
+        return await download_store.response(
+            request=request, context=context, build=lambda: storage.build_save_download_response(app=app, save_id=save_id),
+        )
 
     @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/saves/upload")
     async def _upload_save(
         app_name: str,
         request: Request,
-        root_id: Annotated[str, Form()],
-        upload: Annotated[UploadFile, File()],
-        filename: Annotated[str | None, Form()] = None,
-        upload_transport: Annotated[NodeSaveUploadTransport, Form()] = NodeSaveUploadTransport.DIRECT,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info(
-            "Node API save upload request: node=%s app=%s root=%s transport=%s",
-            auth.node_name,
-            app_name,
-            root_id,
-            upload_transport.value,
-        )
+        # Authorise before multipart parsing so a token can expire during a slow transfer.
         context = auth.require_access(
             request,
             access_token,
@@ -516,14 +539,20 @@ def register_storage_routes(
             app.save_file_write_level,
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        result: NodeSaveMutationResult = await storage.upload_save_file(
-            app=app,
-            root_id=root_id,
-            upload=upload,
-            upload_name=filename,
-            actor_user_id=actor_user_id,
-            upload_transport=upload_transport,
-        )
+        async with request.form() as form:
+            root_id = _upload_form_text(form, "root_id", required=True)
+            assert root_id is not None
+            upload = _save_upload_files(form, multiple=False)[0]
+            filename = _upload_form_text(form, "filename")
+            upload_transport = _save_upload_transport(form)
+            traffic_log.info(
+                "Node API save upload received: node=%s app=%s root=%s transport=%s bytes=%s",
+                auth.node_name, app_name, root_id, upload_transport.value, upload.size,
+            )
+            result: NodeSaveMutationResult = await storage.upload_save_file(
+                app=app, root_id=root_id, upload=upload, upload_name=filename,
+                actor_user_id=actor_user_id, upload_transport=upload_transport,
+            )
         audit_log(
             "save.file_uploaded",
             actor_user_id=actor_user_id,
@@ -540,17 +569,8 @@ def register_storage_routes(
     async def _upload_saves_to_inferred_roots(
         app_name: str,
         request: Request,
-        upload: Annotated[list[UploadFile], File()],
-        upload_transport: Annotated[NodeSaveUploadTransport, Form()] = NodeSaveUploadTransport.DIRECT,
         access_token: str | None = None,
     ) -> dict[str, object]:
-        traffic_log.info(
-            "Node API inferred save upload request: node=%s app=%s uploads=%s transport=%s",
-            auth.node_name,
-            app_name,
-            len(upload),
-            upload_transport.value,
-        )
         context = auth.require_access(
             request,
             access_token,
@@ -563,12 +583,17 @@ def register_storage_routes(
             app.save_file_write_level,
         )
         actor_user_id = auth.require_actor(context).require_actor_user_id()
-        result: NodeSaveBatchMutationResult = await storage.upload_save_files_to_inferred_roots(
-            app=app,
-            uploads=upload,
-            actor_user_id=actor_user_id,
-            upload_transport=upload_transport,
-        )
+        async with request.form() as form:
+            uploads = _save_upload_files(form, multiple=True)
+            upload_transport = _save_upload_transport(form)
+            traffic_log.info(
+                "Node API inferred save upload received: node=%s app=%s uploads=%s transport=%s bytes=%s",
+                auth.node_name, app_name, len(uploads), upload_transport.value,
+                sum(upload.size or 0 for upload in uploads),
+            )
+            result: NodeSaveBatchMutationResult = await storage.upload_save_files_to_inferred_roots(
+                app=app, uploads=uploads, actor_user_id=actor_user_id, upload_transport=upload_transport,
+            )
         audit_log(
             "save.files_uploaded",
             actor_user_id=actor_user_id,

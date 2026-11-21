@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import tempfile
 import asyncio
+import logging
+from time import perf_counter
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
@@ -14,6 +16,7 @@ from _async_utils import run_blocking
 from _file import InsufficientDiskSpaceError, require_free_disk_space
 
 _MULTIPART_OVERHEAD_BYTES = 1024**2
+log = logging.getLogger(__name__)
 
 
 def is_mod_upload_path(path: str, api_prefix: str) -> bool:
@@ -96,15 +99,24 @@ class NodeApiRequestBodyLimitMiddleware:
                 raise
 
         received_bytes = 0
+        started_at = perf_counter()
+        last_chunk_at = started_at
+        largest_chunk_gap = 0.0
+        received_chunks = 0
+        response_status: int | None = None
         next_space_check = 64 * 1024**2
         response_started = False
 
         async def limited_receive() -> Message:
-            nonlocal received_bytes, next_space_check
+            nonlocal received_bytes, next_space_check, last_chunk_at, largest_chunk_gap, received_chunks
             message = await receive()
             if message.get("type") == "http.request":
                 body = message.get("body", b"")
                 if isinstance(body, bytes):
+                    now = perf_counter()
+                    largest_chunk_gap = max(largest_chunk_gap, now - last_chunk_at)
+                    last_chunk_at = now
+                    received_chunks += 1
                     received_bytes += len(body)
                     if received_bytes > limit:
                         raise _RequestBodyTooLargeError
@@ -117,22 +129,33 @@ class NodeApiRequestBodyLimitMiddleware:
             return message
 
         async def tracked_send(message: Message) -> None:
-            nonlocal response_started
+            nonlocal response_started, response_status
             if message.get("type") == "http.response.start":
                 response_started = True
+                response_status = message["status"]
             await send(message)
 
         try:
             await self._app(scope, limited_receive, tracked_send)
         except _RequestBodyTooLargeError:
             if not response_started:
-                await self._send_too_large_response(send, limit)
+                await self._send_too_large_response(tracked_send, limit)
         except _UploadStorageFullError as xcp:
             if not response_started:
-                await self._send_error(send, 507, str(xcp))
+                await self._send_error(tracked_send, 507, str(xcp))
         finally:
             if mod_upload:
                 self._mod_upload_lock.release()
+            if any(name.lower() == b"content-type" and value.lower().startswith(b"multipart/form-data")
+                   for name, value in scope.get("headers", [])):
+                receive_duration = last_chunk_at - started_at
+                log.info(
+                    "Upload request finished: path=%s status=%s bytes=%s expected_bytes=%s chunks=%s "
+                    "receive_seconds=%.3f request_seconds=%.3f bytes_per_second=%.0f max_chunk_gap_seconds=%.3f",
+                    scope["path"], response_status, received_bytes, content_length, received_chunks, receive_duration,
+                    perf_counter() - started_at, received_bytes / receive_duration if receive_duration > 0 else 0,
+                    largest_chunk_gap,
+                )
 
     def _should_limit(self, scope: Scope) -> bool:
         return (

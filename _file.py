@@ -12,14 +12,16 @@ from collections.abc import AsyncIterator, Callable, Collection, Mapping
 from logging import Logger
 from pathlib import Path
 from subprocess import CompletedProcess
+from threading import Event
 from types import ModuleType
 from typing import cast
+from uuid import uuid4
 
 import aiofiles
 import hikari
 
 import config
-from _async_utils import run_blocking
+from _async_utils import run_blocking, run_blocking_cancellable
 from archive_safety import extract_rar_entries, open_rar_archive, validated_archive_member_path, validated_rar_entries
 
 log: Logger = logging.getLogger(__name__)
@@ -450,8 +452,12 @@ class File_Utils:
         zip_name: str,
         overwrite: bool | None = True,
         arc_base: Path | None = None,
+        *,
+        unique_output: bool = False,
     ) -> Path:
         zip_path = config.DIR_ZIPS / zip_name
+        if unique_output:
+            zip_path = zip_path.with_name(f"{zip_path.stem}-{uuid4().hex}.zip")
         if zip_path.exists():
             if overwrite:
                 zip_path.unlink()
@@ -463,12 +469,25 @@ class File_Utils:
         if not zip_path.suffix == ".zip":
             zip_path = zip_path.with_suffix(".zip")
 
+        try:
+            if unique_output:
+                await run_blocking_cancellable(Event(), cls._compress_to_path, target, zip_path, arc_base)
+            else:
+                await run_blocking(cls._compress_to_path, target, zip_path, arc_base)
+        except BaseException:
+            if unique_output:
+                zip_path.unlink(missing_ok=True)
+            raise
+        return zip_path
+
+    @classmethod
+    def _compress_to_path(cls, target: Path | Collection[Path], zip_path: Path, arc_base: Path | None) -> None:
         if isinstance(target, Path):
             cls.ensure_valid_path(target)
             if target.is_file():
-                await run_blocking(cls.compress_file, target, zip_path)
+                cls.compress_file(target, zip_path)
             elif target.is_dir():
-                await run_blocking(cls.compress_dir, target, zip_path, arc_base)
+                cls.compress_dir(target, zip_path, arc_base)
             else:
                 raise ValueError(f"Unsupported path type: {target}")
         else:
@@ -476,14 +495,12 @@ class File_Utils:
             for p in paths:
                 cls.ensure_valid_path(p)
             if all(p.is_file() for p in paths):
-                await run_blocking(cls.compress_files, paths, zip_path, arc_base)
+                cls.compress_files(paths, zip_path, arc_base)
 
             elif all(p.is_dir() for p in paths):
-                await run_blocking(cls.compress_dirs, paths, zip_path, arc_base)
+                cls.compress_dirs(paths, zip_path, arc_base)
             else:
-                await run_blocking(cls.compress_paths, paths, zip_path, arc_base)
-
-        return zip_path
+                cls.compress_paths(paths, zip_path, arc_base)
 
     @staticmethod
     def ensure_valid_path(path: Path):

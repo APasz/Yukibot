@@ -1952,7 +1952,7 @@ class ModWebTests(unittest.TestCase):
                 patch.object(service, "_create_remote_console_stdout_subscription") as subscribe,
             ):
                 service._render_console_editor(ui=cast(ModWebUi, ui), model=model, user=user)
-                bootstrap = ui.run_javascript.call_args.args[0]
+                bootstrap = "\n".join(call.args[0] for call in ui.run_javascript.call_args_list)
                 self.assertIn("window.modWebConsoleFeed ??=", bootstrap)
                 self.assertNotIn("<script>", bootstrap)
                 ui.add_head_html.assert_not_called()
@@ -1961,9 +1961,15 @@ class ModWebTests(unittest.TestCase):
                     lines=("BepInEx loaded", "Server ready"), truncated=False, running=True,
                 )
                 subscribe.call_args.kwargs["on_update"](ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.LIVE, snapshot))
-                await asyncio.sleep(0)
+                visibility_handler = next(
+                    call.args[1] for call in ui.element.return_value.classes.return_value.on.call_args_list
+                    if call.args[0] == "mod-web-visibility"
+                )
+                visibility_handler(SimpleNamespace(args=True))
+                await asyncio.sleep(0.55)
                 feed = ui.html.return_value.classes.return_value
-                update = feed.client.run_javascript.call_args.args[0]
+                update = next(call.args[0] for call in feed.client.run_javascript.call_args_list
+                              if "modWebConsoleFeed?.update" in call.args[0])
                 self.assertIn("BepInEx loaded\\nServer ready", update)
                 self.assertIn("modWebConsoleFeed?.update", update)
                 feed.client.run_javascript.reset_mock()
@@ -1973,6 +1979,39 @@ class ModWebTests(unittest.TestCase):
                 await asyncio.sleep(0)
                 feed.client.run_javascript.assert_not_called()
 
+        asyncio.run(exercise())
+
+    def test_console_deltas_match_shorter_snapshots_and_reset_after_remount(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            ui = MagicMock()
+            model = replace(self._overview_model_with_config_and_chat(), console_actions=self._console_action_list())
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            with (patch.object(service, "_render_flat_tab_header"), patch.object(service, "_remote_node_link"),
+                  patch.object(service, "_register_client_cleanup"), patch.object(service, "_create_remote_console_stdout_subscription"),
+                  patch("nicegui.context.context", SimpleNamespace(client=nullcontext())),
+                  patch("web_dash.editors.CoalescedUiUpdate") as coalescer):
+                service._render_console_editor(ui=cast(ModWebUi, ui), model=model, user=user)
+                apply = coalescer.__getitem__.return_value.call_args.kwargs["apply"]
+                snapshot = NodeConsoleStdoutSnapshot(app_name=model.app_name, app_friendly=model.app_friendly,
+                    node=model.node_name, lines=("a", "b", "c"), truncated=False, running=True)
+                client = ui.html.return_value.classes.return_value.client
+                for next_lines in (("c",), ("c", "d"), ("a", "b", "c")):
+                    with self.subTest(next_lines=next_lines):
+                        apply(ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.LIVE, snapshot), True)
+                        client.run_javascript.reset_mock()
+                        update = ModWebConsoleStdoutUpdate(ModWebConsoleConnectionState.LIVE, replace(snapshot, lines=next_lines))
+                        apply(update, False)
+                        if next_lines == ("c",):
+                            self.assertIn(', "c", false)', client.run_javascript.call_args.args[0])
+                        elif next_lines == ("c", "d"):
+                            self.assertIn(', ["d"], false, true, 2)', client.run_javascript.call_args.args[0])
+                        else:
+                            client.run_javascript.assert_not_called()
+                        client.run_javascript.reset_mock()
+                        apply(update, True)
+                        self.assertNotIn("false, true", client.run_javascript.call_args.args[0])
+                        self.assertIn("modWebConsoleFeed?.update", client.run_javascript.call_args.args[0])
         asyncio.run(exercise())
 
     def test_console_subscribers_receive_existing_output_without_waiting_for_new_lines(self) -> None:

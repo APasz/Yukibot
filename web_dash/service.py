@@ -305,6 +305,8 @@ class ModWebService(
                 show=False,
                 reload=False,
                 title="Yukibot Dashboard",
+                reconnect_timeout=config.MOD_WEB_SERVER.reconnect_timeout_seconds,
+                message_history_length=1000,
             )
         except Exception as xcp:
             self._startup_error = xcp

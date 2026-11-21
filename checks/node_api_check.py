@@ -10284,6 +10284,7 @@ class NodeApiTests(unittest.TestCase):
             (first_path, second_path),
             "Minecraft_Alpha_mod-configs_configs.zip",
             arc_base=root_path,
+            unique_output=True,
         )
 
     def test_factorio_mod_settings_state_reports_missing_file(self) -> None:

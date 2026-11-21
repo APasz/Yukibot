@@ -14,6 +14,7 @@ from .constants import (
     _HOME_NODE_LATENCY_TIMEOUT_SECONDS,
     _NODE_PRESENCE_RECONNECT_DELAY_SECONDS,
     _PORTAL_HEALTH_PATH,
+    _PORTAL_CONNECTION_REPORT_PATH,
     _PORTAL_RECOVERY_HEALTH_TIMEOUT_SECONDS,
     _PORTAL_RECOVERY_IDLE_THRESHOLD_SECONDS,
     _PORTAL_RECOVERY_POLL_INTERVAL_SECONDS,
@@ -129,6 +130,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
     @staticmethod
     def _portal_recovery_head_html() -> str:
         health_path: str = json.dumps(_PORTAL_HEALTH_PATH)
+        report_path = json.dumps(_PORTAL_CONNECTION_REPORT_PATH)
         health_timeout_ms: int = round(_PORTAL_RECOVERY_HEALTH_TIMEOUT_SECONDS * 1000)
         idle_threshold_ms: int = round(_PORTAL_RECOVERY_IDLE_THRESHOLD_SECONDS * 1000)
         poll_interval_ms: int = round(_PORTAL_RECOVERY_POLL_INTERVAL_SECONDS * 1000)
@@ -136,10 +138,11 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
             <script>
             (() => {{
               const existing = window.modWebPortalRecovery;
-              if (existing?.version === 1) {{
+              if (existing?.version === 2) {{
                 return;
               }}
               const healthPath = {health_path};
+              const reportPath = {report_path};
               const healthTimeoutMs = {health_timeout_ms};
               const idleThresholdMs = {idle_threshold_ms};
               const pollIntervalMs = {poll_interval_ms};
@@ -149,6 +152,34 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
               let hiddenAt = document.visibilityState === 'hidden' ? Date.now() : null;
               let recoveryActive = false;
               let reloadScheduled = false;
+              let retryTimer = null;
+              let retryDelayMs = 2000;
+              let disconnectedAt = null;
+              let reconnectAttempts = 0;
+              let reportedInitial = false;
+              const socketReady = () => Boolean(window.socket?.connected && window.did_handshake);
+              const reportConnection = () => {{
+                if (!socketReady() || (reportedInitial && disconnectedAt === null)) return;
+                const connection = navigator.connection;
+                const transport = window.socket?.io?.engine?.transport?.name;
+                const effectiveType = connection?.effectiveType;
+                const nonnegative = value => Number.isFinite(value) && value >= 0 ? value : null;
+                const payload = {{
+                  event: reportedInitial ? 'reconnected' : 'initial',
+                  reconnect_attempts: reconnectAttempts,
+                  outage_ms: disconnectedAt === null ? 0 : Math.max(0, performance.now() - disconnectedAt),
+                  effective_type: ['slow-2g', '2g', '3g', '4g'].includes(effectiveType) ? effectiveType : null,
+                  downlink_mbps: nonnegative(connection?.downlink),
+                  rtt_ms: nonnegative(connection?.rtt),
+                  save_data: typeof connection?.saveData === 'boolean' ? connection.saveData : null,
+                  transport: ['websocket', 'polling', 'webtransport'].includes(transport) ? transport : null,
+                }};
+                reportedInitial = true;
+                disconnectedAt = null;
+                reconnectAttempts = 0;
+                void fetch(reportPath, {{method: 'POST', credentials: 'same-origin',
+                  headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(payload)}}).catch(() => {{}});
+              }};
 
               const installStyle = () => {{
                 if (document.getElementById(styleId)) {{
@@ -247,6 +278,15 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                 document.getElementById(overlayId)?.remove();
               }};
 
+              const restoreReadyConnection = () => {{
+                if (!socketReady()) return false;
+                if (retryTimer !== null) {{ window.clearTimeout(retryTimer); retryTimer = null; }}
+                hideOverlay();
+                retryDelayMs = 2000;
+                reportConnection();
+                return true;
+              }};
+
               const probeHealth = async () => {{
                 const controller = new AbortController();
                 const timeoutId = window.setTimeout(() => controller.abort(), healthTimeoutMs);
@@ -272,32 +312,41 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                 window.setTimeout(() => window.location.reload(), 250);
               }};
 
-              const recover = async (reason, shouldReload) => {{
-                if (recoveryActive || reloadScheduled) {{
+              const scheduleRetry = () => {{
+                if (!navigator.onLine || retryTimer !== null || reloadScheduled) return;
+                const delay = retryDelayMs * (0.5 + Math.random());
+                retryDelayMs = Math.min(retryDelayMs * 2, 30000);
+                retryTimer = window.setTimeout(() => {{
+                  retryTimer = null;
+                  void recover('Retrying portal connection...');
+                }}, delay);
+              }};
+
+              const recover = async reason => {{
+                if (reloadScheduled || restoreReadyConnection() || recoveryActive) {{
+                  return;
+                }}
+                if (retryTimer !== null) {{ window.clearTimeout(retryTimer); retryTimer = null; }}
+                if (!navigator.onLine) {{
+                  ensureOverlay('The browser is offline. Waiting for the network...');
                   return;
                 }}
                 recoveryActive = true;
                 ensureOverlay(reason || 'Reconnecting to the portal...');
                 try {{
-                  if (await probeHealth()) {{
-                    if (shouldReload) {{
-                      hardReload('Refreshing the portal connection...');
-                    }} else {{
-                      hideOverlay();
-                    }}
+                  const healthy = await probeHealth();
+                  if (restoreReadyConnection()) return;
+                  if (healthy) {{
+                    if (window.socket && !window.socket.active) window.socket.connect();
+                    scheduleRetry();
                     return;
                   }}
                   ensureOverlay('The portal is not responding yet. Retrying shortly...');
-                  window.setTimeout(() => {{
-                    recoveryActive = false;
-                    recover('Retrying portal connection...', shouldReload);
-                  }}, 2000);
+                  scheduleRetry();
                 }} catch (_error) {{
+                  if (restoreReadyConnection()) return;
                   ensureOverlay(navigator.onLine ? 'The portal is not responding yet. Retrying shortly...' : 'The browser is offline. Waiting for the network...');
-                  window.setTimeout(() => {{
-                    recoveryActive = false;
-                    recover('Retrying portal connection...', shouldReload);
-                  }}, 2000);
+                  scheduleRetry();
                 }} finally {{
                   if (!reloadScheduled) {{
                     recoveryActive = false;
@@ -310,7 +359,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                 const drift = now - lastTick - pollIntervalMs;
                 lastTick = now;
                 if (document.visibilityState === 'visible' && drift > idleThresholdMs) {{
-                  recover('The portal was idle for a while. Reconnecting...', true);
+                  recover('The portal was idle for a while. Reconnecting...');
                 }}
               }}, pollIntervalMs);
 
@@ -323,16 +372,16 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                 hiddenAt = null;
                 lastTick = Date.now();
                 if (hiddenDuration > idleThresholdMs) {{
-                  recover('The portal was idle for a while. Reconnecting...', true);
+                  recover('The portal was idle for a while. Reconnecting...');
                 }}
               }});
 
               window.addEventListener('pageshow', event => {{
                 if (event.persisted) {{
-                  recover('Restoring the portal connection...', true);
+                  recover('Restoring the portal connection...');
                 }}
               }});
-              window.addEventListener('online', () => recover('Network restored. Reconnecting...', true));
+              window.addEventListener('online', () => recover('Network restored. Reconnecting...'));
 
               window.setTimeout(() => {{
                 const bodyText = document.body?.innerText?.trim() || '';
@@ -343,10 +392,24 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
               }}, 8000);
 
               window.modWebPortalRecovery = {{
-                version: 1,
+                version: 2,
                 reload: hardReload,
                 recover,
               }};
+              const bindSocket = () => {{
+                const socket = window.socket;
+                if (!socket) return;
+                window.clearInterval(socketBindingTimer);
+                socket.io.reconnectionDelay(1000).reconnectionDelayMax(30000).randomizationFactor(0.5);
+                socket.io.on('reconnect_attempt', () => {{ reconnectAttempts = Math.min(100000, reconnectAttempts + 1); }});
+                socket.on('disconnect', () => {{
+                  disconnectedAt ??= performance.now();
+                }});
+                socket.on('connect', () => window.setTimeout(() => void recover('Restoring the portal connection...'), 250));
+                if (socketReady()) reportConnection();
+              }};
+              const socketBindingTimer = window.setInterval(bindSocket, 1000);
+              bindSocket();
             }})();
             </script>
         """

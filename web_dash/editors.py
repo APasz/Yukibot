@@ -10,6 +10,7 @@ from apps._console import ConsoleResponseSource
 from apps._scs_truck_simulator import SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE
 from apps.sevendays import SevenDaysSaveArchiveInspection, inspect_sevendays_save_archive
 from node_api.console import NodeConsoleActionExecuteRequest
+from node_api.realtime_service import NodeRealtimeService
 
 from .constants import (
     _CONFIG_EDITOR_DOCKERFILE_LANGUAGE,
@@ -29,6 +30,7 @@ from .nicegui_protocols import (
     _value_as_object,
     _value_as_text,
 )
+from .live_updates import CoalescedUiUpdate
 from .runtime_imports import (
     Access_Control,
     App_Manager,
@@ -321,7 +323,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                       }
                       sync(elementId);
                     };
-                    const update = (elementId, text, forceScroll) => {
+                    const update = (elementId, text, forceScroll, append = false, maxLines = 200) => {
                       bind(elementId);
                       const element = get(elementId);
                       if (!element) {
@@ -329,6 +331,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                       }
                       const previousState = captureState(elementId);
                       const code = element.querySelector('code') || element;
+                      if (append) text = [...code.textContent.split('\\n'), ...text].slice(-maxLines).join('\\n');
                       if (code.textContent === text) {
                         if (forceScroll) jump(elementId);
                         return;
@@ -394,17 +397,27 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 )
             )
 
-        def _apply_stdout_update(update: ModWebConsoleStdoutUpdate) -> None:
+        def _apply_stdout_update(update: ModWebConsoleStdoutUpdate, reset: bool = False) -> None:
             nonlocal stdout_snapshot
             if console_closed:
                 return
             self._set_badge_state(connection_badge, update.connection.value, _CONSOLE_CONNECTION_TONES[update.connection])
-            if update.snapshot is not None and update.snapshot != stdout_snapshot:
-                previous_text = _console_stdout_text(stdout_snapshot)
+            if update.snapshot is not None and (reset or update.snapshot != stdout_snapshot):
+                previous_snapshot = stdout_snapshot
+                previous_text = _console_stdout_text(previous_snapshot)
                 stdout_snapshot = update.snapshot
                 next_text = _console_stdout_text(stdout_snapshot)
-                if next_text != previous_text:
-                    _update_stdout_feed_text(next_text, force_scroll=False)
+                if reset or next_text != previous_text:
+                    appended = (
+                        NodeRealtimeService.console_stdout_appended_lines(previous_snapshot, stdout_snapshot)
+                        if not reset and previous_snapshot is not None and previous_snapshot.lines else None
+                    )
+                    if not appended:
+                        _update_stdout_feed_text(next_text, force_scroll=False)
+                    else:
+                        _run_stdout_feed_javascript(
+                            f"window.modWebConsoleFeed?.update({stdout_feed_id!r}, {json.dumps(appended)}, false, true, {len(stdout_snapshot.lines)});"
+                        )
 
         def selected_action() -> NodeConsoleActionEntry | None:
             return next((action for action in current_console_actions.actions if action.key == selected_action_key), None)
@@ -847,10 +860,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     _jump_stdout_feed_to_bottom()
 
         loop = asyncio.get_running_loop()
+        if stdout_feed is None:
+            raise RuntimeError("Console stdout feed was not rendered.")
+        stdout_updates = CoalescedUiUpdate[ModWebConsoleStdoutUpdate](ui=ui, target=stdout_feed, apply=_apply_stdout_update)
 
         def _queue_stdout_update(update: ModWebConsoleStdoutUpdate) -> None:
             try:
-                loop.call_soon_threadsafe(lambda: _apply_stdout_update(update))
+                loop.call_soon_threadsafe(stdout_updates.submit, update)
             except RuntimeError:
                 return
 
@@ -873,6 +889,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if console_closed:
                 return
             console_closed = True
+            stdout_updates.close()
             if unsubscribe_stdout is not None:
                 unsubscribe_stdout()
 

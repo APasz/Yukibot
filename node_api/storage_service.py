@@ -236,10 +236,12 @@ class NodeStorageService:
         paths = tuple(
             app.resolve_config_file(config_file.id) for config_file in visible_configs
         )
+        archive_name = self._config_root_archive_name(app=app, root=root)
         archive_path = await File_Utils.compress(
             paths,
-            self._config_root_archive_name(app=app, root=root),
+            archive_name,
             arc_base=root_path,
+            unique_output=True,
         )
         self._traffic_log.info(
             "Node API sending config root archive: node=%s app=%s root=%s files=%s archive=%s",
@@ -249,7 +251,7 @@ class NodeStorageService:
             len(paths),
             archive_path,
         )
-        return FileResponse(path=archive_path, filename=archive_path.name)
+        return FileResponse(path=archive_path, filename=archive_name)
 
     async def build_save_list(self, app: App) -> NodeSaveList:
         saves = await app.list_save_files_async()
@@ -359,10 +361,12 @@ class NodeStorageService:
                 404, f"Save path is unsupported: {save_path.name}"
             )
 
+        archive_name = self._save_archive_name(app=app, save_path=save_path)
         archive_path = await File_Utils.compress(
             save_path,
-            self._save_archive_name(app=app, save_path=save_path),
+            archive_name,
             arc_base=save_path.parent,
+            unique_output=True,
         )
         self._traffic_log.info(
             "Node API sending save archive: node=%s app=%s path=%s archive=%s",
@@ -371,7 +375,7 @@ class NodeStorageService:
             save_path,
             archive_path,
         )
-        return FileResponse(path=archive_path, filename=archive_path.name)
+        return FileResponse(path=archive_path, filename=archive_name)
 
     async def upload_save_file(
         self,

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import Receive, Scope, Send
@@ -19,6 +20,7 @@ from .constants import (
     _MOD_WEB_APP_PAGE_RESPONSE_TIMEOUT_SECONDS,
     _MOD_WEB_PAGE_PATH,
     _PORTAL_HEALTH_PATH,
+    _PORTAL_CONNECTION_REPORT_PATH,
     _PORTAL_NODE_LATENCIES_PATH,
     _REMOTE_NODE_DOWNLOAD_REQUEST_TIMEOUT,
     _SAME_ORIGIN_NODE_PROXY_BASE,
@@ -63,6 +65,19 @@ class _ModWebClientMapErrorReport(BaseModel):
     public_map_url: str | None = None
 
     model_config = ConfigDict(str_strip_whitespace=False)
+
+
+class _ModWebConnectionReport(BaseModel):
+    event: Literal["initial", "reconnected"]
+    reconnect_attempts: int = Field(ge=0, le=100000)
+    outage_ms: float = Field(ge=0, allow_inf_nan=False)
+    effective_type: Literal["slow-2g", "2g", "3g", "4g"] | None = None
+    downlink_mbps: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    rtt_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    save_data: bool | None = None
+    transport: Literal["websocket", "polling", "webtransport"] | None = None
+
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class _ModWebGZipMiddleware(GZipMiddleware):
@@ -308,6 +323,17 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 media_type="application/json",
                 headers={"Cache-Control": "no-store"},
             )
+
+        @nicegui_app.post(_PORTAL_CONNECTION_REPORT_PATH)
+        async def _connection_report(report: _ModWebConnectionReport, request: Request) -> dict[str, bool]:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            log.info(
+                "Browser connection ready (client-reported): user=%s event=%s transport=%s reconnect_attempts=%s "
+                "outage_ms=%.0f effective_type=%s downlink_mbps=%s rtt_ms=%s save_data=%s",
+                user.discord_id, report.event, report.transport, report.reconnect_attempts, report.outage_ms,
+                report.effective_type, report.downlink_mbps, report.rtt_ms, report.save_data,
+            )
+            return {"ok": True}
 
         @nicegui_app.get(_PORTAL_NODE_LATENCIES_PATH)
         async def _portal_node_latencies(request: Request) -> dict[str, object]:

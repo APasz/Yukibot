@@ -16,6 +16,7 @@ from .constants import (
     log,
 )
 from .links import mod_web_node_system_path
+from .live_updates import CoalescedUiUpdate, SYSTEM_HISTORY_JAVASCRIPT
 from .nicegui_protocols import ModWebUi, _value_as_bool, _value_as_object, _value_as_text
 from .remote_node_monitor import RemoteNodeAvailability, RemoteNodeMonitorSnapshot
 from .runtime_imports import (
@@ -807,8 +808,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         if samples and sample.captured_at_epoch_seconds < samples[-1].captured_at_epoch_seconds:
             samples = []
         if samples:
-            elapsed = sample.captured_at_epoch_seconds - samples[-1].captured_at_epoch_seconds
-            if elapsed < history.sample_interval_seconds:
+            if sample.captured_at_epoch_seconds // history.sample_interval_seconds == samples[-1].captured_at_epoch_seconds // history.sample_interval_seconds:
                 samples[-1] = sample
             else:
                 samples.append(sample)
@@ -830,13 +830,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         plot_width = 832.0
         plot_height = 196.0
         samples = history.samples
-        if not samples:
-            return (
-                '<div class="mod-system-chart-empty">'
-                "Collecting telemetry. The first historical sample will appear shortly."
-                "</div>"
-            )
-        end_time = samples[-1].captured_at_epoch_seconds
+        end_time = samples[-1].captured_at_epoch_seconds if samples else 0
         start_time = end_time - history.retention_seconds
         time_span = max(1, end_time - start_time)
 
@@ -860,14 +854,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 x, y = _point(sample, value)
                 commands.append(f"{'L' if segment_open else 'M'} {x:.1f} {y:.1f}")
                 segment_open = True
-            if commands:
-                line_classes = "mod-system-chart-line"
-                if animate:
-                    line_classes = f"{line_classes} mod-system-chart-line-enter"
-                paths.append(
-                    f'<path class="{line_classes}" pathLength="1" '
-                    f'stroke="{series.color_hex}" d="{" ".join(commands)}"/>'
-                )
+            line_classes = "mod-system-chart-line"
+            if animate:
+                line_classes = f"{line_classes} mod-system-chart-line-enter"
+            paths.append(
+                f'<path class="{line_classes}" pathLength="1" data-series="{index + 1}" '
+                f'stroke="{series.color_hex}" d="{" ".join(commands)}"/>'
+            )
             legend_x = plot_left + index * 122
             legend.append(
                 f'<g transform="translate({legend_x:.0f},244)">'
@@ -877,6 +870,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
             )
 
         grid_lines: list[str] = []
+        empty_label = (
+            '<text class="mod-system-chart-empty" x="60" y="120">Collecting telemetry. The first historical sample will appear shortly.</text>'
+            if not samples else ""
+        )
         for percent in (0, 25, 50, 75, 100):
             y = plot_top + ((100 - percent) / 100) * plot_height
             grid_lines.append(
@@ -885,7 +882,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
             )
         return (
             '<svg class="mod-system-chart" viewBox="0 0 900 260" role="img" '
+            f'data-retention="{history.retention_seconds}" data-sample-interval="{history.sample_interval_seconds}" '
+            f'data-plot-left="{plot_left}" data-plot-top="{plot_top}" data-plot-width="{plot_width}" data-plot-height="{plot_height}" '
             'aria-label="CPU, RAM, and storage usage over the last hour">'
+            f'{empty_label}'
             f'<g class="mod-system-chart-grid">{"".join(grid_lines)}</g>'
             f'<g>{"".join(paths)}</g>'
             '<g class="mod-system-chart-axis-labels">'
@@ -1720,7 +1720,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             system_tab_panels: dict[_ModWebNodeSystemTab, Element] = {}
             apply_system_overview_stats: Callable[[tuple[ModWebTitleStat, ...]], None]
             apply_system_detail_stats: Callable[[tuple[ModWebTitleStat, ...]], None] | None = None
-            chart: Html
+            chart: Html | None = None
 
             def _render_overview(panel: Element) -> None:
                 nonlocal apply_system_overview_stats, chart
@@ -1946,6 +1946,39 @@ class ModWebHomeMixin(ModWebServiceSupport):
             page_closed = False
             loop: AbstractEventLoop = asyncio.get_running_loop()
 
+            sent_history: NodeSystemHistory | None = None
+            if chart is None:
+                raise RuntimeError("System history chart was not rendered.")
+            history_chart = chart
+
+            def _send_chart_update(history: NodeSystemHistory, reset: bool) -> None:
+                nonlocal sent_history
+                reset = (
+                    reset or sent_history is None or not sent_history.samples or not history.samples
+                    or history.samples[-1].captured_at_epoch_seconds < sent_history.samples[-1].captured_at_epoch_seconds
+                )
+                samples = history.samples
+                if not reset and sent_history is not None:
+                    last_bucket = sent_history.samples[-1].captured_at_epoch_seconds // history.sample_interval_seconds
+                    samples = tuple(sample for sample in samples
+                                    if sample.captured_at_epoch_seconds // history.sample_interval_seconds >= last_bucket)
+                payload = [
+                    (sample.captured_at_epoch_seconds,
+                     *(self._system_chart_sample_value(sample, series.metric) for series in _SYSTEM_CHART_SERIES))
+                    for sample in samples
+                ]
+                history_chart.client.run_javascript(
+                    f"window.modWebSystemHistory.update({history_chart.id}, {json.dumps(payload)}, {str(reset).lower()});",
+                    timeout=0.1,
+                )
+                sent_history = history
+
+            ui.run_javascript(SYSTEM_HISTORY_JAVASCRIPT)
+            chart_updates = CoalescedUiUpdate[NodeSystemHistory](
+                ui=ui, target=history_chart, apply=_send_chart_update, interval=2.0,
+            )
+            chart_updates.submit(current_history)
+
             async def _refresh_node_connectivity_badges() -> None:
                 nonlocal current_node_status
                 next_node_status = await refresh_node_status()
@@ -2014,7 +2047,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 next_history = self._append_node_system_history(current_history, current_system_summary)
                 if next_history != current_history:
                     current_history = next_history
-                    chart.set_content(self._node_system_history_svg(current_history))
+                    chart_updates.submit(current_history)
                 if can_view_operator_signals:
                     current_usage_badges = _apply_live_signal_badges(
                         previous_badges=current_usage_badges,
@@ -2047,6 +2080,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 nonlocal page_closed
                 page_closed = True
                 unsubscribe()
+                chart_updates.close()
 
             self._register_client_cleanup(ui=ui, cleanup=_cleanup_live_updates)
 

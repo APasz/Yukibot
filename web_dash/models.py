@@ -2691,13 +2691,16 @@ class ModWebModelsMixin(ModWebServiceSupport):
         request: Request | None = None,
     ) -> StarletteResponse:
         transfer_id: int | None = None
+        range_requested = request is not None and "range" in request.headers
         raw_transfer_id = None if request is None else request.query_params.get(DOWNLOAD_TRANSFER_QUERY_PARAMETER)
         if raw_transfer_id is not None:
             try:
                 requested_transfer_id = int(raw_transfer_id)
             except ValueError as xcp:
                 raise _http_exception(400, "Invalid download transfer identifier.") from xcp
-            if self._backend.claim_download_transfer(transfer_id=requested_transfer_id, user_id=user.discord_id):
+            if self._backend.claim_download_transfer(
+                transfer_id=requested_transfer_id, user_id=user.discord_id, resume=range_requested,
+            ):
                 transfer_id = requested_transfer_id
 
         try:
@@ -2707,46 +2710,51 @@ class ModWebModelsMixin(ModWebServiceSupport):
             if query:
                 url = f"{url}?{urlencode(query, doseq=True)}"
             session = await self._remote_http_client()
+            upstream_headers = {"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"}
+            if request is not None:
+                for header in ("Range", "If-Range"):
+                    if (value := request.headers.get(header)) is not None:
+                        upstream_headers[header] = value
             response_context = session.get(
                 url,
-                headers={"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"},
+                headers=upstream_headers,
                 timeout=self._aiohttp_client_timeout(timeout, streaming=True),
                 auto_decompress=False,
             )
+            request_started_at = time.perf_counter()
             try:
                 response: aiohttp.ClientResponse = await response_context.__aenter__()
             except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
                 raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+            if request is not None:
+                log.info(
+                    "Remote download response: node=%s app=%s status=%s partial_requested=%s bytes=%s headers_seconds=%.3f",
+                    node.node_name, app_name, response.status, range_requested,
+                    response.content_length, time.perf_counter() - request_started_at,
+                )
 
             async def close_upstream() -> None:
                 await response_context.__aexit__(None, None, None)
 
             try:
-                if response.status >= 400:
+                if response.status >= 400 and response.status != 416:
                     detail = await self._aiohttp_response_detail(response)
                     raise RuntimeError(f"Remote node rejected the request: url={url} status={response.status} detail={detail}")
                 forwarded_headers = {
                     header_name: header_value
                     for header_name in (
                         "Cache-Control", "Content-Disposition", "Content-Length", "Content-Encoding",
-                        "ETag", "Expires", "Last-Modified",
+                        "ETag", "Expires", "Last-Modified", "Accept-Ranges", "Content-Range",
                     )
                     if (header_value := response.headers.get(header_name))
                 }
                 forwarded_headers["Referrer-Policy"] = "no-referrer"
-                if transfer_id is not None:
-                    self._backend.update_transfer_progress(
-                        transfer_id=transfer_id,
-                        progress_percent=0.0 if response.content_length is not None else None,
-                        detail_text="Sending download…",
-                    )
-
                 async def stream_body() -> AsyncIterator[bytes]:
                     async for chunk in response.content.iter_chunked(_REMOTE_NODE_STREAM_CHUNK_SIZE_BYTES):
                         if chunk:
                             yield chunk
 
-                return DownloadStreamingResponse(
+                download_response = DownloadStreamingResponse(
                     stream_body(),
                     media_type=response.headers.get("Content-Type"),
                     headers=forwarded_headers,
@@ -2754,7 +2762,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     backend=self._backend,
                     transfer_id=transfer_id,
                     total_bytes=response.content_length,
+                    status_code=response.status,
                 )
+                if transfer_id is not None:
+                    self._backend.update_transfer_progress(
+                        transfer_id=transfer_id, progress_percent=download_response.initial_progress_percent,
+                        detail_text="Resuming download…" if response.status == 206 else "Sending download…",
+                    )
+                return download_response
             except BaseException:
                 await close_upstream()
                 raise
