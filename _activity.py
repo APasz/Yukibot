@@ -181,6 +181,9 @@ class Activity_Manager(config.Activity_Manager):
     async def update(self) -> None:
         if config.IS_RESTARTING:
             return
+        shards = self.bot.shards
+        if not shards or any(not shard.is_connected for shard in shards.values()):
+            return
         now: datetime = datetime.now(tz=timezone.utc)
         if self.last_update is not None and now - self.last_update < timedelta(seconds=self.refresh_interval_seconds):
             return
@@ -216,15 +219,18 @@ class Activity_Manager(config.Activity_Manager):
         new_state = self._build_state(field_statuses=field_statuses, unmapped_statuses=unmapped_statuses)
         if new_state == self.state:
             return
-        self.state = new_state
         if not self.silent:
             log.debug("New activity: mapped=%s unmapped=%s", field_statuses, unmapped_statuses)
         try:
             if not self.silent:
                 log.debug("AM.update_presence: %s", new_state)
             await self.bot.update_presence(activity=hikari.Activity(name=new_state, type=hikari.ActivityType.CUSTOM))
+        except hikari.ComponentStateConflictError:
+            log.debug("Discord presence update deferred until the gateway reconnects")
         except Exception as xcp:
             log.exception(f"BotPresence: {xcp}")
+        else:
+            self.state = new_state
 
 
 # AiviA APasz
