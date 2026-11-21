@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import threading
 import unittest
 from pathlib import Path
@@ -11,6 +12,31 @@ from apps._tailer import Tailer
 
 
 class TailerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_can_reject_an_inactive_app_without_waiting(self) -> None:
+        for alive in (False, asyncio.Event()):
+            with self.subTest(alive=alive):
+                tailer = Tailer(lambda: alive, io.StringIO())
+                with self.assertRaisesRegex(RuntimeError, "inactive app"):
+                    await asyncio.wait_for(tailer.start(set(), wait_for_app=False), timeout=1)
+                self.assertIsNone(tailer._read_task)
+                self.assertIsNone(tailer._log_clear_task)
+
+    async def test_default_start_still_waits_for_the_app_ready_event(self) -> None:
+        ready = asyncio.Event()
+        tailer = Tailer(lambda: ready, io.StringIO())
+        start = asyncio.create_task(tailer.start(set()))
+        try:
+            await asyncio.sleep(0)
+            self.assertFalse(start.done())
+            ready.set()
+            await asyncio.wait_for(start, timeout=1)
+            self.assertTrue(tailer.is_running)
+        finally:
+            start.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await start
+            await tailer.stop()
+
     async def test_replacing_stream_reader_preserves_output_and_cached_lines(self) -> None:
         with TemporaryDirectory() as tmp:
             output = Path(tmp) / "stdout.log"

@@ -8,7 +8,6 @@ import os
 import signal
 import subprocess
 from abc import ABC, abstractmethod
-from collections import deque
 from collections.abc import Collection, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -180,6 +179,7 @@ class AppRuntimeFaultCode(enum.StrEnum):
     """Stable identifiers for recognised, user-actionable app runtime faults."""
 
     GMOD_STEAM_GAME_SERVER_LOGIN_TOKEN_REJECTED = "gmod_steam_game_server_login_token_rejected"
+    STEAM_GAME_SERVER_LOGIN_TOKEN_EXPIRED = "steam_game_server_login_token_expired"
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +359,7 @@ class App(Generic[ConfigT], ABC):
     cmd_start: list[str]
     cmd_cwd: Path | None = None
     shell: bool = False
+    pipe_stdout: bool = True
     uses_process_group_termination: bool = False
     _stderr_task = None
     _running: bool = False
@@ -1370,12 +1371,20 @@ class App(Generic[ConfigT], ABC):
         )
 
     def read_stdout_tail(self, *, max_lines: int = 200) -> AppStdoutTail:
+        return self._read_log_tail(self.file_stdout, max_lines=max_lines)
+
+    def read_stderr_tail(self, *, max_lines: int = 200) -> AppStdoutTail:
+        return self._read_log_tail(self.file_errout, max_lines=max_lines)
+
+    @staticmethod
+    def _read_log_tail(path: Path, *, max_lines: int) -> AppStdoutTail:
         if max_lines < 1:
-            raise ValueError("Stdout tail line limit must be at least 1.")
-        stdout_path: Path = self.file_stdout
-        if not stdout_path.exists():
+            raise ValueError("Log tail line limit must be at least 1.")
+        try:
+            handle = path.open("rb")
+        except FileNotFoundError:
             return AppStdoutTail(lines=(), truncated=False)
-        with stdout_path.open("rb") as handle:
+        with handle:
             handle.seek(0, os.SEEK_END)
             file_size: int = handle.tell()
             if file_size <= 0:
@@ -1383,7 +1392,7 @@ class App(Generic[ConfigT], ABC):
 
             chunk_size = 8192
             position = file_size
-            buffer = bytearray()
+            chunks: list[bytes] = []
             newline_count = 0
             while position > 0 and newline_count <= max_lines:
                 read_size = min(chunk_size, position)
@@ -1392,16 +1401,13 @@ class App(Generic[ConfigT], ABC):
                 chunk = handle.read(read_size)
                 if not chunk:
                     break
-                buffer[:0] = chunk
-                newline_count = buffer.count(b"\n")
+                chunks.append(chunk)
+                newline_count += chunk.count(b"\n")
 
-        decoded_lines = deque(
-            buffer.decode(config.STR_ENCODE, errors="replace").splitlines(),
-            maxlen=max_lines,
-        )
+        decoded_lines = b"".join(reversed(chunks)).decode(config.STR_ENCODE, errors="replace").splitlines()
         return AppStdoutTail(
-            lines=tuple(decoded_lines),
-            truncated=position > 0 or newline_count > max_lines,
+            lines=tuple(decoded_lines[-max_lines:]),
+            truncated=position > 0 or len(decoded_lines) > max_lines,
         )
 
     @property
@@ -1503,7 +1509,7 @@ class App(Generic[ConfigT], ABC):
             self.process = subprocess.Popen(
                 self.cmd_start,
                 cwd=self.resolved_cmd_cwd,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.PIPE if self.pipe_stdout else subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.PIPE,
                 start_new_session=True,

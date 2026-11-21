@@ -50,6 +50,8 @@ dev = [
 [tool.uv]
 package = false
 default-groups = ["dev"]
+# hikari-wave 0.7.0a1 does not implement Davey 0.2's explicit key transitions.
+constraint-dependencies = ["davey<0.2"]
 # The Satisfactory API client has an obsolete upper bound; its dotenv usage is
 # covered by the dashboard regression suite against the current secure release.
 override-dependencies = ["python-dotenv>=1.2.2"]

@@ -10,7 +10,6 @@ import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from re import Match
 from types import MappingProxyType
 from typing import Any, ClassVar, Final, cast
 
@@ -20,7 +19,7 @@ import config
 from _discord import DC_Bound, DC_Relay
 from _file import atomic_write_files
 from _security import Power_Level
-from apps._app import App, AppPortClaim, tcp_udp_port_claims
+from apps._app import App, AppPortClaim, AppRuntimeFault, AppRuntimeFaultCode, AppRuntimeFaultKind, tcp_udp_port_claims
 from apps._config import App_Config, AppVersion, SteamUpdatePreset
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._mod import Mod
@@ -84,6 +83,16 @@ _SCS_SERVER_CONFIG_ASSIGNMENT_RE = re.compile(
 _SCS_SERVER_CONFIG_BARE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SCS_GAME_VERSION_RE = re.compile(r"\[MP\]\s+Game version:\s*(?P<version>\S+)", re.IGNORECASE)
 _SCS_PACKSET_VERSION_RE = re.compile(r"Loaded pack set version\s+(?P<version>\S+)", re.IGNORECASE)
+_SCS_GSLT_EXPIRED_RE = re.compile(
+    r"(?:\*{3}\s*ERROR\s*\*{3}\s*:\s*)?"
+    r"\[(?:SERVICES|MP)\]\s*(?:Error:\s*)?Steam log on failed\s*-\s*code\s+106\s*\.\s*",
+    re.IGNORECASE,
+)
+_SCS_PLAYER_SESSION_RE = re.compile(
+    r"^(?:\d+:\d{2}:\d{2}\.\d+\s*:\s*)?\[MP\]\s+(?!\[Chat\]\s)"
+    r"(?P<player>.+?)\s+(?P<action>connected|disconnected),\s*client_id\s*=\s*\d+\s*$",
+    re.IGNORECASE,
+)
 
 SCS_DEFAULT_CONNECTION_PORT: Final[int] = 27015
 
@@ -1207,6 +1216,8 @@ class ScsTruckSimulator(App[App_Config]):
     relay_notice_player_session_supported = True
     # server_launch.sh starts the server as a child process.
     uses_process_group_termination = True
+    # The server writes its console output to server.log.txt as well.
+    pipe_stdout = False
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = self.profile.manage_embed_color
@@ -1232,6 +1243,7 @@ class ScsTruckSimulator(App[App_Config]):
         )
 
         self._tail: Tailer | None = None
+        self._stderr_capture_started: bool = False
         self._tail_matchers: set[Callable[[str], Awaitable[None]]] = set()
         self._matchers = ScsTruckSimulatorMatchers(self)
 
@@ -1379,8 +1391,48 @@ class ScsTruckSimulator(App[App_Config]):
         _replace_scs_server_package(source_path=source_path, target=target, profile=self.profile)
         return describe_app_save_path(root=root, path=target, relative_path=target.name)
 
+    async def _stop_tailer(self) -> None:
+        tailer = self._tail
+        if tailer is None:
+            return
+        await tailer.stop()
+        if self._tail is tailer:
+            self._tail = None
+
+    async def handle_unexpected_stop(self) -> None:
+        try:
+            await self._stop_tailer()
+        finally:
+            await super().handle_unexpected_stop()
+
+    def diagnose_unexpected_stop(self) -> AppRuntimeFault | None:
+        """Recognise Steam token expiry after the current launch's stderr has drained."""
+
+        stderr_task = self._stderr_task
+        if (
+            not self._stderr_capture_started
+            or stderr_task is None
+            or not stderr_task.done()
+            or stderr_task.cancelled()
+        ):
+            return None
+        stderr_task.result()
+        if not any(_SCS_GSLT_EXPIRED_RE.fullmatch(line) for line in self.read_stderr_tail().lines):
+            return None
+        return AppRuntimeFault(
+            kind=AppRuntimeFaultKind.UNEXPECTED_EXIT,
+            code=AppRuntimeFaultCode.STEAM_GAME_SERVER_LOGIN_TOKEN_EXPIRED,
+            summary="The Steam Game Server Login Token (GSLT) has expired.",
+            remediation=(
+                f"Regenerate the GSLT for {self.profile.abbreviation} (App ID {self.profile.steam_game_app_id}), "
+                "replace it in Properties → Steam Game Server Login Token, then restart."
+            ),
+        )
+
     async def start(self) -> bool:
         log.info(f"{__name__}.start")
+        self._stderr_capture_started = False
+        self.clear_runtime_fault()
         config_path = scs_server_config_path(self.directory, profile=self.profile)
         if not config_path.is_file():
             raise RuntimeError(
@@ -1394,16 +1446,27 @@ class ScsTruckSimulator(App[App_Config]):
                 f"{', '.join(missing_packages)}. In a matching {self.profile.abbreviation} client, run export_server_packages "
                 "while a map is loaded, then upload both files in Server Packages."
             )
-        await self._std_launch()
-        while not self.check_running():
-            await asyncio.sleep(1)
-
-        if self.server_log:
-            log.debug(f"{self.name} Tailing: server log")
-            self._tail = Tailer(self.check_running, self.server_log, self.file_stdout)
-        else:
-            raise SystemError("No Log to be passed to Tailer")
-        await self._tail.start(self._tail_matchers)
+        server_log = self.server_log
+        if server_log is None:
+            raise RuntimeError(f"{self.profile.abbreviation} requires a server log path before starting.")
+        await self._stop_tailer()
+        try:
+            await self._std_launch()
+            self._stderr_capture_started = True
+            if not self.check_running():
+                raise RuntimeError(f"{self.profile.abbreviation} stopped before startup completed.")
+            log.debug("%s Tailing: server log", self.name)
+            self._tail = Tailer(self.check_running, server_log, self.file_stdout)
+            await self._tail.start(self._tail_matchers, wait_for_app=False)
+        except BaseException:
+            try:
+                if self.check_running():
+                    await self.stop()
+                else:
+                    await self.handle_unexpected_stop()
+            except Exception:
+                log.exception("Failed to clean up %s after startup failed.", self.name)
+            raise
 
         self._running = True
         return True
@@ -1412,18 +1475,14 @@ class ScsTruckSimulator(App[App_Config]):
         log.info(f"{__name__}.stop")
         self._running = False
 
-        if self._tail:
-            await self._tail.stop()
-
-        await self._terminate()
+        try:
+            await self._stop_tailer()
+        finally:
+            await self._terminate()
         return True
 
     async def kill(self) -> bool:
-        self._running = False
-        if self._tail:
-            await self._tail.stop()
-        await self._terminate()
-        return True
+        return await self.stop()
 
     async def player_count(self) -> tuple[int, int] | None:
         return None
@@ -1443,15 +1502,10 @@ class ScsTruckSimulatorMatchers:
             self.app.apply_version(match.group("version"), persist=True)
 
     async def match_transient(self, line: str) -> None:
-        match: Match[str] | None = re.search(
-            r"\[MP\] (?P<player>\w+) (connected|disconnected),",
-            line,
-            re.IGNORECASE,
-        )
+        match = _SCS_PLAYER_SESSION_RE.fullmatch(line)
         if match:
-            player: str = str(match.group(1))
-            action: str = str(match.group(2)).lower()
-            if "disconnected" in action:
+            player = match.group("player")
+            if match.group("action").casefold() == "disconnected":
                 if self.app.relay_notice_player_left_enabled is False:
                     return
                 notice_action = PlayerSessionAction.LEFT

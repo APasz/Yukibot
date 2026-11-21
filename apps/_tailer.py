@@ -80,13 +80,20 @@ class Tailer:
             return await result
         return result
 
-    async def start(self, matchers: set[Callable[[str], Awaitable[None]]]) -> None:
+    async def start(
+        self,
+        matchers: set[Callable[[str], Awaitable[None]]],
+        *,
+        wait_for_app: bool = True,
+    ) -> None:
         log.info(f"{__name__}.start")
         self._prepare_for_start()
         for matcher in matchers:
             self.register_matcher(matcher)
 
         result = await self._resolve_app_alive()
+        if not wait_for_app and not (result.is_set() if isinstance(result, asyncio.Event) else result):
+            raise RuntimeError("Cannot start a tailer for an inactive app.")
 
         if isinstance(result, asyncio.Event):
             log.info(f"{__name__}.wait: Event")
