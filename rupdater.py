@@ -47,6 +47,8 @@ ALWAYS_SYNCED_FILES: tuple[Path, ...] = (
     Path("pyproject.toml"),
     Path("uv.lock"),
 )
+FRONTEND_DIRECTORY: Final[Path] = Path("frontend")
+FRONTEND_BUILD_DIRECTORY: Final[Path] = FRONTEND_DIRECTORY / "dist"
 REMOTE_UV_SYNC_COMMAND = "uv sync"
 NO_CHANGED_PYTHON_FILES_ERROR = "git status returned no changed Python files"
 
@@ -122,7 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--all-tracked",
         action="store_true",
-        help="Sync all tracked Python files instead of only changed local Python files.",
+        help="Sync all tracked Python files instead of changed Python files, plus the compiled frontend.",
     )
     parser.add_argument(
         "--release",
@@ -218,6 +220,34 @@ def load_remote_targets(*, target_file: Path) -> dict[TargetName, RemoteTarget]:
 def require_program(name: str) -> None:
     if shutil.which(name) is None:
         raise RuntimeError(f"Required program not found on PATH: {name}")
+
+
+def frontend_exists() -> bool:
+    return (REPO_ROOT / FRONTEND_DIRECTORY / "package.json").is_file()
+
+
+def build_frontend() -> None:
+    """Build locally before selecting files or committing a release revision."""
+    if not frontend_exists():
+        return
+    require_program("pnpm")
+    for arguments in (("install", "--frozen-lockfile"), ("build",)):
+        run_checked(["pnpm", "--dir", FRONTEND_DIRECTORY.as_posix(), *arguments], password=None)
+
+
+def frontend_runtime_files(*, allow_missing: bool = False) -> list[Path]:
+    """Include the complete compiled output, even during Python-only updates."""
+    if not frontend_exists():
+        return []
+    directory = REPO_ROOT / FRONTEND_BUILD_DIRECTORY
+    if not (directory / "index.html").is_file():
+        if allow_missing:
+            return []
+        raise RuntimeError("Frontend build did not produce frontend/dist/index.html.")
+    return sorted(
+        (path.relative_to(REPO_ROOT) for path in directory.rglob("*") if path.is_file()),
+        key=lambda path: path.as_posix(),
+    )
 
 
 def parse_tracked_python_files(stdout: str) -> list[Path]:
@@ -838,13 +868,27 @@ def main() -> int:
             raise ValueError("--release cannot be combined with --check or --dry.")
         if not args.restart:
             raise ValueError("--release requires --restart so recorded deployment metadata matches running code.")
+
+    preview: bool = args.check or args.dry
+    if preview:
+        if frontend_exists():
+            print("Preview uses existing frontend assets; deployment will rebuild them locally.")
+    else:
+        build_frontend()
+    frontend_files: list[Path] = frontend_runtime_files(allow_missing=preview)
+
+    if args.release:
         if working_tree_status():
             release_message: str = prompt_release_message()
             commit_release_changes(message=release_message)
         sync_plan = tracked_project_sync_plan()
+        untracked_assets = set(frontend_files) - set(sync_plan.write_files)
+        if untracked_assets:
+            paths = ", ".join(sorted(path.as_posix() for path in untracked_assets))
+            raise RuntimeError(f"Built frontend assets must be committed with the release: {paths}")
     else:
         sync_plan = select_sync_plan(sync_all_tracked=args.all_tracked)
-    files: list[Path] = planned_sync_files(list[Path](sync_plan.write_files))
+    files: list[Path] = planned_sync_files([*sync_plan.write_files, *frontend_files])
     if args.release:
         release_metadata_by_target = {
             target.name: build_deployment_metadata(target_name=target.name, source_files=tuple(files))
@@ -888,8 +932,8 @@ def main() -> int:
                             current=release_metadata_by_target[target.name],
                         )
                     )
-            delete_remote_files(session, delete_files)
             sync_files(session, files)
+            delete_remote_files(session, delete_files)
             sync_remote_dependencies(session)
             if release_metadata_by_target is not None:
                 write_deployment_metadata(session, release_metadata_by_target[target.name])

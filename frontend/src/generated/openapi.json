@@ -1,0 +1,858 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FastAPI",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/network/config": {
+      "get": {
+        "tags": [
+          "network-diagnostics"
+        ],
+        "summary": "Configuration",
+        "operationId": "network_configuration",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkConfiguration"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/network/context": {
+      "get": {
+        "tags": [
+          "network-diagnostics"
+        ],
+        "summary": "Context",
+        "operationId": "network_context",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkContext"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/network/reports": {
+      "get": {
+        "tags": [
+          "network-diagnostics"
+        ],
+        "summary": "Reports",
+        "operationId": "network_reports",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkReportList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "network-diagnostics"
+        ],
+        "summary": "Save Report",
+        "operationId": "save_network_report",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NetworkReportInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/network/reports/{report_id}": {
+      "get": {
+        "tags": [
+          "network-diagnostics"
+        ],
+        "summary": "Report",
+        "operationId": "network_report",
+        "parameters": [
+          {
+            "name": "report_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Report Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DelayedProbe": {
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Target Id"
+          },
+          "offset_ms": {
+            "type": "integer",
+            "maximum": 1805000.0,
+            "minimum": 0.0,
+            "title": "Offset Ms"
+          },
+          "hidden": {
+            "type": "boolean",
+            "title": "Hidden"
+          },
+          "browser_delay_ms": {
+            "type": "integer",
+            "maximum": 86400000.0,
+            "minimum": 0.0,
+            "title": "Browser Delay Ms"
+          },
+          "status": {
+            "type": "string",
+            "const": "browser_delayed",
+            "title": "Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_id",
+          "offset_ms",
+          "hidden",
+          "browser_delay_ms",
+          "status"
+        ],
+        "title": "DelayedProbe"
+      },
+      "FailedProbe": {
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Target Id"
+          },
+          "offset_ms": {
+            "type": "integer",
+            "maximum": 1805000.0,
+            "minimum": 0.0,
+            "title": "Offset Ms"
+          },
+          "hidden": {
+            "type": "boolean",
+            "title": "Hidden"
+          },
+          "browser_delay_ms": {
+            "type": "integer",
+            "maximum": 86400000.0,
+            "minimum": 0.0,
+            "title": "Browser Delay Ms"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "timeout",
+              "network_error",
+              "http_error"
+            ],
+            "title": "Status"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 599.0,
+                "minimum": 100.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_id",
+          "offset_ms",
+          "hidden",
+          "browser_delay_ms",
+          "status"
+        ],
+        "title": "FailedProbe"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "NetworkConfiguration": {
+        "properties": {
+          "identity": {
+            "$ref": "#/components/schemas/NetworkIdentity"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkTarget"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Targets"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/NetworkLimits"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "identity",
+          "targets",
+          "limits"
+        ],
+        "title": "NetworkConfiguration"
+      },
+      "NetworkContext": {
+        "properties": {
+          "observed_at_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Observed At Ms"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkNodeContext"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Nodes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "observed_at_ms",
+          "nodes"
+        ],
+        "title": "NetworkContext"
+      },
+      "NetworkIdentity": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "title": "Is Admin"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "user_id",
+          "display_name",
+          "is_admin"
+        ],
+        "title": "NetworkIdentity"
+      },
+      "NetworkLimits": {
+        "properties": {
+          "interval_ms": {
+            "type": "integer",
+            "title": "Interval Ms"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "title": "Timeout Ms"
+          },
+          "context_interval_ms": {
+            "type": "integer",
+            "title": "Context Interval Ms"
+          },
+          "max_duration_ms": {
+            "type": "integer",
+            "title": "Max Duration Ms"
+          },
+          "max_targets": {
+            "type": "integer",
+            "title": "Max Targets"
+          },
+          "retention_days": {
+            "type": "integer",
+            "title": "Retention Days"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "interval_ms",
+          "timeout_ms",
+          "context_interval_ms",
+          "max_duration_ms",
+          "max_targets",
+          "retention_days"
+        ],
+        "title": "NetworkLimits"
+      },
+      "NetworkMarker": {
+        "properties": {
+          "offset_ms": {
+            "type": "integer",
+            "maximum": 1800000.0,
+            "minimum": 0.0,
+            "title": "Offset Ms"
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "offset_ms",
+          "label"
+        ],
+        "title": "NetworkMarker"
+      },
+      "NetworkNodeContext": {
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Target Id"
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "online",
+              "connecting",
+              "offline"
+            ],
+            "title": "Availability"
+          },
+          "captured_at_ms": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Captured At Ms"
+          },
+          "cpu_percent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Percent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cpu_per_core_percent": {
+            "items": {
+              "$ref": "#/components/schemas/Percent"
+            },
+            "type": "array",
+            "maxItems": 4096,
+            "title": "Cpu Per Core Percent"
+          },
+          "ram_percent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Percent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "portal_latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portal Latency Ms"
+          },
+          "portal_probe_captured_at_ms": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portal Probe Captured At Ms"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_id",
+          "availability"
+        ],
+        "title": "NetworkNodeContext"
+      },
+      "NetworkProbe": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SuccessfulProbe"
+          },
+          {
+            "$ref": "#/components/schemas/FailedProbe"
+          },
+          {
+            "$ref": "#/components/schemas/DelayedProbe"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "status",
+          "mapping": {
+            "browser_delayed": "#/components/schemas/DelayedProbe",
+            "http_error": "#/components/schemas/FailedProbe",
+            "network_error": "#/components/schemas/FailedProbe",
+            "ok": "#/components/schemas/SuccessfulProbe",
+            "timeout": "#/components/schemas/FailedProbe"
+          }
+        }
+      },
+      "NetworkReport": {
+        "properties": {
+          "summary": {
+            "$ref": "#/components/schemas/NetworkReportSummary"
+          },
+          "recording": {
+            "$ref": "#/components/schemas/NetworkReportInput"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "summary",
+          "recording"
+        ],
+        "title": "NetworkReport"
+      },
+      "NetworkReportInput": {
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Schema Version",
+            "default": 1
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "started_at_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Started At Ms"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "maximum": 1800000.0,
+            "minimum": 0.0,
+            "title": "Duration Ms"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 2000,
+            "title": "Notes",
+            "default": ""
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkTarget"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Targets"
+          },
+          "probes": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkProbe"
+            },
+            "type": "array",
+            "maxItems": 15000,
+            "title": "Probes"
+          },
+          "contexts": {
+            "items": {
+              "$ref": "#/components/schemas/RecordedContext"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "title": "Contexts"
+          },
+          "markers": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkMarker"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Markers"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "started_at_ms",
+          "duration_ms",
+          "title",
+          "targets",
+          "probes",
+          "contexts",
+          "markers"
+        ],
+        "title": "NetworkReportInput"
+      },
+      "NetworkReportList": {
+        "properties": {
+          "reports": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkReportSummary"
+            },
+            "type": "array",
+            "title": "Reports"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reports"
+        ],
+        "title": "NetworkReportList"
+      },
+      "NetworkReportSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "owner_id": {
+            "type": "string",
+            "title": "Owner Id"
+          },
+          "owner_name": {
+            "type": "string",
+            "title": "Owner Name"
+          },
+          "saved_at_ms": {
+            "type": "integer",
+            "title": "Saved At Ms"
+          },
+          "started_at_ms": {
+            "type": "integer",
+            "title": "Started At Ms"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "title": "Duration Ms"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "probe_count": {
+            "type": "integer",
+            "title": "Probe Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "owner_id",
+          "owner_name",
+          "saved_at_ms",
+          "started_at_ms",
+          "duration_ms",
+          "title",
+          "probe_count"
+        ],
+        "title": "NetworkReportSummary"
+      },
+      "NetworkTarget": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Label"
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "portal",
+              "node"
+            ],
+            "title": "Kind"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "url",
+          "kind"
+        ],
+        "title": "NetworkTarget"
+      },
+      "Percent": {
+        "type": "integer",
+        "maximum": 100.0,
+        "minimum": 0.0
+      },
+      "RecordedContext": {
+        "properties": {
+          "offset_ms": {
+            "type": "integer",
+            "maximum": 1805000.0,
+            "minimum": 0.0,
+            "title": "Offset Ms"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetworkContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "unavailable"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "offset_ms",
+          "snapshot"
+        ],
+        "title": "RecordedContext"
+      },
+      "SuccessfulProbe": {
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Target Id"
+          },
+          "offset_ms": {
+            "type": "integer",
+            "maximum": 1805000.0,
+            "minimum": 0.0,
+            "title": "Offset Ms"
+          },
+          "hidden": {
+            "type": "boolean",
+            "title": "Hidden"
+          },
+          "browser_delay_ms": {
+            "type": "integer",
+            "maximum": 86400000.0,
+            "minimum": 0.0,
+            "title": "Browser Delay Ms"
+          },
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status"
+          },
+          "rtt_ms": {
+            "type": "number",
+            "maximum": 5000.0,
+            "minimum": 0.0,
+            "title": "Rtt Ms"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_id",
+          "offset_ms",
+          "hidden",
+          "browser_delay_ms",
+          "status",
+          "rtt_ms"
+        ],
+        "title": "SuccessfulProbe"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

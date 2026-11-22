@@ -9,6 +9,8 @@ data/*
 
 logs/
 .venv
+node_modules/
+.svelte-check/
 .basedpyright/
 __p*
 dev_apps

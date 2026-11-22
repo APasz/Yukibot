@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from fastapi import APIRouter
+
 from mod_web_toasts import ModWebNotificationType
 
 from .runtime_imports import (
@@ -60,6 +62,8 @@ class ModWebRunnerUi(Protocol):
 
 class ModWebFastApiApp(Protocol):
     exception_handlers: MutableMapping[object, Callable[..., object]]
+
+    def include_router(self, router: APIRouter) -> None: ...
 
     def middleware(self, middleware_type: str) -> Callable[[ModWebRouteCallable], ModWebRouteCallable]: ...
 

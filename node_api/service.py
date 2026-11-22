@@ -148,6 +148,7 @@ class PortalNodeLatencyProbe:
     latency_ms: int | None
     discord_latency_ms: int | None
     discord_service_state: DiscordServiceState | None
+    captured_at_epoch_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1315,6 +1316,7 @@ class NodeApiService:
                 latency_ms=None,
                 discord_latency_ms=None,
                 discord_service_state=None,
+                captured_at_epoch_ms=round(time.time() * 1000),
             )
         finally:
             if response is not None:
@@ -1347,6 +1349,7 @@ class NodeApiService:
             latency_ms=max(1, round((time.perf_counter() - started_at) * 1000)),
             discord_latency_ms=discord_latency_ms,
             discord_service_state=discord_service_state,
+            captured_at_epoch_ms=round(time.time() * 1000),
         )
 
     async def _app_player_snapshot(self, app: App) -> _NodeAppPlayerSnapshot | None:

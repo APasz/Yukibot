@@ -1,0 +1,483 @@
+{
+  "$defs": {
+    "DelayedProbe": {
+      "additionalProperties": false,
+      "properties": {
+        "target_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Target Id",
+          "type": "string"
+        },
+        "offset_ms": {
+          "maximum": 1805000,
+          "minimum": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "hidden": {
+          "title": "Hidden",
+          "type": "boolean"
+        },
+        "browser_delay_ms": {
+          "maximum": 86400000,
+          "minimum": 0,
+          "title": "Browser Delay Ms",
+          "type": "integer"
+        },
+        "status": {
+          "const": "browser_delayed",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "offset_ms",
+        "hidden",
+        "browser_delay_ms",
+        "status"
+      ],
+      "title": "DelayedProbe",
+      "type": "object"
+    },
+    "FailedProbe": {
+      "additionalProperties": false,
+      "properties": {
+        "target_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Target Id",
+          "type": "string"
+        },
+        "offset_ms": {
+          "maximum": 1805000,
+          "minimum": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "hidden": {
+          "title": "Hidden",
+          "type": "boolean"
+        },
+        "browser_delay_ms": {
+          "maximum": 86400000,
+          "minimum": 0,
+          "title": "Browser Delay Ms",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "timeout",
+            "network_error",
+            "http_error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "http_status": {
+          "anyOf": [
+            {
+              "maximum": 599,
+              "minimum": 100,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Http Status"
+        }
+      },
+      "required": [
+        "target_id",
+        "offset_ms",
+        "hidden",
+        "browser_delay_ms",
+        "status"
+      ],
+      "title": "FailedProbe",
+      "type": "object"
+    },
+    "NetworkContext": {
+      "additionalProperties": false,
+      "properties": {
+        "observed_at_ms": {
+          "minimum": 0,
+          "title": "Observed At Ms",
+          "type": "integer"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/NetworkNodeContext"
+          },
+          "maxItems": 16,
+          "title": "Nodes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "observed_at_ms",
+        "nodes"
+      ],
+      "title": "NetworkContext",
+      "type": "object"
+    },
+    "NetworkMarker": {
+      "additionalProperties": false,
+      "properties": {
+        "offset_ms": {
+          "maximum": 1800000,
+          "minimum": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "offset_ms",
+        "label"
+      ],
+      "title": "NetworkMarker",
+      "type": "object"
+    },
+    "NetworkNodeContext": {
+      "additionalProperties": false,
+      "properties": {
+        "target_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Target Id",
+          "type": "string"
+        },
+        "availability": {
+          "enum": [
+            "online",
+            "connecting",
+            "offline"
+          ],
+          "title": "Availability",
+          "type": "string"
+        },
+        "captured_at_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Captured At Ms"
+        },
+        "cpu_percent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Percent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cpu_per_core_percent": {
+          "items": {
+            "$ref": "#/$defs/Percent"
+          },
+          "maxItems": 4096,
+          "title": "Cpu Per Core Percent",
+          "type": "array"
+        },
+        "ram_percent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Percent"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "portal_latency_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Portal Latency Ms"
+        },
+        "portal_probe_captured_at_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Portal Probe Captured At Ms"
+        }
+      },
+      "required": [
+        "target_id",
+        "availability"
+      ],
+      "title": "NetworkNodeContext",
+      "type": "object"
+    },
+    "NetworkProbe": {
+      "discriminator": {
+        "mapping": {
+          "browser_delayed": "#/$defs/DelayedProbe",
+          "http_error": "#/$defs/FailedProbe",
+          "network_error": "#/$defs/FailedProbe",
+          "ok": "#/$defs/SuccessfulProbe",
+          "timeout": "#/$defs/FailedProbe"
+        },
+        "propertyName": "status"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SuccessfulProbe"
+        },
+        {
+          "$ref": "#/$defs/FailedProbe"
+        },
+        {
+          "$ref": "#/$defs/DelayedProbe"
+        }
+      ]
+    },
+    "NetworkTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "url": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "portal",
+            "node"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "url",
+        "kind"
+      ],
+      "title": "NetworkTarget",
+      "type": "object"
+    },
+    "Percent": {
+      "maximum": 100,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "RecordedContext": {
+      "additionalProperties": false,
+      "properties": {
+        "offset_ms": {
+          "maximum": 1805000,
+          "minimum": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "const": "unavailable",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "offset_ms",
+        "snapshot"
+      ],
+      "title": "RecordedContext",
+      "type": "object"
+    },
+    "SuccessfulProbe": {
+      "additionalProperties": false,
+      "properties": {
+        "target_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Target Id",
+          "type": "string"
+        },
+        "offset_ms": {
+          "maximum": 1805000,
+          "minimum": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "hidden": {
+          "title": "Hidden",
+          "type": "boolean"
+        },
+        "browser_delay_ms": {
+          "maximum": 86400000,
+          "minimum": 0,
+          "title": "Browser Delay Ms",
+          "type": "integer"
+        },
+        "status": {
+          "const": "ok",
+          "title": "Status",
+          "type": "string"
+        },
+        "rtt_ms": {
+          "maximum": 5000,
+          "minimum": 0,
+          "title": "Rtt Ms",
+          "type": "number"
+        }
+      },
+      "required": [
+        "target_id",
+        "offset_ms",
+        "hidden",
+        "browser_delay_ms",
+        "status",
+        "rtt_ms"
+      ],
+      "title": "SuccessfulProbe",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "id": {
+      "format": "uuid",
+      "title": "Id",
+      "type": "string"
+    },
+    "started_at_ms": {
+      "minimum": 0,
+      "title": "Started At Ms",
+      "type": "integer"
+    },
+    "duration_ms": {
+      "maximum": 1800000,
+      "minimum": 0,
+      "title": "Duration Ms",
+      "type": "integer"
+    },
+    "title": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    },
+    "notes": {
+      "default": "",
+      "maxLength": 2000,
+      "title": "Notes",
+      "type": "string"
+    },
+    "targets": {
+      "items": {
+        "$ref": "#/$defs/NetworkTarget"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Targets",
+      "type": "array"
+    },
+    "probes": {
+      "items": {
+        "$ref": "#/$defs/NetworkProbe"
+      },
+      "maxItems": 15000,
+      "title": "Probes",
+      "type": "array"
+    },
+    "contexts": {
+      "items": {
+        "$ref": "#/$defs/RecordedContext"
+      },
+      "maxItems": 1000,
+      "title": "Contexts",
+      "type": "array"
+    },
+    "markers": {
+      "items": {
+        "$ref": "#/$defs/NetworkMarker"
+      },
+      "maxItems": 100,
+      "title": "Markers",
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "started_at_ms",
+    "duration_ms",
+    "title",
+    "targets",
+    "probes",
+    "contexts",
+    "markers"
+  ],
+  "title": "NetworkReportInput",
+  "type": "object"
+}

@@ -73,6 +73,7 @@ include = [
     "apps",
     "node_api",
     "web_dash",
+    "web_api",
 ]
 exclude = [
     "**/__pycache__",

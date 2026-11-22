@@ -136,6 +136,14 @@ class ModWebStatusUtilityLauncherMixin(ModWebStatusFeatureSupport):
                 )
             )
         action_specs.append(_plate_action(ModWebUserPlateAction.SETTINGS, open_user_settings))
+        if self._user_has_level(user, Power_Level.visitor):
+            action_specs.append(
+                _UtilityActionSpec(
+                    label="Network Diagnostics",
+                    icon="network_check",
+                    action=lambda: ui.navigate.to("/mod-web/network"),
+                )
+            )
         action_specs.append(_plate_action(ModWebUserPlateAction.STANDARD_DRINKS, open_standard_drinks))
         action_specs.append(_plate_action(ModWebUserPlateAction.CURRENCY, open_currency_converter))
         action_specs.append(_plate_action(ModWebUserPlateAction.DISCORD_TIME, open_time_formatter))

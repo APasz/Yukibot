@@ -23,6 +23,32 @@ Set `BOT_PROFILE` in `.env` before running anything. Startup now fails if it is 
 uv run python main.py
 ```
 
+### Network diagnostics frontend
+
+`/mod-web/network` is the first standalone Svelte + TypeScript page. Open it from the user utilities menu. It uses the existing Discord session and ACL, alongside the NiceGUI pages, and does not create a NiceGUI client or Socket.IO connection. Python still hosts the application through the current server during this first migration step.
+
+Build the browser assets with Node.js 22 and pnpm:
+
+```bash
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend build
+```
+
+The build regenerates TypeScript API types and the browser-draft validation schema from `web_api`'s Python contracts. `rupdater.py` installs locked frontend dependencies and builds locally before any deployment. Releases build before committing so their revision includes the generated assets; regular and `--all-tracked` updates also transfer the complete compiled frontend. Build failures stop before committing or contacting a remote. `--check` and `--dry` use existing assets without building. Production serves the static assets and does not need Node.js or pnpm. Missing builds produce a clear 503 page without preventing the rest of the dashboard from starting.
+
+For frontend development, sign in to the local Portal first, then run `pnpm --dir frontend dev` and open `http://127.0.0.1:5173/mod-web/frontend/`. Set `YUKIBOT_BACKEND_URL` when the local Portal is not on `http://127.0.0.1:3180`.
+
+Sessions record direct browser-to-endpoint HTTP probes, event markers, and host CPU/memory snapshots with separate Portal-to-node observations. Browser scheduling delays and failed requests are separate outcomes. Recordings continue locally through temporary outages; the latest draft is saved in IndexedDB under the signed-in user's ID. Background browser throttling can reduce sampling coverage.
+
+Players can save and export their own sessions. Admins can also read and compare other players' reports. Saved reports are client-reported evidence, retained in the private `.cache/network_diagnostics` directory for seven days, with limits of 20 per user, 200 total, and a 64 MiB cache. The API caps each submitted report at 2 MiB. Keep this cache persistent across Portal deployments to retain reports.
+
+These HTTP probes do not measure the game's packet loss, trace ISP hops, or measure game simulation health. The first version uses configured nodes as destinations; it does not include an independent external reference endpoint. Portal and Yuki on Wakusei share a physical host and must not be treated as independent network references.
+
+```bash
+pnpm --dir frontend test
+BOT_PROFILE=yuki uv run pytest checks/network_diagnostics_check.py checks/networking_check.py -q
+```
+
 ### Bot Profiles
 
 `BOT_PROFILE` is required and controls which command groups and services are enabled for a deployment.

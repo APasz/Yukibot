@@ -14,6 +14,7 @@ from mirror_models import MirrorError, MirrorRevisionUnavailable
 from font_assets import font_assets
 from mod_web_theme import MOD_WEB_THEME_STYLESHEET
 from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT
+from web_api.network_routes import NetworkBodyLimitMiddleware, create_network_router
 
 from .assets import CacheableTextAsset, cacheable_text_asset
 from .constants import (
@@ -28,6 +29,7 @@ from .constants import (
     traffic_log,
 )
 from .nicegui_protocols import ModWebFastApiApp, ModWebNotificationType, ModWebRouteCallable, ModWebRouteUi
+from .network_service import ModWebNetworkMixin
 from .runtime_imports import (
     Access_Control,
     Awaitable,
@@ -50,7 +52,6 @@ from .runtime_imports import (
     urlencode,
     urlsplit,
 )
-from .service_base import ModWebServiceSupport
 from .utils import _http_exception
 
 
@@ -107,7 +108,7 @@ class _ModWebGZipMiddleware(GZipMiddleware):
         await super().__call__(scope, receive, send)
 
 
-class ModWebRoutesMixin(ModWebServiceSupport):
+class ModWebRoutesMixin(ModWebNetworkMixin):
     @staticmethod
     def _app_page_route(
         *,
@@ -175,6 +176,9 @@ class ModWebRoutesMixin(ModWebServiceSupport):
 
     def _register_routes(self, *, nicegui_app: ModWebFastApiApp, ui: ModWebRouteUi) -> None:
         nicegui_app.add_middleware(_ModWebGZipMiddleware, minimum_size=500, compresslevel=6)
+        nicegui_app.add_middleware(NetworkBodyLimitMiddleware)
+        nicegui_app.include_router(create_network_router(self))
+        nicegui_app.on_shutdown(self.close_network_reports)
 
         @nicegui_app.middleware("http")
         async def _log_mod_web_request(
