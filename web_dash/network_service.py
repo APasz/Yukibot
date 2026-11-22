@@ -17,6 +17,7 @@ from mod_web_auth import ModWebUser
 from node_api.app_state import NodeAppEntry
 from node_api.process import NodeAppProcessSummary
 from node_auth import NodeApiScope
+from web_api.network_bandwidth import PORTAL_BANDWIDTH_PREFIX
 from web_api.network_models import (
     NETWORK_LIMITS,
     DEFAULT_BANDWIDTH_SIZE,
@@ -88,8 +89,20 @@ class ModWebNetworkMixin(ModWebServiceSupport):
                     kind="portal" if is_portal else "node",
                 )
             )
+        portal_host = urlsplit(config.MOD_WEB_SERVER.public_base_url).hostname
+        portal_shares_host = portal_host is not None and any(
+            target.kind == "node" and urlsplit(target.url).hostname == portal_host
+            for target in targets
+        )
         return NetworkConfiguration(
-            identity=identity, targets=targets, limits=NETWORK_LIMITS
+            identity=identity,
+            targets=targets,
+            bandwidth_target_ids=[
+                target.id
+                for target in targets
+                if target.kind != "portal" or not portal_shares_host
+            ],
+            limits=NETWORK_LIMITS,
         )
 
     async def network_bandwidth_session(
@@ -101,11 +114,13 @@ class ModWebNetworkMixin(ModWebServiceSupport):
         duration_ms: NetworkBandwidthDuration = DEFAULT_BANDWIDTH_DURATION,
     ) -> NetworkBandwidthEndpoint:
         identity = self.network_identity(request)
+        configuration = self.network_configuration(identity)
         target = next(
             (
                 item
-                for item in self.network_configuration(identity).targets
+                for item in configuration.targets
                 if item.id == target_id
+                and item.id in configuration.bandwidth_target_ids
             ),
             None,
         )
@@ -160,7 +175,7 @@ class ModWebNetworkMixin(ModWebServiceSupport):
                 503, "This node did not accept the selected test limits."
             )
         if target.kind == "portal":
-            url = "/api/node/bandwidth"
+            url = PORTAL_BANDWIDTH_PREFIX
         else:
             parsed = urlsplit(target.url)
             url = urlunsplit(

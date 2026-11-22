@@ -75,6 +75,11 @@
   );
   const owned = $derived(owner === null || owner.user_id === configuration?.identity.user_id);
   const selectedApp = $derived(apps.apps.find((app) => appKey(app) === selectedAppKey) ?? null);
+  const bandwidthTargets = $derived(
+    configuration?.targets.filter((target) =>
+      configuration?.bandwidth_target_ids.includes(target.id),
+    ) ?? [],
+  );
 
   function appKey(app: MonitoredApp): string {
     return JSON.stringify([app.target_id, app.app_name]);
@@ -151,7 +156,7 @@
         if (destroyed) return;
         configuration = config;
         selectedIds = config.targets.map((target) => target.id);
-        bandwidthTargetId = config.targets[0]?.id ?? '';
+        bandwidthTargetId = config.bandwidth_target_ids[0] ?? '';
         bandwidthSize =
           config.bandwidth_sizes.find(
             (size) => size === config.bandwidth_limits.max_bytes_per_direction,
@@ -246,7 +251,7 @@
   async function speedTest(activeRecorder: Recorder | null): Promise<void> {
     if (!configuration || bandwidthProgress || bandwidthSize === null || bandwidthDuration === null)
       return;
-    const target = configuration.targets.find((item) => item.id === bandwidthTargetId);
+    const target = bandwidthTargets.find((item) => item.id === bandwidthTargetId);
     if (!target) return;
     try {
       activeRecorder?.requireBandwidthCapacity(configuration.bandwidth_limits);
@@ -477,7 +482,10 @@
         ><input
           type="checkbox"
           bind:checked={includeBandwidth}
-          disabled={running || bandwidthProgress !== null || pending !== null}
+          disabled={running ||
+            bandwidthProgress !== null ||
+            pending !== null ||
+            !bandwidthTargets.length}
         />Include speed test at start</label
       >
       {#if !recording || running}<p class="caption">Keep this tab open while playing.</p>
@@ -502,7 +510,7 @@
       <div class="bandwidth-controls">
         <label
           >Destination<select bind:value={bandwidthTargetId} disabled={bandwidthProgress !== null}>
-            {#each configuration.targets as target}<option value={target.id}>{target.label}</option
+            {#each bandwidthTargets as target}<option value={target.id}>{target.label}</option
               >{/each}
           </select></label
         >

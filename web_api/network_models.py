@@ -154,6 +154,9 @@ class NetworkIdentity(NetworkModel):
 class NetworkConfiguration(NetworkModel):
     identity: NetworkIdentity
     targets: list[NetworkTarget] = Field(max_length=NETWORK_LIMITS.max_targets)
+    bandwidth_target_ids: list[NetworkNodeId] = Field(
+        max_length=NETWORK_LIMITS.max_targets
+    )
     limits: NetworkLimits
     bandwidth_limits: NetworkBandwidthLimits = BANDWIDTH_LIMITS
     bandwidth_sizes: tuple[NetworkBandwidthSize, ...] = Field(
@@ -162,6 +165,21 @@ class NetworkConfiguration(NetworkModel):
     bandwidth_durations: tuple[NetworkBandwidthDuration, ...] = Field(
         default=tuple(NetworkBandwidthDuration), min_length=1
     )
+
+    @model_validator(mode="after")
+    def validate_targets(self) -> Self:
+        target_ids = {target.id for target in self.targets}
+        if len(target_ids) != len(self.targets):
+            raise ValueError("Probe target identifiers must be unique.")
+        bandwidth_ids = set(self.bandwidth_target_ids)
+        if (
+            len(bandwidth_ids) != len(self.bandwidth_target_ids)
+            or not bandwidth_ids <= target_ids
+        ):
+            raise ValueError(
+                "Bandwidth targets must be unique configured destinations."
+            )
+        return self
 
 
 class NetworkMonitoredApp(NetworkModel):

@@ -25,6 +25,8 @@ from .network_models import (
     NetworkBandwidthSize,
 )
 
+PORTAL_BANDWIDTH_PREFIX: Final[str] = "/api/network/bandwidth/transfers"
+
 _MIN_SESSION_SECONDS: Final[float] = 30.0
 _SESSION_GRACE_SECONDS: Final[float] = 10.0
 _COOLDOWN_SECONDS: Final[float] = 60.0

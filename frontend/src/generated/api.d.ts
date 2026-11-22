@@ -263,6 +263,8 @@ export interface components {
             identity: components["schemas"]["NetworkIdentity"];
             /** Targets */
             targets: components["schemas"]["NetworkTarget"][];
+            /** Bandwidth Target Ids */
+            bandwidth_target_ids: components["schemas"]["NetworkNodeId"][];
             limits: components["schemas"]["NetworkLimits"];
             /**
              * @default {

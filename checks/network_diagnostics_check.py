@@ -81,6 +81,7 @@ class DiagnosticBackend:
     def network_configuration(self, identity: NetworkIdentity) -> NetworkConfiguration:
         return NetworkConfiguration(
             identity=identity,
+            bandwidth_target_ids=["erin"],
             targets=[
                 NetworkTarget(
                     id="erin",
@@ -229,6 +230,29 @@ def test_api_requires_authentication_and_does_not_cache_context(
     response = client.get(path, headers={"x-test-user": "one"})
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    ("target_ids", "bandwidth_ids"),
+    [
+        (["erin", "erin"], ["erin"]),
+        (["erin"], ["erin", "erin"]),
+        (["erin"], ["missing"]),
+    ],
+)
+def test_configuration_rejects_ambiguous_or_unknown_destinations(
+    target_ids: list[str], bandwidth_ids: list[str]
+) -> None:
+    with pytest.raises(ValidationError, match="unique|configured destinations"):
+        NetworkConfiguration(
+            identity=NetworkIdentity(user_id="one", display_name="One", is_admin=False),
+            limits=NETWORK_LIMITS,
+            targets=[
+                NetworkTarget(id=target_id, label=target_id, url="/ping", kind="node")
+                for target_id in target_ids
+            ],
+            bandwidth_target_ids=bandwidth_ids,
+        )
 
 
 def test_reports_are_owned_and_admins_can_review_without_overwriting(

@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from nicegui import ui
 from nicegui.app.app import App
+from starlette.types import Receive, Scope, Send
 
 import config
 from mod_web_auth import ModWebUser
@@ -20,6 +22,10 @@ from node_api.service import PortalNodeLatencyProbe
 from node_api.system import NodeSystemSummary
 from node_auth import NodeApiScope
 from web_api.network_models import NetworkContext, NetworkIdentity
+from web_api.network_bandwidth import (
+    NetworkBandwidthService,
+    create_bandwidth_transfer_router,
+)
 from web_api.network_models import (
     BANDWIDTH_LIMITS,
     MAX_BANDWIDTH_REQUEST_BYTES,
@@ -78,6 +84,58 @@ def test_portal_configuration_never_sends_browser_probes_to_its_loopback_api() -
     assert "/node-proxy/" not in configuration.targets[1].url
 
 
+@pytest.mark.parametrize(
+    ("portal_url", "node_url", "expected_ids"),
+    [
+        ("https://shared.invalid", "https://shared.invalid/api/node", ["yuki"]),
+        ("https://SHARED.invalid", "http://shared.invalid:3181/api/node", ["yuki"]),
+        ("https://portal.invalid", "https://node.invalid/api/node", ["portal", "yuki"]),
+    ],
+)
+def test_speed_targets_hide_portal_when_a_game_node_shares_its_public_host(
+    portal_url: str, node_url: str, expected_ids: list[str]
+) -> None:
+    service = ModWebService()
+    nodes = (
+        links()[0],
+        replace(
+            links()[1],
+            node_name="yuki",
+            label="Yuki",
+            api_base_url=node_url,
+            latency_probe_url=f"{node_url}/ping",
+        ),
+    )
+    identity = NetworkIdentity(user_id="one", display_name="One", is_admin=False)
+    with (
+        patch.object(
+            config,
+            "ACTIVE_BOT_PROFILE",
+            SimpleNamespace(name=config.BotProfileName.PORTAL),
+        ),
+        patch.object(
+            config,
+            "MOD_WEB_SERVER",
+            replace(config.MOD_WEB_SERVER, public_base_url=portal_url),
+        ),
+        patch.object(service, "_node_links", return_value=nodes),
+        patch.object(service, "network_identity", return_value=identity),
+        patch.object(service._node_api.bandwidth, "issue") as issue,
+    ):
+        configuration = service.network_configuration(identity)
+        assert [target.id for target in configuration.targets] == ["portal", "yuki"]
+        assert configuration.bandwidth_target_ids == expected_ids
+        if "portal" not in expected_ids:
+            with pytest.raises(HTTPException) as hidden:
+                asyncio.run(
+                    service.network_bandwidth_session(
+                        Request({"type": "http"}), "portal", portal_url
+                    )
+                )
+            assert hidden.value.status_code == 404
+            issue.assert_not_called()
+
+
 @pytest.mark.parametrize("node_name", ["portal", "erin"])
 @pytest.mark.parametrize(
     "duration",
@@ -128,7 +186,7 @@ def test_bandwidth_grants_keep_the_actual_user_and_use_direct_public_destination
             duration_ms=duration,
         )
         remote.assert_not_called()
-        assert result.url == "/api/node/bandwidth"
+        assert result.url == "/api/network/bandwidth/transfers"
     else:
         local.assert_not_called()
         assert remote.call_args.kwargs["user"] is user
@@ -366,6 +424,17 @@ def test_diagnostics_routes_work_through_the_registered_dashboard_stack(
 ) -> None:
     service = ModWebService()
     application = App()
+    node = FastAPI()
+    node.include_router(create_bandwidth_transfer_router(NetworkBandwidthService()))
+    node_requests: list[str] = []
+
+    async def proxy(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["path"].startswith("/api/node/"):
+            node_requests.append(scope["path"])
+            await node(scope, receive, send)
+        else:
+            await application(scope, receive, send)
+
     identity = NetworkIdentity(user_id="one", display_name="One", is_admin=False)
     store = NetworkReportStore(tmp_path / "reports")
     with (
@@ -373,6 +442,17 @@ def test_diagnostics_routes_work_through_the_registered_dashboard_stack(
         patch.object(service, "_network_report_store", store),
         patch.object(service, "_remote_portal_redirect", return_value=None),
         patch.object(service, "_node_links", return_value=links()),
+        patch.object(config, "mirror_hosting_enabled", return_value=False),
+        patch.object(
+            config,
+            "ACTIVE_BOT_PROFILE",
+            SimpleNamespace(name=config.BotProfileName.PORTAL),
+        ),
+        patch.object(
+            service,
+            "_require_http_user",
+            return_value=ModWebUser(123, "Player", None, None),
+        ),
         patch.object(
             service, "network_identity", return_value=identity
         ) as authenticate,
@@ -381,7 +461,7 @@ def test_diagnostics_routes_work_through_the_registered_dashboard_stack(
             nicegui_app=cast(ModWebFastApiApp, application),
             ui=cast(ModWebRouteUi, ui),
         )
-        with TestClient(application) as client:
+        with TestClient(proxy) as client:
             response = client.get("/api/network/config")
             assert response.status_code == 200, response.text
             assert response.json()["identity"]["user_id"] == identity.user_id
@@ -389,6 +469,28 @@ def test_diagnostics_routes_work_through_the_registered_dashboard_stack(
             page = client.get("/mod-web/network")
             assert page.status_code == 200
             assert "_nicegui" not in page.text and "socket.io" not in page.text
+            granted = client.post(
+                "/api/network/bandwidth/portal",
+                json={"duration_ms": NetworkBandwidthDuration.SECONDS_20.value},
+            )
+            assert granted.status_code == 200, granted.text
+            endpoint = granted.json()
+            headers = {"Authorization": f"Bearer {endpoint['grant']['token']}"}
+            downloaded = client.get(
+                f"{endpoint['url']}/download?size=8", headers=headers
+            )
+            assert downloaded.status_code == 200, downloaded.text
+            assert len(downloaded.content) == 8
+            uploaded = client.post(
+                f"{endpoint['url']}/upload", headers=headers, content=b"12345678"
+            )
+            assert uploaded.status_code == 200, uploaded.text
+            assert uploaded.json() == {"received_bytes": 8}
+            assert (
+                client.post(f"{endpoint['url']}/finish", headers=headers).status_code
+                == 204
+            )
+            assert not node_requests
             authenticate.side_effect = HTTPException(401, "Sign in required.")
             assert client.get("/api/network/reports").status_code == 401
             assert (

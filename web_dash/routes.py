@@ -14,6 +14,10 @@ from mirror_models import MirrorError, MirrorRevisionUnavailable
 from font_assets import font_assets
 from mod_web_theme import MOD_WEB_THEME_STYLESHEET
 from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT
+from web_api.network_bandwidth import (
+    PORTAL_BANDWIDTH_PREFIX,
+    create_bandwidth_transfer_router,
+)
 from web_api.network_routes import NetworkBodyLimitMiddleware, create_network_router
 
 from .assets import CacheableTextAsset, cacheable_text_asset
@@ -178,6 +182,11 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
         nicegui_app.add_middleware(_ModWebGZipMiddleware, minimum_size=500, compresslevel=6)
         nicegui_app.add_middleware(NetworkBodyLimitMiddleware)
         nicegui_app.include_router(create_network_router(self))
+        nicegui_app.include_router(
+            create_bandwidth_transfer_router(
+                self._node_api.bandwidth, prefix=PORTAL_BANDWIDTH_PREFIX
+            )
+        )
         nicegui_app.on_shutdown(self.close_network_reports)
 
         @nicegui_app.middleware("http")

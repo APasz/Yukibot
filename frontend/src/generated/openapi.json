@@ -738,6 +738,14 @@
             "maxItems": 16,
             "title": "Targets"
           },
+          "bandwidth_target_ids": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkNodeId"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Bandwidth Target Ids"
+          },
           "limits": {
             "$ref": "#/components/schemas/NetworkLimits"
           },
@@ -788,6 +796,7 @@
         "required": [
           "identity",
           "targets",
+          "bandwidth_target_ids",
           "limits"
         ],
         "title": "NetworkConfiguration"
