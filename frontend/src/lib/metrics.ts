@@ -1,4 +1,4 @@
-import type { Probe } from './types';
+import type { BandwidthPhase, BandwidthTest, Probe } from './types';
 
 export interface ProbeStatistics {
   successful: number;
@@ -69,6 +69,41 @@ export function statistics(probes: readonly Probe[]): ProbeStatistics {
 
 export function milliseconds(value: number | null | undefined): string {
   return value === null || value === undefined ? '—' : `${Math.round(value)} ms`;
+}
+
+interface BandwidthPhaseStatistics {
+  phase: BandwidthPhase;
+  mbps: number | null;
+  statistics: ProbeStatistics;
+}
+
+export function bandwidthStatistics(test: BandwidthTest): BandwidthPhaseStatistics[] {
+  return test.phases.map((phase) => ({
+    phase,
+    mbps:
+      phase.phase !== 'idle' && phase.transferred_bytes > 0 && phase.end_ms > phase.offset_ms
+        ? (phase.transferred_bytes * 8) / (phase.end_ms - phase.offset_ms) / 1000
+        : null,
+    statistics: statistics(
+      test.probes.filter(
+        (probe) =>
+          !probe.hidden &&
+          probe.offset_ms >= phase.offset_ms &&
+          probe.offset_ms + (probe.status === 'ok' ? probe.rtt_ms : 0) < phase.end_ms,
+      ),
+    ),
+  }));
+}
+
+export function dataSize(bytes: number): string {
+  const gibibytes = bytes >= 1024 ** 3;
+  return `${Number((bytes / 1024 ** (gibibytes ? 3 : 2)).toFixed(1))} ${gibibytes ? 'GiB' : 'MiB'}`;
+}
+
+export function bandwidthSpeedGuide(bytes: number, durationMs: number): number {
+  // Leave a quarter of the data allowance unused at the suggested speed.
+  const payloadMbps = (bytes * 8) / durationMs / 1000;
+  return Math.floor((payloadMbps * 0.75) / 10) * 10;
 }
 
 export function duration(value: number): string {

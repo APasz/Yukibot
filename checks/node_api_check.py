@@ -21,6 +21,7 @@ import hikari
 import requests
 from fastapi import FastAPI, HTTPException, Request, UploadFile, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.routing import APIRoute, APIWebSocketRoute
 from httpx import ASGITransport, AsyncClient, Response
 from modmux.models import Provider
 
@@ -1666,49 +1667,13 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(parsed.query, "")
 
     def test_registered_routes_expose_real_fastapi_request_annotations(self) -> None:
-        handlers: dict[str, object] = {}
-
-        class _RouteCollector:
-            def add_middleware(self, middleware_class: type[object], **options: object) -> None:
-                del middleware_class, options
-
-            def get(self, path: str):
-                def _decorator(handler: object) -> object:
-                    handlers[path] = handler
-                    return handler
-
-                return _decorator
-
-            def post(self, path: str):
-                def _decorator(handler: object) -> object:
-                    handlers[path] = handler
-                    return handler
-
-                return _decorator
-
-            def put(self, path: str):
-                def _decorator(handler: object) -> object:
-                    handlers[path] = handler
-                    return handler
-
-                return _decorator
-
-            def delete(self, path: str):
-                def _decorator(handler: object) -> object:
-                    handlers[path] = handler
-                    return handler
-
-                return _decorator
-
-            def websocket(self, path: str):
-                def _decorator(handler: object) -> object:
-                    handlers[path] = handler
-                    return handler
-
-                return _decorator
-
-        service = NodeApiService()
-        service.register_routes(_RouteCollector())
+        app = FastAPI()
+        NodeApiService().register_routes(app)
+        handlers = {
+            route.path: route.endpoint
+            for route in app.routes
+            if isinstance(route, (APIRoute, APIWebSocketRoute))
+        }
 
         route = handlers["/api/node/apps/{app_name}/mods/{mod_name}/download"]
         hints = get_type_hints(route)
@@ -1727,6 +1692,7 @@ class NodeApiTests(unittest.TestCase):
             handlers,
         )
         self.assertIn("/api/node/ping", handlers)
+        self.assertIn("/api/node/bandwidth/sessions", handlers)
         self.assertIn("/api/node/presence/stream", handlers)
         self.assertIn("/api/node/system/restart-schedules", handlers)
         self.assertIn("/api/node/node-capacity", handlers)
@@ -1878,10 +1844,34 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 204)
         self.assertEqual(response.headers["access-control-allow-origin"], "*")
-        self.assertEqual(
-            response.headers["access-control-expose-headers"],
-            "X-Yukibot-Discord-Latency-Ms, X-Yukibot-Discord-Service-State",
+        exposed_headers = set(response.headers["access-control-expose-headers"].split(", "))
+        self.assertTrue(
+            {
+                "Content-Encoding",
+                "X-Yukibot-Discord-Latency-Ms",
+                "X-Yukibot-Discord-Service-State",
+            }.issubset(exposed_headers)
         )
+
+    def test_bandwidth_router_precedes_the_missing_route_handler(self) -> None:
+        app = FastAPI()
+        service = NodeApiService()
+        service.register_routes(app)
+        token = service.bandwidth.issue(
+            actor_id="123", origin="https://portal.example"
+        ).token
+        response = asyncio.run(
+            _asgi_request(
+                app, method="GET", path="/api/node/bandwidth/download?size=8",
+                headers={
+                    "Origin": "https://portal.example",
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.content), 8)
+        self.assertEqual(response.headers["content-encoding"], "identity")
 
     def test_mod_mutation_result_round_trips_mapping(self) -> None:
         result = NodeModMutationResult(

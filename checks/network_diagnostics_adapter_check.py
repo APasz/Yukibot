@@ -20,6 +20,13 @@ from node_api.service import PortalNodeLatencyProbe
 from node_api.system import NodeSystemSummary
 from node_auth import NodeApiScope
 from web_api.network_models import NetworkContext, NetworkIdentity
+from web_api.network_models import (
+    BANDWIDTH_LIMITS,
+    MAX_BANDWIDTH_REQUEST_BYTES,
+    NetworkBandwidthGrant,
+    NetworkBandwidthSize,
+    NetworkBandwidthDuration,
+)
 from web_api.network_reports import NetworkReportStore
 from web_dash.nicegui_protocols import ModWebFastApiApp, ModWebRouteUi
 from web_dash.remote_node_monitor import (
@@ -69,6 +76,151 @@ def test_portal_configuration_never_sends_browser_probes_to_its_loopback_api() -
     assert configuration.targets[0].url == "/mod-web/health"
     assert configuration.targets[1].url == "https://erin.example.invalid/api/node/ping"
     assert "/node-proxy/" not in configuration.targets[1].url
+
+
+@pytest.mark.parametrize("node_name", ["portal", "erin"])
+@pytest.mark.parametrize(
+    "duration",
+    [NetworkBandwidthDuration.SECONDS_5, NetworkBandwidthDuration.SECONDS_20],
+)
+def test_bandwidth_grants_keep_the_actual_user_and_use_direct_public_destinations(
+    node_name: str,
+    duration: NetworkBandwidthDuration,
+) -> None:
+    service = ModWebService()
+    user = ModWebUser(123, "Player", None, None)
+    size = NetworkBandwidthSize.MIB_128
+    grant = NetworkBandwidthGrant(
+        token="x" * 40,
+        limits=BANDWIDTH_LIMITS.model_copy(
+            update={
+                "max_bytes_per_direction": size.value,
+                "transfer_duration_ms": duration.value,
+            }
+        ),
+    )
+    request = Request({"type": "http"})
+    with (
+        patch.object(
+            config,
+            "ACTIVE_BOT_PROFILE",
+            SimpleNamespace(name=config.BotProfileName.PORTAL),
+        ),
+        patch.object(service, "_node_links", return_value=links()),
+        patch.object(service, "_require_http_user", return_value=user),
+        patch.object(service._node_api.bandwidth, "issue", return_value=grant) as local,
+        patch.object(
+            service,
+            "_remote_json_async",
+            AsyncMock(return_value=grant.model_dump(mode="json")),
+        ) as remote,
+    ):
+        result = asyncio.run(
+            service.network_bandwidth_session(
+                request, node_name, "https://portal.invalid", size, duration
+            )
+        )
+    if node_name == "portal":
+        local.assert_called_once_with(
+            actor_id="123",
+            origin="https://portal.invalid",
+            size_bytes=size,
+            duration_ms=duration,
+        )
+        remote.assert_not_called()
+        assert result.url == "/api/node/bandwidth"
+    else:
+        local.assert_not_called()
+        assert remote.call_args.kwargs["user"] is user
+        assert remote.call_args.kwargs["method"] == "POST"
+        assert remote.call_args.kwargs["json_payload"] == {
+            "origin": "https://portal.invalid",
+            "size_bytes": size.value,
+            "duration_ms": duration.value,
+        }
+        assert result.url == "https://erin.example.invalid/api/node/bandwidth"
+    assert result.grant == grant
+
+
+@pytest.mark.parametrize(
+    ("size", "duration", "request_bytes"),
+    [
+        (
+            NetworkBandwidthSize.MIB_64,
+            NetworkBandwidthDuration.SECONDS_5,
+            MAX_BANDWIDTH_REQUEST_BYTES,
+        ),
+        (
+            NetworkBandwidthSize.MIB_32,
+            NetworkBandwidthDuration.SECONDS_20,
+            MAX_BANDWIDTH_REQUEST_BYTES,
+        ),
+        (
+            NetworkBandwidthSize.MIB_32,
+            NetworkBandwidthDuration.SECONDS_5,
+            MAX_BANDWIDTH_REQUEST_BYTES + 1,
+        ),
+    ],
+)
+def test_bandwidth_grants_reject_incompatible_node_limits(
+    size: NetworkBandwidthSize, duration: NetworkBandwidthDuration, request_bytes: int
+) -> None:
+    service = ModWebService()
+    limits = BANDWIDTH_LIMITS.model_dump(mode="json")
+    limits["max_request_bytes"] = request_bytes
+    with (
+        patch.object(service, "_node_links", return_value=links()),
+        patch.object(
+            service,
+            "_require_http_user",
+            return_value=ModWebUser(123, "Player", None, None),
+        ),
+        patch.object(
+            service,
+            "_remote_json_async",
+            AsyncMock(return_value={"token": "x" * 40, "limits": limits}),
+        ),
+    ):
+        with pytest.raises(HTTPException) as rejected:
+            asyncio.run(
+                service.network_bandwidth_session(
+                    Request({"type": "http"}),
+                    "erin",
+                    "https://portal.invalid",
+                    size,
+                    duration,
+                )
+            )
+        assert rejected.value.status_code == 503
+
+
+def test_old_or_unreachable_nodes_cannot_break_normal_diagnostics() -> None:
+    service = ModWebService()
+    user = ModWebUser(123, "Player", None, None)
+    with (
+        patch.object(service, "_node_links", return_value=links()),
+        patch.object(service, "_require_http_user", return_value=user),
+        patch.object(
+            service,
+            "_remote_json_async",
+            AsyncMock(side_effect=HTTPException(404, "Old node")),
+        ),
+    ):
+        with pytest.raises(HTTPException) as unavailable:
+            asyncio.run(
+                service.network_bandwidth_session(
+                    Request({"type": "http"}), "erin", "https://portal.invalid"
+                )
+            )
+        assert unavailable.value.status_code == 503
+        assert (
+            len(
+                service.network_configuration(
+                    service.network_identity(Request({"type": "http"}))
+                ).targets
+            )
+            == 2
+        )
 
 
 def test_context_preserves_capture_times_and_marks_retained_offline_metrics() -> None:

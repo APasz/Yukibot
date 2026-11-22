@@ -142,6 +142,142 @@
       "minLength": 1,
       "type": "string"
     },
+    "NetworkBandwidthPhase": {
+      "additionalProperties": false,
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/NetworkBandwidthPhaseName"
+        },
+        "offset_ms": {
+          "maximum": 1800000,
+          "minimum": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "end_ms": {
+          "maximum": 1800000,
+          "minimum": 0,
+          "title": "End Ms",
+          "type": "integer"
+        },
+        "transferred_bytes": {
+          "maximum": 1073741824,
+          "minimum": 0,
+          "title": "Transferred Bytes",
+          "type": "integer"
+        },
+        "ended_by": {
+          "enum": [
+            "duration",
+            "byte_limit",
+            "cancelled",
+            "error"
+          ],
+          "title": "Ended By",
+          "type": "string"
+        }
+      },
+      "required": [
+        "phase",
+        "offset_ms",
+        "end_ms",
+        "transferred_bytes",
+        "ended_by"
+      ],
+      "title": "NetworkBandwidthPhase",
+      "type": "object"
+    },
+    "NetworkBandwidthPhaseName": {
+      "enum": [
+        "idle",
+        "download",
+        "upload"
+      ],
+      "type": "string"
+    },
+    "NetworkBandwidthTest": {
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/NetworkTarget"
+        },
+        "max_bytes_per_direction": {
+          "default": 33554432,
+          "exclusiveMinimum": 0,
+          "maximum": 1073741824,
+          "title": "Max Bytes Per Direction",
+          "type": "integer"
+        },
+        "transfer_duration_ms": {
+          "default": 5000,
+          "exclusiveMinimum": 0,
+          "maximum": 20000,
+          "title": "Transfer Duration Ms",
+          "type": "integer"
+        },
+        "started_at_ms": {
+          "minimum": 0,
+          "title": "Started At Ms",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "maximum": 1800000,
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "probes": {
+          "items": {
+            "$ref": "#/$defs/NetworkProbe"
+          },
+          "maxItems": 100,
+          "title": "Probes",
+          "type": "array"
+        },
+        "phases": {
+          "items": {
+            "$ref": "#/$defs/NetworkBandwidthPhase"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Phases",
+          "type": "array"
+        },
+        "state": {
+          "enum": [
+            "completed",
+            "cancelled",
+            "failed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "target",
+        "started_at_ms",
+        "duration_ms",
+        "probes",
+        "phases",
+        "state"
+      ],
+      "title": "NetworkBandwidthTest",
+      "type": "object"
+    },
     "NetworkContext": {
       "additionalProperties": false,
       "properties": {
@@ -350,6 +486,26 @@
           "$ref": "#/$defs/DelayedProbe"
         }
       ]
+    },
+    "NetworkRecordedBandwidthTest": {
+      "additionalProperties": false,
+      "properties": {
+        "offset_ms": {
+          "maximum": 1800000,
+          "minimum": 0,
+          "title": "Offset Ms",
+          "type": "integer"
+        },
+        "test": {
+          "$ref": "#/$defs/NetworkBandwidthTest"
+        }
+      },
+      "required": [
+        "offset_ms",
+        "test"
+      ],
+      "title": "NetworkRecordedBandwidthTest",
+      "type": "object"
     },
     "NetworkTarget": {
       "additionalProperties": false,
@@ -686,6 +842,14 @@
         }
       ],
       "default": null
+    },
+    "bandwidth_tests": {
+      "items": {
+        "$ref": "#/$defs/NetworkRecordedBandwidthTest"
+      },
+      "maxItems": 5,
+      "title": "Bandwidth Tests",
+      "type": "array"
     }
   },
   "required": [

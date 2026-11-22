@@ -18,7 +18,4 @@
     </nav>
   </header>
   <main>{@render children()}</main>
-  <footer>
-    Yukibot <span>Browser → configured endpoints</span>
-  </footer>
 </div>

@@ -16,9 +16,12 @@ export class ApiError extends Error {
   }
 }
 
-export function requireData<T>(result: { data?: T; response: Response }): T {
+export function requireData<T>(
+  result: { data?: T; response: Response },
+  messages: Readonly<Partial<Record<number, string>>> = {},
+): T {
   if (!result.response.ok || result.data === undefined) {
-    const messages: Record<number, string> = {
+    const defaults: Record<number, string> = {
       401: 'Your session has expired. Sign in again to continue.',
       403: 'You do not have permission for this action.',
       413: 'This report is too large to save. Export it to keep a local copy.',
@@ -27,6 +30,7 @@ export function requireData<T>(result: { data?: T; response: Response }): T {
     throw new ApiError(
       result.response.status,
       messages[result.response.status] ??
+        defaults[result.response.status] ??
         `The server returned HTTP ${result.response.status}. Please try again.`,
     );
   }

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Self
+from enum import IntEnum
+from typing import Annotated, Final, Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,6 +43,101 @@ MAX_REPORTS_PER_USER = 20
 MAX_STORED_REPORTS = 200
 
 
+class NetworkBandwidthSize(IntEnum):
+    MIB_32 = 32 * 1024**2
+    MIB_64 = 64 * 1024**2
+    MIB_128 = 128 * 1024**2
+    MIB_256 = 256 * 1024**2
+    MIB_512 = 512 * 1024**2
+    GIB_1 = 1024**3
+
+
+class NetworkBandwidthDuration(IntEnum):
+    SECONDS_5 = 5000
+    SECONDS_10 = 10000
+    SECONDS_20 = 20000
+
+
+DEFAULT_BANDWIDTH_SIZE: Final = NetworkBandwidthSize.MIB_32
+DEFAULT_BANDWIDTH_DURATION: Final = NetworkBandwidthDuration.SECONDS_5
+MAX_BANDWIDTH_BYTES: Final = max(NetworkBandwidthSize).value
+MAX_BANDWIDTH_REQUEST_BYTES: Final = 2 * 1024**2
+
+
+class NetworkBandwidthLimits(NetworkModel):
+    idle_duration_ms: int = Field(gt=0)
+    transfer_duration_ms: int = Field(gt=0)
+    probe_interval_ms: int = Field(gt=0)
+    max_bytes_per_direction: int = Field(gt=0)
+    max_request_bytes: int = Field(gt=0, le=MAX_BANDWIDTH_REQUEST_BYTES)
+    parallel_requests: int = Field(gt=0, le=4)
+    max_tests_per_recording: int = Field(gt=0, le=10)
+
+    @model_validator(mode="after")
+    def validate_request_budget(self) -> Self:
+        if self.max_request_bytes > self.max_bytes_per_direction:
+            raise ValueError("A transfer cannot exceed the test's data allowance.")
+        return self
+
+
+BANDWIDTH_LIMITS = NetworkBandwidthLimits(
+    idle_duration_ms=3000,
+    transfer_duration_ms=DEFAULT_BANDWIDTH_DURATION.value,
+    probe_interval_ms=500,
+    max_bytes_per_direction=DEFAULT_BANDWIDTH_SIZE.value,
+    max_request_bytes=MAX_BANDWIDTH_REQUEST_BYTES,
+    parallel_requests=4,
+    max_tests_per_recording=5,
+)
+
+
+class NetworkBandwidthGrant(NetworkModel):
+    token: str = Field(min_length=32, max_length=128)
+    limits: NetworkBandwidthLimits
+
+
+class NetworkBandwidthEndpoint(NetworkModel):
+    target_id: NetworkNodeId
+    url: str = Field(min_length=1, max_length=2048)
+    grant: NetworkBandwidthGrant
+
+
+class NetworkBandwidthSelection(NetworkModel):
+    size_bytes: NetworkBandwidthSize = Field(
+        default=DEFAULT_BANDWIDTH_SIZE, strict=False
+    )
+    duration_ms: NetworkBandwidthDuration = Field(
+        default=DEFAULT_BANDWIDTH_DURATION, strict=False
+    )
+
+
+class NetworkBandwidthSessionRequest(NetworkBandwidthSelection):
+    origin: str = Field(min_length=1, max_length=2048)
+
+
+class NetworkBandwidthReceipt(NetworkModel):
+    received_bytes: int = Field(ge=0, le=BANDWIDTH_LIMITS.max_request_bytes)
+
+
+type NetworkBandwidthPhaseName = Literal["idle", "download", "upload"]
+
+
+class NetworkBandwidthPhase(NetworkModel):
+    phase: NetworkBandwidthPhaseName
+    offset_ms: int = Field(ge=0, le=NETWORK_LIMITS.max_duration_ms)
+    end_ms: int = Field(ge=0, le=NETWORK_LIMITS.max_duration_ms)
+    transferred_bytes: int = Field(ge=0, le=MAX_BANDWIDTH_BYTES)
+    ended_by: Literal["duration", "byte_limit", "cancelled", "error"]
+
+    @model_validator(mode="after")
+    def validate_phase(self) -> Self:
+        if self.end_ms < self.offset_ms:
+            raise ValueError("A bandwidth phase cannot end before it starts.")
+        if self.phase == "idle" and self.transferred_bytes:
+            raise ValueError("An idle phase cannot transfer test data.")
+        return self
+
+
 class NetworkTarget(NetworkModel):
     id: NetworkNodeId
     label: str = Field(min_length=1, max_length=128)
@@ -59,6 +155,13 @@ class NetworkConfiguration(NetworkModel):
     identity: NetworkIdentity
     targets: list[NetworkTarget] = Field(max_length=NETWORK_LIMITS.max_targets)
     limits: NetworkLimits
+    bandwidth_limits: NetworkBandwidthLimits = BANDWIDTH_LIMITS
+    bandwidth_sizes: tuple[NetworkBandwidthSize, ...] = Field(
+        default=tuple(NetworkBandwidthSize), min_length=1
+    )
+    bandwidth_durations: tuple[NetworkBandwidthDuration, ...] = Field(
+        default=tuple(NetworkBandwidthDuration), min_length=1
+    )
 
 
 class NetworkMonitoredApp(NetworkModel):
@@ -118,6 +221,68 @@ type NetworkProbe = Annotated[
 ]
 
 
+class NetworkBandwidthTest(NetworkModel):
+    target: NetworkTarget
+    max_bytes_per_direction: int = Field(
+        default=DEFAULT_BANDWIDTH_SIZE.value, gt=0, le=MAX_BANDWIDTH_BYTES
+    )
+    transfer_duration_ms: int = Field(
+        default=DEFAULT_BANDWIDTH_DURATION.value,
+        gt=0,
+        le=max(NetworkBandwidthDuration).value,
+    )
+    started_at_ms: int = Field(ge=0)
+    duration_ms: int = Field(ge=0, le=NETWORK_LIMITS.max_duration_ms)
+    probes: list[NetworkProbe] = Field(max_length=100)
+    phases: list[NetworkBandwidthPhase] = Field(min_length=1, max_length=3)
+    state: Literal["completed", "cancelled", "failed"]
+    error: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_phases(self) -> Self:
+        expected = ("idle", "download", "upload")
+        previous_end = 0
+        for index, phase in enumerate(self.phases):
+            if phase.transferred_bytes > self.max_bytes_per_direction:
+                raise ValueError(
+                    "Bandwidth phases cannot exceed the selected data cap."
+                )
+            if phase.phase != expected[index] or phase.offset_ms < previous_end:
+                raise ValueError("Bandwidth phases must be ordered and not overlap.")
+            if index < len(self.phases) - 1 and phase.ended_by not in {
+                "duration",
+                "byte_limit",
+            }:
+                raise ValueError("Only the last bandwidth phase can be interrupted.")
+            previous_end = phase.end_ms
+        if self.state == "completed" and (
+            len(self.phases) != len(expected)
+            or any(
+                phase.ended_by not in {"duration", "byte_limit"}
+                for phase in self.phases
+            )
+        ):
+            raise ValueError("A completed bandwidth test must finish all phases.")
+        if (self.state == "failed") != (self.error is not None):
+            raise ValueError("Only failed bandwidth tests must include an error.")
+        last_reason = self.phases[-1].ended_by
+        if (self.state == "failed") != (last_reason == "error") or (
+            (self.state == "cancelled") != (last_reason == "cancelled")
+        ):
+            raise ValueError("The final phase must match the bandwidth test state.")
+        if self.phases[-1].end_ms > self.duration_ms:
+            raise ValueError("Bandwidth phases must fall within the test.")
+        for probe in self.probes:
+            if probe.target_id != self.target.id or probe.offset_ms > self.duration_ms:
+                raise ValueError("Bandwidth probes must belong to this test.")
+        return self
+
+
+class NetworkRecordedBandwidthTest(NetworkModel):
+    offset_ms: int = Field(ge=0, le=NETWORK_LIMITS.max_duration_ms)
+    test: NetworkBandwidthTest
+
+
 class NetworkNodeContext(NetworkModel):
     target_id: NetworkNodeId
     availability: Literal["online", "connecting", "offline"]
@@ -170,6 +335,9 @@ class NetworkReportInput(NetworkModel):
     contexts: list[RecordedContext] = Field(max_length=1000)
     markers: list[NetworkMarker] = Field(max_length=100)
     monitored_app: NetworkMonitoredApp | None = None
+    bandwidth_tests: list[NetworkRecordedBandwidthTest] = Field(
+        default_factory=list, max_length=BANDWIDTH_LIMITS.max_tests_per_recording
+    )
 
     @model_validator(mode="after")
     def validate_timeline(self) -> Self:
@@ -194,6 +362,9 @@ class NetworkReportInput(NetworkModel):
                 raise ValueError(
                     "Process observations must belong to the monitored app."
                 )
+        for test in self.bandwidth_tests:
+            if test.offset_ms + test.test.duration_ms > self.duration_ms:
+                raise ValueError("Bandwidth tests must fall within the recording.")
         return self
 
 

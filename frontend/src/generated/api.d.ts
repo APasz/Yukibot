@@ -73,6 +73,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/network/bandwidth/{target_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Bandwidth Session */
+        post: operations["network_bandwidth_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/network/reports/{report_id}": {
         parameters: {
             query?: never;
@@ -148,12 +165,138 @@ export interface components {
             unavailable_nodes: string[];
         };
         NetworkAppName: string;
+        /**
+         * NetworkBandwidthDuration
+         * @enum {integer}
+         */
+        NetworkBandwidthDuration: 5000 | 10000 | 20000;
+        /** NetworkBandwidthEndpoint */
+        NetworkBandwidthEndpoint: {
+            target_id: components["schemas"]["NetworkNodeId"];
+            /** Url */
+            url: string;
+            grant: components["schemas"]["NetworkBandwidthGrant"];
+        };
+        /** NetworkBandwidthGrant */
+        NetworkBandwidthGrant: {
+            /** Token */
+            token: string;
+            limits: components["schemas"]["NetworkBandwidthLimits"];
+        };
+        /** NetworkBandwidthLimits */
+        NetworkBandwidthLimits: {
+            /** Idle Duration Ms */
+            idle_duration_ms: number;
+            /** Transfer Duration Ms */
+            transfer_duration_ms: number;
+            /** Probe Interval Ms */
+            probe_interval_ms: number;
+            /** Max Bytes Per Direction */
+            max_bytes_per_direction: number;
+            /** Max Request Bytes */
+            max_request_bytes: number;
+            /** Parallel Requests */
+            parallel_requests: number;
+            /** Max Tests Per Recording */
+            max_tests_per_recording: number;
+        };
+        /** NetworkBandwidthPhase */
+        NetworkBandwidthPhase: {
+            phase: components["schemas"]["NetworkBandwidthPhaseName"];
+            /** Offset Ms */
+            offset_ms: number;
+            /** End Ms */
+            end_ms: number;
+            /** Transferred Bytes */
+            transferred_bytes: number;
+            /**
+             * Ended By
+             * @enum {string}
+             */
+            ended_by: "duration" | "byte_limit" | "cancelled" | "error";
+        };
+        /** @enum {string} */
+        NetworkBandwidthPhaseName: "idle" | "download" | "upload";
+        /** NetworkBandwidthSelection */
+        NetworkBandwidthSelection: {
+            /** @default 33554432 */
+            size_bytes: components["schemas"]["NetworkBandwidthSize"];
+            /** @default 5000 */
+            duration_ms: components["schemas"]["NetworkBandwidthDuration"];
+        };
+        /**
+         * NetworkBandwidthSize
+         * @enum {integer}
+         */
+        NetworkBandwidthSize: 33554432 | 67108864 | 134217728 | 268435456 | 536870912 | 1073741824;
+        /** NetworkBandwidthTest */
+        NetworkBandwidthTest: {
+            target: components["schemas"]["NetworkTarget"];
+            /**
+             * Max Bytes Per Direction
+             * @default 33554432
+             */
+            max_bytes_per_direction: number;
+            /**
+             * Transfer Duration Ms
+             * @default 5000
+             */
+            transfer_duration_ms: number;
+            /** Started At Ms */
+            started_at_ms: number;
+            /** Duration Ms */
+            duration_ms: number;
+            /** Probes */
+            probes: components["schemas"]["NetworkProbe"][];
+            /** Phases */
+            phases: components["schemas"]["NetworkBandwidthPhase"][];
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "completed" | "cancelled" | "failed";
+            /** Error */
+            error?: string | null;
+        };
         /** NetworkConfiguration */
         NetworkConfiguration: {
             identity: components["schemas"]["NetworkIdentity"];
             /** Targets */
             targets: components["schemas"]["NetworkTarget"][];
             limits: components["schemas"]["NetworkLimits"];
+            /**
+             * @default {
+             *       "idle_duration_ms": 3000,
+             *       "transfer_duration_ms": 5000,
+             *       "probe_interval_ms": 500,
+             *       "max_bytes_per_direction": 33554432,
+             *       "max_request_bytes": 2097152,
+             *       "parallel_requests": 4,
+             *       "max_tests_per_recording": 5
+             *     }
+             */
+            bandwidth_limits: components["schemas"]["NetworkBandwidthLimits"];
+            /**
+             * Bandwidth Sizes
+             * @default [
+             *       33554432,
+             *       67108864,
+             *       134217728,
+             *       268435456,
+             *       536870912,
+             *       1073741824
+             *     ]
+             */
+            bandwidth_sizes: components["schemas"]["NetworkBandwidthSize"][];
+            /**
+             * Bandwidth Durations
+             * @default [
+             *       5000,
+             *       10000,
+             *       20000
+             *     ]
+             */
+            bandwidth_durations: components["schemas"]["NetworkBandwidthDuration"][];
         };
         /** NetworkContext */
         NetworkContext: {
@@ -224,6 +367,12 @@ export interface components {
         };
         NetworkNodeId: string;
         NetworkProbe: components["schemas"]["SuccessfulProbe"] | components["schemas"]["FailedProbe"] | components["schemas"]["DelayedProbe"];
+        /** NetworkRecordedBandwidthTest */
+        NetworkRecordedBandwidthTest: {
+            /** Offset Ms */
+            offset_ms: number;
+            test: components["schemas"]["NetworkBandwidthTest"];
+        };
         /** NetworkReport */
         NetworkReport: {
             summary: components["schemas"]["NetworkReportSummary"];
@@ -262,6 +411,8 @@ export interface components {
             /** Markers */
             markers: components["schemas"]["NetworkMarker"][];
             monitored_app?: components["schemas"]["NetworkMonitoredApp"] | null;
+            /** Bandwidth Tests */
+            bandwidth_tests?: components["schemas"]["NetworkRecordedBandwidthTest"][];
         };
         /** NetworkReportList */
         NetworkReportList: {
@@ -489,6 +640,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NetworkReport"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    network_bandwidth_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                target_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["NetworkBandwidthSelection"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkBandwidthEndpoint"];
                 };
             };
             /** @description Validation Error */

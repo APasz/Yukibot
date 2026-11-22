@@ -172,6 +172,67 @@
         }
       }
     },
+    "/api/network/bandwidth/{target_id}": {
+      "post": {
+        "tags": [
+          "network-diagnostics"
+        ],
+        "summary": "Bandwidth Session",
+        "operationId": "network_bandwidth_session",
+        "parameters": [
+          {
+            "name": "target_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Target Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/NetworkBandwidthSelection"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkBandwidthEndpoint"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/network/reports/{report_id}": {
       "get": {
         "tags": [
@@ -395,6 +456,275 @@
         "maxLength": 256,
         "minLength": 1
       },
+      "NetworkBandwidthDuration": {
+        "type": "integer",
+        "enum": [
+          5000,
+          10000,
+          20000
+        ],
+        "title": "NetworkBandwidthDuration"
+      },
+      "NetworkBandwidthEndpoint": {
+        "properties": {
+          "target_id": {
+            "$ref": "#/components/schemas/NetworkNodeId"
+          },
+          "url": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url"
+          },
+          "grant": {
+            "$ref": "#/components/schemas/NetworkBandwidthGrant"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_id",
+          "url",
+          "grant"
+        ],
+        "title": "NetworkBandwidthEndpoint"
+      },
+      "NetworkBandwidthGrant": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 32,
+            "title": "Token"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/NetworkBandwidthLimits"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "token",
+          "limits"
+        ],
+        "title": "NetworkBandwidthGrant"
+      },
+      "NetworkBandwidthLimits": {
+        "properties": {
+          "idle_duration_ms": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Idle Duration Ms"
+          },
+          "transfer_duration_ms": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Transfer Duration Ms"
+          },
+          "probe_interval_ms": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Probe Interval Ms"
+          },
+          "max_bytes_per_direction": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Max Bytes Per Direction"
+          },
+          "max_request_bytes": {
+            "type": "integer",
+            "maximum": 2097152.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Request Bytes"
+          },
+          "parallel_requests": {
+            "type": "integer",
+            "maximum": 4.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Parallel Requests"
+          },
+          "max_tests_per_recording": {
+            "type": "integer",
+            "maximum": 10.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Tests Per Recording"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "idle_duration_ms",
+          "transfer_duration_ms",
+          "probe_interval_ms",
+          "max_bytes_per_direction",
+          "max_request_bytes",
+          "parallel_requests",
+          "max_tests_per_recording"
+        ],
+        "title": "NetworkBandwidthLimits"
+      },
+      "NetworkBandwidthPhase": {
+        "properties": {
+          "phase": {
+            "$ref": "#/components/schemas/NetworkBandwidthPhaseName"
+          },
+          "offset_ms": {
+            "type": "integer",
+            "maximum": 1800000.0,
+            "minimum": 0.0,
+            "title": "Offset Ms"
+          },
+          "end_ms": {
+            "type": "integer",
+            "maximum": 1800000.0,
+            "minimum": 0.0,
+            "title": "End Ms"
+          },
+          "transferred_bytes": {
+            "type": "integer",
+            "maximum": 1073741824.0,
+            "minimum": 0.0,
+            "title": "Transferred Bytes"
+          },
+          "ended_by": {
+            "type": "string",
+            "enum": [
+              "duration",
+              "byte_limit",
+              "cancelled",
+              "error"
+            ],
+            "title": "Ended By"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "phase",
+          "offset_ms",
+          "end_ms",
+          "transferred_bytes",
+          "ended_by"
+        ],
+        "title": "NetworkBandwidthPhase"
+      },
+      "NetworkBandwidthPhaseName": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "download",
+          "upload"
+        ]
+      },
+      "NetworkBandwidthSelection": {
+        "properties": {
+          "size_bytes": {
+            "$ref": "#/components/schemas/NetworkBandwidthSize",
+            "default": 33554432
+          },
+          "duration_ms": {
+            "$ref": "#/components/schemas/NetworkBandwidthDuration",
+            "default": 5000
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "NetworkBandwidthSelection"
+      },
+      "NetworkBandwidthSize": {
+        "type": "integer",
+        "enum": [
+          33554432,
+          67108864,
+          134217728,
+          268435456,
+          536870912,
+          1073741824
+        ],
+        "title": "NetworkBandwidthSize"
+      },
+      "NetworkBandwidthTest": {
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/NetworkTarget"
+          },
+          "max_bytes_per_direction": {
+            "type": "integer",
+            "maximum": 1073741824.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Bytes Per Direction",
+            "default": 33554432
+          },
+          "transfer_duration_ms": {
+            "type": "integer",
+            "maximum": 20000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Transfer Duration Ms",
+            "default": 5000
+          },
+          "started_at_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Started At Ms"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "maximum": 1800000.0,
+            "minimum": 0.0,
+            "title": "Duration Ms"
+          },
+          "probes": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkProbe"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Probes"
+          },
+          "phases": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkBandwidthPhase"
+            },
+            "type": "array",
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Phases"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "cancelled",
+              "failed"
+            ],
+            "title": "State"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target",
+          "started_at_ms",
+          "duration_ms",
+          "probes",
+          "phases",
+          "state"
+        ],
+        "title": "NetworkBandwidthTest"
+      },
       "NetworkConfiguration": {
         "properties": {
           "identity": {
@@ -410,6 +740,47 @@
           },
           "limits": {
             "$ref": "#/components/schemas/NetworkLimits"
+          },
+          "bandwidth_limits": {
+            "$ref": "#/components/schemas/NetworkBandwidthLimits",
+            "default": {
+              "idle_duration_ms": 3000,
+              "transfer_duration_ms": 5000,
+              "probe_interval_ms": 500,
+              "max_bytes_per_direction": 33554432,
+              "max_request_bytes": 2097152,
+              "parallel_requests": 4,
+              "max_tests_per_recording": 5
+            }
+          },
+          "bandwidth_sizes": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkBandwidthSize"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Bandwidth Sizes",
+            "default": [
+              33554432,
+              67108864,
+              134217728,
+              268435456,
+              536870912,
+              1073741824
+            ]
+          },
+          "bandwidth_durations": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkBandwidthDuration"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Bandwidth Durations",
+            "default": [
+              5000,
+              10000,
+              20000
+            ]
           }
         },
         "additionalProperties": false,
@@ -687,6 +1058,26 @@
           }
         }
       },
+      "NetworkRecordedBandwidthTest": {
+        "properties": {
+          "offset_ms": {
+            "type": "integer",
+            "maximum": 1800000.0,
+            "minimum": 0.0,
+            "title": "Offset Ms"
+          },
+          "test": {
+            "$ref": "#/components/schemas/NetworkBandwidthTest"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "offset_ms",
+          "test"
+        ],
+        "title": "NetworkRecordedBandwidthTest"
+      },
       "NetworkReport": {
         "properties": {
           "summary": {
@@ -782,6 +1173,14 @@
                 "type": "null"
               }
             ]
+          },
+          "bandwidth_tests": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkRecordedBandwidthTest"
+            },
+            "type": "array",
+            "maxItems": 5,
+            "title": "Bandwidth Tests"
           }
         },
         "additionalProperties": false,

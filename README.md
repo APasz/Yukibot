@@ -40,6 +40,10 @@ For frontend development, sign in to the local Portal first, then run `pnpm --di
 
 Sessions record direct browser-to-endpoint HTTP probes, event markers, and host CPU/memory snapshots with separate Portal-to-node observations. Browser scheduling delays and failed requests are separate outcomes. Recordings continue locally through temporary outages; the latest draft is saved in IndexedDB under the signed-in user's ID. Background browser throttling can reduce sampling coverage.
 
+The separate speed test runs directly between the browser and the selected Portal/node. The time selector allows 5 seconds (default), 10 seconds, or 20 seconds per direction, following a 3-second idle baseline: about 13, 23, or 43 seconds total. The data selector caps each direction at 32 MiB (default), 64 MiB, 128 MiB, 256 MiB, 512 MiB, or 1 GiB. Each direction stops at whichever cap is reached first. Suggested connection speeds recalculate for the selected duration, leaving roughly a quarter of the data cap as headroom. Rates reflect observed HTTP throughput, with uploads counted only after the node acknowledges them. Results preserve both selected limits, include median idle/loaded latency, and can be exported. Short tests and data caps can understate capacity on fast or distant links. Hiding the tab or cancelling stops the test and retains partial results.
+
+Normal recording does not run a speed test. The off-by-default **Include speed test at start** checkbox runs one test using the speed utility's selected destination and limits. Tests started during recording are saved with it and shaded on the timeline as artificial load. Standalone tests do not start a recording. Nodes need the updated bandwidth routes; transfer-only credentials last for the selected test duration plus 10 seconds of grace, with a minimum lifetime of 30 seconds, a 60-second per-user/node cooldown, and two concurrent tests per node. Upload bodies are discarded and downloads use a bounded in-memory payload.
+
 The game process section lists currently running apps across available nodes. Choose an app before recording to include its process-tree CPU usage, RSS memory, disk I/O rates, threads, uptime, and available player counts. The choice stays fixed for that session and is preserved in drafts, saved reports, and JSON exports. Inspecting the connection timeline also selects the corresponding process observation. CPU uses one logical CPU as 100%, so a multithreaded app can exceed 100%; RSS sums the process tree and can double-count shared pages. CPU and I/O rates need two observations of the same process tree and reset after restarts or tree changes. Missing or inaccessible measurements remain unavailable. Nodes need the updated `/api/node/apps/{app_name}/process` endpoint to supply process telemetry; older reports remain readable.
 
 Players can save and export their own sessions. Admins can also read and compare other players' reports. Saved reports are client-reported evidence, retained in the private `.cache/network_diagnostics` directory for seven days, with limits of 20 per user, 200 total, and a 64 MiB cache. The API caps each submitted report at 2 MiB. Keep this cache persistent across Portal deployments to retain reports.
@@ -48,7 +52,7 @@ These HTTP probes do not measure the game's packet loss, trace ISP hops, or meas
 
 ```bash
 pnpm --dir frontend test
-BOT_PROFILE=yuki uv run pytest checks/network_diagnostics_check.py checks/networking_check.py -q
+BOT_PROFILE=yuki uv run pytest checks/network_bandwidth_check.py checks/network_diagnostics_check.py checks/network_diagnostics_adapter_check.py checks/networking_check.py -q
 ```
 
 ### Bot Profiles

@@ -1,64 +1,18 @@
-import type { Context, Limits, MonitoredApp, Probe, Recording, Target } from './types';
-
-interface ProbeTiming {
-  target_id: string;
-  offset_ms: number;
-  hidden: boolean;
-  browser_delay_ms: number;
-}
-
-export async function measureProbe(
-  target: Target,
-  timing: ProbeTiming,
-  timeoutMs: number,
-  signal: AbortSignal,
-): Promise<Probe | null> {
-  const timeout = new AbortController();
-  const handle = setTimeout(() => timeout.abort(), timeoutMs);
-  const startedAt = performance.now();
-  try {
-    const url = new URL(target.url, window.location.origin);
-    url.searchParams.set('_diagnostic', `${Date.now()}-${timing.offset_ms}`);
-    const response = await fetch(url, {
-      cache: 'no-store',
-      credentials: 'omit',
-      mode: 'cors',
-      redirect: 'error',
-      signal: AbortSignal.any([signal, timeout.signal]),
-    });
-    await response.arrayBuffer();
-    if (signal.aborted) return null;
-    const elapsed = performance.now() - startedAt;
-    if (elapsed > timeoutMs) return { ...timing, status: 'browser_delayed' };
-    if (!response.ok) return { ...timing, status: 'http_error', http_status: response.status };
-    return { ...timing, status: 'ok', rtt_ms: elapsed };
-  } catch {
-    if (signal.aborted) return null;
-    const elapsed = performance.now() - startedAt;
-    if (elapsed > timeoutMs + 1000) return { ...timing, status: 'browser_delayed' };
-    return {
-      ...timing,
-      status: timeout.signal.aborted ? 'timeout' : 'network_error',
-      http_status: null,
-    };
-  } finally {
-    clearTimeout(handle);
-  }
-}
-
-function pause(milliseconds: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const finish = () => {
-      clearTimeout(handle);
-      signal.removeEventListener('abort', finish);
-      resolve();
-    };
-    const handle = setTimeout(finish, milliseconds);
-    signal.addEventListener('abort', finish, { once: true });
-    if (signal.aborted) finish();
-  });
-}
-
+import type {
+  BandwidthEndpoint,
+  BandwidthLimits,
+  BandwidthTest,
+  Context,
+  Limits,
+  MonitoredApp,
+  Probe,
+  Recording,
+  Target,
+} from './types';
+import { pause } from './async';
+import { measureProbe, type ProbeTiming } from './probes';
+import { runBandwidthTest, type BandwidthProgress } from './bandwidth';
+export { measureProbe } from './probes';
 export class Recorder {
   private readonly abort = new AbortController();
   private readonly startedAt = performance.now();
@@ -66,6 +20,7 @@ export class Recorder {
   private readonly stopTimer: ReturnType<typeof setTimeout>;
   private stopping: Promise<void> | undefined;
   private stoppedAt: number | undefined;
+  private bandwidthActive = false;
   readonly recording: Recording;
 
   constructor(
@@ -89,12 +44,60 @@ export class Recorder {
       contexts: [],
       markers: [],
       monitored_app: monitoredApp,
+      bandwidth_tests: [],
     };
     this.tasks = [...targets.map((target) => this.sampleTarget(target)), this.sampleContext()];
     this.stopTimer = setTimeout(() => {
       void this.stop();
     }, limits.max_duration_ms);
     this.publish();
+  }
+
+  get signal(): AbortSignal {
+    return this.abort.signal;
+  }
+
+  requireBandwidthCapacity(limits: BandwidthLimits): void {
+    if (this.signal.aborted) throw new Error('The recording has stopped.');
+    if (this.bandwidthActive) throw new Error('A speed test is already running.');
+    if ((this.recording.bandwidth_tests?.length ?? 0) >= limits.max_tests_per_recording) {
+      throw new Error('Bandwidth test limit reached for this recording.');
+    }
+  }
+
+  measureBandwidth(
+    target: Target,
+    endpoint: BandwidthEndpoint,
+    signal: AbortSignal,
+    onProgress: (progress: BandwidthProgress) => void,
+  ): Promise<BandwidthTest> {
+    this.requireBandwidthCapacity(endpoint.grant.limits);
+    const tests = (this.recording.bandwidth_tests ??= []);
+    this.bandwidthActive = true;
+    const offset = this.elapsed();
+    const task = runBandwidthTest({
+      target,
+      endpoint,
+      signal: AbortSignal.any([signal, this.signal]),
+      now: () => this.elapsed(),
+      timeoutMs: this.limits.timeout_ms,
+      onProgress,
+    })
+      .then((test) => {
+        tests.push({ offset_ms: offset, test });
+        this.publish();
+        return test;
+      })
+      .finally(() => {
+        this.bandwidthActive = false;
+      });
+    this.tasks.push(
+      task.then(
+        () => {},
+        () => {},
+      ),
+    );
+    return task;
   }
 
   private elapsed(): number {

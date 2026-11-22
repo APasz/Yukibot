@@ -16,8 +16,14 @@ from _async_utils import run_blocking
 
 from .network_models import (
     MAX_REPORT_BYTES,
+    DEFAULT_BANDWIDTH_SIZE,
+    DEFAULT_BANDWIDTH_DURATION,
     NetworkAppList,
     NetworkAppName,
+    NetworkBandwidthEndpoint,
+    NetworkBandwidthSelection,
+    NetworkBandwidthSize,
+    NetworkBandwidthDuration,
     NetworkConfiguration,
     NetworkContext,
     NetworkIdentity,
@@ -37,6 +43,14 @@ class NetworkBackend(Protocol):
         self, identity: NetworkIdentity
     ) -> NetworkConfiguration: ...
     async def network_apps(self) -> NetworkAppList: ...
+    async def network_bandwidth_session(
+        self,
+        request: Request,
+        target_id: str,
+        origin: str,
+        size_bytes: NetworkBandwidthSize = DEFAULT_BANDWIDTH_SIZE,
+        duration_ms: NetworkBandwidthDuration = DEFAULT_BANDWIDTH_DURATION,
+    ) -> NetworkBandwidthEndpoint: ...
     async def network_context(
         self,
         request: Request,
@@ -107,6 +121,13 @@ def create_network_router(
             raise RuntimeError("Network diagnostics backend is not configured.")
         return backend
 
+    def require_same_origin(request: Request) -> str:
+        origin = str(request.base_url).rstrip("/")
+        supplied = request.headers.get("origin")
+        if supplied is not None and supplied != origin:
+            raise HTTPException(403, "Diagnostics requests must use the same origin.")
+        return origin
+
     @router.get("/mod-web/network", response_model=None, include_in_schema=False)
     async def page(request: Request) -> HTMLResponse | FileResponse | RedirectResponse:
         try:
@@ -167,6 +188,21 @@ def create_network_router(
             reports=await run_blocking(service().network_reports.list, identity)
         )
 
+    @router.post(
+        "/api/network/bandwidth/{target_id}", operation_id="network_bandwidth_session"
+    )
+    async def bandwidth_session(
+        request: Request,
+        target_id: NetworkNodeId,
+        payload: NetworkBandwidthSelection | None = None,
+    ) -> NetworkBandwidthEndpoint:
+        service().network_identity(request)
+        origin = require_same_origin(request)
+        selection = NetworkBandwidthSelection() if payload is None else payload
+        return await service().network_bandwidth_session(
+            request, target_id, origin, selection.size_bytes, selection.duration_ms
+        )
+
     @router.get("/api/network/reports/{report_id}", operation_id="network_report")
     async def report(report_id: UUID, request: Request) -> NetworkReport:
         identity = service().network_identity(request)
@@ -180,9 +216,7 @@ def create_network_router(
         recording: NetworkReportInput, request: Request
     ) -> NetworkReport:
         identity = service().network_identity(request)
-        origin = request.headers.get("origin")
-        if origin is not None and origin != str(request.base_url).rstrip("/"):
-            raise HTTPException(403, "Reports must be saved from the same origin.")
+        require_same_origin(request)
         try:
             return await run_blocking(
                 service().network_reports.save, recording, identity

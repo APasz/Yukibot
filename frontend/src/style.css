@@ -213,11 +213,6 @@ main {
   gap: 20px;
   padding-bottom: 4px;
 }
-.intro-text {
-  color: var(--mod-muted);
-  font-size: 0.85rem;
-  margin-top: 8px;
-}
 .session-status {
   display: flex;
   gap: 10px;
@@ -260,17 +255,28 @@ main {
 }
 .control-grid {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(200px, 1.4fr) auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 20px;
   align-items: end;
 }
 .control-grid > button {
   min-height: 38px;
+  min-width: 150px;
+  justify-self: end;
+}
+.control-grid > label,
+.app-field {
+  align-self: start;
+}
+.app-field {
+  min-width: 0;
+}
+.app-field .caption {
+  margin-top: 6px;
 }
 .target-picker {
   display: grid;
-  gap: 10px;
-  padding-bottom: 8px;
+  gap: 8px;
 }
 .target-picker > div {
   display: flex;
@@ -284,15 +290,6 @@ main {
   color: var(--mod-text);
   font-size: 0.8rem;
   font-weight: 400;
-}
-.recording-details {
-  display: flex;
-  justify-content: space-between;
-  gap: 6px 20px;
-  flex-wrap: wrap;
-  margin-top: 14px;
-  color: var(--mod-muted);
-  font-size: 0.75rem;
 }
 .marker-controls {
   display: flex;
@@ -476,14 +473,6 @@ dd {
   font-size: 1.05rem;
   font-variant-numeric: tabular-nums;
 }
-.context-card > small {
-  display: block;
-  font-size: 0.7rem;
-}
-.process-picker {
-  max-width: 540px;
-  margin-bottom: 16px;
-}
 .process-metrics {
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
@@ -497,33 +486,20 @@ dd {
   padding: 16px 0;
   font-size: 0.8rem;
 }
-.welcome h2 {
-  color: var(--mod-text);
-  margin-bottom: 6px;
-}
 .interpretation > summary {
   font-weight: 700;
 }
-.interpretation-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 24px;
-  margin-top: 16px;
+.measurement-guide {
+  margin: 16px 0 0;
 }
-.interpretation-grid p {
+.measurement-guide dd {
   color: var(--mod-muted);
   font-size: 0.8rem;
   line-height: 1.6;
 }
-.interpretation-grid strong {
-  display: block;
+.measurement-guide dt {
   color: var(--mod-text);
   font-weight: 600;
-  margin-bottom: 6px;
-}
-.interpretation > .caption {
-  border-top: 1px solid var(--mod-border);
-  padding-top: 12px;
 }
 .actions {
   display: flex;
@@ -535,9 +511,6 @@ dd {
 .actions .muted {
   margin-left: auto;
 }
-.notes-field {
-  margin-top: 16px;
-}
 details {
   padding: 12px 14px;
   border: 1px solid var(--mod-border);
@@ -545,6 +518,19 @@ details {
 }
 summary {
   cursor: pointer;
+}
+.individual-probes {
+  margin-top: 16px;
+}
+.sample-details {
+  padding: 0;
+  border: 0;
+  color: var(--mod-muted);
+  font-size: 0.7rem;
+}
+.sample-details small {
+  display: block;
+  margin-top: 6px;
 }
 .probe-table {
   max-height: 360px;
@@ -593,15 +579,6 @@ button.text-button {
   background: none;
   text-decoration: underline;
 }
-footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  border-top: 1px solid var(--mod-border);
-  padding: 16px 0 24px;
-  color: var(--mod-muted);
-  font-size: 0.7rem;
-}
 .sr-only {
   position: absolute;
   width: 1px;
@@ -614,13 +591,6 @@ footer {
   border: 0;
 }
 @media (max-width: 900px) {
-  .control-grid {
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-  }
-  .control-grid > button {
-    grid-column: 1 / -1;
-  }
   .account-name {
     display: none;
   }
@@ -653,6 +623,10 @@ footer {
   }
   .control-grid {
     grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .control-grid > button {
+    width: 100%;
   }
   .section-heading {
     flex-wrap: wrap;
@@ -668,7 +642,7 @@ footer {
     max-width: 240px;
   }
   .context-grid,
-  .interpretation-grid {
+  .measurement-guide {
     grid-template-columns: 1fr;
   }
   .marker-controls {
@@ -690,8 +664,33 @@ footer {
   .timeline-wrap {
     overflow-x: auto;
   }
-  footer {
-    flex-wrap: wrap;
-    gap: 4px 16px;
-  }
+}
+
+.bandwidth-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem;
+}
+.bandwidth-controls label {
+  flex: 1 1 12rem;
+}
+.bandwidth-opt-in {
+  margin-top: 0.75rem;
+}
+.bandwidth-result,
+.bandwidth-recorded {
+  margin-top: 1rem;
+}
+.bandwidth-result h3 {
+  font-size: 0.9rem;
+  margin: 0;
+}
+.bandwidth-load {
+  fill: var(--mod-warning);
+  opacity: 0.12;
+}
+.chart-legend .bandwidth-key {
+  background: var(--mod-warning);
+  opacity: 0.5;
 }

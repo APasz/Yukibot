@@ -53,6 +53,19 @@
     ) * 1.15,
   );
   const x = (timestamp: number) => 62 + ((timestamp - start) / (end - start)) * 900;
+  const loads = $derived(
+    recordings.flatMap(({ recording }) =>
+      (recording.bandwidth_tests ?? []).flatMap((item) =>
+        item.test.phases
+          .filter((phase) => phase.phase !== 'idle')
+          .map((phase) => ({
+            start: recording.started_at_ms + item.offset_ms + phase.offset_ms,
+            end: recording.started_at_ms + item.offset_ms + phase.end_ms,
+            label: `${item.test.target.label} · ${phase.phase} test`,
+          })),
+      ),
+    ),
+  );
   const y = (rtt: number) => 186 - (rtt / ceiling) * 154;
 
   function segments(item: (typeof series)[number]): string[] {
@@ -103,6 +116,7 @@
     {#each series as item}<span><i style={`background:${item.colour}`}></i>{item.label}</span
       >{/each}
     <span><i class="failure-key"></i>Failed request</span>
+    {#if loads.length}<span><i class="bandwidth-key"></i>Speed test load</span>{/if}
   </div>
   <svg
     class="timeline"
@@ -119,6 +133,13 @@
       >HTTP round-trip latency; red marks indicate failed requests, grey marks indicate browser
       scheduling delays.</title
     >
+    {#each loads as load}<rect
+        x={x(load.start)}
+        y="30"
+        width={Math.max(1, x(load.end) - x(load.start))}
+        height="158"
+        class="bandwidth-load"><title>{load.label}</title></rect
+      >{/each}
     {#each ticks as tick}
       <line x1="62" x2="962" y1={tick.position} y2={tick.position} class="chart-grid" />
       <text x="49" y={tick.position + 4} text-anchor="end" class="chart-text"
@@ -184,7 +205,7 @@
   </svg>
   <p class="caption">
     {cursor === null
-      ? 'Point for context. Dashed lines mark events. Missing RTTs stay blank.'
+      ? 'Point to inspect.'
       : new Date(start + cursor * (end - start)).toLocaleString()}
   </p>
 </div>

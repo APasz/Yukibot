@@ -6,7 +6,7 @@ import asyncio
 import time
 from pathlib import Path
 from typing import Final
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import HTTPException, Request
 
@@ -19,8 +19,14 @@ from node_api.process import NodeAppProcessSummary
 from node_auth import NodeApiScope
 from web_api.network_models import (
     NETWORK_LIMITS,
+    DEFAULT_BANDWIDTH_SIZE,
+    DEFAULT_BANDWIDTH_DURATION,
     NetworkAppContext,
     NetworkAppList,
+    NetworkBandwidthEndpoint,
+    NetworkBandwidthGrant,
+    NetworkBandwidthSize,
+    NetworkBandwidthDuration,
     NetworkConfiguration,
     NetworkContext,
     NetworkIdentity,
@@ -85,6 +91,88 @@ class ModWebNetworkMixin(ModWebServiceSupport):
         return NetworkConfiguration(
             identity=identity, targets=targets, limits=NETWORK_LIMITS
         )
+
+    async def network_bandwidth_session(
+        self,
+        request: Request,
+        target_id: str,
+        origin: str,
+        size_bytes: NetworkBandwidthSize = DEFAULT_BANDWIDTH_SIZE,
+        duration_ms: NetworkBandwidthDuration = DEFAULT_BANDWIDTH_DURATION,
+    ) -> NetworkBandwidthEndpoint:
+        identity = self.network_identity(request)
+        target = next(
+            (
+                item
+                for item in self.network_configuration(identity).targets
+                if item.id == target_id
+            ),
+            None,
+        )
+        node = next(
+            (item for item in self._node_links() if item.node_name == target_id), None
+        )
+        if target is None or node is None:
+            raise HTTPException(404, "Unknown bandwidth target.")
+        user = self._require_http_user(
+            request=request, required_level=Power_Level.visitor
+        )
+        if node.is_current:
+            grant = self._node_api.bandwidth.issue(
+                actor_id=identity.user_id,
+                origin=origin,
+                size_bytes=size_bytes,
+                duration_ms=duration_ms,
+            )
+        else:
+            try:
+                async with asyncio.timeout(_APP_TELEMETRY_TIMEOUT_SECONDS):
+                    payload = await self._remote_json_async(
+                        node=node,
+                        app_name=None,
+                        path="/bandwidth/sessions",
+                        scopes=(NodeApiScope.APPS_READ,),
+                        user=user,
+                        method="POST",
+                        json_payload={
+                            "origin": origin,
+                            "size_bytes": size_bytes.value,
+                            "duration_ms": duration_ms.value,
+                        },
+                        timeout=_APP_TELEMETRY_TIMEOUT_SECONDS,
+                    )
+                grant = NetworkBandwidthGrant.model_validate(payload)
+            except HTTPException as error:
+                if error.status_code in {404, 422}:
+                    raise HTTPException(
+                        503, "Update this node to enable bandwidth tests."
+                    ) from error
+                raise
+            except (OSError, TimeoutError, ValueError, RuntimeError) as error:
+                raise HTTPException(
+                    503, "Bandwidth test unavailable on this node."
+                ) from error
+        if (
+            grant.limits.max_bytes_per_direction != size_bytes.value
+            or grant.limits.transfer_duration_ms != duration_ms.value
+        ):
+            raise HTTPException(
+                503, "This node did not accept the selected test limits."
+            )
+        if target.kind == "portal":
+            url = "/api/node/bandwidth"
+        else:
+            parsed = urlsplit(target.url)
+            url = urlunsplit(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path.rsplit("/", 1)[0] + "/bandwidth",
+                    "",
+                    "",
+                )
+            )
+        return NetworkBandwidthEndpoint(target_id=target_id, url=url, grant=grant)
 
     async def _network_app_entries(
         self, node: ModWebNodeLink

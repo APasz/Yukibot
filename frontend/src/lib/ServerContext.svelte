@@ -10,7 +10,7 @@
 
 <div class="section-heading">
   <div>
-    <h2>Server context</h2>
+    <h2>Servers</h2>
   </div>
   <span class="muted"
     >{context ? `+${(context.offset_ms / 1000).toFixed(0)}s` : 'Waiting for sample'}</span
@@ -68,12 +68,15 @@
             </dd>
           </div>
         </dl>
-        <small class="muted"
-          >Host: {node.captured_at_ms ? new Date(node.captured_at_ms).toLocaleTimeString() : '—'} · Probe:
-          {node.portal_probe_captured_at_ms
-            ? new Date(node.portal_probe_captured_at_ms).toLocaleTimeString()
-            : '—'}</small
-        >
+        <details class="sample-details">
+          <summary>Sample times</summary>
+          <small class="muted"
+            >Host: {node.captured_at_ms ? new Date(node.captured_at_ms).toLocaleTimeString() : '—'} ·
+            Probe: {node.portal_probe_captured_at_ms
+              ? new Date(node.portal_probe_captured_at_ms).toLocaleTimeString()
+              : '—'}</small
+          >
+        </details>
       </article>
     {/each}
   </div>
@@ -86,4 +89,3 @@
         : 'Waiting for server sample.'}
   </p>
 {/if}
-<p class="caption">Host usage · Portal → node HTTP. Shared hosts are not independent references.</p>

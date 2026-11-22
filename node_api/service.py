@@ -70,7 +70,9 @@ from apps.satisfactory.node_api import (
     NodeBlueprintMutationResult,
 )
 from mod_web_auth import ModWebAuthService, ModWebUser
+from web_api.network_bandwidth import NetworkBandwidthService
 from .app_routes import register_app_routes
+from .bandwidth_routes import register_bandwidth_routes
 from .app_installer_routes import register_app_installer_routes
 from .app_state import (
     _ALL_NODE_STATE_TOPICS,
@@ -204,6 +206,7 @@ def _validated_steam_game_server_login_token_status(
 class NodeApiService:
     def __init__(self) -> None:
         self._manager: App_Manager | None = None
+        self.bandwidth = NetworkBandwidthService()
         self._downloads = NodeDownloadStore()
         self._discord_health_lock = threading.RLock()
         self._discord_service_state: DiscordServiceState | None = None
@@ -628,6 +631,7 @@ class NodeApiService:
             allow_methods=("GET", "POST"),
             allow_headers=("Authorization",),
             expose_headers=(
+                "Content-Encoding",
                 NODE_DISCORD_HEARTBEAT_LATENCY_HEADER,
                 NODE_DISCORD_SERVICE_STATE_HEADER,
             ),
@@ -644,6 +648,13 @@ class NodeApiService:
             relay_tts=self.relay_tts,
             api_prefix=_NODE_API_PREFIX,
             traffic_log=traffic_log,
+        )
+
+        register_bandwidth_routes(
+            nicegui_app,
+            auth=self.request_auth,
+            service=self.bandwidth,
+            api_prefix=_NODE_API_PREFIX,
         )
 
         register_system_routes(
