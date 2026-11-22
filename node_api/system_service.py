@@ -9,13 +9,16 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import psutil
 
 import config
 from _manager import App_Manager, app_scope_from_name
 from _sys import Stats_System, StatsDiskSnapshot, StatsSystemSnapshot
+from apps._app import App
 from deployment_metadata import DeploymentMetadata
+from .process import NodeAppProcessSummary
 from .system import (
     NodeSystemDiskSummary,
     NodeSystemHistory,
@@ -26,11 +29,27 @@ from .system import (
     NodeSystemSummary,
 )
 
+_APP_PROCESS_MAX_INTERVAL_SECONDS: Final[float] = 30.0
+
 
 @dataclass(frozen=True, slots=True)
 class _TimedSystemSummary:
     captured_at_seconds: float
     summary: NodeSystemSummary
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessCounters:
+    cpu_seconds: float
+    read_bytes: int | None
+    write_bytes: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _TimedAppProcessSummary:
+    sampled_at_seconds: float
+    summary: NodeAppProcessSummary
+    counters: dict[tuple[int, float], _ProcessCounters]
 
 
 class NodeSystemMonitoringService:
@@ -69,9 +88,137 @@ class NodeSystemMonitoringService:
             maxlen=max(1, int(history_retention_seconds // history_interval_seconds))
         )
         self._history_lock = threading.RLock()
+        self._process_lock = threading.RLock()
+        self._process_cache: dict[str, _TimedAppProcessSummary] = {}
 
     def set_manager(self, manager: App_Manager) -> None:
         self._manager = manager
+        with self._process_lock:
+            self._process_cache.clear()
+
+    def build_app_process_summary(self, app: App) -> NodeAppProcessSummary:
+        """Sample the owned process tree without blocking for a CPU interval."""
+        with self._process_lock:
+            if not app.check_running():
+                self._process_cache.pop(app.name, None)
+                return NodeAppProcessSummary(
+                    state="stopped", captured_at_ms=round(time.time() * 1000)
+                )
+            owned_process = app.process
+            if owned_process is None:
+                self._process_cache.pop(app.name, None)
+                return NodeAppProcessSummary(
+                    state="unavailable", captured_at_ms=round(time.time() * 1000)
+                )
+            try:
+                root = psutil.Process(owned_process.pid)
+                root_started_at = root.create_time()
+                started_at_ms = round(root_started_at * 1000)
+                now = time.monotonic()
+                previous = self._process_cache.get(app.name)
+                if (
+                    previous is not None
+                    and previous.summary.pid == root.pid
+                    and (root.pid, root_started_at) in previous.counters
+                    and now - previous.sampled_at_seconds
+                    < self._summary_cache_ttl_seconds
+                ):
+                    return previous.summary
+                counters: dict[tuple[int, float], _ProcessCounters] = {}
+                memory_rss_bytes = 0
+                thread_count = 0
+                for process in (root, *root.children(recursive=True)):
+                    try:
+                        with process.oneshot():
+                            identity = (process.pid, process.create_time())
+                            cpu = process.cpu_times()
+                            memory = process.memory_info().rss
+                            threads = process.num_threads()
+                            try:
+                                io = process.io_counters()
+                            except (
+                                AttributeError,
+                                NotImplementedError,
+                                psutil.AccessDenied,
+                            ):
+                                read_bytes = write_bytes = None
+                            else:
+                                read_bytes, write_bytes = io.read_bytes, io.write_bytes
+                            if not process.is_running():
+                                raise psutil.NoSuchProcess(process.pid)
+                            counters[identity] = _ProcessCounters(
+                                cpu.user + cpu.system, read_bytes, write_bytes
+                            )
+                            memory_rss_bytes += memory
+                            thread_count += threads
+                    except psutil.NoSuchProcess, psutil.ZombieProcess:
+                        if process is root:
+                            raise
+                if app.process is not owned_process or not app.check_running():
+                    raise psutil.NoSuchProcess(root.pid)
+            except psutil.Error, OSError:
+                self._process_cache.pop(app.name, None)
+                return NodeAppProcessSummary(
+                    state="unavailable", captured_at_ms=round(time.time() * 1000)
+                )
+
+            sampled_at = time.monotonic()
+            cpu_percent = read_rate = write_rate = None
+            # Changing tree membership starts a fresh interval, including after PID reuse.
+            if previous is not None and counters.keys() == previous.counters.keys():
+                elapsed = sampled_at - previous.sampled_at_seconds
+                if 0 < elapsed <= _APP_PROCESS_MAX_INTERVAL_SECONDS:
+                    cpu_percent = (
+                        sum(
+                            max(
+                                0,
+                                value.cpu_seconds - previous.counters[key].cpu_seconds,
+                            )
+                            for key, value in counters.items()
+                        )
+                        / elapsed
+                        * 100
+                    )
+                    read_rate = self._process_io_rate(
+                        counters, previous.counters, elapsed, read=True
+                    )
+                    write_rate = self._process_io_rate(
+                        counters, previous.counters, elapsed, read=False
+                    )
+            summary = NodeAppProcessSummary(
+                state="running",
+                captured_at_ms=round(time.time() * 1000),
+                pid=root.pid,
+                started_at_ms=started_at_ms,
+                process_count=len(counters),
+                cpu_percent=cpu_percent,
+                memory_rss_bytes=memory_rss_bytes,
+                thread_count=thread_count,
+                read_bytes_per_second=read_rate,
+                write_bytes_per_second=write_rate,
+            )
+            self._process_cache[app.name] = _TimedAppProcessSummary(
+                sampled_at, summary, counters
+            )
+            return summary
+
+    @staticmethod
+    def _process_io_rate(
+        current: dict[tuple[int, float], _ProcessCounters],
+        previous: dict[tuple[int, float], _ProcessCounters],
+        elapsed: float,
+        *,
+        read: bool,
+    ) -> float | None:
+        total = 0
+        for key, value in current.items():
+            before = previous[key]
+            new = value.read_bytes if read else value.write_bytes
+            old = before.read_bytes if read else before.write_bytes
+            if new is None or old is None:
+                return None
+            total += max(0, new - old)
+        return total / elapsed
 
     def invalidate_summary_cache(self) -> None:
         with self._summary_cache_lock:

@@ -7,7 +7,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from node_api.process import NodeAppProcessSummary
+
 type Percent = Annotated[int, Field(ge=0, le=100)]
+type NetworkNodeId = Annotated[str, Field(min_length=1, max_length=128)]
+type NetworkAppName = Annotated[str, Field(min_length=1, max_length=256)]
 
 
 class NetworkModel(BaseModel):
@@ -39,7 +43,7 @@ MAX_STORED_REPORTS = 200
 
 
 class NetworkTarget(NetworkModel):
-    id: str = Field(min_length=1, max_length=128)
+    id: NetworkNodeId
     label: str = Field(min_length=1, max_length=128)
     url: str = Field(min_length=1, max_length=2048)
     kind: Literal["portal", "node"]
@@ -57,8 +61,27 @@ class NetworkConfiguration(NetworkModel):
     limits: NetworkLimits
 
 
+class NetworkMonitoredApp(NetworkModel):
+    target_id: NetworkNodeId
+    node_label: str = Field(min_length=1, max_length=128)
+    app_name: NetworkAppName
+    label: str = Field(min_length=1, max_length=256)
+
+
+class NetworkAppList(NetworkModel):
+    apps: list[NetworkMonitoredApp]
+    unavailable_nodes: list[str]
+
+
+class NetworkAppContext(NetworkModel):
+    app: NetworkMonitoredApp
+    process: NodeAppProcessSummary
+    player_count: int | None = Field(default=None, ge=0)
+    player_capacity: int | None = Field(default=None, ge=0)
+
+
 class ProbeBase(NetworkModel):
-    target_id: str = Field(min_length=1, max_length=128)
+    target_id: NetworkNodeId
     offset_ms: int = Field(
         ge=0, le=NETWORK_LIMITS.max_duration_ms + NETWORK_LIMITS.timeout_ms
     )
@@ -96,7 +119,7 @@ type NetworkProbe = Annotated[
 
 
 class NetworkNodeContext(NetworkModel):
-    target_id: str = Field(min_length=1, max_length=128)
+    target_id: NetworkNodeId
     availability: Literal["online", "connecting", "offline"]
     captured_at_ms: int | None = Field(default=None, ge=0)
     cpu_percent: Percent | None = None
@@ -109,6 +132,7 @@ class NetworkNodeContext(NetworkModel):
 class NetworkContext(NetworkModel):
     observed_at_ms: int = Field(ge=0)
     nodes: list[NetworkNodeContext] = Field(max_length=NETWORK_LIMITS.max_targets)
+    app: NetworkAppContext | None = None
 
 
 class RecordedContext(NetworkModel):
@@ -145,6 +169,7 @@ class NetworkReportInput(NetworkModel):
     probes: list[NetworkProbe] = Field(max_length=15000)
     contexts: list[RecordedContext] = Field(max_length=1000)
     markers: list[NetworkMarker] = Field(max_length=100)
+    monitored_app: NetworkMonitoredApp | None = None
 
     @model_validator(mode="after")
     def validate_timeline(self) -> Self:
@@ -159,6 +184,16 @@ class NetworkReportInput(NetworkModel):
         for item in [*self.contexts, *self.markers]:
             if item.offset_ms > self.duration_ms:
                 raise ValueError("Event timestamps must fall within the recording.")
+        for item in self.contexts:
+            app = None if item.snapshot is None else item.snapshot.app
+            if app is not None and (
+                self.monitored_app is None
+                or app.app.target_id != self.monitored_app.target_id
+                or app.app.app_name != self.monitored_app.app_name
+            ):
+                raise ValueError(
+                    "Process observations must belong to the monitored app."
+                )
         return self
 
 

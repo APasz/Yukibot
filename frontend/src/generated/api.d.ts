@@ -38,6 +38,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/network/apps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Apps */
+        get: operations["network_apps"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/network/reports": {
         parameters: {
             query?: never;
@@ -79,8 +96,7 @@ export interface components {
     schemas: {
         /** DelayedProbe */
         DelayedProbe: {
-            /** Target Id */
-            target_id: string;
+            target_id: components["schemas"]["NetworkNodeId"];
             /** Offset Ms */
             offset_ms: number;
             /** Hidden */
@@ -95,8 +111,7 @@ export interface components {
         };
         /** FailedProbe */
         FailedProbe: {
-            /** Target Id */
-            target_id: string;
+            target_id: components["schemas"]["NetworkNodeId"];
             /** Offset Ms */
             offset_ms: number;
             /** Hidden */
@@ -116,6 +131,23 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** NetworkAppContext */
+        NetworkAppContext: {
+            app: components["schemas"]["NetworkMonitoredApp"];
+            process: components["schemas"]["NodeAppProcessSummary"];
+            /** Player Count */
+            player_count?: number | null;
+            /** Player Capacity */
+            player_capacity?: number | null;
+        };
+        /** NetworkAppList */
+        NetworkAppList: {
+            /** Apps */
+            apps: components["schemas"]["NetworkMonitoredApp"][];
+            /** Unavailable Nodes */
+            unavailable_nodes: string[];
+        };
+        NetworkAppName: string;
         /** NetworkConfiguration */
         NetworkConfiguration: {
             identity: components["schemas"]["NetworkIdentity"];
@@ -129,6 +161,7 @@ export interface components {
             observed_at_ms: number;
             /** Nodes */
             nodes: components["schemas"]["NetworkNodeContext"][];
+            app?: components["schemas"]["NetworkAppContext"] | null;
         };
         /** NetworkIdentity */
         NetworkIdentity: {
@@ -161,10 +194,18 @@ export interface components {
             /** Label */
             label: string;
         };
+        /** NetworkMonitoredApp */
+        NetworkMonitoredApp: {
+            target_id: components["schemas"]["NetworkNodeId"];
+            /** Node Label */
+            node_label: string;
+            app_name: components["schemas"]["NetworkAppName"];
+            /** Label */
+            label: string;
+        };
         /** NetworkNodeContext */
         NetworkNodeContext: {
-            /** Target Id */
-            target_id: string;
+            target_id: components["schemas"]["NetworkNodeId"];
             /**
              * Availability
              * @enum {string}
@@ -181,6 +222,7 @@ export interface components {
             /** Portal Probe Captured At Ms */
             portal_probe_captured_at_ms?: number | null;
         };
+        NetworkNodeId: string;
         NetworkProbe: components["schemas"]["SuccessfulProbe"] | components["schemas"]["FailedProbe"] | components["schemas"]["DelayedProbe"];
         /** NetworkReport */
         NetworkReport: {
@@ -219,6 +261,7 @@ export interface components {
             contexts: components["schemas"]["RecordedContext"][];
             /** Markers */
             markers: components["schemas"]["NetworkMarker"][];
+            monitored_app?: components["schemas"]["NetworkMonitoredApp"] | null;
         };
         /** NetworkReportList */
         NetworkReportList: {
@@ -249,8 +292,7 @@ export interface components {
         };
         /** NetworkTarget */
         NetworkTarget: {
-            /** Id */
-            id: string;
+            id: components["schemas"]["NetworkNodeId"];
             /** Label */
             label: string;
             /** Url */
@@ -260,6 +302,32 @@ export interface components {
              * @enum {string}
              */
             kind: "portal" | "node";
+        };
+        /** NodeAppProcessSummary */
+        NodeAppProcessSummary: {
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "running" | "stopped" | "unavailable";
+            /** Captured At Ms */
+            captured_at_ms: number;
+            /** Pid */
+            pid?: number | null;
+            /** Started At Ms */
+            started_at_ms?: number | null;
+            /** Process Count */
+            process_count?: number | null;
+            /** Cpu Percent */
+            cpu_percent?: number | null;
+            /** Memory Rss Bytes */
+            memory_rss_bytes?: number | null;
+            /** Thread Count */
+            thread_count?: number | null;
+            /** Read Bytes Per Second */
+            read_bytes_per_second?: number | null;
+            /** Write Bytes Per Second */
+            write_bytes_per_second?: number | null;
         };
         Percent: number;
         /** RecordedContext */
@@ -272,8 +340,7 @@ export interface components {
         };
         /** SuccessfulProbe */
         SuccessfulProbe: {
-            /** Target Id */
-            target_id: string;
+            target_id: components["schemas"]["NetworkNodeId"];
             /** Offset Ms */
             offset_ms: number;
             /** Hidden */
@@ -332,7 +399,10 @@ export interface operations {
     };
     network_context: {
         parameters: {
-            query?: never;
+            query?: {
+                node_name?: components["schemas"]["NetworkNodeId"] | null;
+                app_name?: components["schemas"]["NetworkAppName"] | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -346,6 +416,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NetworkContext"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    network_apps: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkAppList"];
                 };
             };
         };

@@ -5,6 +5,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -12,14 +13,19 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from node_api.process import NodeAppProcessSummary
 from web_api.network_models import (
     MAX_REPORT_BYTES,
     NETWORK_LIMITS,
     FailedProbe,
+    NetworkAppContext,
+    NetworkAppList,
     NetworkConfiguration,
     NetworkContext,
     NetworkIdentity,
+    NetworkMonitoredApp,
     NetworkNodeContext,
+    NetworkReport,
     NetworkReportInput,
     NetworkTarget,
 )
@@ -57,8 +63,43 @@ class DiagnosticBackend:
             limits=NETWORK_LIMITS,
         )
 
-    async def network_context(self) -> NetworkContext:
-        return NetworkContext(observed_at_ms=1234, nodes=[])
+    async def network_context(
+        self,
+        request: Request,
+        node_name: str | None = None,
+        app_name: str | None = None,
+    ) -> NetworkContext:
+        app = (
+            None
+            if node_name is None or app_name is None
+            else NetworkAppContext(
+                app=NetworkMonitoredApp(
+                    target_id=node_name,
+                    node_label="Erin",
+                    app_name=app_name,
+                    label="UL",
+                ),
+                process=NodeAppProcessSummary(
+                    state="running",
+                    captured_at_ms=1234,
+                    cpu_percent=235.5,
+                    memory_rss_bytes=1024,
+                ),
+                player_count=2,
+                player_capacity=12,
+            )
+        )
+        return NetworkContext(observed_at_ms=1234, nodes=[], app=app)
+
+    async def network_apps(self) -> NetworkAppList:
+        return NetworkAppList(
+            apps=[
+                NetworkMonitoredApp(
+                    target_id="erin", node_label="Erin", app_name="ul", label="UL"
+                )
+            ],
+            unavailable_nodes=[],
+        )
 
 
 @pytest.fixture
@@ -144,7 +185,13 @@ def test_assets_are_immutable_and_cannot_escape_asset_directory(
 
 
 @pytest.mark.parametrize(
-    "path", ["/api/network/config", "/api/network/context", "/api/network/reports"]
+    "path",
+    [
+        "/api/network/config",
+        "/api/network/context",
+        "/api/network/reports",
+        "/api/network/apps",
+    ],
 )
 def test_api_requires_authentication_and_does_not_cache_context(
     client: TestClient, path: str
@@ -237,6 +284,38 @@ def test_body_limit_applies_without_content_length(client: TestClient) -> None:
     assert response.status_code == 413
 
 
+def test_selected_process_telemetry_round_trips_with_a_recording(
+    client: TestClient,
+) -> None:
+    headers = {"x-test-user": "one"}
+    app = client.get("/api/network/apps", headers=headers).json()["apps"][0]
+    assert app["app_name"] == "ul"
+    snapshot = client.get(
+        "/api/network/context?node_name=erin&app_name=ul", headers=headers
+    ).json()
+    assert snapshot["app"]["process"]["cpu_percent"] == 235.5
+    assert (
+        client.get("/api/network/context?node_name=erin", headers=headers).status_code
+        == 422
+    )
+    payload = recording()
+    payload["monitored_app"] = app
+    payload["contexts"] = [{"offset_ms": 1000, "snapshot": snapshot}]
+    saved = client.post("/api/network/reports", headers=headers, json=payload)
+    assert saved.status_code == 200, saved.text
+    report_id = saved.json()["summary"]["id"]
+    restored = client.get(f"/api/network/reports/{report_id}", headers=headers).json()[
+        "recording"
+    ]
+    assert restored["monitored_app"] == app
+    assert restored["contexts"][0]["snapshot"]["app"] == snapshot["app"]
+    payload["monitored_app"] = {**app, "app_name": "different"}
+    assert (
+        client.post("/api/network/reports", headers=headers, json=payload).status_code
+        == 422
+    )
+
+
 def test_report_validation_distinguishes_http_failures_and_unknown_targets() -> None:
     with pytest.raises(ValidationError):
         FailedProbe(
@@ -311,3 +390,65 @@ def test_new_api_import_does_not_import_nicegui() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "node_name,app_name",
+    [("", "ul"), ("erin", ""), ("a" * 129, "ul"), ("erin", "a" * 257)],
+)
+def test_process_selection_rejects_invalid_identifiers(
+    client: TestClient, node_name: str, app_name: str
+) -> None:
+    response = client.get(
+        "/api/network/context",
+        headers={"x-test-user": "one"},
+        params={"node_name": node_name, "app_name": app_name},
+    )
+    assert response.status_code == 422
+
+
+def test_report_library_and_saves_do_not_construct_other_recordings(
+    tmp_path: Path,
+) -> None:
+    store = NetworkReportStore(tmp_path / "reports")
+    identity = NetworkIdentity(user_id="one", display_name="One", is_admin=False)
+    first = store.save(
+        NetworkReportInput.model_validate_json(json.dumps(recording())), identity
+    )
+    try:
+        with patch.object(
+            NetworkReport,
+            "model_validate_json",
+            side_effect=AssertionError("Unexpected full recording load"),
+        ):
+            assert store.list(identity) == [first.summary]
+            second = store.save(
+                NetworkReportInput.model_validate_json(json.dumps(recording())),
+                identity,
+            )
+            assert store.list(identity) == [second.summary, first.summary]
+        assert store.get(first.summary.id, identity) == first
+    finally:
+        store.close()
+
+
+def test_report_caps_preserve_newest_summaries_across_users(tmp_path: Path) -> None:
+    store = NetworkReportStore(tmp_path / "reports")
+    admin = NetworkIdentity(user_id="admin", display_name="Admin", is_admin=True)
+    try:
+        with (
+            patch("web_api.network_reports.MAX_REPORTS_PER_USER", 2),
+            patch("web_api.network_reports.MAX_STORED_REPORTS", 3),
+        ):
+            saved = [
+                store.save(
+                    NetworkReportInput.model_validate_json(json.dumps(recording())),
+                    NetworkIdentity(user_id=owner, display_name=owner, is_admin=False),
+                )
+                for owner in ("one", "one", "one", "two", "three")
+            ]
+        assert store.list(admin) == [report.summary for report in reversed(saved[-3:])]
+        assert store.get(saved[0].summary.id, admin) is None
+        assert store.get(saved[1].summary.id, admin) is None
+    finally:
+        store.close()

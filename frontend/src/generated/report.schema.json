@@ -4,10 +4,7 @@
       "additionalProperties": false,
       "properties": {
         "target_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "title": "Target Id",
-          "type": "string"
+          "$ref": "#/$defs/NetworkNodeId"
         },
         "offset_ms": {
           "maximum": 1805000,
@@ -45,10 +42,7 @@
       "additionalProperties": false,
       "properties": {
         "target_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "title": "Target Id",
-          "type": "string"
+          "$ref": "#/$defs/NetworkNodeId"
         },
         "offset_ms": {
           "maximum": 1805000,
@@ -100,6 +94,54 @@
       "title": "FailedProbe",
       "type": "object"
     },
+    "NetworkAppContext": {
+      "additionalProperties": false,
+      "properties": {
+        "app": {
+          "$ref": "#/$defs/NetworkMonitoredApp"
+        },
+        "process": {
+          "$ref": "#/$defs/NodeAppProcessSummary"
+        },
+        "player_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Player Count"
+        },
+        "player_capacity": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Player Capacity"
+        }
+      },
+      "required": [
+        "app",
+        "process"
+      ],
+      "title": "NetworkAppContext",
+      "type": "object"
+    },
+    "NetworkAppName": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
     "NetworkContext": {
       "additionalProperties": false,
       "properties": {
@@ -115,6 +157,17 @@
           "maxItems": 16,
           "title": "Nodes",
           "type": "array"
+        },
+        "app": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkAppContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -147,14 +200,42 @@
       "title": "NetworkMarker",
       "type": "object"
     },
+    "NetworkMonitoredApp": {
+      "additionalProperties": false,
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/NetworkNodeId"
+        },
+        "node_label": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Node Label",
+          "type": "string"
+        },
+        "app_name": {
+          "$ref": "#/$defs/NetworkAppName"
+        },
+        "label": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "node_label",
+        "app_name",
+        "label"
+      ],
+      "title": "NetworkMonitoredApp",
+      "type": "object"
+    },
     "NetworkNodeContext": {
       "additionalProperties": false,
       "properties": {
         "target_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "title": "Target Id",
-          "type": "string"
+          "$ref": "#/$defs/NetworkNodeId"
         },
         "availability": {
           "enum": [
@@ -242,6 +323,11 @@
       "title": "NetworkNodeContext",
       "type": "object"
     },
+    "NetworkNodeId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
     "NetworkProbe": {
       "discriminator": {
         "mapping": {
@@ -269,10 +355,7 @@
       "additionalProperties": false,
       "properties": {
         "id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "title": "Id",
-          "type": "string"
+          "$ref": "#/$defs/NetworkNodeId"
         },
         "label": {
           "maxLength": 128,
@@ -302,6 +385,135 @@
         "kind"
       ],
       "title": "NetworkTarget",
+      "type": "object"
+    },
+    "NodeAppProcessSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "running",
+            "stopped",
+            "unavailable"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "captured_at_ms": {
+          "minimum": 0,
+          "title": "Captured At Ms",
+          "type": "integer"
+        },
+        "pid": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pid"
+        },
+        "started_at_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At Ms"
+        },
+        "process_count": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Process Count"
+        },
+        "cpu_percent": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Percent"
+        },
+        "memory_rss_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Rss Bytes"
+        },
+        "thread_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Count"
+        },
+        "read_bytes_per_second": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Read Bytes Per Second"
+        },
+        "write_bytes_per_second": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Write Bytes Per Second"
+        }
+      },
+      "required": [
+        "state",
+        "captured_at_ms"
+      ],
+      "title": "NodeAppProcessSummary",
       "type": "object"
     },
     "Percent": {
@@ -353,10 +565,7 @@
       "additionalProperties": false,
       "properties": {
         "target_id": {
-          "maxLength": 128,
-          "minLength": 1,
-          "title": "Target Id",
-          "type": "string"
+          "$ref": "#/$defs/NetworkNodeId"
         },
         "offset_ms": {
           "maximum": 1805000,
@@ -466,6 +675,17 @@
       "maxItems": 100,
       "title": "Markers",
       "type": "array"
+    },
+    "monitored_app": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NetworkMonitoredApp"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

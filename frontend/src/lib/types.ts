@@ -12,3 +12,5 @@ export type Context = Schemas['NetworkContext'];
 export type RecordedContext = Schemas['RecordedContext'];
 export type Probe = Recording['probes'][number];
 export type Marker = Schemas['NetworkMarker'];
+export type MonitoredApp = Schemas['NetworkMonitoredApp'];
+export type AppList = Schemas['NetworkAppList'];

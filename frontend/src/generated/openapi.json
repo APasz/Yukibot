@@ -33,6 +33,40 @@
         ],
         "summary": "Context",
         "operationId": "network_context",
+        "parameters": [
+          {
+            "name": "node_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/NetworkNodeId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Node Name"
+            }
+          },
+          {
+            "name": "app_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/NetworkAppName"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "App Name"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -40,6 +74,37 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NetworkContext"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/network/apps": {
+      "get": {
+        "tags": [
+          "network-diagnostics"
+        ],
+        "summary": "Apps",
+        "operationId": "network_apps",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkAppList"
                 }
               }
             }
@@ -156,10 +221,7 @@
       "DelayedProbe": {
         "properties": {
           "target_id": {
-            "type": "string",
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Target Id"
+            "$ref": "#/components/schemas/NetworkNodeId"
           },
           "offset_ms": {
             "type": "integer",
@@ -197,10 +259,7 @@
       "FailedProbe": {
         "properties": {
           "target_id": {
-            "type": "string",
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Target Id"
+            "$ref": "#/components/schemas/NetworkNodeId"
           },
           "offset_ms": {
             "type": "integer",
@@ -265,6 +324,77 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "NetworkAppContext": {
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/NetworkMonitoredApp"
+          },
+          "process": {
+            "$ref": "#/components/schemas/NodeAppProcessSummary"
+          },
+          "player_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Count"
+          },
+          "player_capacity": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Player Capacity"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "app",
+          "process"
+        ],
+        "title": "NetworkAppContext"
+      },
+      "NetworkAppList": {
+        "properties": {
+          "apps": {
+            "items": {
+              "$ref": "#/components/schemas/NetworkMonitoredApp"
+            },
+            "type": "array",
+            "title": "Apps"
+          },
+          "unavailable_nodes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unavailable Nodes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "apps",
+          "unavailable_nodes"
+        ],
+        "title": "NetworkAppList"
+      },
+      "NetworkAppName": {
+        "type": "string",
+        "maxLength": 256,
+        "minLength": 1
+      },
       "NetworkConfiguration": {
         "properties": {
           "identity": {
@@ -305,6 +435,16 @@
             "type": "array",
             "maxItems": 16,
             "title": "Nodes"
+          },
+          "app": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetworkAppContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -401,13 +541,41 @@
         ],
         "title": "NetworkMarker"
       },
-      "NetworkNodeContext": {
+      "NetworkMonitoredApp": {
         "properties": {
           "target_id": {
+            "$ref": "#/components/schemas/NetworkNodeId"
+          },
+          "node_label": {
             "type": "string",
             "maxLength": 128,
             "minLength": 1,
-            "title": "Target Id"
+            "title": "Node Label"
+          },
+          "app_name": {
+            "$ref": "#/components/schemas/NetworkAppName"
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "target_id",
+          "node_label",
+          "app_name",
+          "label"
+        ],
+        "title": "NetworkMonitoredApp"
+      },
+      "NetworkNodeContext": {
+        "properties": {
+          "target_id": {
+            "$ref": "#/components/schemas/NetworkNodeId"
           },
           "availability": {
             "type": "string",
@@ -490,6 +658,11 @@
           "availability"
         ],
         "title": "NetworkNodeContext"
+      },
+      "NetworkNodeId": {
+        "type": "string",
+        "maxLength": 128,
+        "minLength": 1
       },
       "NetworkProbe": {
         "oneOf": [
@@ -599,6 +772,16 @@
             "type": "array",
             "maxItems": 100,
             "title": "Markers"
+          },
+          "monitored_app": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetworkMonitoredApp"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -685,10 +868,7 @@
       "NetworkTarget": {
         "properties": {
           "id": {
-            "type": "string",
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Id"
+            "$ref": "#/components/schemas/NetworkNodeId"
           },
           "label": {
             "type": "string",
@@ -720,6 +900,127 @@
           "kind"
         ],
         "title": "NetworkTarget"
+      },
+      "NodeAppProcessSummary": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "running",
+              "stopped",
+              "unavailable"
+            ],
+            "title": "State"
+          },
+          "captured_at_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Captured At Ms"
+          },
+          "pid": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pid"
+          },
+          "started_at_ms": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At Ms"
+          },
+          "process_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Process Count"
+          },
+          "cpu_percent": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Percent"
+          },
+          "memory_rss_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Rss Bytes"
+          },
+          "thread_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Count"
+          },
+          "read_bytes_per_second": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Read Bytes Per Second"
+          },
+          "write_bytes_per_second": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Write Bytes Per Second"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "state",
+          "captured_at_ms"
+        ],
+        "title": "NodeAppProcessSummary"
       },
       "Percent": {
         "type": "integer",
@@ -768,10 +1069,7 @@
       "SuccessfulProbe": {
         "properties": {
           "target_id": {
-            "type": "string",
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Target Id"
+            "$ref": "#/components/schemas/NetworkNodeId"
           },
           "offset_ms": {
             "type": "integer",

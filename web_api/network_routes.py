@@ -4,26 +4,29 @@ from __future__ import annotations
 
 from html import escape
 from pathlib import Path
-from typing import Protocol
+from typing import Annotated, Protocol
 from urllib.parse import urlencode
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from _async_utils import run_blocking
+
 from .network_models import (
     MAX_REPORT_BYTES,
+    NetworkAppList,
+    NetworkAppName,
     NetworkConfiguration,
     NetworkContext,
     NetworkIdentity,
+    NetworkNodeId,
     NetworkReport,
     NetworkReportInput,
     NetworkReportList,
 )
 from .network_reports import NetworkReportStore
-
 
 FRONTEND_ROOT = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 
@@ -33,7 +36,13 @@ class NetworkBackend(Protocol):
     def network_configuration(
         self, identity: NetworkIdentity
     ) -> NetworkConfiguration: ...
-    async def network_context(self) -> NetworkContext: ...
+    async def network_apps(self) -> NetworkAppList: ...
+    async def network_context(
+        self,
+        request: Request,
+        node_name: str | None = None,
+        app_name: str | None = None,
+    ) -> NetworkContext: ...
 
     @property
     def network_reports(self) -> NetworkReportStore: ...
@@ -136,9 +145,20 @@ def create_network_router(
         return service().network_configuration(service().network_identity(request))
 
     @router.get("/api/network/context", operation_id="network_context")
-    async def context(request: Request) -> NetworkContext:
+    async def context(
+        request: Request,
+        node_name: Annotated[NetworkNodeId | None, Query()] = None,
+        app_name: Annotated[NetworkAppName | None, Query()] = None,
+    ) -> NetworkContext:
         service().network_identity(request)
-        return await service().network_context()
+        if (node_name is None) != (app_name is None):
+            raise HTTPException(422, "Choose both a node and an app.")
+        return await service().network_context(request, node_name, app_name)
+
+    @router.get("/api/network/apps", operation_id="network_apps")
+    async def apps(request: Request) -> NetworkAppList:
+        service().network_identity(request)
+        return await service().network_apps()
 
     @router.get("/api/network/reports", operation_id="network_reports")
     async def reports(request: Request) -> NetworkReportList:

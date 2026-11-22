@@ -21,6 +21,7 @@ from .app_state import (
     required_app_mutation_scope,
 )
 from .mod_service import NodeModService
+from .process import NodeAppProcessSummary
 from .realtime_service import NodeRealtimeService
 from .route_contracts import (
     HttpExceptionFactory,
@@ -36,6 +37,7 @@ def register_app_routes(
     resolve_app: Callable[[str], App],
     mod_service: NodeModService,
     build_cached_runtime_summary: Callable[[App], Awaitable[NodeAppRuntimeSummary]],
+    build_process_summary: Callable[[App], NodeAppProcessSummary],
     games: NodeAppGameService,
     mutations: NodeAppMutationService,
     realtime: NodeRealtimeService,
@@ -44,6 +46,16 @@ def register_app_routes(
     traffic_log: logging.Logger,
 ) -> None:
     """Register app catalogue extensions, runtime, and app-control endpoints."""
+
+    @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/process")
+    async def _process_summary(
+        app_name: str, request: Request, response: Response, access_token: str | None = None
+    ) -> NodeAppProcessSummary:
+        auth.require_access(
+            request, access_token, app_name=app_name, scopes=(NodeApiScope.APPS_READ,)
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return await run_blocking(build_process_summary, resolve_app(app_name))
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/mods")
     async def _list_mods(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:

@@ -476,6 +476,13 @@ dd {
   display: block;
   font-size: 0.66rem;
 }
+.process-picker {
+  max-width: 540px;
+  margin-bottom: 20px;
+}
+.process-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
 .empty-state {
   text-align: center;
   padding: 45px 22px;

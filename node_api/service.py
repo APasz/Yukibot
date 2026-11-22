@@ -682,6 +682,7 @@ class NodeApiService:
             resolve_app=self._resolve_app,
             mod_service=self._mod_service,
             build_cached_runtime_summary=self.build_cached_app_runtime_summary,
+            build_process_summary=self.system_monitoring.build_app_process_summary,
             games=self.app_games,
             mutations=self._app_mutations,
             realtime=self.realtime,

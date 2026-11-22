@@ -6,15 +6,20 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
-from fastapi import HTTPException
+import pytest
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from nicegui import ui
 from nicegui.app.app import App
 
 import config
+from mod_web_auth import ModWebUser
+from node_api.app_state import NodeAppEntry
+from node_api.process import NodeAppProcessSummary
 from node_api.service import PortalNodeLatencyProbe
 from node_api.system import NodeSystemSummary
-from web_api.network_models import NetworkIdentity
+from node_auth import NodeApiScope
+from web_api.network_models import NetworkContext, NetworkIdentity
 from web_api.network_reports import NetworkReportStore
 from web_dash.nicegui_protocols import ModWebFastApiApp, ModWebRouteUi
 from web_dash.remote_node_monitor import (
@@ -98,7 +103,7 @@ def test_context_preserves_capture_times_and_marks_retained_offline_metrics() ->
             AsyncMock(return_value={"erin": probe}),
         ),
     ):
-        context = asyncio.run(service.network_context())
+        context = asyncio.run(service.network_context(Request({"type": "http"})))
     node = context.nodes[1]
     assert node.availability == "offline"
     assert node.captured_at_ms == 100000
@@ -115,6 +120,93 @@ def test_remote_nodes_preserve_the_new_portal_owned_paths() -> None:
     ):
         for path in ("/mod-web/network", "/mod-web/frontend/assets/app-hash.js"):
             assert service._remote_portal_path(path, target_node_name="erin") == path
+
+
+def app_entry(*, name: str = "ul", running: bool = True) -> NodeAppEntry:
+    return NodeAppEntry(
+        name=name,
+        friendly="Undead Legacy",
+        node="erin",
+        running=running,
+        enabled=True,
+        supports_mods=True,
+        supports_configs=True,
+        player_count=2,
+        player_capacity=12,
+    )
+
+
+def test_app_discovery_lists_running_apps_and_excludes_retained_offline_state() -> None:
+    service = ModWebService()
+    nodes = links()
+    snapshot = RemoteNodeMonitorSnapshot(
+        node=nodes[1],
+        availability=RemoteNodeAvailability.ONLINE,
+        app_entries=(app_entry(), app_entry(name="stopped", running=False)),
+    )
+    with (
+        patch.object(service, "_node_links", return_value=nodes),
+        patch.object(service._node_api, "list_apps", AsyncMock(return_value=())),
+        patch.object(
+            service, "_remote_node_monitor_snapshot", return_value=snapshot
+        ) as cached,
+    ):
+        result = asyncio.run(service.network_apps())
+        assert [(app.target_id, app.app_name) for app in result.apps] == [
+            ("erin", "ul")
+        ]
+        cached.return_value = RemoteNodeMonitorSnapshot(
+            node=nodes[1],
+            availability=RemoteNodeAvailability.OFFLINE,
+            app_entries=snapshot.app_entries,
+        )
+        result = asyncio.run(service.network_apps())
+        assert result.apps == [] and result.unavailable_nodes == ["Erin"]
+
+
+def test_remote_process_keeps_player_credentials_and_host_context() -> None:
+    service = ModWebService()
+    nodes = links()
+    user = ModWebUser(123, "Player", None, None)
+    request = Request({"type": "http"})
+    snapshot = RemoteNodeMonitorSnapshot(
+        node=nodes[1],
+        availability=RemoteNodeAvailability.ONLINE,
+        app_entries=(app_entry(),),
+    )
+    process = NodeAppProcessSummary(
+        state="running",
+        captured_at_ms=100000,
+        pid=1234,
+        cpu_percent=175.5,
+        memory_rss_bytes=4096,
+    )
+    with (
+        patch.object(service, "_node_links", return_value=nodes),
+        patch.object(service, "_require_http_user", return_value=user),
+        patch.object(service, "_remote_node_monitor_snapshot", return_value=snapshot),
+        patch.object(
+            service,
+            "_network_node_context",
+            AsyncMock(return_value=NetworkContext(observed_at_ms=100000, nodes=[])),
+        ),
+        patch.object(
+            service, "_remote_json_async", AsyncMock(return_value=process.model_dump())
+        ) as remote,
+    ):
+        result = asyncio.run(service.network_context(request, "erin", "ul"))
+        assert result.app is not None
+        assert result.app.process.cpu_percent == 175.5 and result.app.player_count == 2
+        assert remote.call_args.kwargs["user"] is user
+        assert remote.call_args.kwargs["scopes"] == (NodeApiScope.APPS_READ,)
+        remote.side_effect = RuntimeError("Remote node unavailable")
+        unavailable = asyncio.run(service.network_context(request, "erin", "ul"))
+        assert (
+            unavailable.app is not None
+            and unavailable.app.process.state == "unavailable"
+        )
+        assert unavailable.app.player_count is None
+        assert unavailable.nodes == result.nodes
 
 
 def test_diagnostics_routes_work_through_the_registered_dashboard_stack(
@@ -152,3 +244,98 @@ def test_diagnostics_routes_work_through_the_registered_dashboard_stack(
                 == 303
             )
     store.close()
+
+
+def test_failed_local_catalog_does_not_hide_remote_running_apps() -> None:
+    service = ModWebService()
+    nodes = links()
+    remote = RemoteNodeMonitorSnapshot(
+        node=nodes[1],
+        availability=RemoteNodeAvailability.ONLINE,
+        app_entries=(app_entry(),),
+    )
+    with (
+        patch.object(service, "_node_links", return_value=nodes),
+        patch.object(
+            service._node_api,
+            "list_apps",
+            AsyncMock(side_effect=RuntimeError("Catalogue failed")),
+        ),
+        patch.object(service, "_remote_node_monitor_snapshot", return_value=remote),
+    ):
+        result = asyncio.run(service.network_apps())
+    assert [(app.target_id, app.app_name) for app in result.apps] == [("erin", "ul")]
+    assert result.unavailable_nodes == ["Portal"]
+
+
+def test_slow_catalog_times_out_without_blocking_healthy_nodes() -> None:
+    async def wait_for_catalog() -> tuple[NodeAppEntry, ...]:
+        await asyncio.Event().wait()
+        raise AssertionError("The pending catalogue should have been cancelled")
+
+    service = ModWebService()
+    nodes = links()
+    remote = RemoteNodeMonitorSnapshot(
+        node=nodes[1],
+        availability=RemoteNodeAvailability.ONLINE,
+        app_entries=(app_entry(),),
+    )
+    with (
+        patch("web_dash.network_service._APP_TELEMETRY_TIMEOUT_SECONDS", 0.01),
+        patch.object(service, "_node_links", return_value=nodes),
+        patch.object(service._node_api, "list_apps", side_effect=wait_for_catalog),
+        patch.object(service, "_remote_node_monitor_snapshot", return_value=remote),
+    ):
+        result = asyncio.run(service.network_apps())
+    assert result.unavailable_nodes == ["Portal"]
+    assert len(result.apps) == 1
+
+
+def test_local_process_sampling_survives_a_failed_catalog() -> None:
+    service = ModWebService()
+    user = ModWebUser(123, "Player", None, None)
+    process = NodeAppProcessSummary(
+        state="running", captured_at_ms=100, pid=10, memory_rss_bytes=1024
+    )
+    with (
+        patch.object(service, "_node_links", return_value=links()),
+        patch.object(service, "_require_http_user", return_value=user),
+        patch.object(
+            service._node_api,
+            "list_apps",
+            AsyncMock(side_effect=RuntimeError("Catalogue failed")),
+        ),
+        patch.object(service, "_resolve_app"),
+        patch.object(
+            service._node_api.system_monitoring,
+            "build_app_process_summary",
+            return_value=process,
+        ),
+        patch.object(
+            service,
+            "_network_node_context",
+            AsyncMock(return_value=NetworkContext(observed_at_ms=100, nodes=[])),
+        ),
+    ):
+        result = asyncio.run(
+            service.network_context(Request({"type": "http"}), "portal", "ul")
+        )
+    assert result.app is not None and result.app.process == process
+    assert result.app.player_count is None
+
+
+def test_unknown_node_is_rejected_before_starting_measurements() -> None:
+    service = ModWebService()
+    with (
+        patch.object(service, "_node_links", return_value=links()),
+        patch.object(service, "_require_http_user"),
+        patch.object(service, "_network_node_context", AsyncMock()) as context,
+        patch.object(service, "_network_app_context", AsyncMock()) as process,
+    ):
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(
+                service.network_context(Request({"type": "http"}), "unknown", "ul")
+            )
+    assert error.value.status_code == 404
+    context.assert_not_called()
+    process.assert_not_called()

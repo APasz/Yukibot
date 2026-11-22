@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { measureProbe, Recorder } from './recorder';
-import type { Context, Limits, Recording, Target } from './types';
+import type { Context, Limits, MonitoredApp, Recording, Target } from './types';
 
 const target: Target = {
   id: 'erin',
@@ -143,4 +143,44 @@ it('places context at response time and freezes the duration when stopped with a
   expect(recorder.recording.duration_ms).toBe(13000);
   expect(recorder.recording.contexts).toHaveLength(1);
   expect(vi.getTimerCount()).toBe(0);
+});
+
+it('keeps the monitored app and its process observations with the recording', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+  const app: MonitoredApp = {
+    target_id: 'erin',
+    node_label: 'Erin',
+    app_name: 'ul',
+    label: 'Undead Legacy',
+  };
+  const context: Context = {
+    observed_at_ms: Date.now(),
+    nodes: [],
+    app: {
+      app,
+      player_count: 2,
+      player_capacity: 12,
+      process: {
+        state: 'running',
+        captured_at_ms: Date.now(),
+        pid: 123,
+        cpu_percent: 175.5,
+        memory_rss_bytes: 4096,
+      },
+    },
+  };
+  const recorder = new Recorder(
+    [target],
+    'UL',
+    limits,
+    () => {},
+    async () => context,
+    () => {},
+    app,
+  );
+  await vi.advanceTimersByTimeAsync(1000);
+  await recorder.stop();
+  expect(recorder.recording.monitored_app).toEqual(app);
+  expect(recorder.recording.contexts[0]?.snapshot?.app?.process.cpu_percent).toBe(175.5);
+  expect(recorder.recording.contexts[0]?.snapshot?.app?.player_count).toBe(2);
 });

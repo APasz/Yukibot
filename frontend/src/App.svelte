@@ -4,11 +4,20 @@
   import Timeline from './lib/Timeline.svelte';
   import ProbeSummary from './lib/ProbeSummary.svelte';
   import ServerContext from './lib/ServerContext.svelte';
+  import ProcessTelemetry from './lib/ProcessTelemetry.svelte';
   import { api, ApiError, errorMessage, requireData } from './lib/api';
   import { readDraft, writeDraft } from './lib/drafts';
   import { duration, probeLabel } from './lib/metrics';
   import { Recorder } from './lib/recorder';
-  import type { Configuration, Identity, Recording, Report, ReportSummary } from './lib/types';
+  import type {
+    AppList,
+    MonitoredApp,
+    Configuration,
+    Identity,
+    Recording,
+    Report,
+    ReportSummary,
+  } from './lib/types';
 
   let configuration = $state.raw<Configuration | null>(null);
   let loading = $state(true);
@@ -27,6 +36,10 @@
   let needsLogin = $state(false);
   let saved = $state(false);
   let owner = $state<Pick<Identity, 'user_id' | 'display_name'> | null>(null);
+  let apps = $state.raw<AppList>({ apps: [], unavailable_nodes: [] });
+  let appsLoading = $state(false);
+  let appsError = $state<string | null>(null);
+  let selectedAppKey = $state('');
   let recorder: Recorder | null = null;
   let draftPending: Promise<void> = Promise.resolve();
   let detailsTimer: ReturnType<typeof setTimeout> | undefined;
@@ -48,6 +61,27 @@
       .reverse() ?? [],
   );
   const owned = $derived(owner === null || owner.user_id === configuration?.identity.user_id);
+  const selectedApp = $derived(apps.apps.find((app) => appKey(app) === selectedAppKey) ?? null);
+
+  function appKey(app: MonitoredApp): string {
+    return JSON.stringify([app.target_id, app.app_name]);
+  }
+
+  async function refreshApps(): Promise<void> {
+    if (appsLoading || running) return;
+    appsLoading = true;
+    try {
+      apps = requireData(
+        await api.GET('/api/network/apps', { signal: AbortSignal.timeout(15000) }),
+      );
+      appsError = null;
+    } catch (error) {
+      appsError = errorMessage(error);
+      if (error instanceof ApiError && error.status === 401) fail(error);
+    } finally {
+      appsLoading = false;
+    }
+  }
 
   function fail(error: unknown): void {
     notice = { tone: 'error', text: errorMessage(error) };
@@ -104,6 +138,7 @@
         if (destroyed) return;
         configuration = config;
         selectedIds = config.targets.map((target) => target.id);
+        void refreshApps();
         try {
           const draft = await readDraft(config.identity.user_id);
           if (destroyed) return;
@@ -112,6 +147,7 @@
             owner = config.identity;
             title = draft.title;
             notes = draft.notes ?? '';
+            selectedAppKey = draft.monitored_app ? appKey(draft.monitored_app) : '';
             notice = {
               tone: 'info',
               text: 'Recovered your last browser recording. It is stopped and ready to review, save or export.',
@@ -130,9 +166,13 @@
     const timer = setInterval(() => {
       if (running) keepDraft();
     }, 5000);
+    const appsTimer = setInterval(() => {
+      if (configuration && !destroyed) void refreshApps();
+    }, 10000);
     return () => {
       destroyed = true;
       clearInterval(timer);
+      clearInterval(appsTimer);
       clearTimeout(detailsTimer);
       keepDraft();
       if (recorder) void recorder.stop();
@@ -142,12 +182,14 @@
   function start(): void {
     if (!configuration || running || pending !== null) return;
     const targets = configuration.targets.filter((target) => selectedIds.includes(target.id));
-    if (!targets.length || !title.trim()) return;
+    if (!targets.length || !title.trim() || (selectedAppKey && !selectedApp)) return;
+    const app = selectedApp;
     comparison = null;
     selectedOffset = null;
     targetId = '';
     notice = null;
     saved = false;
+    if (!owned) notes = '';
     owner = configuration.identity;
     running = true;
     recorder = new Recorder(
@@ -157,11 +199,18 @@
       (next) => {
         recording = next;
       },
-      async (signal) => requireData(await api.GET('/api/network/context', { signal })),
+      async (signal) =>
+        requireData(
+          await api.GET('/api/network/context', {
+            signal,
+            params: { query: app ? { node_name: app.target_id, app_name: app.app_name } : {} },
+          }),
+        ),
       () => {
         running = false;
         keepDraft();
       },
+      app,
     );
     keepDraft();
   }
@@ -208,6 +257,7 @@
         title = recording.title;
         notes = recording.notes ?? '';
         owner = { user_id: report.summary.owner_id, display_name: report.summary.owner_name };
+        selectedAppKey = recording.monitored_app ? appKey(recording.monitored_app) : '';
         comparison = null;
         targetId = '';
         selectedOffset = null;
@@ -307,7 +357,11 @@
         </div>
         <button
           class="primary"
-          disabled={!running && (pending !== null || !selectedIds.length || !title.trim())}
+          disabled={!running &&
+            (pending !== null ||
+              !selectedIds.length ||
+              !title.trim() ||
+              Boolean(selectedAppKey && !selectedApp))}
           onclick={() => (running ? void recorder?.stop() : start())}
           >{running ? '■ Stop recording' : '● Start recording'}</button
         >
@@ -332,6 +386,39 @@
           Starting a new session replaces the browser draft. Save or export this session first if
           you want to keep it.
         </p>{/if}
+    </section>
+
+    <section class="panel" aria-label="Game process telemetry">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Game process</p>
+          <h2>Game process telemetry</h2>
+        </div>
+        <button
+          disabled={appsLoading || running || pending !== null}
+          onclick={() => void refreshApps()}
+          >{appsLoading ? 'Refreshing apps…' : 'Refresh apps'}</button
+        >
+      </div>
+      <label class="process-picker"
+        >{recording && !running ? 'App for next recording' : 'App to monitor'}
+        <select bind:value={selectedAppKey} disabled={running || pending !== null}>
+          <option value="">Network only</option>
+          {#if selectedAppKey && !selectedApp}<option value={selectedAppKey} disabled
+              >{recording?.monitored_app?.label ?? 'Selected app'} · not currently listed</option
+            >{/if}
+          {#each apps.apps as app}<option value={appKey(app)}>{app.label} · {app.node_label}</option
+            >{/each}
+        </select>
+      </label>
+      {#if appsError}<p class="caption bad">App list unavailable: {appsError}</p>
+      {:else if apps.unavailable_nodes.length}<p class="caption">
+          Waiting for app lists from {apps.unavailable_nodes.join(', ')}.
+        </p>
+      {:else if !appsLoading && !apps.apps.length}<p class="caption">
+          No running apps are currently available.
+        </p>{/if}
+      <ProcessTelemetry {recording} offset={selectedOffset} />
     </section>
 
     {#if recording}

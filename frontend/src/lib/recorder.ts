@@ -1,4 +1,4 @@
-import type { Context, Limits, Probe, Recording, Target } from './types';
+import type { Context, Limits, MonitoredApp, Probe, Recording, Target } from './types';
 
 interface ProbeTiming {
   target_id: string;
@@ -75,6 +75,7 @@ export class Recorder {
     private readonly onChange: (recording: Recording) => void,
     private readonly loadContext: (signal: AbortSignal) => Promise<Context>,
     private readonly onStop: () => void,
+    monitoredApp: MonitoredApp | null = null,
   ) {
     this.recording = {
       schema_version: 1,
@@ -87,6 +88,7 @@ export class Recorder {
       probes: [],
       contexts: [],
       markers: [],
+      monitored_app: monitoredApp,
     };
     this.tasks = [...targets.map((target) => this.sampleTarget(target)), this.sampleContext()];
     this.stopTimer = setTimeout(() => {

@@ -4,7 +4,11 @@ const MAX_OBSERVATION_AGE_MS = 15000;
 
 export function contextAt(recording: Recording, offset: number): RecordedContext | undefined {
   if (offset < 0 || offset > recording.duration_ms) return undefined;
-  return recording.contexts.filter((item) => item.offset_ms <= offset).at(-1);
+  for (let index = recording.contexts.length - 1; index >= 0; index -= 1) {
+    const item = recording.contexts[index];
+    if (item && item.offset_ms <= offset) return item;
+  }
+  return undefined;
 }
 
 export function observationIsStale(
