@@ -4975,6 +4975,32 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(response.media_type, "image/png")
         get_mock.assert_not_called()
 
+    def test_squaremap_does_not_receive_node_access_tokens(self) -> None:
+        class _MappedApp(_DummyApp):
+            @property
+            def public_map_url(self) -> str | None:
+                return "https://example.invalid/squaremap/"
+
+        app = _build_app(Mock())
+        app.__class__ = _MappedApp
+        response = Mock(status_code=200, content=b"{}")
+        response.headers = {"Content-Type": "application/json"}
+        with patch("node_api.map_service.requests.Session.get", return_value=response) as get:
+            NodeApiService().maps.proxy_response(
+                app=app, relative_path="tiles/players.json", raw_query="access_token=private-node-token&tile_rev=5",
+            )
+        self.assertEqual(get.call_args.kwargs["params"], {"tile_rev": ["5"]})
+        maps = NodeApiService().maps
+        with (
+            patch("node_api.map_service.requests.Session.get", side_effect=requests.Timeout),
+            patch.object(maps._log, "warning") as warning,
+        ):
+            with self.assertRaises(HTTPException):
+                maps.proxy_response(
+                    app=app, relative_path="tiles/players.json", raw_query="access_token=private-node-token&tile_rev=5",
+                )
+        self.assertNotIn("private-node-token", str(warning.call_args))
+
     def test_build_map_manifest_uses_cached_squaremap_settings_when_upstream_is_unavailable(
         self,
     ) -> None:

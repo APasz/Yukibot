@@ -1638,7 +1638,7 @@ class ModWebAppPageMixin(
               </div>
               {read_only_note}
               <div class="mod-card mod-card-plain mod-map-status-panel">
-                <div id="{notice_id}" class="mod-map-notice mod-subtitle">Connecting to Squaremap…</div>
+                <div id="{notice_id}" class="mod-map-notice mod-subtitle">Loading rendered map…</div>
               </div>
               <div class="mod-card mod-card-plain mod-map-stage">
                 <div id="{canvas_frame_id}" class="mod-map-canvas-frame">
@@ -2071,6 +2071,7 @@ class ModWebAppPageMixin(
               }
               .mod-map-player-label,
               .mod-map-annotation-label {
+                width: max-content;
                 background: rgba(255, 255, 255, 0.94);
                 border: 1px solid rgba(15, 23, 42, 0.12);
                 border-radius: 999px;
@@ -2117,6 +2118,9 @@ class ModWebAppPageMixin(
                 }
                 .mod-map-status {
                   max-width: 55%;
+                  min-width: 0;
+                  white-space: normal;
+                  overflow-wrap: anywhere;
                 }
                 .mod-map-label-prompt {
                   width: calc(100% - 0.6rem);
@@ -2223,8 +2227,8 @@ class ModWebAppPageMixin(
                       .replaceAll(">", "&gt;")
                       .replaceAll('"', "&quot;")
                       .replaceAll("'", "&#39;");
-                  const toLatLng = (world, point) => [(-point.z) * world.scale, point.x * world.scale];
-                  const toPoint = (world, latlng) => ({ x: latlng.lng / world.scale, z: -latlng.lat / world.scale });
+                  const toLatLng = (world, point) => [(world.north_positive ? point.z : -point.z) * world.scale, point.x * world.scale];
+                  const toPoint = (world, latlng) => ({ x: latlng.lng / world.scale, z: (world.north_positive ? latlng.lat : -latlng.lat) / world.scale });
                   const convertNestedPoints = (world, points) =>
                     Array.isArray(points)
                       ? points.map((point) => (Array.isArray(point) ? convertNestedPoints(world, point) : toLatLng(world, point)))
@@ -2467,7 +2471,7 @@ class ModWebAppPageMixin(
                     );
                   const createTileLayer = (state, world) =>
                     window.L.tileLayer(tileUrlTemplate(state, world), {
-                      tileSize: 512,
+                      tileSize: world.tile_size || 512,
                       minNativeZoom: 0,
                       maxNativeZoom: world.zoom.max,
                       minZoom: 0,
@@ -2577,7 +2581,9 @@ class ModWebAppPageMixin(
                     state.lastSquaremapCacheUpdatedAtUnixMs = null;
                     setNotice(
                       state,
-                      "Squaremap is live. Shared dashboard annotations stay available independently.",
+                      state.manifest?.provider === "sevendays"
+                        ? "Showing shared explored terrain. Unrendered areas remain blank; tiles refresh as the game renders them."
+                        : "Squaremap is live. Shared dashboard annotations stay available independently.",
                       "success",
                     );
                   };
@@ -3034,13 +3040,12 @@ class ModWebAppPageMixin(
                     if (playerResult.status === "fulfilled") {
                       replaceLayerGroup(state, "playerLayer", playerResult.value.layer);
                     }
+                    setToolState(state, state.tool);
                     const markersLoaded = markerResult.status === "fulfilled" ? markerResult.value.result : null;
                     const playersLoaded = playerResult.status === "fulfilled" ? playerResult.value.result : null;
                     const playersFailed = playerResult.status === "rejected";
                     if (markersLoaded && markersLoaded.source === MAP_SOURCE_LIVE) {
-                      if (forceTiles) {
-                        await refreshTiles(state, { force: true });
-                      }
+                      await refreshTiles(state, { force: forceTiles });
                       state.lastSquaremapCacheUpdatedAtUnixMs = null;
                       if (playersFailed) {
                         setNotice(
@@ -3078,7 +3083,7 @@ class ModWebAppPageMixin(
                     }
                     return { squaremapSource: MAP_SOURCE_STALE };
                   };
-                  const loadWorld = async (state, worldName, { preserveView = false } = {}) => {
+                  const loadWorld = async (state, worldName, { preserveView = false, forceTiles = true } = {}) => {
                     const worldSummary = state.worldByName.get(worldName) || state.manifest.worlds[0];
                     const worldSettingsResult = await fetchJsonDetailed(
                       apiUrl(state, `/worlds/${encodeURIComponent(worldSummary.name)}/settings`),
@@ -3088,26 +3093,39 @@ class ModWebAppPageMixin(
                       ...worldSummary,
                       zoom: worldSettings.zoom,
                       spawn: worldSettings.spawn,
+                      tile_size: worldSettings.tile_size,
+                      north_positive: worldSettings.north_positive === true,
                       player_tracker: worldSettings.player_tracker,
                       marker_update_interval: worldSettings.marker_update_interval || 5,
                       tiles_update_interval: worldSettings.tiles_update_interval || 15,
                       scale: 1 / Math.pow(2, worldSettings.zoom.max),
                     };
+                    const previousWorld = state.currentWorld;
+                    const sameWorld = previousWorld?.name === nextWorld.name
+                      && previousWorld.zoom.max === nextWorld.zoom.max
+                      && previousWorld.tile_size === nextWorld.tile_size
+                      && previousWorld.north_positive === nextWorld.north_positive;
                     state.currentWorld = nextWorld;
                     state.worldSelect.value = nextWorld.name;
-                    resetTileLayers(state);
-                    state.tileRevision = 0;
-                    state.lastTileRefreshAt = null;
-                    if (!preserveView) {
+                    state.map.setMinZoom(0);
+                    state.map.setMaxZoom(nextWorld.zoom.max + nextWorld.zoom.extra);
+                    if (!sameWorld) {
+                      resetTileLayers(state);
+                      replaceLayerGroup(state, "annotationLayer", window.L.layerGroup());
+                      replaceLayerGroup(state, "squaremapLayer", window.L.layerGroup());
+                      replaceLayerGroup(state, "playerLayer", window.L.layerGroup());
+                      state.tileRevision = 0;
+                      state.lastTileRefreshAt = null;
+                      cancelPendingAnnotation(state, { focusMap: false });
+                      setToolState(state, "pan");
+                    }
+                    if (!preserveView || !sameWorld) {
                       state.map.setView(toLatLng(nextWorld, nextWorld.spawn), nextWorld.zoom.def);
                     }
-                    cancelLineDraft(state);
                     if (worldSettingsResult.source === MAP_SOURCE_STALE) {
                       setSquaremapStaleNotice(state, worldSettingsResult.cacheUpdatedAtUnixMs);
                     }
-                    const refreshResult = await refreshAll(state, { forceTiles: true });
-                    state.map.setMinZoom(0);
-                    state.map.setMaxZoom(nextWorld.zoom.max + nextWorld.zoom.extra);
+                    const refreshResult = await refreshAll(state, { forceTiles });
                     window.setTimeout(() => state.map.invalidateSize(), 60);
                     if (refreshResult.squaremapSource === MAP_SOURCE_LIVE) {
                       setStatus(state, `Loaded ${nextWorld.display_name}.`, "success");
@@ -3115,12 +3133,13 @@ class ModWebAppPageMixin(
                       setStatus(state, `Loaded cached ${nextWorld.display_name} data.`, "warning");
                     }
                   };
-                  const bootstrapMap = async (state, { announce = false, preserveView = true } = {}) => {
+                  const bootstrapMap = async (state, { announce = false, preserveView = true, forceTiles = true } = {}) => {
                     if (announce) {
                       setStatus(state, "Refreshing map data…");
                     }
                     const manifestResult = await fetchJsonDetailed(apiUrl(state, "/manifest"));
                     state.manifest = manifestResult.data;
+                    state.lastManifestRefreshAt = Date.now();
                     state.iconBaseUrl = apiUrl(state, "/assets");
                     state.worldByName.clear();
                     populateWorldOptions(state);
@@ -3136,7 +3155,7 @@ class ModWebAppPageMixin(
                     } else {
                       setSquaremapLiveNotice(state);
                     }
-                    await loadWorld(state, requestedWorldName, { preserveView });
+                    await loadWorld(state, requestedWorldName, { preserveView, forceTiles });
                   };
                   const runMapSync = async (state, operation) => {
                     if (state.syncPromise) {
@@ -3183,9 +3202,7 @@ class ModWebAppPageMixin(
                     });
                     state.refreshButton?.addEventListener("click", () => {
                       void runMapSync(state, () =>
-                        state.manifest && state.currentWorld
-                          ? refreshAll(state, { announce: true, forceTiles: true })
-                          : bootstrapMap(state, { announce: true }),
+                        bootstrapMap(state, { announce: true, preserveView: true }),
                       ).catch((error) => handleBootstrapFailure(state, error));
                     });
                     if (!state.config.canWrite) {
@@ -3270,6 +3287,7 @@ class ModWebAppPageMixin(
                         noWrap: true,
                       }),
                       manifest: null,
+                      lastManifestRefreshAt: null,
                       worldByName: new Map(),
                       currentWorld: null,
                       tileLayer: null,
@@ -3414,10 +3432,12 @@ class ModWebAppPageMixin(
                       if (document.visibilityState !== "visible" || state.container.offsetParent === null) {
                         return;
                       }
+                      const rediscoverWorld = state.manifest?.provider === "sevendays"
+                        && Date.now() - state.lastManifestRefreshAt >= (state.currentWorld?.tiles_update_interval || 15) * 1000;
                       void runMapSync(state, () =>
-                        state.manifest && state.currentWorld
+                        state.manifest && state.currentWorld && !rediscoverWorld
                           ? refreshAll(state)
-                          : bootstrapMap(state, { preserveView: true }),
+                          : bootstrapMap(state, { preserveView: true, forceTiles: false }),
                       ).catch((error) => handleBootstrapFailure(state, error));
                     }, 5000);
                     try {

@@ -1,18 +1,22 @@
-"""Squaremap proxying, manifest assembly, cache handling, and annotations."""
+"""Rendered game maps, Squaremap proxying, caches, and shared annotations."""
 
 from __future__ import annotations
 
 import json
 import logging
 import mimetypes
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
-from urllib.parse import parse_qs, urlsplit, urlunsplit
+from pathlib import Path
+from typing import Literal, cast
+from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 
 import requests
 
 from apps._app import App
+from apps.sevendays import SevenDays
+from apps.sevendays.map import SevenDaysMap
 from http_sessions import ThreadLocalHttpSessions
 from map_annotations import (
     AppMapAnnotationStore,
@@ -20,6 +24,7 @@ from map_annotations import (
     MapAnnotationList,
     MapAnnotationMutationResult,
     MapManifest,
+    MapProvider,
     MapWorldSummary,
 )
 from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
@@ -37,7 +42,7 @@ class NodeMapProxyResponse:
 
 
 class NodeMapService:
-    """Owns Squaremap-backed map operations for a node API service."""
+    """Serve rendered game maps and shared dashboard annotations."""
 
     def __init__(
         self,
@@ -50,6 +55,9 @@ class NodeMapService:
         self._http_exception = http_exception
         self._log = logger
         self._http_sessions = ThreadLocalHttpSessions()
+        self._store_lock = threading.Lock()
+        self._annotation_stores: dict[Path, AppMapAnnotationStore] = {}
+        self._json_cache_stores: dict[Path, AppMapJsonCacheStore] = {}
 
     def close(self) -> None:
         self._http_sessions.close()
@@ -61,7 +69,26 @@ class NodeMapService:
     def build_manifest_result(
         self, app: App
     ) -> tuple[MapManifest, NodeMapProxyResponse]:
+        if isinstance(app, SevenDays):
+            rendered = self._sevendays_map(app)
+            return (
+                MapManifest(
+                    app_name=app.name,
+                    app_friendly=app.friendly,
+                    node_name=self._node_name(),
+                    public_map_url=None,
+                    icon_base_url="./assets",
+                    initial_world_name=rendered.world_id,
+                    worlds=(MapWorldSummary(
+                        name=rendered.world_id, display_name=rendered.display_name, world_type="normal", order=0,
+                    ),),
+                    provider=MapProvider.SEVENDAYS,
+                ),
+                self._json_response({}),
+            )
         public_map_url = self._require_map_app(app)
+        if public_map_url is None:
+            raise self._http_exception(404, "The map has no Squaremap source.")
         settings_response = self.proxy_response(
             app=app,
             relative_path="tiles/settings.json",
@@ -95,9 +122,75 @@ class NodeMapService:
             settings_response,
         )
 
+    @staticmethod
+    def _json_response(payload: object) -> NodeMapProxyResponse:
+        return NodeMapProxyResponse(
+            content=json.dumps(payload).encode("utf-8"), media_type="application/json",
+            headers=(("Cache-Control", "no-store"),),
+        )
+
+    def _sevendays_map(self, app: SevenDays, world_name: str | None = None) -> SevenDaysMap:
+        rendered = app.rendered_map
+        if rendered is None:
+            raise self._http_exception(404, "Map Rendering is disabled or this save has no usable rendered tiles.")
+        if world_name is not None and world_name != rendered.world_id:
+            raise self._http_exception(404, "The requested map is not the selected 7D2D save.")
+        return rendered
+
+    def players_response(self, app: App, raw_query: str = "") -> NodeMapProxyResponse:
+        if isinstance(app, SevenDays):
+            self._sevendays_map(app)
+            return self._json_response([])
+        return self.proxy_response(app=app, relative_path="tiles/players.json", raw_query=raw_query)
+
+    def world_response(
+        self, app: App, world_name: str, part: Literal["settings", "markers"], raw_query: str = "",
+    ) -> NodeMapProxyResponse:
+        if isinstance(app, SevenDays):
+            rendered = self._sevendays_map(app, world_name)
+            if part == "markers":
+                return self._json_response([])
+            return self._json_response({
+                "zoom": {"max": rendered.max_zoom, "def": rendered.initial_zoom, "extra": 2},
+                "spawn": rendered.center.to_mapping(),
+                "tile_size": rendered.tile_size,
+                "north_positive": True,
+                "player_tracker": {"enabled": False},
+                "marker_update_interval": 5,
+                "tiles_update_interval": 15,
+            })
+        return self.proxy_response(
+            app=app, relative_path=f"tiles/{quote(world_name, safe='')}/{part}.json",
+            raw_query=raw_query, allow_stale_on_error=True,
+        )
+
+    def tile_response(
+        self, app: App, world_name: str, zoom: int, tile_name: str, raw_query: str = "",
+    ) -> NodeMapProxyResponse:
+        if isinstance(app, SevenDays):
+            rendered = self._sevendays_map(app, world_name)
+            try:
+                content = rendered.read_tile(zoom=zoom, tile_name=tile_name)
+            except FileNotFoundError as xcp:
+                raise self._http_exception(404, "This map tile has not been rendered.") from xcp
+            except ValueError as xcp:
+                raise self._http_exception(400, str(xcp)) from xcp
+            except OSError as xcp:
+                raise self._http_exception(503, "This map tile is temporarily unavailable. Try refreshing shortly.") from xcp
+            return NodeMapProxyResponse(
+                content=content, media_type="image/png", headers=(("Cache-Control", "no-store"),),
+            )
+        return self.proxy_response(
+            app=app, relative_path=f"tiles/{quote(world_name, safe='')}/{zoom}/{quote(tile_name, safe='')}",
+            raw_query=raw_query,
+        )
+
     def build_annotation_list(self, app: App) -> MapAnnotationList:
         self._require_map_app(app)
         annotations = self._annotation_store(app).list_annotations()
+        if isinstance(app, SevenDays):
+            world_id = self._sevendays_map(app).world_id
+            annotations = tuple(annotation for annotation in annotations if annotation.world_name == world_id)
         return MapAnnotationList(
             app_name=app.name,
             app_friendly=app.friendly,
@@ -114,6 +207,8 @@ class NodeMapService:
         created_by_name: str | None,
     ) -> MapAnnotationMutationResult:
         self._require_map_app(app)
+        if isinstance(app, SevenDays):
+            self._sevendays_map(app, draft.world_name)
         annotation = self._annotation_store(app).create_annotation(
             draft=draft,
             created_by_user_id=created_by_user_id,
@@ -131,8 +226,9 @@ class NodeMapService:
         self, *, app: App, annotation_id: str
     ) -> MapAnnotationMutationResult:
         self._require_map_app(app)
+        world_id = self._sevendays_map(app).world_id if isinstance(app, SevenDays) else None
         try:
-            removed = self._annotation_store(app).delete_annotation(annotation_id)
+            removed = self._annotation_store(app).delete_annotation(annotation_id, world_name=world_id)
         except KeyError as xcp:
             raise self._http_exception(
                 404, f"Unknown map annotation: {annotation_id}"
@@ -159,6 +255,8 @@ class NodeMapService:
             return local_response
         url = f"{self._root_url(app)}{normalized_path}"
         params = parse_qs(raw_query, keep_blank_values=True) if raw_query else None
+        if params is not None:
+            params.pop("access_token", None)
         should_log_failure = not normalized_path.casefold().endswith(".png")
         try:
             response = self._http_sessions.session().get(
@@ -175,7 +273,7 @@ class NodeMapService:
                     "Squaremap request timed out: app=%s url=%s query=%s stale_cache=%s",
                     app.name,
                     url,
-                    raw_query,
+                    params,
                     cached_response is not None,
                 )
             if cached_response is not None:
@@ -194,7 +292,7 @@ class NodeMapService:
                     "Squaremap request failed: app=%s url=%s query=%s stale_cache=%s error=%s: %s",
                     app.name,
                     url,
-                    raw_query,
+                    params,
                     cached_response is not None,
                     type(xcp).__name__,
                     xcp,
@@ -215,7 +313,7 @@ class NodeMapService:
                                 response.status_code,
                                 app.name,
                                 url,
-                                raw_query,
+                                params,
                                 True,
                             )
                         return cached_response
@@ -225,7 +323,7 @@ class NodeMapService:
                         response.status_code,
                         app.name,
                         url,
-                        raw_query,
+                        params,
                         False,
                     )
                 status_code = 404 if response.status_code == 404 else 502
@@ -243,20 +341,30 @@ class NodeMapService:
         finally:
             response.close()
 
-    def _require_map_app(self, app: App) -> str:
+    def _require_map_app(self, app: App) -> str | None:
         public_map_url = app.public_map_url
-        if public_map_url is None:
+        if not app.supports_map:
             raise self._http_exception(
                 404, f"{app.friendly} does not expose a public map."
             )
         return public_map_url
 
-    @staticmethod
-    def _annotation_store(app: App) -> AppMapAnnotationStore:
-        return AppMapAnnotationStore(app.map_annotations_path)
+    def _annotation_store(self, app: App) -> AppMapAnnotationStore:
+        return self._cached_store(self._annotation_stores, app.map_annotations_path, AppMapAnnotationStore)
+
+    def _cached_store[T](self, stores: dict[Path, T], path: Path, factory: Callable[[Path], T]) -> T:
+        path = path.resolve()
+        with self._store_lock:
+            store = stores.get(path)
+            if store is None:
+                store = factory(path)
+                stores[path] = store
+            return store
 
     def _root_url(self, app: App) -> str:
         map_proxy_url = app.map_proxy_url or self._require_map_app(app)
+        if map_proxy_url is None:
+            raise self._http_exception(404, "This map does not have an upstream web server.")
         parsed = urlsplit(map_proxy_url)
         root_path = parsed.path.rstrip("/") + "/"
         return urlunsplit((parsed.scheme, parsed.netloc, root_path, "", ""))
@@ -320,7 +428,7 @@ class NodeMapService:
     def _cache_entry(self, app: App, relative_path: str) -> MapJsonCacheEntry | None:
         try:
             return self._json_cache_store(app).load_entry(relative_path)
-        except ValueError:
+        except (OSError, ValueError):
             self._log.exception(
                 "Map cache for %s is invalid at %s", app.friendly, app.map_cache_path
             )
@@ -350,7 +458,7 @@ class NodeMapService:
                 media_type=proxy_response.media_type,
                 headers=proxy_response.headers,
             )
-        except ValueError:
+        except (OSError, ValueError):
             self._log.exception(
                 "Failed to update map cache for %s at %s",
                 app.friendly,
@@ -367,9 +475,8 @@ class NodeMapService:
             or normalized_path.endswith("/markers.json")
         )
 
-    @staticmethod
-    def _json_cache_store(app: App) -> AppMapJsonCacheStore:
-        return AppMapJsonCacheStore(app.map_cache_path)
+    def _json_cache_store(self, app: App) -> AppMapJsonCacheStore:
+        return self._cached_store(self._json_cache_stores, app.map_cache_path, AppMapJsonCacheStore)
 
     def _json_object_from_response(
         self,

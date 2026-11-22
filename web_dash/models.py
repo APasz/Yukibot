@@ -795,7 +795,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             settings=page_data.settings,
             console_actions=page_data.console_actions,
             map_url=page_data.app_entry.map_url,
-            can_write_map_annotations=page_data.app_entry.map_url is not None and can_manage_app,
+            supports_map=page_data.app_entry.supports_map,
+            can_write_map_annotations=page_data.app_entry.supports_map and can_manage_app,
             supports_chat=page_data.app_entry.supports_chat,
             supports_updates=page_data.app_entry.supports_updates,
             steam_update_supported=page_data.app_entry.steam_update_supported,
@@ -869,7 +870,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             settings=page_data.settings,
             console_actions=page_data.console_actions,
             map_url=page_data.app_entry.map_url,
-            can_write_map_annotations=page_data.app_entry.map_url is not None and can_manage_app,
+            supports_map=page_data.app_entry.supports_map,
+            can_write_map_annotations=page_data.app_entry.supports_map and can_manage_app,
             supports_chat=page_data.app_entry.supports_chat,
             supports_updates=page_data.app_entry.supports_updates,
             steam_update_supported=page_data.app_entry.steam_update_supported,
@@ -937,6 +939,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         supports_chat: bool,
         supports_updates: bool,
         steam_update_supported: bool = True,
+        supports_map: bool = False,
         client_pack_content_dirty: bool = False,
         client_pack_published_version: str | None = None,
         client_pack_next_version: str | None = None,
@@ -976,6 +979,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         factorio_generation: NodeFactorioGenerationState | None = None,
         factorio_mod_settings: NodeFactorioModSettings | None = None,
     ) -> ModWebPageModel:
+        supports_map = supports_map or map_url is not None
         app_api_url: str = self._node_app_api_url(node, mods.app_name)
         shared_changelog_draft = self._backend.client_pack_changelog_draft(
             node_name=node.node_name,
@@ -1006,7 +1010,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     console_actions=console_actions,
                     blueprints=blueprints,
                     map_url=map_url,
-                    can_write_map_annotations=map_url is not None and can_write_map_annotations,
+                    can_write_map_annotations=supports_map and can_write_map_annotations,
                     supports_chat=supports_chat,
                     supports_updates=supports_updates,
                     steam_update_supported=steam_update_supported,
@@ -1053,7 +1057,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                         for mod in mods.mods
                         if mod.source is ModSourceKind.LOCAL and mod.supports_action(ModAction.DOWNLOAD)
                     },
-                    map_api_url=f"{app_api_url}/map" if map_url is not None else None,
+                    map_api_url=f"{app_api_url}/map" if supports_map else None,
                     minecraft_item_icon_api_url=f"{app_api_url}/minecraft/recipes/item-icon",
                 ),
             ),
@@ -1083,6 +1087,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         supports_chat: bool,
         supports_updates: bool,
         steam_update_supported: bool = True,
+        supports_map: bool = False,
         chat_url: str | None,
         update_info: AppUpdateInfo | None,
         update_status: AppUpdateStatus | None,
@@ -1110,6 +1115,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         factorio_generation: NodeFactorioGenerationState | None = None,
         factorio_mod_settings: NodeFactorioModSettings | None = None,
     ) -> ModWebOverviewPageModel:
+        supports_map = supports_map or map_url is not None
         app_api_url: str = self._node_app_api_url(node, app_name)
         return cast(
             ModWebOverviewPageModel,
@@ -1135,9 +1141,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     console_actions=console_actions,
                     blueprints=blueprints,
                     map_url=map_url,
-                    map_api_url=f"{app_api_url}/map" if map_url is not None else None,
+                    map_api_url=f"{app_api_url}/map" if supports_map else None,
                     minecraft_item_icon_api_url=f"{app_api_url}/minecraft/recipes/item-icon",
-                    can_write_map_annotations=map_url is not None and can_write_map_annotations,
+                    can_write_map_annotations=supports_map and can_write_map_annotations,
                     supports_chat=supports_chat,
                     supports_updates=supports_updates,
                     steam_update_supported=steam_update_supported,

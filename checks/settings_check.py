@@ -1216,6 +1216,34 @@ class SettingTests(unittest.TestCase):
             self.assertIn('partial_name="trader_rekt" biomeTags="burntforest"', rwgmixer_saved)
             self.assertIn('partial_name="trader_jen" biomeTags="forest"', rwgmixer_saved)
 
+    def test_sevendays_map_rendering_loads_and_saves_without_enabling_webdashboard(self) -> None:
+        for version in ("2.6", "3.4"):
+            for stored_value in (None, "false", "true"):
+                with self.subTest(version=version, stored_value=stored_value), TemporaryDirectory[str]() as temp_dir:
+                    properties = {"WebDashboardEnabled": "false"}
+                    if stored_value is not None:
+                        properties["EnableMapRendering"] = stored_value
+                    pointer, _ = _write_sevendays_xml_files(Path(temp_dir), server_properties=properties)
+                    app_version = AppVersion(main=version)
+                    settings = SevenDays_Settings(pointer, version_getter=lambda: app_version)
+                    rendering = settings.get_setting("EnableMapRendering")
+                    assert rendering is not None
+                    self.assertIs(rendering.value, stored_value == "true")
+                    self.assertIs(rendering.value_type, bool)
+                    self.assertEqual(rendering.label, "Map Rendering")
+                    self.assertEqual(rendering.power_level, Power_Level.sudo)
+
+                    manager = _sevendays_settings_manager(settings)
+                    for enabled in (True, False):
+                        manager.update_setting(42, rendering, str(enabled).lower())
+                        manager.save(42)
+
+                        saved = _read_sevendays_properties(pointer)
+                        self.assertEqual(saved["EnableMapRendering"], str(enabled).lower())
+                        self.assertEqual(saved["WebDashboardEnabled"], "false")
+                        settings.load()
+                        self.assertIs(rendering.value, enabled)
+
     def test_sevendays_settings_reject_invalid_restricted_values(self) -> None:
         property_values = {
             "ServerMaxWorldTransferSpeedKiBs": "1200",

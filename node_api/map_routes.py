@@ -149,11 +149,7 @@ def register_map_routes(
         traffic_log.info("Node API map players request: node=%s app=%s", auth.node_name, app_name)
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
         app = resolve_app(app_name)
-        proxy_response = await _proxy_response(
-            app,
-            "tiles/players.json",
-            request.url.query,
-        )
+        proxy_response = await run_blocking(maps.players_response, app, request.url.query)
         return Response(
             content=proxy_response.content,
             media_type=proxy_response.media_type,
@@ -175,12 +171,7 @@ def register_map_routes(
         )
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
         app = resolve_app(app_name)
-        proxy_response = await _proxy_response(
-            app,
-            f"tiles/{quote(world_name, safe='')}/settings.json",
-            request.url.query,
-            allow_stale_on_error=True,
-        )
+        proxy_response = await run_blocking(maps.world_response, app, world_name, "settings", request.url.query)
         return Response(
             content=proxy_response.content,
             media_type=proxy_response.media_type,
@@ -202,12 +193,7 @@ def register_map_routes(
         )
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
         app = resolve_app(app_name)
-        proxy_response = await _proxy_response(
-            app,
-            f"tiles/{quote(world_name, safe='')}/markers.json",
-            request.url.query,
-            allow_stale_on_error=True,
-        )
+        proxy_response = await run_blocking(maps.world_response, app, world_name, "markers", request.url.query)
         return Response(
             content=proxy_response.content,
             media_type=proxy_response.media_type,
@@ -233,11 +219,7 @@ def register_map_routes(
         )
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
         app = resolve_app(app_name)
-        proxy_response = await _proxy_response(
-            app,
-            f"tiles/{quote(world_name, safe='')}/{z}/{quote(tile_name, safe='')}",
-            request.url.query,
-        )
+        proxy_response = await run_blocking(maps.tile_response, app, world_name, z, tile_name, request.url.query)
         return Response(
             content=proxy_response.content,
             media_type=proxy_response.media_type,

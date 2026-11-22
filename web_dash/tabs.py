@@ -192,7 +192,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
         return ModWebAppTabContext(
             app_name=app.name,
             app_scope=app.app_scope,
-            supports_map=app.map_url is not None,
+            supports_map=app.supports_map or app.map_url is not None,
             supports_blueprints=app.supports_blueprints,
         )
 

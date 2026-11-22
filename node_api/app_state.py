@@ -342,6 +342,7 @@ class NodeAppEntry:
     save_write_level: Power_Level = Power_Level.sudo
     color_hex: str | None = None
     map_url: str | None = None
+    supports_map: bool = field(default=False, kw_only=True)
     join_address: str | None = None
     join_direct_ip_address: str | None = None
     resource_points: NodeAppResourcePointSummary | None = None
@@ -360,6 +361,10 @@ class NodeAppEntry:
     rcon_requires_online_players: bool | None = None
     steam_game_server_login_token_status: SteamGameServerLoginTokenStatus | None = None
     activity_providers: tuple[NodeAppActivityProviderEntry, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.map_url is not None:
+            object.__setattr__(self, "supports_map", True)
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeAppEntry:
@@ -403,6 +408,7 @@ class NodeAppEntry:
         save_write_level = power_level(payload, "save_write_level", default=Power_Level.sudo)
         color_hex = payload.get("color_hex")
         map_url = payload.get("map_url")
+        supports_map = payload.get("supports_map", map_url is not None)
         join_address = optional_string(payload, "join_address")
         join_direct_ip_address = optional_string(payload, "join_direct_ip_address")
         raw_resource_points = payload.get("resource_points")
@@ -515,6 +521,8 @@ class NodeAppEntry:
             raise ValueError("Node app entry color_hex is invalid.")
         if map_url is not None and not isinstance(map_url, str):
             raise ValueError("Node app entry map_url is invalid.")
+        if not isinstance(supports_map, bool):
+            raise ValueError("Node app entry supports_map is invalid.")
         if join_direct_ip_address is not None and join_address is None:
             raise ValueError("Node app entry direct join address requires a primary join address.")
         if not isinstance(raw_title_font_preset, str):
@@ -608,6 +616,7 @@ class NodeAppEntry:
             save_write_level=save_write_level,
             color_hex=color_hex,
             map_url=map_url,
+            supports_map=supports_map,
             join_address=join_address,
             join_direct_ip_address=join_direct_ip_address,
             resource_points=(
@@ -686,6 +695,7 @@ class NodeAppEntry:
             "save_write_level": self.save_write_level.name,
             "color_hex": self.color_hex,
             "map_url": self.map_url,
+            "supports_map": self.supports_map,
             "join_address": self.join_address,
             "join_direct_ip_address": self.join_direct_ip_address,
             "resource_points": self.resource_points.to_mapping() if self.resource_points is not None else None,

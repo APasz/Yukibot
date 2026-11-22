@@ -20866,7 +20866,7 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertIn("if (forceTiles) {", assets_html)
         self.assertIn("await refreshTiles(state, { force: true });", assets_html)
-        self.assertNotIn("await refreshTiles(state, { force: forceTiles });", assets_html)
+        self.assertIn("await refreshTiles(state, { force: forceTiles });", assets_html)
         self.assertIn("const isOfflineError = isSquaremapOfflineError(detail);", assets_html)
         self.assertIn('setStatus(state, "Map data is unavailable.", "error");', assets_html)
 

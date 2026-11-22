@@ -689,6 +689,7 @@ class ModWebAppLink:
     settings_api_url: str | None = None
     map_url: str | None = field(default=None, kw_only=True)
     supports_blueprints: bool = field(default=False, kw_only=True)
+    supports_map: bool = field(default=False, kw_only=True)
     supports_console_actions: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
     supports_updates: bool = field(default=False, kw_only=True)

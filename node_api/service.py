@@ -924,6 +924,7 @@ class NodeApiService:
             save_write_level=app.save_file_write_level,
             color_hex=self.app_color_hex(app.manage_embed_color),
             map_url=app.public_map_url,
+            supports_map=app.supports_map,
             join_address=app.cfg.join_address,
             join_direct_ip_address=app.cfg.join_direct_ip_address,
             resource_points=self._app_resource_point_summary(app),

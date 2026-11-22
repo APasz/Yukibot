@@ -4217,6 +4217,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 saves_api_url=saves_api_url,
                 settings_api_url=settings_api_url,
                 map_url=entry.map_url,
+                supports_map=entry.supports_map,
                 supports_blueprints=entry.supports_blueprints,
                 supports_console_actions=entry.supports_console_actions,
                 supports_chat=entry.supports_chat,

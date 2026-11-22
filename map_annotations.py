@@ -292,25 +292,35 @@ class MapWorldSummary:
         }
 
 
+class MapProvider(StrEnum):
+    SQUAREMAP = "squaremap"
+    SEVENDAYS = "sevendays"
+
+
 @dataclass(frozen=True, slots=True)
 class MapManifest:
     app_name: str
     app_friendly: str
     node_name: str
-    public_map_url: str
+    public_map_url: str | None
     icon_base_url: str
     initial_world_name: str
     worlds: tuple[MapWorldSummary, ...]
+    provider: MapProvider = MapProvider.SQUAREMAP
 
     def __post_init__(self) -> None:
+        if not isinstance(self.provider, MapProvider):
+            raise ValueError("Map manifest provider is invalid.")
         if not self.app_name.strip():
             raise ValueError("Map manifest app_name is invalid.")
         if not self.app_friendly.strip():
             raise ValueError("Map manifest app_friendly is invalid.")
         if not self.node_name.strip():
             raise ValueError("Map manifest node_name is invalid.")
-        if not self.public_map_url.strip():
+        if self.public_map_url is not None and not self.public_map_url.strip():
             raise ValueError("Map manifest public_map_url is invalid.")
+        if self.provider is MapProvider.SQUAREMAP and self.public_map_url is None:
+            raise ValueError("Squaremap manifests require a public_map_url.")
         if not self.icon_base_url.strip():
             raise ValueError("Map manifest icon_base_url is invalid.")
         if not self.initial_world_name.strip():
@@ -331,10 +341,11 @@ class MapManifest:
             app_name=_required_text(payload, "app_name"),
             app_friendly=_required_text(payload, "app_friendly"),
             node_name=_required_text(payload, "node_name"),
-            public_map_url=_required_text(payload, "public_map_url"),
+            public_map_url=_optional_text(payload, "public_map_url"),
             icon_base_url=_required_text(payload, "icon_base_url"),
             initial_world_name=_required_text(payload, "initial_world_name"),
             worlds=worlds,
+            provider=MapProvider(_required_text(payload, "provider")) if "provider" in payload else MapProvider.SQUAREMAP,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -343,6 +354,7 @@ class MapManifest:
             "app_friendly": self.app_friendly,
             "node_name": self.node_name,
             "public_map_url": self.public_map_url,
+            "provider": self.provider.value,
             "icon_base_url": self.icon_base_url,
             "initial_world_name": self.initial_world_name,
             "worlds": [world.to_mapping() for world in self.worlds],
@@ -466,7 +478,7 @@ class AppMapAnnotationStore:
             self._write_annotations(tuple(annotations))
             return annotation
 
-    def delete_annotation(self, annotation_id: str) -> MapAnnotation:
+    def delete_annotation(self, annotation_id: str, *, world_name: str | None = None) -> MapAnnotation:
         target_id = annotation_id.strip()
         if not target_id:
             raise ValueError("annotation_id is invalid.")
@@ -474,6 +486,8 @@ class AppMapAnnotationStore:
             annotations = list(self._load_annotations())
             for index, annotation in enumerate(annotations):
                 if annotation.annotation_id == target_id:
+                    if world_name is not None and annotation.world_name != world_name:
+                        raise KeyError(target_id)
                     removed = annotations.pop(index)
                     self._write_annotations(tuple(annotations))
                     return removed

@@ -85,6 +85,7 @@ from apps.sevendays.installation import (
     sevendays_content_userdata_root,
     undead_legacy_download_cache_directory,
 )
+from apps.sevendays.map import SevenDaysMap, SevenDaysMapCache
 from apps.sevendays.overhaul_settings import MAX_WANDERING_HORDE_ENEMIES, SevenDaysSettingGroup, undead_legacy_settings
 from archive_safety import validated_zip_entries
 from config import Activity_Manager
@@ -2122,6 +2123,15 @@ class SevenDays_Settings(App_Settings):
                 power_level=Power_Level.sudo,
                 desc="Enable the built-in web dashboard.",
             ),
+            Setting[bool](
+                BoolSettingSpec(),
+                "Map Rendering",
+                "EnableMapRendering",
+                [],
+                default=False,
+                power_level=Power_Level.sudo,
+                desc="Render explored areas to map image tiles.",
+            ),
             Setting[int](
                 IntSettingSpec(),
                 "Storm Frequency",
@@ -2709,11 +2719,34 @@ class SevenDays(App[App_Config]):
     relay_notice_player_death_supported = True
     _serverconfig_cache: _SevenDaysServerConfigCache | None = None
     _overhaul_installation: UndeadLegacyInstallation | None = None
+    _rendered_map_cache: SevenDaysMapCache | None = None
+
+    @property
+    def rendered_map(self) -> SevenDaysMap | None:
+        serverconfig = self._load_serverconfig_snapshot()
+        enabled = _sevendays_serverconfig_bool_from_value(
+            serverconfig.value("EnableMapRendering"), property_name="EnableMapRendering"
+        )
+        if not enabled:
+            return None
+        save = self._save_directory_path(serverconfig=serverconfig)
+        if save is None:
+            return None
+        if self._rendered_map_cache is None:
+            self._rendered_map_cache = SevenDaysMapCache()
+        return self._rendered_map_cache.load(
+            save=save, world_id=self._save_root_id(PurePosixPath(save.parent.name, save.name)),
+        )
+
+    @property
+    def supports_map(self) -> bool:
+        return self.rendered_map is not None
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         overhaul = load_undead_legacy_installation(cfg.directory)
         self._overhaul_installation = overhaul
         self._maintenance_lock = asyncio.Lock()
+        self._rendered_map_cache = SevenDaysMapCache()
         self.manage_embed_color = 0xB91C1C if overhaul is None else 0x73E9B2
         self.proc_name = "7DaysToDie"
         self.proc_cmd = ["7DaysToDieServer", "-nographics"]
@@ -3070,18 +3103,19 @@ class SevenDays(App[App_Config]):
                 pass
         return current_save
 
-    def _save_directory_path(self) -> Path | None:
-        saves_root = self._save_container_path()
+    def _save_directory_path(self, *, serverconfig: _SevenDaysServerConfigSnapshot | None = None) -> Path | None:
+        serverconfig = serverconfig or self._load_serverconfig_snapshot()
+        saves_root = self._save_container_path(serverconfig=serverconfig)
         if saves_root is None:
             return None
-        game_world = self._serverconfig_setting_value("GameWorld")
-        game_name = self._serverconfig_setting_value("GameName")
+        game_world = serverconfig.value("GameWorld")
+        game_name = serverconfig.value("GameName")
         if game_world is None or game_name is None:
             return None
         return saves_root / game_world / game_name
 
-    def _save_container_path(self) -> Path | None:
-        userdata_root = self._userdata_root_path()
+    def _save_container_path(self, *, serverconfig: _SevenDaysServerConfigSnapshot | None = None) -> Path | None:
+        userdata_root = self._userdata_root_path(serverconfig=serverconfig)
         if userdata_root is None:
             return None
         return userdata_root / "Saves"
@@ -3178,8 +3212,9 @@ class SevenDays(App[App_Config]):
             root.path.as_posix().casefold(),
         )
 
-    def _userdata_root_path(self) -> Path | None:
-        raw_value = self._load_serverconfig_snapshot().value("UserDataFolder")
+    def _userdata_root_path(self, *, serverconfig: _SevenDaysServerConfigSnapshot | None = None) -> Path | None:
+        serverconfig = serverconfig or self._load_serverconfig_snapshot()
+        raw_value = serverconfig.value("UserDataFolder")
         candidate = Path(raw_value or _SEVENDAYS_MANAGED_USERDATA_FOLDER).expanduser()
         if not candidate.is_absolute():
             candidate = (self.directory / candidate).resolve()

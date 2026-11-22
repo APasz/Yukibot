@@ -75,7 +75,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             available_tab_ids.append("configs")
         if app_entry.supports_settings and can_manage_app:
             available_tab_ids.append("settings")
-        if app_entry.map_url is not None:
+        if app_entry.supports_map:
             available_tab_ids.append("map")
         if app_entry.supports_saves and can_manage_app:
             available_tab_ids.append("saves")
@@ -890,7 +890,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     settings=settings,
                     console_actions=console_actions,
                     map_url=app_entry.map_url,
-                    can_write_map_annotations=can_manage_app and app_entry.map_url is not None,
+                    supports_map=app_entry.supports_map,
+                    can_write_map_annotations=can_manage_app and app_entry.supports_map,
                     supports_chat=app_entry.supports_chat,
                     supports_updates=app_entry.supports_updates,
                     steam_update_supported=app_entry.steam_update_supported,
@@ -1100,7 +1101,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     settings=settings,
                     console_actions=console_actions,
                     map_url=app_entry.map_url,
-                    can_write_map_annotations=can_manage_app and app_entry.map_url is not None,
+                    supports_map=app_entry.supports_map,
+                    can_write_map_annotations=can_manage_app and app_entry.supports_map,
                     supports_chat=app_entry.supports_chat,
                     supports_updates=app_entry.supports_updates,
                     steam_update_supported=app_entry.steam_update_supported,
