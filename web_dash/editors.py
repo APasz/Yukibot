@@ -2432,13 +2432,11 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         if not isinstance(draft_value, str):
                             raise TypeError(f"Choice setting {setting.key!r} requires a string draft value.")
                         is_editable_choice = control_kind is ModWebSettingControlKind.EDITABLE_CHOICE_SELECT
-                        choice_options: dict[str, str] = (
-                            {choice.raw_value: choice.label for choice in setting.choices}
-                            if is_editable_choice
-                            else {choice.label: choice.label for choice in setting.choices}
-                        )
+                        choice_options = [choice.label for choice in setting.choices]
+                        if is_editable_choice and draft_value and draft_value not in choice_options:
+                            choice_options.append(draft_value)
                         choice_props: str = (
-                            self._setting_editable_choice_select_props()
+                            self._setting_select_props()
                             if is_editable_choice
                             else self._setting_choice_select_props()
                         )
@@ -2453,6 +2451,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                     choice_options,
                                     value=draft_value or None,
                                     on_change=sync_choice_value if setting.can_edit else None,
+                                    with_input=is_editable_choice,
+                                    new_value_mode="add-unique" if is_editable_choice else None,
                                 )
                                 .props(choice_props)
                                 .classes("mod-setting-field mod-setting-field-primary")
@@ -4736,13 +4736,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     @staticmethod
     def _setting_choice_select_props() -> str:
         return "filled square dense hide-bottom-space color=accent options-dense popup-content-class=mod-setting-menu"
-
-    @staticmethod
-    def _setting_editable_choice_select_props() -> str:
-        return (
-            "filled square dense clearable hide-bottom-space color=accent options-dense "
-            "popup-content-class=mod-setting-menu use-input new-value-mode=add input-debounce=0"
-        )
 
     @staticmethod
     def _setting_aux_select_props(*, prefix: Literal["Preset", "Recent"]) -> str:

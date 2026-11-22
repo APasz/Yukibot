@@ -106,12 +106,12 @@ def undead_legacy_settings() -> tuple[Setting[int] | Setting[bool], ...]:
             desc="In-game hour when daylight begins (0–23).",
         ),
         Setting[int](
-            IntSettingSpec(min_value=0, max_value=23),
+            IntSettingSpec(min_value=0, max_value=24),
             "Dusk Hour",
             "DuskTime",
             [],
             default=20,
-            desc="In-game hour when night begins (0–23).",
+            desc="In-game hour when night begins (0–24); 24 is midnight.",
         ),
         Setting[int](
             IntSettingSpec(min_value=0, max_value=100),

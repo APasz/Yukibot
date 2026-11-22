@@ -1136,9 +1136,20 @@ _SERVER_VISIBILITY_CHOICES = ChoiceSpec(
 )
 
 _WORLD_GEN_SIZE_CHOICES = ChoiceSpec(
+    ChoiceOption("2048"),
+    ChoiceOption("3072"),
+    ChoiceOption("4096"),
+    ChoiceOption("5120"),
     ChoiceOption("6144", "Small"),
+    ChoiceOption("7168"),
     ChoiceOption("8192", "Medium"),
+    ChoiceOption("9216"),
     ChoiceOption("10240", "Large"),
+)
+
+_UNDEAD_LEGACY_WORLD_GEN_SIZE_CHOICES = ChoiceSpec(
+    *_WORLD_GEN_SIZE_CHOICES.options,
+    *(ChoiceOption(str(size)) for size in range(11 * 1024, 16 * 1024, 1024)),
 )
 
 _TRADER_BIOME_CHOICES = ChoiceSpec(
@@ -1803,13 +1814,13 @@ class SevenDays_Settings(App_Settings):
                 desc="How the server appears in the browser.",
             ),
             Setting[int](
-                IntSettingSpec(max_value=2048),
+                IntSettingSpec(),
                 "World Transfer Speed (KiB/s)",
                 "ServerMaxWorldTransferSpeedKiBs",
                 [],
                 default=512,
                 power_level=Power_Level.sudo,
-                desc="Caps first-time world downloads to about 1300 KiB/s per client.",
+                desc="Maximum first-time world download rate per client in KiB/s. Game networking may impose a lower effective rate.",
             ),
             Setting[int](
                 IntSettingSpec(min_value=1),
@@ -1994,13 +2005,15 @@ class SevenDays_Settings(App_Settings):
                 desc="Seed used only when generating a fresh random world.",
             ),
             Setting[int](
-                IntSettingSpec(_WORLD_GEN_SIZE_CHOICES),
+                IntSettingSpec(
+                    _UNDEAD_LEGACY_WORLD_GEN_SIZE_CHOICES if self._undead_legacy else _WORLD_GEN_SIZE_CHOICES
+                ),
                 "World Gen Size",
                 "WorldGenSize",
                 [],
                 default=6144,
                 power_level=Power_Level.sudo,
-                desc="Supported RWG world size preset.",
+                desc="RWG world size in blocks, including the advanced generator's presets.",
             ),
             Setting[str](
                 StringSettingSpec(raw_validator=lambda value: bool(_normalise_sevendays_game_name(value))),
@@ -2290,11 +2303,16 @@ class SevenDays_Settings(App_Settings):
                 desc="Controls who players can damage in PvP.",
             ),
             Setting[int](
-                IntSettingSpec(),
+                IntSettingSpec(
+                    ChoiceSpec(ChoiceOption("-1", "Unlimited"), strict=False),
+                    allow_negative=True,
+                    raw_validator=lambda value: int(value) >= -1,
+                ),
                 "Quest Progression Daily Limit",
                 "QuestProgressionDailyLimit",
                 [],
                 default=4,
+                desc="Daily quests that count toward trader tier progression. -1 disables the limit; later quests still give rewards.",
                 max_app_version=AppVersion(main="2.6"),
             ),
         ]

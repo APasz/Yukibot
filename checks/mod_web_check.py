@@ -18222,12 +18222,43 @@ class ModWebTests(unittest.TestCase):
             "filled square dense hide-bottom-space color=accent options-dense popup-content-class=mod-setting-menu",
         )
 
-    def test_setting_editable_choice_select_props_allow_free_text(self) -> None:
-        self.assertEqual(
-            ModWebService._setting_editable_choice_select_props(),
-            "filled square dense clearable hide-bottom-space color=accent options-dense "
-            "popup-content-class=mod-setting-menu use-input new-value-mode=add input-debounce=0",
-        )
+    def test_editable_integer_setting_renders_labels_and_accepts_custom_values(self) -> None:
+        from nicegui import ui
+        from nicegui.client import Client
+        from nicegui.elements.select import Select
+        from nicegui.events import GenericEventArguments
+
+        service = ModWebService()
+        client = Client(ui.page("/_test/settings"))
+        self.addCleanup(client.delete)
+        for current_value in ("4", "Unlimited", "11"):
+            with self.subTest(current_value=current_value), client:
+                setting = self._setting_entry(
+                    key="QuestProgressionDailyLimit",
+                    label="Quest Progression Daily Limit",
+                    type_name="int",
+                    current_input_value=current_value,
+                    choices=(NodeSettingChoice(label="Unlimited", raw_value="-1"),),
+                )
+                set_draft = Mock()
+                with ui.column() as container:
+                    service._render_setting_card(
+                        ui=cast(ModWebUi, ui),
+                        setting=setting,
+                        draft_value=current_value,
+                        draft_values={},
+                        set_draft_value=set_draft,
+                        set_setting_validity=Mock(),
+                    )
+                control = next(element for element in container.descendants() if isinstance(element, Select))
+                self.assertEqual(control.value, current_value)
+                control.set_value("Unlimited")
+                event = GenericEventArguments(sender=control, client=control.client, args="11")
+                for _ in range(2):
+                    control.set_value(control._event_args_to_value(event))
+                self.assertEqual(control.value, "11")
+                self.assertEqual(control.options.count("11"), 1)
+                set_draft.assert_called_with(setting, "11", False)
 
     def test_setting_aux_select_props_adds_integrated_prefix(self) -> None:
         self.assertEqual(

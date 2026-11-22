@@ -87,6 +87,13 @@ def _sevendays_settings_manager(settings: SevenDays_Settings) -> Settings_Manage
     )
 
 
+def _read_sevendays_properties(pointer: Path) -> dict[str, str]:
+    return {
+        element.attrib["name"]: element.attrib["value"]
+        for element in ET.parse(pointer).getroot().findall("property")
+    }
+
+
 def _write_computercraft_config(root: Path, *, level_name: str = "world") -> Path:
     pointer = root / level_name / "serverconfig" / "computercraft-server.toml"
     pointer.parent.mkdir(parents=True)
@@ -1129,7 +1136,7 @@ class SettingTests(unittest.TestCase):
             self.assertEqual(view_distance.value, 12)
             self.assertEqual(world_gen_size.choice_label_for_value(), "Small")
             self.assertEqual(region.desc, "Server browser region.")
-            self.assertEqual(world_gen_size.desc, "Supported RWG world size preset.")
+            self.assertEqual(world_gen_size.desc, "RWG world size in blocks, including the advanced generator's presets.")
             self.assertEqual(eac_enabled.desc, "Require Easy Anti-Cheat for connecting clients.")
 
             for key, value in {
@@ -1227,8 +1234,10 @@ class SettingTests(unittest.TestCase):
             if transfer_speed is None or world_gen_size is None or max_players is None:
                 raise AssertionError("Missing expected 7D2D setting")
 
-            with self.assertRaisesRegex(ValueError, "2048"):
-                transfer_speed.update("2049")
+            transfer_speed.update("2049")
+            self.assertEqual(transfer_speed.value, 2049)
+            with self.assertRaises(ValueError):
+                transfer_speed.update("-1")
 
             with self.assertRaisesRegex(ValueError, "must match provided choices"):
                 world_gen_size.update("7000")
@@ -1480,68 +1489,84 @@ class SettingTests(unittest.TestCase):
             self.assertIn('name="GameWorld" value="Wizefoco Mountains"', fresh_characters)
             self.assertIn('name="GameName" value="FreshCharacters"', fresh_characters)
 
-    def test_sevendays_settings_clamp_loaded_transfer_speed_without_startup_error(self) -> None:
-        property_values = {
-            "ServerName": "Clamp Test",
-            "ServerDescription": "Clamp Test",
-            "ServerPassword": "",
-            "ServerVisibility": "2",
-            "ServerMaxWorldTransferSpeedKiBs": "4096",
-            "ServerMaxPlayerCount": "8",
-            "ServerReservedSlots": "0",
-            "ServerAdminSlots": "0",
-            "GameWorld": "RWG",
-            "WorldGenSeed": "seed",
-            "WorldGenSize": "6144",
-            "GameName": "World",
-            "GameDifficulty": "1",
-            "BlockDamagePlayer": "100",
-            "BlockDamageAI": "100",
-            "BlockDamageAIBM": "100",
-            "XPMultiplier": "100",
-            "DayNightLength": "60",
-            "DayLightLength": "18",
-            "BiomeProgression": "true",
-            "WebDashboardEnabled": "false",
-            "StormFreq": "100",
-            "DeathPenalty": "1",
-            "DropOnDeath": "1",
-            "DropOnQuit": "0",
-            "CameraRestrictionMode": "0",
-            "JarRefund": "60",
-            "EnemyDifficulty": "0",
-            "ZombieFeralSense": "0",
-            "ZombieMove": "0",
-            "ZombieMoveNight": "3",
-            "ZombieFeralMove": "3",
-            "ZombieBMMove": "3",
-            "AISmellMode": "3",
-            "BloodMoonFrequency": "7",
-            "BloodMoonRange": "0",
-            "BloodMoonWarning": "8",
-            "LootAbundance": "100",
-            "LootRespawnDays": "7",
-            "AirDropFrequency": "72",
-            "AirDropMarker": "true",
-            "PartySharedKillRange": "100",
-            "PlayerKillingMode": "3",
-            "QuestProgressionDailyLimit": "4",
-        }
+    def test_sevendays_quest_daily_limit_saves_and_reloads_unlimited(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer, _ = _write_sevendays_xml_files(
+                Path(temporary), server_properties={"QuestProgressionDailyLimit": "4"},
+            )
+            settings = SevenDays_Settings(pointer, version_getter=lambda: AppVersion(main="2.6"))
+            manager = _sevendays_settings_manager(settings)
+            manager.config.version = AppVersion(main="2.6")
+            limit = settings.get_setting("QuestProgressionDailyLimit")
+            assert limit is not None
+            self.assertEqual(limit.default, 4)
+            self.assertIn(("Unlimited", "-1"), limit.choice_items())
+            self.assertFalse(limit.strict_choice)
 
-        with TemporaryDirectory[str]() as temp_dir:
-            pointer, _ = _write_sevendays_xml_files(Path(temp_dir), server_properties=property_values)
+            for value, expected in (("Unlimited", -1), ("-1", -1), ("1", 1), ("10", 10), ("11", 11)):
+                with self.subTest(value=value):
+                    manager.update_setting(42, limit, value)
+                    manager.save(42)
+                    persisted = _read_sevendays_properties(pointer)
+                    self.assertEqual(persisted[limit.key], str(expected))
+                    settings.load()
+                    self.assertEqual(limit.value, expected)
+                    if expected == -1:
+                        self.assertEqual(limit.display_value(), "Unlimited (-1)")
 
+    def test_sevendays_quest_daily_limit_rejects_invalid_negative_values(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer, _ = _write_sevendays_xml_files(
+                Path(temporary), server_properties={"QuestProgressionDailyLimit": "4"},
+            )
+            settings = SevenDays_Settings(pointer, version_getter=lambda: AppVersion(main="2.6"))
+            limit = settings.get_setting("QuestProgressionDailyLimit")
+            assert limit is not None
+
+            for parse in (limit.update, limit.load_value):
+                for value in ("-2", "-10", "1.5", "invalid"):
+                    with self.subTest(parse=parse, value=value), self.assertRaises(ValueError):
+                        parse(value)
+                    self.assertEqual(limit.value, 4)
+
+    def test_sevendays_settings_preserve_loaded_transfer_speed(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer, _ = _write_sevendays_xml_files(
+                Path(temporary), server_properties={"ServerMaxWorldTransferSpeedKiBs": "4096"},
+            )
             settings = SevenDays_Settings(pointer)
             transfer_speed = settings.get_setting("ServerMaxWorldTransferSpeedKiBs")
-            if transfer_speed is None:
-                raise AssertionError("Missing transfer speed setting")
-
-            self.assertEqual(transfer_speed.value, 2048)
-
+            assert transfer_speed is not None
+            self.assertEqual(transfer_speed.value, 4096)
             settings.save()
+            self.assertEqual(_read_sevendays_properties(pointer)[transfer_speed.key], "4096")
 
-            saved = pointer.read_text(encoding="utf-8")
-            self.assertIn('name="ServerMaxWorldTransferSpeedKiBs" value="2048"', saved)
+            for value in ("0", "2049", "8192"):
+                with self.subTest(value=value):
+                    transfer_speed.update(value)
+                    settings.save()
+                    self.assertEqual(_read_sevendays_properties(pointer)[transfer_speed.key], value)
+                    settings.load()
+                    self.assertEqual(transfer_speed.value, int(value))
+
+    def test_sevendays_settings_save_advanced_world_sizes(self) -> None:
+        with TemporaryDirectory() as temporary:
+            pointer, _ = _write_sevendays_xml_files(Path(temporary), server_properties={"WorldGenSize": "4096"})
+            settings = SevenDays_Settings(pointer)
+            world_size = settings.get_setting("WorldGenSize")
+            assert world_size is not None
+            self.assertEqual(world_size.value, 4096)
+
+            for value in ("2048", "3072", "5120", "7168", "9216"):
+                with self.subTest(value=value):
+                    world_size.update(value)
+                    settings.save()
+                    persisted = _read_sevendays_properties(pointer)
+                    self.assertEqual(persisted[world_size.key], value)
+                    settings.load()
+                    self.assertEqual(world_size.value, int(value))
+            with self.assertRaises(ValueError):
+                world_size.update("12288")
 
     def test_sevendays_settings_blank_camera_restriction_keeps_default(self) -> None:
         property_values = {
@@ -1980,6 +2005,9 @@ class UndeadLegacySettingTests(unittest.TestCase):
             "XPMultiplier": "150",
             "AirDropMarker": "false",
             "ServerWebsiteURL": "",
+            "QuestProgressionDailyLimit": "-1",
+            "DuskTime": "24",
+            "WorldGenSize": "14336",
         }
         with TemporaryDirectory() as temp:
             pointer = self._settings(Path(temp), **properties).pointer
@@ -2051,6 +2079,26 @@ class UndeadLegacySettingTests(unittest.TestCase):
             assert setting is not None
             self.assertEqual(setting.value, 125)
 
+    def test_ul_settings_save_larger_world_sizes_and_midnight_dusk(self) -> None:
+        with TemporaryDirectory() as temporary:
+            settings = self._settings(Path(temporary))
+            manager = _sevendays_settings_manager(settings)
+            world_size = settings.get_setting("WorldGenSize")
+            dusk = settings.get_setting("DuskTime")
+            assert world_size is not None and dusk is not None
+            manager.update_setting(42, dusk, "24")
+
+            for value in ("11264", "12288", "13312", "14336", "15360"):
+                with self.subTest(value=value):
+                    manager.update_setting(42, world_size, value)
+                    manager.save(42)
+                    persisted = _read_sevendays_properties(settings.pointer)
+                    self.assertEqual(persisted[world_size.key], value)
+                    self.assertEqual(persisted[dusk.key], "24")
+                    manager.load()
+                    self.assertEqual(world_size.value, int(value))
+                    self.assertEqual(dusk.value, 24)
+
     def test_wandering_horde_limit_is_checked_before_accepting_a_draft(self) -> None:
         with TemporaryDirectory() as temp:
             settings = self._settings(Path(temp))
@@ -2100,6 +2148,7 @@ class UndeadLegacySettingTests(unittest.TestCase):
             for key, value in (
                 ("RecipeFilter", "3"),
                 ("DawnTime", "24"),
+                ("DuskTime", "25"),
                 ("POITierLootScale", "101"),
                 ("WanderingHordeFrequency", "0"),
                 ("OverrideBrightness", "1.5"),
