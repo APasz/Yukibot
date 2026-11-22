@@ -97,7 +97,7 @@
       .catch((error: unknown) => {
         notice = {
           tone: 'error',
-          text: `Browser draft could not be saved: ${errorMessage(error)}. Keep this tab open or export the recording.`,
+          text: `Draft save failed: ${errorMessage(error)}. Export to keep this recording.`,
         };
       });
   }
@@ -150,7 +150,7 @@
             selectedAppKey = draft.monitored_app ? appKey(draft.monitored_app) : '';
             notice = {
               tone: 'info',
-              text: 'Recovered your last browser recording. It is stopped and ready to review, save or export.',
+              text: 'Browser draft restored. Review, save or export.',
             };
           }
         } catch (error) {
@@ -231,7 +231,7 @@
       keepDraft();
       notice = {
         tone: 'info',
-        text: 'Report saved. You and administrators can review it from the report library.',
+        text: 'Report saved. Visible to you and admins.',
       };
       await fetchReports();
     } catch (error) {
@@ -295,20 +295,15 @@
 <AppShell identity={configuration?.identity ?? null}>
   <section class="page-intro">
     <div>
-      <p class="eyebrow">Network diagnostics</p>
-      <h1>Understand the delay<span>.</span></h1>
-      <p class="intro-text">
-        Record your connection while you play. Match slow interactions and disconnects with network
-        and server observations.
-      </p>
+      <h1>Network diagnostics</h1>
+      <p class="intro-text">Record latency. Mark delays. Compare sessions.</p>
     </div>
     <div class="session-status">
       <span class:recording={running} class="status-dot"></span>{running
-        ? 'Recording session'
+        ? 'Recording'
         : recording
-          ? 'Reviewing session'
-          : 'Ready when you are'}{#if recording}<strong>{duration(recording.duration_ms)}</strong
-        >{/if}
+          ? 'Review'
+          : 'Ready'}{#if recording}<strong>{duration(recording.duration_ms)}</strong>{/if}
     </div>
   </section>
 
@@ -321,16 +316,15 @@
         <a href="/auth/login?next_path=%2Fmod-web%2Fnetwork">Sign in again</a>{/if}
     </div>{/if}
 
-  {#if loading}<div class="panel empty-state">Loading your diagnostic workspace…</div>
+  {#if loading}<div class="panel empty-state">Loading…</div>
   {:else if configuration}
     <section class="panel session-panel" aria-label="Recording controls">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">01 / Record</p>
-          <h2>A session from your browser</h2>
+          <h2>Recording</h2>
         </div>
         <span class="badge"
-          >Up to {Math.round((configuration.limits?.max_duration_ms ?? 0) / 60000)} minutes</span
+          >{Math.round((configuration.limits?.max_duration_ms ?? 0) / 60000)} min limit</span
         >
       </div>
       <div class="control-grid">
@@ -357,47 +351,41 @@
         </div>
         <button
           class="primary"
+          class:stop={running}
           disabled={!running &&
             (pending !== null ||
               !selectedIds.length ||
               !title.trim() ||
               Boolean(selectedAppKey && !selectedApp))}
           onclick={() => (running ? void recorder?.stop() : start())}
-          >{running ? '■ Stop recording' : '● Start recording'}</button
+          >{running ? 'Stop recording' : 'Start recording'}</button
         >
       </div>
       <div class="recording-details">
-        <p>Lightweight HTTP probes. No speed test or deliberate traffic saturation.</p>
-        <p>
-          Keep this tab open while playing. Background-tab scheduling delays are flagged separately.
-        </p>
+        <p>Keep this tab open while playing. Background delays are flagged.</p>
+        <p>HTTP probes only · no speed test</p>
       </div>
       {#if running}<div class="marker-controls">
           <label class="sr-only" for="marker-label">Event description</label><input
             id="marker-label"
             bind:value={markerLabel}
             maxlength="200"
-            placeholder="What happened in the game?"
-          /><button onclick={mark}>＋ Mark a problem</button><span class="muted"
-            >Add a timestamp without interrupting the recording.</span
-          >
+            placeholder="Describe the problem"
+          /><button onclick={mark}>Mark event</button>
         </div>{/if}
       {#if recording && !running}<p class="caption">
-          Starting a new session replaces the browser draft. Save or export this session first if
-          you want to keep it.
+          New recordings replace this draft. Save or export to keep it.
         </p>{/if}
     </section>
 
     <section class="panel" aria-label="Game process telemetry">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Game process</p>
-          <h2>Game process telemetry</h2>
+          <h2>Game process</h2>
         </div>
         <button
           disabled={appsLoading || running || pending !== null}
-          onclick={() => void refreshApps()}
-          >{appsLoading ? 'Refreshing apps…' : 'Refresh apps'}</button
+          onclick={() => void refreshApps()}>{appsLoading ? 'Refreshing…' : 'Refresh apps'}</button
         >
       </div>
       <label class="process-picker"
@@ -405,7 +393,7 @@
         <select bind:value={selectedAppKey} disabled={running || pending !== null}>
           <option value="">Network only</option>
           {#if selectedAppKey && !selectedApp}<option value={selectedAppKey} disabled
-              >{recording?.monitored_app?.label ?? 'Selected app'} · not currently listed</option
+              >{recording?.monitored_app?.label ?? 'Selected app'} · unavailable</option
             >{/if}
           {#each apps.apps as app}<option value={appKey(app)}>{app.label} · {app.node_label}</option
             >{/each}
@@ -413,11 +401,9 @@
       </label>
       {#if appsError}<p class="caption bad">App list unavailable: {appsError}</p>
       {:else if apps.unavailable_nodes.length}<p class="caption">
-          Waiting for app lists from {apps.unavailable_nodes.join(', ')}.
+          App lists unavailable: {apps.unavailable_nodes.join(', ')}.
         </p>
-      {:else if !appsLoading && !apps.apps.length}<p class="caption">
-          No running apps are currently available.
-        </p>{/if}
+      {:else if !appsLoading && !apps.apps.length}<p class="caption">No running apps.</p>{/if}
       <ProcessTelemetry {recording} offset={selectedOffset} />
     </section>
 
@@ -425,7 +411,6 @@
       <section class="panel">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">02 / Inspect</p>
             <h2>Connection timeline</h2>
           </div>
           <label class="compact-label"
@@ -437,8 +422,7 @@
           >
         </div>
         {#if comparison}<div class="comparison-note">
-            Comparing with {comparison.summary.owner_name}: {comparison.summary.title}. Timelines
-            align by recorded wall-clock time.
+            {comparison.summary.owner_name} · {comparison.summary.title} · aligned by clock time
             <button class="text-button" onclick={() => (comparison = null)}>Remove</button>
           </div>{/if}
         <Timeline recordings={plotted} {targetId} onseek={(offset) => (selectedOffset = offset)} />
@@ -450,11 +434,10 @@
       <section class="panel">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">03 / Review</p>
-            <h2>Events and observations</h2>
+            <h2>Events &amp; notes</h2>
           </div>
           <span class="muted"
-            >{owner?.display_name ?? configuration.identity.display_name} · Started {new Date(
+            >{owner?.display_name ?? configuration.identity.display_name} · {new Date(
               recording.started_at_ms,
             ).toLocaleString()}</span
           >
@@ -467,18 +450,11 @@
               >{/each}
           </div>{/if}
         <details>
-          <summary
-            >Inspect individual probes <span class="muted"
-              >· latest 100 for selected destination</span
-            ></summary
-          >
+          <summary>Individual probes <span class="muted">· latest 100</span></summary>
           <div class="table-scroll probe-table">
             <table>
               <thead
-                ><tr
-                  ><th>Time in session</th><th>Destination</th><th>Observation</th><th
-                    >Browser state</th
-                  ></tr
+                ><tr><th>Time</th><th>Destination</th><th>Result</th><th>Browser state</th></tr
                 ></thead
               ><tbody
                 >{#each visibleProbes as probe}<tr
@@ -503,7 +479,7 @@
             maxlength="2000"
             rows="3"
             disabled={!owned || pending !== null}
-            placeholder="Game, symptoms, household traffic, changes you tried…"
+            placeholder="Symptoms, shared traffic, changes tried…"
             oninput={(event) => updateDetails('notes', event.currentTarget.value)}
           ></textarea></label
         >
@@ -518,53 +494,43 @@
                   ? 'Save report again'
                   : 'Save report'}</button
             >{/if}<button disabled={running} onclick={exportReport}>Export JSON</button><span
-            class="muted"
-            >Browser-reported measurements · saved for {configuration.limits.retention_days} days · visible
-            to you and admins</span
+            class="muted">Kept {configuration.limits.retention_days} days · you and admins</span
           >
         </div>
       </section>
     {:else}
       <section class="panel empty-state welcome">
-        <span class="welcome-icon" aria-hidden="true">⌁</span>
-        <h2>Catch the problem as it happens.</h2>
-        <p>
-          Start a session, reproduce the delay in-game, then mark the moment here.<br />Your
-          recording stays in this browser through a temporary connection outage.
-        </p>
+        <h2>No recording</h2>
+        <p>Start recording, play, then mark any delays.</p>
+        <p class="caption">Drafts stay in this browser during connection outages.</p>
       </section>
     {/if}
 
-    <section class="panel interpretation">
-      <div>
-        <p class="eyebrow">Reading the evidence</p>
-        <h2>Patterns, with context.</h2>
-      </div>
+    <details class="panel interpretation">
+      <summary>Reading results</summary>
       <div class="interpretation-grid">
         <p>
-          <strong>One destination degrades</strong>Compare its direct browser measurements with
-          Portal-to-node probes and other players at the same time.
+          <strong>One destination slows</strong>Compare browser and Portal probes with other players
+          at the same time.
         </p>
         <p>
-          <strong>Several destinations degrade</strong>Investigate the shared connection or route.
-          Services on one physical host are not independent reference points.
+          <strong>Several destinations slow</strong>Check the shared connection or route. Services
+          on one host share failure risks.
         </p>
         <p>
-          <strong>Game stalls; web probes stay healthy</strong>Investigate game/client processing
-          and the game transport. These HTTP tests do not measure game packet loss.
+          <strong>Game stalls; HTTP stays healthy</strong>Check game/client processing and game
+          traffic. HTTP probes do not measure game packet loss.
         </p>
       </div>
       <p class="caption">
-        No independent reference outside your configured nodes is included. These tests cannot
-        isolate a copper-line fault, identify a failing ISP hop, or prove that the game transport is
-        healthy.
+        Configured nodes only. These tests cannot locate line or ISP faults, or prove game traffic
+        is healthy. Host and process metrics do not measure game tick health.
       </p>
-    </section>
+    </details>
 
     <section class="panel report-library">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Report library</p>
           <h2>{configuration.identity.is_admin ? 'Player sessions' : 'Your saved sessions'}</h2>
         </div>
         <button disabled={pending !== null} onclick={() => void refreshReports()}>Refresh</button>
@@ -583,21 +549,21 @@
                       >{report.owner_name}</td
                     >{/if}<td>{new Date(report.started_at_ms).toLocaleString()}</td><td
                     >{duration(report.duration_ms)}</td
-                  ><td>{report.probe_count}</td><td class="row-actions"
-                    ><button
-                      disabled={running || pending !== null}
-                      onclick={() => void loadReport(report)}>Open</button
-                    >{#if recording}<button
-                        disabled={running || pending !== null || report.id === recording.id}
-                        onclick={() => void loadReport(report, true)}>Compare</button
-                      >{/if}</td
+                  ><td>{report.probe_count}</td><td
+                    ><div class="row-actions">
+                      <button
+                        disabled={running || pending !== null}
+                        onclick={() => void loadReport(report)}>Open</button
+                      >{#if recording}<button
+                          disabled={running || pending !== null || report.id === recording.id}
+                          onclick={() => void loadReport(report, true)}>Compare</button
+                        >{/if}
+                    </div></td
                   ></tr
                 >{/each}</tbody
             >
           </table>
-        </div>{:else}<p class="empty-state small">
-          Saved recordings will appear here. Older sessions expire automatically.
-        </p>{/if}
+        </div>{:else}<p class="empty-state small">No saved sessions.</p>{/if}
     </section>
   {/if}
 </AppShell>

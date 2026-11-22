@@ -11,7 +11,14 @@
     targetId: string;
     onseek: (offset: number | null) => void;
   } = $props();
-  const colours = ['#a99aff', '#65d4c5', '#f4bd72', '#83b4ff', '#e99dce', '#b7d983'];
+  const colours = [
+    'var(--mod-accent)',
+    '#38bdf8',
+    'var(--mod-warning)',
+    '#e879f9',
+    '#34d399',
+    '#f4f4f5',
+  ] as const;
   let cursor = $state<number | null>(null);
   const start = $derived(Math.min(...recordings.map(({ recording }) => recording.started_at_ms)));
   const end = $derived(
@@ -22,15 +29,19 @@
   );
   const series = $derived(
     recordings.flatMap(({ label, recording }, reportIndex) =>
-      recording.targets
-        .filter((target) => !targetId || target.id === targetId)
-        .map((target, targetIndex) => ({
-          label: `${recordings.length > 1 ? `${label} · ` : ''}${target.label}`,
-          recording,
-          target,
-          colour: colours[(reportIndex * 3 + targetIndex) % colours.length] ?? '#a99aff',
-          probes: recording.probes.filter((probe) => probe.target_id === target.id),
-        })),
+      recording.targets.flatMap((target, targetIndex) =>
+        targetId && target.id !== targetId
+          ? []
+          : [
+              {
+                label: `${recordings.length > 1 ? `${label} · ` : ''}${target.label}`,
+                recording,
+                target,
+                colour: colours[(reportIndex * 3 + targetIndex) % colours.length] ?? colours[0],
+                probes: recording.probes.filter((probe) => probe.target_id === target.id),
+              },
+            ],
+      ),
     ),
   );
   const ceiling = $derived(
@@ -136,7 +147,7 @@
             x2={x(item.recording.started_at_ms + probe.offset_ms)}
             y1="17"
             y2="26"
-            stroke={probe.status === 'browser_delayed' ? '#8994a6' : '#f18087'}
+            stroke={probe.status === 'browser_delayed' ? 'var(--mod-muted)' : 'var(--mod-red)'}
             stroke-width="3"><title>{item.label}: {probe.status}</title></line
           >
         {/if}
@@ -158,7 +169,7 @@
         x2={62 + cursor * 900}
         y1="15"
         y2="189"
-        stroke="#ccd3e0"
+        stroke="var(--mod-text)"
         stroke-dasharray="2 3"
       />{/if}
     {#each [0, 0.25, 0.5, 0.75, 1] as fraction}
@@ -173,7 +184,7 @@
   </svg>
   <p class="caption">
     {cursor === null
-      ? 'Hover to inspect server context at that time. Event markers are shown as dashed lines.'
-      : new Date(start + cursor * (end - start)).toLocaleString()} · Missing observations remain gaps.
+      ? 'Point for context. Dashed lines mark events. Missing RTTs stay blank.'
+      : new Date(start + cursor * (end - start)).toLocaleString()}
   </p>
 </div>

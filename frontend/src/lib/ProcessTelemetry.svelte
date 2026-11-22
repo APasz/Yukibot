@@ -27,7 +27,7 @@
     <div class="context-title">
       <strong>{recording.monitored_app.label} · {recording.monitored_app.node_label}</strong>
       <span class="status-label" class:bad={sample?.state === 'stopped'}>
-        {sample ? `${sample.state}${stale ? ' · stale' : ''}` : 'No observation at this time'}
+        {sample ? `${sample.state}${stale ? ' · stale' : ''}` : 'No sample'}
       </span>
     </div>
     {#if sample?.state === 'running'}
@@ -74,31 +74,27 @@
         </div>
       </dl>
       {#if sample.cpu_percent == null}<p class="caption">
-          CPU and I/O rates need two recent observations of the same process tree.
+          Rates need two recent samples of the same process tree.
         </p>{/if}
       <small class="muted"
-        >PID {sample.pid} · captured {new Date(sample.captured_at_ms).toLocaleTimeString()} · sample at
-        +{((context?.offset_ms ?? 0) / 1000).toFixed(0)}s</small
+        >PID {sample.pid} · {new Date(sample.captured_at_ms).toLocaleTimeString()} · +{(
+          (context?.offset_ms ?? 0) / 1000
+        ).toFixed(0)}s</small
       >
     {:else}
       <p class="caption">
         {sample?.state === 'stopped'
-          ? 'The selected app was stopped at this time. Its earlier observations remain in this recording.'
+          ? 'App stopped at this time.'
           : sample?.state === 'unavailable'
-            ? 'Process measurements could not be read. This does not establish whether the game was unhealthy.'
-            : 'Waiting for a process observation. Missing samples remain unavailable.'}
+            ? 'Process sample unavailable.'
+            : 'Waiting for process sample.'}
       </p>
     {/if}
   </article>
   <p class="caption">
-    Inspect a moment on the connection timeline to see its process sample. CPU is summed across the
-    app process tree: 100% represents one fully used logical CPU. RSS includes child processes and
-    can count shared memory more than once. Disk rates show OS-reported process I/O; these
-    measurements do not establish game tick or simulation health.
+    Process tree totals · 100% CPU = one logical core · RSS may double-count shared memory ·
+    OS-reported disk I/O
   </p>
 {:else}
-  <p class="empty-state small">
-    Choose a running app before starting a recording to capture its CPU, memory, disk I/O and player
-    count alongside your connection.
-  </p>
+  <p class="empty-state small">Select an app to record its usage alongside latency.</p>
 {/if}

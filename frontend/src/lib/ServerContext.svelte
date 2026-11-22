@@ -10,13 +10,10 @@
 
 <div class="section-heading">
   <div>
-    <p class="eyebrow">Server side</p>
-    <h2>Context at the same moment</h2>
+    <h2>Server context</h2>
   </div>
   <span class="muted"
-    >{context
-      ? `Sample at +${(context.offset_ms / 1000).toFixed(0)}s`
-      : 'Waiting for a sample'}</span
+    >{context ? `+${(context.offset_ms / 1000).toFixed(0)}s` : 'Waiting for sample'}</span
   >
 </div>
 {#if snapshot}
@@ -34,7 +31,7 @@
         <div class="context-title">
           <strong>{label}</strong><span
             class:bad={node.availability === 'offline'}
-            class="status-label">{node.availability}{stale ? ' · stale / unavailable' : ''}</span
+            class="status-label">{node.availability}{stale ? ' · stale' : ''}</span
           >
         </div>
         <dl>
@@ -72,11 +69,10 @@
           </div>
         </dl>
         <small class="muted"
-          >Host captured: {node.captured_at_ms
-            ? new Date(node.captured_at_ms).toLocaleTimeString()
-            : 'not available'}<br />Portal probe: {node.portal_probe_captured_at_ms
+          >Host: {node.captured_at_ms ? new Date(node.captured_at_ms).toLocaleTimeString() : '—'} · Probe:
+          {node.portal_probe_captured_at_ms
             ? new Date(node.portal_probe_captured_at_ms).toLocaleTimeString()
-            : 'not available'}</small
+            : '—'}</small
         >
       </article>
     {/each}
@@ -84,13 +80,10 @@
 {:else}
   <p class="empty-state">
     {position < 0 || position > recording.duration_ms
-      ? 'This time is outside the selected recording.'
+      ? 'Outside this recording.'
       : context?.error
-        ? 'Server context could not be retrieved at this time. This does not establish whether the server itself was unhealthy.'
-        : 'Server observations will appear once the first context sample arrives.'}
+        ? 'Server sample unavailable.'
+        : 'Waiting for server sample.'}
   </p>
 {/if}
-<p class="caption">
-  Host health and Portal-to-node probes are separate measurements. CPU and memory do not establish
-  game simulation health. Services sharing a physical host share a failure domain.
-</p>
+<p class="caption">Host usage · Portal → node HTTP. Shared hosts are not independent references.</p>

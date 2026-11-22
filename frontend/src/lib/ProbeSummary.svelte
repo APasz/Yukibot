@@ -15,9 +15,8 @@
     <caption class="sr-only">Browser to endpoint HTTP measurements</caption>
     <thead
       ><tr
-        ><th>Browser → endpoint</th><th>Median</th><th>95th percentile</th><th>Maximum</th><th
-          >RTT variation</th
-        ><th>Failed probes</th><th>Browser delayed</th></tr
+        ><th>Browser → endpoint</th><th>Median</th><th><abbr title="95th percentile">p95</abbr></th
+        ><th>Peak</th><th>Variation</th><th>Failed</th><th>Browser delays</th></tr
       ></thead
     >
     <tbody
@@ -25,9 +24,7 @@
         <tr
           ><th
             ><span class="node-dot"></span>{target.label}<small
-              >{target.kind === 'portal'
-                ? 'Portal health endpoint'
-                : 'Direct node health endpoint'}</small
+              >{target.kind === 'portal' ? 'Portal health endpoint' : 'Node health endpoint'}</small
             ></th
           >
           <td>{milliseconds(stats.median)}</td><td>{milliseconds(stats.p95)}</td><td
@@ -42,6 +39,6 @@
   </table>
 </div>
 <p class="caption">
-  Variation is the mean absolute change between consecutive successful RTTs. Failed probes are HTTP
-  observations, not a game packet-loss rate.
+  Variation: mean absolute change between consecutive successful RTTs. HTTP failures ≠ game packet
+  loss.
 </p>
