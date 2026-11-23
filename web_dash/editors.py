@@ -9,6 +9,7 @@ from apps._blueprint_files import BlueprintUploadPair, classify_blueprint_upload
 from apps._console import ConsoleResponseSource
 from apps._mod_catalog import ModSourceKind
 from apps._scs_truck_simulator import SCS_TRUCK_SIMULATOR_PROFILES_BY_SCOPE
+from apps._settings import SettingStateValue
 from apps.sevendays import SevenDaysSaveArchiveInspection, inspect_sevendays_save_archive
 from node_api.console import NodeConsoleActionExecuteRequest
 from node_api.realtime_service import NodeRealtimeService
@@ -2207,6 +2208,11 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 draft_values=draft_values,
             ):
                 _setting_card_list.refresh(search_query_text)
+            if previous_value != value:
+                for notice in self._setting_dependency_notices(
+                    settings=settings.settings, changed_setting=setting, draft_values=draft_values,
+                ):
+                    ui.notify(notice, type="info")
             refresh_save_button()
 
         def set_setting_validity(setting: NodeSettingEntry, is_valid: bool) -> None:
@@ -2217,7 +2223,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             refresh_save_button()
 
         async def _save_settings_action() -> None:
-            if not draft_values:
+            if not draft_values and not settings.has_pending_changes:
                 ui.notify("No pending setting changes.", type="warning")
                 return
             try:
@@ -4921,6 +4927,64 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             draft_values.pop(setting.key, None)
             return
         draft_values[setting.key] = value
+
+    @classmethod
+    def _setting_dependency_value(
+        cls, setting: NodeSettingEntry, draft_values: Mapping[str, bool | str],
+    ) -> SettingStateValue | None:
+        value = cls._setting_effective_control_value(setting=setting, draft_values=draft_values)
+        raw_value = cls._setting_control_value_to_submit(setting, value)
+        return cls._setting_dependency_input_value(setting, raw_value)
+
+    @classmethod
+    def _setting_dependency_input_value(cls, setting: NodeSettingEntry, raw_value: str) -> SettingStateValue | None:
+        raw_value = next((choice.raw_value for choice in setting.choices if choice.label == raw_value), raw_value)
+        try:
+            match setting.type_name.casefold():
+                case "bool":
+                    return cls._parse_boolean_text(raw_value)
+                case "int":
+                    return int(raw_value)
+                case "float":
+                    return float(raw_value)
+                case _:
+                    return raw_value
+        except ValueError:
+            return None
+
+    @classmethod
+    def _setting_dependency_notices(
+        cls,
+        *,
+        settings: tuple[NodeSettingEntry, ...],
+        changed_setting: NodeSettingEntry,
+        draft_values: Mapping[str, bool | str],
+    ) -> tuple[str, ...]:
+        """Explain dependencies affected by an edit; the node enforces their values on save."""
+        by_key = {setting.key: setting for setting in settings}
+        notices: list[str] = []
+        for source in settings:
+            if not source.forced_states:
+                continue
+            source_value = cls._setting_dependency_value(source, draft_values)
+            for state in source.forced_states:
+                if (
+                    changed_setting.key not in {source.key, state.setting_key}
+                    or source_value is None
+                    or source_value != cls._setting_dependency_input_value(source, state.when_value)
+                ):
+                    continue
+                target = by_key[state.setting_key]
+                target_value = cls._setting_dependency_value(target, draft_values)
+                if target_value is None or target_value == cls._setting_dependency_input_value(target, state.value):
+                    continue
+                if cls._is_boolean_setting(target):
+                    action = "enabled" if cls._parse_boolean_text(state.value) else "disabled"
+                else:
+                    choice = cls._setting_choice_for_value(target, state.value)
+                    action = f"set to {choice.label if choice is not None else state.value}"
+                notices.append(f"{target.label} will be {action} when you save; required by {source.label}.")
+        return tuple(notices)
 
     @classmethod
     def _apply_linked_setting_drafts(

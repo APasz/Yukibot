@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from logging import Logger
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Generic, TypeAlias, TypeVar, cast
 
 import hikari
@@ -213,6 +214,14 @@ class SettingSpec(Generic[T]):
         if isinstance(value, bool):
             return "true" if value else "false"
         return str(value)
+
+    def input_text(self, value: T | hikari.UndefinedType) -> str:
+        label = self.choice_label_for_value(value)
+        return label if label is not None else self.serialise_value(value)
+
+    def label_text(self, value: T | hikari.UndefinedType) -> str:
+        label = self.choice_label_for_value(value)
+        return label if label is not None else self.display_value(value)
 
     def blank_value(self) -> T:
         raise ValueError("Blank input is not supported for this setting type.")
@@ -792,6 +801,18 @@ class App_Settings:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class SettingsSnapshot:
+    """An actor's effective values and pending changes from one dependency resolution."""
+
+    values: Mapping[str, DraftSettingValue]
+    pending_keys: frozenset[str]
+    required_level: Power_Level
+
+    def value_for(self, setting: Setting[T]) -> T | hikari.UndefinedType:
+        return cast(T | hikari.UndefinedType, self.values[setting.key])
+
+
 class Settings_Manager:
     def __init__(self, config: App_Config, settings: App_Settings) -> None:
         self.config = config
@@ -855,7 +876,9 @@ class Settings_Manager:
 
     def pending_change_level(self, actor_user_id: int) -> Power_Level | None:
         self._prune_unsupported_drafts()
-        drafts = self._resolved_drafts(actor_user_id)
+        return self._draft_change_level(self._resolved_drafts(actor_user_id))
+
+    def _draft_change_level(self, drafts: Mapping[str, object]) -> Power_Level | None:
         if not drafts:
             return None
         highest_level: Power_Level | None = None
@@ -883,24 +906,23 @@ class Settings_Manager:
     def _resolved_drafts(self, actor_user_id: int) -> dict[str, object]:
         return self.app.resolve_draft_values(self._drafts.get(self._actor_key(actor_user_id), {}))
 
+    def snapshot(self, actor_user_id: int) -> SettingsSnapshot:
+        self._prune_unsupported_drafts()
+        drafts = self._resolved_drafts(actor_user_id)
+        return SettingsSnapshot(
+            values=MappingProxyType({setting.key: drafts.get(setting.key, setting.value) for setting in self.app.options}),
+            pending_keys=frozenset(drafts),
+            required_level=self._draft_change_level(drafts) or Power_Level.user,
+        )
+
     def current_input_value(self, setting: Setting[T], actor_user_id: int) -> str:
-        value = self.value_for(setting, actor_user_id)
-        label = setting.spec.choice_label_for_value(value)
-        if label is not None:
-            return label
-        if isinstance(value, hikari.UndefinedType):
-            return ""
-        return setting.spec.serialise_value(value)
+        return setting.spec.input_text(self.value_for(setting, actor_user_id))
 
     def display_value(self, setting: Setting[T], actor_user_id: int) -> str:
         return setting.spec.display_value(self.value_for(setting, actor_user_id))
 
     def label_text(self, setting: Setting[T], actor_user_id: int) -> str:
-        value = self.value_for(setting, actor_user_id)
-        choice_label = setting.spec.choice_label_for_value(value)
-        if choice_label is not None:
-            return choice_label
-        return setting.spec.display_value(value)
+        return setting.spec.label_text(self.value_for(setting, actor_user_id))
 
     def update_setting(
         self,

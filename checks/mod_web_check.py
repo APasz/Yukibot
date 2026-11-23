@@ -153,7 +153,7 @@ from node_api.node import (
     NodeDiskEntry,
     NodeDiskManagementState,
 )
-from node_api.settings import NodeSettingChoice, NodeSettingEntry, NodeSettingList
+from node_api.settings import NodeSettingChoice, NodeSettingEntry, NodeSettingForcedState, NodeSettingList
 from node_api.system import (
     NodeRestartRecord,
     NodeRestartScheduleState,
@@ -18344,6 +18344,64 @@ class ModWebTests(unittest.TestCase):
             ModWebService._setting_text_input_value(input_control=cast(Any, input_control)),
             "0",
         )
+
+    def test_setting_dependency_notices_follow_effective_drafts(self) -> None:
+        rendering = replace(self._setting_entry(
+            key="EnableMapRendering", label="Map Rendering", type_name="bool", current_input_value="false",
+        ), forced_states=(NodeSettingForcedState("true", "WebDashboardEnabled", "true"),))
+        dashboard = self._setting_entry(
+            key="WebDashboardEnabled", label="Webdashboard", type_name="bool", current_input_value="false",
+        )
+        expected = ("Webdashboard will be enabled when you save; required by Map Rendering.",)
+        cases = (
+            (rendering, {rendering.key: True}, expected),
+            (rendering, {rendering.key: False}, ()),
+            (rendering, {rendering.key: True, dashboard.key: True}, ()),
+            (dashboard, {rendering.key: True, dashboard.key: False}, expected),
+            (dashboard, {rendering.key: False, dashboard.key: False}, ()),
+        )
+        for changed, drafts, notices in cases:
+            with self.subTest(changed=changed.key, drafts=drafts):
+                self.assertEqual(ModWebService._setting_dependency_notices(
+                    settings=(rendering, dashboard), changed_setting=changed, draft_values=drafts,
+                ), notices)
+
+    def test_setting_dependency_notices_use_choice_values_and_labels(self) -> None:
+        source = replace(self._setting_entry(
+            key="mode", label="Mode", type_name="str", current_input_value="Normal",
+            choices=(NodeSettingChoice("Normal", "normal"), NodeSettingChoice("Advanced", "advanced")),
+        ), forced_states=(NodeSettingForcedState("advanced", "detail", "high"),))
+        target = self._setting_entry(
+            key="detail", label="Detail", type_name="str", current_input_value="Low",
+            choices=(NodeSettingChoice("Low", "low"), NodeSettingChoice("High", "high")),
+        )
+        self.assertEqual(ModWebService._setting_dependency_notices(
+            settings=(source, target), changed_setting=source, draft_values={"mode": "Advanced"},
+        ), ("Detail will be set to High when you save; required by Mode.",))
+        self.assertEqual(ModWebService._setting_dependency_notices(
+            settings=(source, target), changed_setting=source, draft_values={"mode": "Advanced", "detail": "High"},
+        ), ())
+        self.assertEqual(ModWebService._setting_dependency_notices(
+            settings=(source, target), changed_setting=source, draft_values={"mode": "ADVANCED"},
+        ), ())
+
+    def test_setting_dependency_notices_compare_numeric_values_and_ignore_partial_input(self) -> None:
+        source = replace(self._setting_entry(
+            key="mode", label="Mode", type_name="int", current_input_value="0",
+        ), forced_states=(NodeSettingForcedState("1", "detail", "2.0"),))
+        target = self._setting_entry(key="detail", label="Detail", type_name="float", current_input_value="0.0")
+        cases = (
+            ({"mode": "01"}, ("Detail will be set to 2.0 when you save; required by Mode.",)),
+            ({"mode": "1", "detail": "2.00"}, ()),
+            ({"mode": ""}, ()),
+            ({"mode": "-"}, ()),
+            ({"mode": "1", "detail": "-"}, ()),
+        )
+        for drafts, expected in cases:
+            with self.subTest(drafts=drafts):
+                self.assertEqual(ModWebService._setting_dependency_notices(
+                    settings=(source, target), changed_setting=source, draft_values=drafts,
+                ), expected)
 
     def test_apply_linked_setting_drafts_swaps_trader_biome_values(self) -> None:
         rekt = self._setting_entry(

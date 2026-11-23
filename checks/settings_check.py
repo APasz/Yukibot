@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import operator
 import tomllib
 import unittest
 import xml.etree.ElementTree as ET
@@ -1216,7 +1217,7 @@ class SettingTests(unittest.TestCase):
             self.assertIn('partial_name="trader_rekt" biomeTags="burntforest"', rwgmixer_saved)
             self.assertIn('partial_name="trader_jen" biomeTags="forest"', rwgmixer_saved)
 
-    def test_sevendays_map_rendering_loads_and_saves_without_enabling_webdashboard(self) -> None:
+    def test_sevendays_map_rendering_enables_webdashboard_and_keeps_it_after_disabling(self) -> None:
         for version in ("2.6", "3.4"):
             for stored_value in (None, "false", "true"):
                 with self.subTest(version=version, stored_value=stored_value), TemporaryDirectory[str]() as temp_dir:
@@ -1240,9 +1241,67 @@ class SettingTests(unittest.TestCase):
 
                         saved = _read_sevendays_properties(pointer)
                         self.assertEqual(saved["EnableMapRendering"], str(enabled).lower())
-                        self.assertEqual(saved["WebDashboardEnabled"], "false")
+                        self.assertEqual(saved["WebDashboardEnabled"], "true")
                         settings.load()
                         self.assertIs(rendering.value, enabled)
+
+    def test_sevendays_map_rendering_keeps_webdashboard_enabled_while_required(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            pointer, _ = _write_sevendays_xml_files(Path(temp_dir), server_properties={
+                "EnableMapRendering": "true", "WebDashboardEnabled": "true",
+            })
+            settings = SevenDays_Settings(pointer)
+            dashboard = settings.get_setting("WebDashboardEnabled")
+            assert dashboard is not None
+            manager = _sevendays_settings_manager(settings)
+            manager.update_setting(42, dashboard, "false")
+            self.assertIs(manager.value_for(dashboard, 42), True)
+            manager.save(42)
+            self.assertEqual(_read_sevendays_properties(pointer)["WebDashboardEnabled"], "true")
+
+    def test_settings_snapshot_preserves_actor_values_across_draft_updates_and_save(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            pointer, _ = _write_sevendays_xml_files(Path(temp_dir), server_properties={
+                "EnableMapRendering": "false", "WebDashboardEnabled": "false",
+            })
+            settings = SevenDays_Settings(pointer)
+            rendering = settings.get_setting("EnableMapRendering")
+            dashboard = settings.get_setting("WebDashboardEnabled")
+            assert rendering is not None and dashboard is not None
+            manager = _sevendays_settings_manager(settings)
+            manager.update_setting(42, rendering, "true")
+            pending = manager.snapshot(42)
+            self.assertEqual(pending.pending_keys, {rendering.key, dashboard.key})
+            self.assertEqual(pending.required_level, Power_Level.sudo)
+            self.assertIs(pending.value_for(rendering), True)
+            self.assertIs(pending.value_for(dashboard), True)
+            other_actor = manager.snapshot(84)
+            self.assertIs(other_actor.value_for(rendering), False)
+            self.assertIs(other_actor.value_for(dashboard), False)
+            self.assertFalse(other_actor.pending_keys)
+            self.assertEqual(other_actor.required_level, Power_Level.user)
+            manager.update_setting(42, rendering, "false")
+            manager.save(42)
+            self.assertIs(pending.value_for(rendering), True)
+            self.assertIs(manager.snapshot(42).value_for(rendering), False)
+            with self.assertRaises(TypeError):
+                operator.setitem(pending.values, rendering.key, False)
+
+    def test_sevendays_cancelled_map_rendering_draft_does_not_enable_webdashboard(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            pointer, _ = _write_sevendays_xml_files(Path(temp_dir), server_properties={
+                "EnableMapRendering": "false", "WebDashboardEnabled": "false",
+            })
+            settings = SevenDays_Settings(pointer)
+            rendering = settings.get_setting("EnableMapRendering")
+            assert rendering is not None
+            manager = _sevendays_settings_manager(settings)
+            manager.update_setting(42, rendering, "true")
+            self.assertEqual(manager.pending_change_count(42), 2)
+            manager.update_setting(42, rendering, "false")
+            self.assertFalse(manager.has_pending_changes(42))
+            manager.save(42)
+            self.assertEqual(_read_sevendays_properties(pointer)["WebDashboardEnabled"], "false")
 
     def test_sevendays_settings_reject_invalid_restricted_values(self) -> None:
         property_values = {

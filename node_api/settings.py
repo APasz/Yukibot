@@ -42,6 +42,32 @@ class NodeSettingChoice:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeSettingForcedState:
+    """A dependency expressed using canonical setting input values."""
+
+    when_value: str
+    setting_key: str
+    value: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.setting_key, str) or not self.setting_key.strip():
+            raise ValueError("Node setting forced state setting_key is invalid.")
+        if not isinstance(self.when_value, str) or not isinstance(self.value, str):
+            raise ValueError("Node setting forced state values must be input text.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSettingForcedState:
+        return cls(
+            when_value=_required_text(payload, "when_value"),
+            setting_key=_required_string(payload, "setting_key"),
+            value=_required_text(payload, "value"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {"when_value": self.when_value, "setting_key": self.setting_key, "value": self.value}
+
+
+@dataclass(frozen=True, slots=True)
 class NodeSettingEntry:
     key: str
     label: str
@@ -66,6 +92,7 @@ class NodeSettingEntry:
     recent_inputs: tuple[str, ...]
     group_id: str | None = None
     group_label: str | None = None
+    forced_states: tuple[NodeSettingForcedState, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.group_id is None) != (self.group_label is None):
@@ -103,6 +130,14 @@ class NodeSettingEntry:
             raise ValueError("Node setting entry has_pending_value is invalid.")
         group_id = _optional_string(payload, "group_id")
         group_label = _optional_string(payload, "group_label")
+        raw_forced_states = payload.get("forced_states", ())
+        if not isinstance(raw_forced_states, Sequence) or isinstance(raw_forced_states, (str, bytes)):
+            raise ValueError("Node setting entry forced states are invalid.")
+        forced_states: list[NodeSettingForcedState] = []
+        for raw_state in raw_forced_states:
+            if not isinstance(raw_state, Mapping):
+                raise ValueError("Node setting entry contained an invalid forced state.")
+            forced_states.append(NodeSettingForcedState.from_mapping(raw_state))
 
         return cls(
             key=_required_string(payload, "key"),
@@ -128,6 +163,7 @@ class NodeSettingEntry:
             recent_inputs=tuple(recent_inputs),
             group_id=group_id,
             group_label=group_label,
+            forced_states=tuple(forced_states),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -155,6 +191,7 @@ class NodeSettingEntry:
             "recent_inputs": list(self.recent_inputs),
             "group_id": self.group_id,
             "group_label": self.group_label,
+            "forced_states": [state.to_mapping() for state in self.forced_states],
         }
 
 
@@ -170,6 +207,15 @@ class NodeSettingList:
     required_save_level_name: str
     required_reload_level_name: str
     settings: tuple[NodeSettingEntry, ...]
+
+    def __post_init__(self) -> None:
+        keys = {setting.key for setting in self.settings}
+        if len(keys) != len(self.settings):
+            raise ValueError("Node setting list contains duplicate setting keys.")
+        for setting in self.settings:
+            for state in setting.forced_states:
+                if state.setting_key not in keys or state.setting_key == setting.key:
+                    raise ValueError(f"Invalid setting dependency: {setting.key} -> {state.setting_key}.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeSettingList:

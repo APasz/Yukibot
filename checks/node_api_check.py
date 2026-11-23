@@ -101,8 +101,10 @@ from apps._settings import (
     BoolSettingSpec,
     ChoiceOption,
     ChoiceSpec,
+    ForcedSettingState,
     IntSettingSpec,
     Setting,
+    SettingStateForceRule,
     Settings_Manager,
     StringSettingSpec,
 )
@@ -215,7 +217,7 @@ from node_api.node import (
     NodeDiskSettingsMutationResult,
     NodeFontSourceSettingsMutationResult,
 )
-from node_api.settings import NodeSettingEntry, NodeSettingList
+from node_api.settings import NodeSettingEntry, NodeSettingForcedState, NodeSettingList
 from node_api.system import (
     NodeRestartRecord,
     NodeRestartScheduleState,
@@ -2209,6 +2211,45 @@ class NodeApiTests(unittest.TestCase):
         restored = NodeSettingEntry.from_mapping(mapped)
 
         self.assertEqual(restored, result)
+
+    def test_setting_dependencies_survive_node_transport(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pointer = root / "settings.json"
+            pointer.write_text("{}", encoding="utf-8")
+            trigger = Setting(
+                BoolSettingSpec(), "Map Rendering", "rendering", [], default=False,
+                forced_state_rules=(SettingStateForceRule(True, ForcedSettingState("dashboard", True)),),
+            )
+            target = Setting(BoolSettingSpec(), "Webdashboard", "dashboard", [], default=False)
+            app = _build_app(Mock())
+            app.settings = Settings_Manager(app.cfg, _DummySettingsApp(pointer, [trigger, target]))
+            acl = Mock(spec=Access_Control)
+            acl.can.return_value = True
+            service = NodeApiService()
+            service.set_acl(acl)
+            app.settings.update_setting(42, trigger, "true")
+            with patch.object(app.settings.app, "resolve_draft_values", wraps=app.settings.app.resolve_draft_values) as resolve:
+                entries = service.build_setting_list(app=app, actor_user_id=42)
+            self.assertEqual(resolve.call_count, 1)
+            restored = NodeSettingList.from_mapping(entries.to_mapping())
+            entry = next(setting for setting in restored.settings if setting.key == "rendering")
+            self.assertEqual(entry.forced_states, (NodeSettingForcedState("true", "dashboard", "true"),))
+            self.assertEqual(restored.pending_change_count, 2)
+            payload = entry.to_mapping()
+            payload.pop("forced_states")
+            self.assertEqual(NodeSettingEntry.from_mapping(payload).forced_states, ())
+            for invalid in (None, "rules", [True], [{"when_value": True, "setting_key": "dashboard", "value": "true"}]):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    NodeSettingEntry.from_mapping({**payload, "forced_states": invalid})
+            for target_key in ("missing", "rendering"):
+                with self.subTest(target_key=target_key), self.assertRaisesRegex(ValueError, "dependency"):
+                    replace(restored, settings=tuple(
+                        replace(setting, forced_states=(NodeSettingForcedState("true", target_key, "true"),))
+                        if setting.key == "rendering" else setting for setting in restored.settings
+                    ))
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                replace(restored, settings=(*restored.settings, entry))
 
     def test_build_setting_list_hides_restricted_values(self) -> None:
         with TemporaryDirectory() as temp_dir:

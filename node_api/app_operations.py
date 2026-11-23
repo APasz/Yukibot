@@ -14,7 +14,7 @@ from apps._console import (
     ConsoleActionResult,
     execute_console_action,
 )
-from apps._settings import Setting, Settings_Manager
+from apps._settings import Setting, Settings_Manager, SettingsSnapshot
 from .console import (
     NodeConsoleActionEntry,
     NodeConsoleActionExecutionResult,
@@ -26,6 +26,7 @@ from .route_contracts import HttpExceptionFactory
 from .settings import (
     NodeSettingChoice,
     NodeSettingEntry,
+    NodeSettingForcedState,
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
@@ -60,12 +61,14 @@ class NodeAppOperationsService:
         settings = self._settings_for_app(app)
         acl = self._require_acl()
         settings_manager = self.require_settings_manager(app)
+        snapshot = settings_manager.snapshot(actor_user_id)
         entries = tuple(
             self._setting_entry(
                 setting,
                 acl=acl,
                 actor_user_id=actor_user_id,
                 settings_manager=settings_manager,
+                snapshot=snapshot,
             )
             for setting in settings
         )
@@ -78,14 +81,10 @@ class NodeAppOperationsService:
             node=self._node_name(),
             editable_count=editable_count,
             restricted_count=len(settings) - editable_count,
-            has_pending_changes=settings_manager.has_pending_changes(actor_user_id),
-            pending_change_count=settings_manager.pending_change_count(actor_user_id),
-            required_save_level_name=settings_manager.required_save_level(
-                actor_user_id
-            ).name,
-            required_reload_level_name=settings_manager.required_reload_level(
-                actor_user_id
-            ).name,
+            has_pending_changes=bool(snapshot.pending_keys),
+            pending_change_count=len(snapshot.pending_keys),
+            required_save_level_name=snapshot.required_level.name,
+            required_reload_level_name=snapshot.required_level.name,
             settings=entries,
         )
 
@@ -118,6 +117,7 @@ class NodeAppOperationsService:
             setting.key,
             actor_user_id,
         )
+        snapshot = settings_manager.snapshot(actor_user_id)
         return NodeSettingMutationResult(
             app_name=app.name,
             app_friendly=app.friendly,
@@ -125,7 +125,7 @@ class NodeAppOperationsService:
             setting_key=setting.key,
             message=(
                 f"{app.friendly} setting `{setting.label}` updated: "
-                f"{settings_manager.display_value(setting, actor_user_id)}. "
+                f"{setting.spec.display_value(snapshot.value_for(setting))}. "
                 "Settings are saved on launch or via Save Settings."
             ),
             setting=self._setting_entry(
@@ -133,6 +133,7 @@ class NodeAppOperationsService:
                 acl=self._require_acl(),
                 actor_user_id=actor_user_id,
                 settings_manager=settings_manager,
+                snapshot=snapshot,
             ),
         )
 
@@ -323,14 +324,13 @@ class NodeAppOperationsService:
         setting: Setting[object],
         *,
         can_edit: bool,
-        settings_manager: Settings_Manager,
-        actor_user_id: int,
+        snapshot: SettingsSnapshot,
     ) -> str:
         if setting.do_hide is not None and (
             not can_edit or setting.value_type is not bool
         ):
             return ""
-        return settings_manager.current_input_value(setting, actor_user_id)
+        return setting.spec.input_text(snapshot.value_for(setting))
 
     @staticmethod
     def _setting_recent_inputs(setting: Setting[object]) -> tuple[str, ...]:
@@ -341,20 +341,11 @@ class NodeAppOperationsService:
         return not setting.choices or not setting.strict_choice
 
     @staticmethod
-    def _setting_label_text(setting: Setting[object], value: object) -> str:
-        choice_label = setting.spec.choice_label_for_value(value)
-        return (
-            choice_label
-            if choice_label is not None
-            else setting.spec.display_value(value)
-        )
-
-    @classmethod
-    def _setting_default_text(cls, setting: Setting[object]) -> str:
+    def _setting_default_text(setting: Setting[object]) -> str:
         return (
             ""
             if setting.do_hide is not None
-            else cls._setting_label_text(setting, setting.default)
+            else setting.spec.label_text(setting.default)
         )
 
     @staticmethod
@@ -362,11 +353,10 @@ class NodeAppOperationsService:
         setting: Setting[object],
         *,
         can_reveal: bool,
-        settings_manager: Settings_Manager,
-        actor_user_id: int,
+        snapshot: SettingsSnapshot,
     ) -> str:
         if setting.do_hide is None:
-            return settings_manager.label_text(setting, actor_user_id)
+            return setting.spec.label_text(snapshot.value_for(setting))
         if setting.is_sensitive:
             return "REDACTED"
         if can_reveal:
@@ -378,12 +368,11 @@ class NodeAppOperationsService:
         setting: Setting[object],
         *,
         can_reveal: bool,
-        settings_manager: Settings_Manager,
-        actor_user_id: int,
+        snapshot: SettingsSnapshot,
     ) -> str:
         if setting.do_hide is None or not can_reveal:
             return ""
-        return settings_manager.label_text(setting, actor_user_id)
+        return setting.spec.label_text(snapshot.value_for(setting))
 
     @classmethod
     def _setting_entry(
@@ -393,6 +382,7 @@ class NodeAppOperationsService:
         acl: Access_Control,
         actor_user_id: int,
         settings_manager: Settings_Manager,
+        snapshot: SettingsSnapshot,
     ) -> NodeSettingEntry:
         can_edit = acl.can(actor_user_id, setting.power_level)
         reveal_level = setting.do_hide
@@ -410,24 +400,19 @@ class NodeAppOperationsService:
             value_text=cls._setting_value_text(
                 setting,
                 can_reveal=can_reveal,
-                settings_manager=settings_manager,
-                actor_user_id=actor_user_id,
+                snapshot=snapshot,
             ),
             revealed_value_text=cls._setting_revealed_value_text(
                 setting,
                 can_reveal=can_reveal,
-                settings_manager=settings_manager,
-                actor_user_id=actor_user_id,
+                snapshot=snapshot,
             ),
             current_input_value=cls._setting_current_input_value(
                 setting,
                 can_edit=can_edit,
-                settings_manager=settings_manager,
-                actor_user_id=actor_user_id,
+                snapshot=snapshot,
             ),
-            has_pending_value=settings_manager.has_pending_value(
-                actor_user_id, setting
-            ),
+            has_pending_value=setting.key in snapshot.pending_keys,
             can_edit=can_edit,
             value_is_hidden=reveal_level is not None,
             can_reveal_hidden_text=can_reveal,
@@ -441,7 +426,26 @@ class NodeAppOperationsService:
             recent_inputs=cls._setting_recent_inputs(setting) if can_edit else (),
             group_id=setting.group.name if setting.group is not None else None,
             group_label=setting.group.value if setting.group is not None else None,
+            forced_states=cls._setting_forced_states(setting, settings_manager=settings_manager),
         )
+
+    @staticmethod
+    def _setting_forced_states(
+        setting: Setting[object], *, settings_manager: Settings_Manager,
+    ) -> tuple[NodeSettingForcedState, ...]:
+        states: list[NodeSettingForcedState] = []
+        for rule in setting.forced_state_rules:
+            when_value = setting.spec.parse_input(setting.spec.serialise_value(rule.when_value))
+            for forced_state in rule.forced_states:
+                target = settings_manager.app.get_setting(forced_state.setting_key)
+                if target is None or not target.show_in_settings:
+                    continue
+                value = target.spec.parse_input(target.spec.serialise_value(forced_state.value))
+                states.append(NodeSettingForcedState(
+                    when_value=setting.spec.serialise_value(when_value), setting_key=target.key,
+                    value=target.spec.serialise_value(value),
+                ))
+        return tuple(states)
 
     def _console_action_entry(
         self,
