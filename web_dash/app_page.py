@@ -2255,6 +2255,7 @@ class ModWebAppPageMixin(
                   const MAP_REQUEST_TIMEOUT_MS = 15000;
 
                   const get = (id) => document.getElementById(id);
+                  const isCurrentWorldRevision = (state, revision) => !state.destroyed && state.worldRevision === revision;
                   const escapeHtml = (value) =>
                     String(value ?? "")
                       .replaceAll("&", "&amp;")
@@ -2265,7 +2266,10 @@ class ModWebAppPageMixin(
                   const toLatLng = (world, point) => [(world.north_positive ? point.z : -point.z) * world.scale, point.x * world.scale];
                   const toPoint = (world, latlng) => ({ x: latlng.lng / world.scale, z: (world.north_positive ? latlng.lat : -latlng.lat) / world.scale });
                   const playerName = (player) => player.display_name || player.name;
-                  const playerSnapshotExpired = (expiresAt) => expiresAt !== null && Date.now() >= expiresAt;
+                  const playerMarkerKey = (player, index) => JSON.stringify(
+                    player.uuid ? [player.uuid] : [null, playerName(player), index],
+                  );
+                  const playerSnapshotExpired = (expiresAt) => expiresAt !== null && performance.now() >= expiresAt;
                   const formatCoordinates = (world, point) => {
                     const north = Math.round(world.north_positive ? point.z : -point.z);
                     const east = Math.round(point.x);
@@ -2297,21 +2301,21 @@ class ModWebAppPageMixin(
                     return `<div class="mod-map-annotation-popup"><strong>${label}</strong>${createdBy}${deleteButton}</div>`;
                   };
                   const setStatus = (state, message, tone = "info") => {
-                    if (!state.statusEl) {
+                    if (state.destroyed || !state.statusEl) {
                       return;
                     }
                     state.statusEl.textContent = message;
                     state.statusEl.dataset.tone = tone;
                   };
                   const setNotice = (state, message = "", tone = "info") => {
-                    if (!state.noticeEl) {
+                    if (state.destroyed || !state.noticeEl) {
                       return;
                     }
                     state.noticeEl.textContent = message;
                     state.noticeEl.dataset.tone = tone;
                   };
                   const setModeText = (state, message) => {
-                    if (state.modeEl) {
+                    if (!state.destroyed && state.modeEl) {
                       state.modeEl.textContent = message;
                     }
                   };
@@ -2344,6 +2348,10 @@ class ModWebAppPageMixin(
                     pendingLabelPrompt?.(value);
                   };
                   const closeLabelPrompt = (state, { focusMap = true } = {}) => {
+                    if (state.labelPromptTimer !== null) {
+                      window.clearTimeout(state.labelPromptTimer);
+                      state.labelPromptTimer = null;
+                    }
                     if (state.labelPrompt) {
                       state.labelPrompt.hidden = true;
                     }
@@ -2400,6 +2408,12 @@ class ModWebAppPageMixin(
                     if (!state) {
                       return;
                     }
+                    state.destroyed = true;
+                    state.queuedSync = null;
+                    state.abortController.abort();
+                    state.resizeObserver?.disconnect();
+                    cancelPendingAnnotation(state, { focusMap: false });
+                    cancelPendingTileRefresh(state);
                     if (state.pollTimer) {
                       window.clearInterval(state.pollTimer);
                     }
@@ -2514,7 +2528,6 @@ class ModWebAppPageMixin(
                       options.signal?.removeEventListener("abort", cancelRequest);
                     }
                   };
-                  const fetchJson = async (url, options = {}) => (await fetchJsonDetailed(url, options)).data;
                   const apiUrl = (state, suffix, extraParams = {}) => {
                     const baseUrl = new URL(state.config.mapApiUrl, window.location.origin);
                     const basePath = baseUrl.pathname.replace(/\\/$/, "");
@@ -2525,6 +2538,17 @@ class ModWebAppPageMixin(
                     const query = searchParams.toString();
                     return `${basePath}${suffix}${query ? `?${query}` : ""}`;
                   };
+                  const fetchMapJsonDetailed = async (state, suffix, options = {}) => {
+                    const result = await fetchJsonDetailed(apiUrl(state, suffix), {
+                      ...options, signal: state.abortController.signal,
+                    });
+                    if (state.abortController.signal.aborted) {
+                      throw state.abortController.signal.reason;
+                    }
+                    return result;
+                  };
+                  const fetchMapJson = async (state, suffix, options = {}) =>
+                    (await fetchMapJsonDetailed(state, suffix, options)).data;
                   const apiSubpathUrl = (state, baseSuffix, relativePath) => {
                     const baseUrl = new URL(apiUrl(state, baseSuffix), window.location.origin);
                     const joinedPath =
@@ -2600,13 +2624,18 @@ class ModWebAppPageMixin(
                       keepalive: true,
                     }).catch(() => {});
                   };
-                  const handleClientActionFailure = (state, error, context) => {
+                  const handleClientActionFailure = (state, error, context, worldRevision = state.worldRevision) => {
+                    if (state.destroyed) {
+                      return;
+                    }
                     const message =
                       error instanceof Error
                         ? normalizeMapError(error.message, "Map action failed.")
                         : "Map action failed.";
                     reportClientError(state, error, context);
-                    setStatus(state, message, "error");
+                    if (isCurrentWorldRevision(state, worldRevision)) {
+                      setStatus(state, message, "error");
+                    }
                   };
                   const syncOverlayOrder = (state) => {
                     bringLayerToFront(state.squaremapLayer);
@@ -2617,7 +2646,6 @@ class ModWebAppPageMixin(
                   const replaceLayerGroup = (state, layerKey, nextLayer) => {
                     const currentLayer = state[layerKey];
                     if (currentLayer === nextLayer) {
-                      syncOverlayOrder(state);
                       return;
                     }
                     nextLayer.addTo(state.map);
@@ -2625,9 +2653,13 @@ class ModWebAppPageMixin(
                     currentLayer?.remove();
                     syncOverlayOrder(state);
                   };
-                  const resetTileLayers = (state) => {
+                  const cancelPendingTileRefresh = (state) => {
                     state.pendingTileLayer?.remove();
                     state.pendingTileLayer = null;
+                    state.finishTileRefresh?.();
+                  };
+                  const resetTileLayers = (state) => {
+                    cancelPendingTileRefresh(state);
                     state.tileLayer?.remove();
                     state.tileLayer = null;
                   };
@@ -2693,11 +2725,11 @@ class ModWebAppPageMixin(
                       if (!button) {
                         return;
                       }
-                      button.addEventListener("click", async (clickEvent) => {
+                      button.onclick = async (clickEvent) => {
                         clickEvent.preventDefault();
                         clickEvent.stopPropagation();
                         await deleteAnnotation(state.config.containerId, annotation.annotation_id);
-                      });
+                      };
                     });
                   };
                   const bindAnnotationLayer = (state, layer, annotation) => {
@@ -2721,15 +2753,23 @@ class ModWebAppPageMixin(
                     }
                   };
                   const loadAnnotationLayer = async (state) => {
-                    const payload = await fetchJson(apiUrl(state, "/annotations"));
+                    const requestId = ++state.annotationRequestId;
+                    const worldRevision = state.worldRevision;
+                    const world = state.currentWorld;
+                    const payload = await fetchMapJson(state, "/annotations");
+                    if (!isCurrentWorldRevision(state, worldRevision) || requestId !== state.annotationRequestId) {
+                      return null;
+                    }
+                    const annotations = (payload.annotations || []).filter((annotation) => annotation.world_name === world?.name);
+                    const signature = JSON.stringify(annotations);
+                    if (signature === state.annotationSignature) {
+                      return null;
+                    }
                     const nextLayer = window.L.layerGroup();
-                    for (const annotation of payload.annotations || []) {
-                      if (!state.currentWorld || annotation.world_name !== state.currentWorld.name) {
-                        continue;
-                      }
+                    for (const annotation of annotations) {
                       if (annotation.shape === "marker") {
                         const [point] = annotation.points;
-                        const layer = window.L.circleMarker(toLatLng(state.currentWorld, point), {
+                        const layer = window.L.circleMarker(toLatLng(world, point), {
                           radius: 7,
                           color: annotation.color_hex,
                           fillColor: annotation.color_hex,
@@ -2741,7 +2781,7 @@ class ModWebAppPageMixin(
                       }
                       if (annotation.shape === "polyline") {
                         const layer = window.L.polyline(
-                          annotation.points.map((point) => toLatLng(state.currentWorld, point)),
+                          annotation.points.map((point) => toLatLng(world, point)),
                           {
                             color: annotation.color_hex,
                             weight: 4,
@@ -2752,12 +2792,23 @@ class ModWebAppPageMixin(
                         bindAnnotationLayer(state, layer, annotation);
                       }
                     }
-                    return nextLayer;
+                    return { layer: nextLayer, signature, requestId, worldRevision };
+                  };
+                  const applyAnnotationLayer = (state, snapshot) => {
+                    if (!snapshot || !isCurrentWorldRevision(state, snapshot.worldRevision)
+                      || snapshot.requestId !== state.annotationRequestId) {
+                      return;
+                    }
+                    replaceLayerGroup(state, "annotationLayer", snapshot.layer);
+                    state.annotationSignature = snapshot.signature;
                   };
                   const refreshAnnotations = async (state) => {
-                    replaceLayerGroup(state, "annotationLayer", await loadAnnotationLayer(state));
+                    applyAnnotationLayer(state, await loadAnnotationLayer(state));
                   };
                   const focusPlayer = (state, player) => {
+                    if (state.destroyed) {
+                      return;
+                    }
                     if (playerSnapshotExpired(state.playersExpireAt)) {
                       clearPlayers(state);
                       return;
@@ -2812,6 +2863,7 @@ class ModWebAppPageMixin(
                   };
                   const clearPlayers = (state) => {
                     state.playerLayer.clearLayers();
+                    state.playerMarkers.clear();
                     state.playersExpireAt = null;
                     state.pendingPlayerFocus = null;
                     updatePlayerControls(state, []);
@@ -2820,8 +2872,8 @@ class ModWebAppPageMixin(
                     if (!state.currentWorld?.player_tracker?.enabled) {
                       return { players: [], expiresAt: null };
                     }
-                    const requestedAt = Date.now();
-                    const result = await fetchJsonDetailed(apiUrl(state, "/players"));
+                    const requestedAt = performance.now();
+                    const result = await fetchMapJsonDetailed(state, "/players");
                     const payload = result.data;
                     const players = Array.isArray(payload) ? payload : payload?.players;
                     if (!Array.isArray(players)) {
@@ -2839,28 +2891,57 @@ class ModWebAppPageMixin(
                     return { players: visiblePlayers, expiresAt };
                   };
                   const applyPlayerSnapshot = (state, { players, expiresAt }) => {
+                    if (state.destroyed) {
+                      return;
+                    }
                     if (players.length === 0 || playerSnapshotExpired(expiresAt)) {
                       clearPlayers(state);
                       return;
                     }
-                    const nextLayer = window.L.layerGroup();
-                    for (const player of players) {
-                      const marker = window.L.circleMarker(toLatLng(state.currentWorld, player), {
-                        radius: 6,
-                        color: "#0f172a",
-                        fillColor: "#22c55e",
-                        fillOpacity: 0.95,
-                        weight: 2,
-                        bubblingMouseEvents: false,
-                      }).addTo(nextLayer);
-                      marker.bindTooltip(escapeHtml(playerName(player)), {
-                        permanent: state.manifest?.provider === "sevendays",
-                        direction: "top",
-                        className: "mod-map-player-label",
-                      });
-                      marker.on("click", () => focusPlayer(state, player));
+                    const keys = new Set();
+                    let membershipChanged = false;
+                    players.forEach((player, index) => {
+                      const key = playerMarkerKey(player, index);
+                      keys.add(key);
+                      let entry = state.playerMarkers.get(key);
+                      if (!entry) {
+                        const marker = window.L.circleMarker(toLatLng(state.currentWorld, player), {
+                          radius: 6,
+                          color: "#0f172a",
+                          fillColor: "#22c55e",
+                          fillOpacity: 0.95,
+                          weight: 2,
+                          bubblingMouseEvents: false,
+                        }).addTo(state.playerLayer);
+                        entry = { player, marker };
+                        state.playerMarkers.set(key, entry);
+                        membershipChanged = true;
+                        marker.bindTooltip(escapeHtml(playerName(player)), {
+                          permanent: state.manifest?.provider === "sevendays",
+                          direction: "top",
+                          className: "mod-map-player-label",
+                        });
+                        marker.on("click", () => focusPlayer(state, entry.player));
+                      } else {
+                        if (entry.player.x !== player.x || entry.player.z !== player.z) {
+                          entry.marker.setLatLng(toLatLng(state.currentWorld, player));
+                        }
+                        if (playerName(entry.player) !== playerName(player)) {
+                          entry.marker.setTooltipContent(escapeHtml(playerName(player)));
+                        }
+                        entry.player = player;
+                      }
+                    });
+                    for (const [key, entry] of state.playerMarkers) {
+                      if (!keys.has(key)) {
+                        state.playerLayer.removeLayer(entry.marker);
+                        state.playerMarkers.delete(key);
+                        membershipChanged = true;
+                      }
                     }
-                    replaceLayerGroup(state, "playerLayer", nextLayer);
+                    if (membershipChanged) {
+                      syncOverlayOrder(state);
+                    }
                     state.playersExpireAt = expiresAt;
                     updatePlayerControls(state, players);
                   };
@@ -2922,17 +3003,21 @@ class ModWebAppPageMixin(
                     return null;
                   };
                   const loadSquaremapMarkerLayer = async (state) => {
-                    const nextLayer = window.L.layerGroup();
-                    if (!state.currentWorld) {
-                      return { result: { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true }, layer: nextLayer };
+                    if (!state.currentWorld || state.manifest?.provider === "sevendays") {
+                      return { result: { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true }, layer: state.squaremapLayer };
                     }
-                    const result = await fetchJsonDetailed(
-                      apiUrl(state, `/worlds/${encodeURIComponent(state.currentWorld.name)}/markers`),
+                    const result = await fetchMapJsonDetailed(
+                      state, `/worlds/${encodeURIComponent(state.currentWorld.name)}/markers`,
                     );
                     const payload = result.data;
                     if (!Array.isArray(payload)) {
-                      return { result, layer: nextLayer };
+                      throw new Error("Map markers are invalid.");
                     }
+                    const signature = JSON.stringify(payload);
+                    if (signature === state.squaremapSignature) {
+                      return { result, layer: state.squaremapLayer, signature };
+                    }
+                    const nextLayer = window.L.layerGroup();
                     for (const markerLayer of payload) {
                       if (!markerLayer || markerLayer.hide === true || !markerLayer.markers) {
                         continue;
@@ -2951,7 +3036,7 @@ class ModWebAppPageMixin(
                         layer.addTo(nextLayer);
                       }
                     }
-                    return { result, layer: nextLayer };
+                    return { result, layer: nextLayer, signature };
                   };
                   const snapLinePoint = (anchor, point) => {
                     const deltaX = point.x - anchor.x;
@@ -2977,15 +3062,14 @@ class ModWebAppPageMixin(
                     if (!state.currentWorld) {
                       return;
                     }
-                    const now = Date.now();
+                    const now = performance.now();
                     const intervalMs = Math.max(1, state.currentWorld.tiles_update_interval || 15) * 1000;
                     if (!force && state.lastTileRefreshAt !== null && now - state.lastTileRefreshAt < intervalMs) {
                       return;
                     }
                     state.tileRevision += 1;
                     state.lastTileRefreshAt = now;
-                    state.pendingTileLayer?.remove();
-                    state.pendingTileLayer = null;
+                    cancelPendingTileRefresh(state);
                     const nextTileLayer = createTileLayer(state, state.currentWorld);
                     nextTileLayer.setOpacity(state.tileLayer ? 0 : 1);
                     nextTileLayer.addTo(state.map);
@@ -3004,7 +3088,9 @@ class ModWebAppPageMixin(
                         }
                         settled = true;
                         timeoutId && window.clearTimeout(timeoutId);
-                        if (state.pendingTileLayer !== nextTileLayer) {
+                        nextTileLayer.off("load", finish);
+                        state.finishTileRefresh = null;
+                        if (state.destroyed || state.pendingTileLayer !== nextTileLayer) {
                           resolve(null);
                           return;
                         }
@@ -3019,6 +3105,7 @@ class ModWebAppPageMixin(
                         resolve(null);
                       };
                       const timeoutId = window.setTimeout(finish, 1500);
+                      state.finishTileRefresh = finish;
                       nextTileLayer.once("load", finish);
                     });
                   };
@@ -3035,12 +3122,17 @@ class ModWebAppPageMixin(
                     if (state.pendingLabelPrompt) {
                       return null;
                     }
+                    const worldRevision = state.worldRevision;
                     state.pendingLabelKind = labelKind;
                     state.labelPrompt.hidden = false;
                     state.labelPromptTitle.textContent = `Label ${labelKind}`;
                     state.labelPromptInput.placeholder = `Enter a label for this ${labelKind}`;
                     state.labelPromptInput.value = "";
-                    window.setTimeout(() => {
+                    state.labelPromptTimer = window.setTimeout(() => {
+                      state.labelPromptTimer = null;
+                      if (state.destroyed || !isLabelPromptOpen(state)) {
+                        return;
+                      }
                       placeLabelPrompt(state, anchorPoint);
                       state.labelPromptInput?.focus();
                       state.labelPromptInput?.select();
@@ -3048,7 +3140,7 @@ class ModWebAppPageMixin(
                     const label = await new Promise((resolve) => {
                       state.pendingLabelPrompt = resolve;
                     });
-                    if (typeof label !== "string") {
+                    if (typeof label !== "string" || !isCurrentWorldRevision(state, worldRevision)) {
                       return null;
                     }
                     const trimmedLabel = label.trim();
@@ -3098,24 +3190,29 @@ class ModWebAppPageMixin(
                     }
                   };
                   const postAnnotation = async (state, payload) => {
-                    return await fetchJson(apiUrl(state, "/annotations"), {
+                    return await fetchMapJson(state, "/annotations", {
                       method: "POST",
                       headers: { "Content-Type": "application/json", Accept: "application/json" },
                       body: JSON.stringify(payload),
                     });
                   };
                   const createMarkerAnnotation = async (state, point, anchorPoint = null) => {
+                    const worldRevision = state.worldRevision;
+                    const worldName = state.currentWorld.name;
                     const label = await requestAnnotationLabel(state, "point", anchorPoint);
-                    if (!label) {
+                    if (!label || !isCurrentWorldRevision(state, worldRevision)) {
                       return;
                     }
                     await postAnnotation(state, {
-                      world_name: state.currentWorld.name,
+                      world_name: worldName,
                       shape: "marker",
                       label,
                       color_hex: currentDraftColor(state),
                       points: [point],
                     });
+                    if (!isCurrentWorldRevision(state, worldRevision)) {
+                      return;
+                    }
                     setStatus(state, `Added point: ${label}`, "success");
                     await refreshAnnotations(state);
                   };
@@ -3137,19 +3234,29 @@ class ModWebAppPageMixin(
                       setStatus(state, "A line needs at least two points.", "error");
                       return;
                     }
+                    const worldRevision = state.worldRevision;
+                    const worldName = state.currentWorld.name;
+                    const draft = state.pendingLine;
                     const label = await requestAnnotationLabel(state, "line", anchorPoint);
-                    if (!label) {
+                    if (!label || !isCurrentWorldRevision(state, worldRevision) || state.pendingLine !== draft) {
                       return;
                     }
+                    const points = [...draft];
                     await postAnnotation(state, {
-                      world_name: state.currentWorld.name,
+                      world_name: worldName,
                       shape: "polyline",
                       label,
                       color_hex: currentDraftColor(state),
-                      points: state.pendingLine,
+                      points,
                     });
+                    if (!isCurrentWorldRevision(state, worldRevision)) {
+                      return;
+                    }
                     setStatus(state, `Added line: ${label}`, "success");
-                    cancelLineDraft(state);
+                    if (state.pendingLine === draft && draft.length === points.length
+                      && draft.every((point, index) => point === points[index])) {
+                      cancelLineDraft(state);
+                    }
                     await refreshAnnotations(state);
                   };
                   const refreshAll = async (state, { announce = false, forceTiles = false } = {}) => {
@@ -3165,6 +3272,9 @@ class ModWebAppPageMixin(
                       loadPlayerSnapshot(state),
                       loadAnnotationLayer(state),
                     ]);
+                    if (state.destroyed) {
+                      return { squaremapSource: state.squaremapSource };
+                    }
                     if (playerResult.status === "fulfilled") {
                       applyPlayerSnapshot(state, playerResult.value);
                     } else {
@@ -3173,9 +3283,10 @@ class ModWebAppPageMixin(
                     if (annotationResult.status !== "fulfilled") {
                       throw annotationResult.reason;
                     }
-                    replaceLayerGroup(state, "annotationLayer", annotationResult.value);
+                    applyAnnotationLayer(state, annotationResult.value);
                     if (markerResult.status === "fulfilled") {
                       replaceLayerGroup(state, "squaremapLayer", markerResult.value.layer);
+                      state.squaremapSignature = markerResult.value.signature ?? null;
                     }
                     setToolState(state, state.tool);
                     const markersLoaded = markerResult.status === "fulfilled" ? markerResult.value.result : null;
@@ -3221,9 +3332,12 @@ class ModWebAppPageMixin(
                   };
                   const loadWorld = async (state, worldName, { preserveView = false, forceTiles = true } = {}) => {
                     const worldSummary = state.worldByName.get(worldName) || state.manifest.worlds[0];
-                    const worldSettingsResult = await fetchJsonDetailed(
-                      apiUrl(state, `/worlds/${encodeURIComponent(worldSummary.name)}/settings`),
+                    const worldSettingsResult = await fetchMapJsonDetailed(
+                      state, `/worlds/${encodeURIComponent(worldSummary.name)}/settings`,
                     );
+                    if (state.destroyed) {
+                      return;
+                    }
                     const worldSettings = worldSettingsResult.data;
                     const nextWorld = {
                       ...worldSummary,
@@ -3246,6 +3360,9 @@ class ModWebAppPageMixin(
                     state.map.setMinZoom(0);
                     state.map.setMaxZoom(nextWorld.zoom.max + nextWorld.zoom.extra);
                     if (!sameWorld) {
+                      state.worldRevision += 1;
+                      state.annotationSignature = null;
+                      state.squaremapSignature = null;
                       resetTileLayers(state);
                       replaceLayerGroup(state, "annotationLayer", window.L.layerGroup());
                       replaceLayerGroup(state, "squaremapLayer", window.L.layerGroup());
@@ -3263,20 +3380,25 @@ class ModWebAppPageMixin(
                       setSquaremapStaleNotice(state, worldSettingsResult.cacheUpdatedAtUnixMs);
                     }
                     const refreshResult = await refreshAll(state, { forceTiles });
-                    window.setTimeout(() => state.map.invalidateSize(), 60);
+                    if (state.destroyed) {
+                      return;
+                    }
                     if (refreshResult.squaremapSource === MAP_SOURCE_LIVE) {
                       setStatus(state, `Loaded ${nextWorld.display_name}.`, "success");
                     } else {
                       setStatus(state, `Loaded cached ${nextWorld.display_name} data.`, "warning");
                     }
                   };
-                  const bootstrapMap = async (state, { announce = false, preserveView = true, forceTiles = true } = {}) => {
+                  const bootstrapMap = async (state, { announce = false, preserveView = true, forceTiles = true, worldName = null } = {}) => {
                     if (announce) {
                       setStatus(state, "Refreshing map data…");
                     }
-                    const manifestResult = await fetchJsonDetailed(apiUrl(state, "/manifest"));
+                    const manifestResult = await fetchMapJsonDetailed(state, "/manifest");
+                    if (state.destroyed) {
+                      return;
+                    }
                     state.manifest = manifestResult.data;
-                    state.lastManifestRefreshAt = Date.now();
+                    state.lastManifestRefreshAt = performance.now();
                     state.iconBaseUrl = apiUrl(state, "/assets");
                     state.worldByName.clear();
                     populateWorldOptions(state);
@@ -3284,9 +3406,10 @@ class ModWebAppPageMixin(
                       ? "minecraft_overworld"
                       : state.manifest.initial_world_name;
                     const requestedWorldName =
-                      state.currentWorld && state.worldByName.has(state.currentWorld.name)
-                        ? state.currentWorld.name
-                        : defaultWorldName;
+                      state.worldByName.has(worldName) ? worldName
+                        : state.currentWorld && state.worldByName.has(state.currentWorld.name)
+                          ? state.currentWorld.name
+                          : defaultWorldName;
                     if (manifestResult.source === MAP_SOURCE_STALE) {
                       setSquaremapStaleNotice(state, manifestResult.cacheUpdatedAtUnixMs);
                     } else {
@@ -3294,21 +3417,50 @@ class ModWebAppPageMixin(
                     }
                     await loadWorld(state, requestedWorldName, { preserveView, forceTiles });
                   };
-                  const runMapSync = async (state, operation) => {
+                  const runMapSync = async (state, operation, { queue = false } = {}) => {
+                    if (state.destroyed) {
+                      return;
+                    }
                     if (state.syncPromise) {
+                      if (queue) {
+                        state.queuedSync = operation;
+                      }
                       return await state.syncPromise;
                     }
-                    const pending = Promise.resolve()
-                      .then(operation)
-                      .finally(() => {
+                    const pending = Promise.resolve().then(async () => {
+                      let next = operation;
+                      let outcome;
+                      try {
+                        while (next && !state.destroyed) {
+                          try {
+                            outcome = { ok: true, value: await next() };
+                          } catch (error) {
+                            outcome = { ok: false, error };
+                          }
+                          next = state.queuedSync;
+                          state.queuedSync = null;
+                        }
+                        state.queuedSync = null;
+                        if (state.destroyed) {
+                          return;
+                        }
+                        if (!outcome.ok) {
+                          throw outcome.error;
+                        }
+                        return outcome.value;
+                      } finally {
                         if (state.syncPromise === pending) {
                           state.syncPromise = null;
                         }
-                      });
+                      }
+                    });
                     state.syncPromise = pending;
                     return await pending;
                   };
                   const handleBootstrapFailure = (state, error) => {
+                    if (state.destroyed) {
+                      return;
+                    }
                     clearPlayers(state);
                     const detail =
                       error instanceof Error
@@ -3335,15 +3487,18 @@ class ModWebAppPageMixin(
                     setStatus(state, "Map data is unavailable.", "error");
                   };
                   const bindControls = (state) => {
+                    const eventOptions = { signal: state.abortController.signal };
                     state.worldSelect?.addEventListener("change", () => {
-                      void runMapSync(state, () => loadWorld(state, state.worldSelect.value))
+                      const worldName = state.worldSelect.value;
+                      void runMapSync(state, () => loadWorld(state, worldName), { queue: true })
                         .catch((error) => handleBootstrapFailure(state, error));
-                    });
+                    }, eventOptions);
                     state.refreshButton?.addEventListener("click", () => {
+                      const worldName = state.worldSelect.value;
                       void runMapSync(state, () =>
-                        bootstrapMap(state, { announce: true, preserveView: true }),
+                        bootstrapMap(state, { announce: true, preserveView: true, worldName }), { queue: true },
                       ).catch((error) => handleBootstrapFailure(state, error));
-                    });
+                    }, eventOptions);
                     if (!state.config.canWrite) {
                       return;
                     }
@@ -3354,7 +3509,7 @@ class ModWebAppPageMixin(
                       }
                       cancelLineDraft(state);
                       setToolState(state, "marker");
-                    });
+                    }, eventOptions);
                     state.toolButtons.line?.addEventListener("click", () => {
                       if (state.tool === "line") {
                         cancelLineDraft(state);
@@ -3365,37 +3520,41 @@ class ModWebAppPageMixin(
                       setToolState(state, "line");
                       updatePreview(state);
                       setStatus(state, "Line tool active. Double-click to save, right-click to cancel.");
-                    });
+                    }, eventOptions);
                     state.labelPromptForm?.addEventListener("submit", (event) => {
                       event.preventDefault();
                       const value = state.labelPromptInput?.value ?? "";
                       resolveLabelPrompt(state, value);
-                    });
+                    }, eventOptions);
                     state.labelPromptInput?.addEventListener("keydown", (event) => {
                       if (event.key !== "Escape") {
                         return;
                       }
                       event.preventDefault();
                       cancelPendingAnnotation(state);
-                    });
+                    }, eventOptions);
                   };
                   const deleteAnnotation = async (containerId, annotationId) => {
                     const state = instances.get(containerId);
                     if (!state) {
                       return;
                     }
+                    const worldRevision = state.worldRevision;
                     try {
-                      await fetchJson(
-                        apiUrl(state, `/annotations/${encodeURIComponent(annotationId)}/delete`),
+                      await fetchMapJson(
+                        state, `/annotations/${encodeURIComponent(annotationId)}/delete`,
                         {
                           method: "POST",
                           headers: { Accept: "application/json" },
                         },
                       );
+                      if (!isCurrentWorldRevision(state, worldRevision)) {
+                        return;
+                      }
                       setStatus(state, "Annotation deleted.", "success");
                       await refreshAnnotations(state);
                     } catch (error) {
-                      handleClientActionFailure(state, error, "delete-annotation");
+                      handleClientActionFailure(state, error, "delete-annotation", worldRevision);
                     }
                   };
                   const init = async (config) => {
@@ -3407,6 +3566,8 @@ class ModWebAppPageMixin(
                     destroyInstance(config.containerId);
                     const state = {
                       config,
+                      destroyed: false,
+                      abortController: new AbortController(),
                       container,
                       canvas,
                       canvasFrame: get(config.canvasFrameId),
@@ -3425,21 +3586,27 @@ class ModWebAppPageMixin(
                       lastManifestRefreshAt: null,
                       worldByName: new Map(),
                       currentWorld: null,
+                      worldRevision: 0,
                       tileLayer: null,
                       squaremapLayer: window.L.layerGroup(),
+                      squaremapSignature: null,
                       playerLayer: window.L.layerGroup(),
+                      playerMarkers: new Map(),
                       playersExpireAt: null,
                       visiblePlayers: [],
                       playerListSignature: null,
                       pendingPlayerFocus: null,
                       zooming: false,
                       annotationLayer: window.L.layerGroup(),
+                      annotationSignature: null,
+                      annotationRequestId: 0,
                       previewLayerGroup: window.L.layerGroup(),
                       previewLayer: null,
                       pendingLine: [],
                       tileRevision: 0,
                       lastTileRefreshAt: null,
                       pendingTileLayer: null,
+                      finishTileRefresh: null,
                       tool: "pan",
                       worldSelect: get(config.worldSelectId),
                       colorInput: get(config.colorInputId),
@@ -3461,6 +3628,8 @@ class ModWebAppPageMixin(
                       },
                       pollTimer: null,
                       syncPromise: null,
+                      queuedSync: null,
+                      resizeObserver: null,
                       visibilityTimer: null,
                       iconBaseUrl: "",
                       squaremapSource: MAP_SOURCE_LIVE,
@@ -3469,6 +3638,7 @@ class ModWebAppPageMixin(
                       lastClientErrorReportedAt: null,
                       pendingLabelPrompt: null,
                       pendingLabelKind: null,
+                      labelPromptTimer: null,
                       lastPromptAnchorPoint: null,
                       documentPointerDownListener: null,
                       documentContextMenuListener: null,
@@ -3503,6 +3673,7 @@ class ModWebAppPageMixin(
                     state.previewLayerGroup.addTo(state.map);
                     instances.set(config.containerId, state);
                     bindControls(state);
+                    clearPlayers(state);
                     setToolState(state, "pan");
                     state.map.on("click", (event) => {
                       if (!state.config.canWrite || !state.currentWorld) {
@@ -3516,8 +3687,9 @@ class ModWebAppPageMixin(
                       }
                       const rawPoint = toPoint(state.currentWorld, event.latlng);
                       if (state.tool === "marker") {
+                        const worldRevision = state.worldRevision;
                         void createMarkerAnnotation(state, rawPoint, event.containerPoint).catch((error) =>
-                          handleClientActionFailure(state, error, "create-marker-annotation")
+                          handleClientActionFailure(state, error, "create-marker-annotation", worldRevision)
                         );
                         return;
                       }
@@ -3550,8 +3722,9 @@ class ModWebAppPageMixin(
                         return;
                       }
                       event.originalEvent?.preventDefault?.();
+                      const worldRevision = state.worldRevision;
                       void finishLineAnnotation(state, event.containerPoint).catch((error) =>
-                        handleClientActionFailure(state, error, "finish-line-annotation")
+                        handleClientActionFailure(state, error, "finish-line-annotation", worldRevision)
                       );
                     });
                     state.map.on("contextmenu", (event) => {
@@ -3569,12 +3742,22 @@ class ModWebAppPageMixin(
                       cancelLineDraft(state);
                       setStatus(state, "Cancelled line draft.");
                     });
+                    state.resizeObserver = new ResizeObserver(() => {
+                      if (!state.destroyed && state.container.isConnected && state.container.offsetParent !== null) {
+                        state.map.invalidateSize(false);
+                      }
+                    });
+                    state.resizeObserver.observe(state.canvas);
                     state.visibilityTimer = window.setInterval(() => {
+                      if (state.destroyed) {
+                        return;
+                      }
+                      if (!state.container.isConnected) {
+                        destroyInstance(state.config.containerId);
+                        return;
+                      }
                       if (playerSnapshotExpired(state.playersExpireAt)) {
                         clearPlayers(state);
-                      }
-                      if (state.container.offsetParent !== null) {
-                        state.map.invalidateSize(false);
                       }
                     }, 1000);
                     state.pollTimer = window.setInterval(() => {
@@ -3582,7 +3765,7 @@ class ModWebAppPageMixin(
                         return;
                       }
                       const rediscoverWorld = state.manifest?.provider === "sevendays"
-                        && Date.now() - state.lastManifestRefreshAt >= (state.currentWorld?.tiles_update_interval || 15) * 1000;
+                        && performance.now() - state.lastManifestRefreshAt >= (state.currentWorld?.tiles_update_interval || 15) * 1000;
                       void runMapSync(state, () =>
                         state.manifest && state.currentWorld && !rediscoverWorld
                           ? refreshAll(state)

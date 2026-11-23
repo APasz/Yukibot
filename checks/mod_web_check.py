@@ -20845,7 +20845,7 @@ class ModWebTests(unittest.TestCase):
         assets_html = ModWebService._map_client_assets_html()
 
         self.assertIn(
-            'replaceLayerGroup(state, "annotationLayer", annotationResult.value);',
+            'applyAnnotationLayer(state, annotationResult.value);',
             assets_html,
         )
         self.assertIn("nextTileLayer.setOpacity(state.tileLayer ? 0 : 1);", assets_html)

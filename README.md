@@ -162,6 +162,8 @@ Unrendered areas remain blank. The map includes pan, zoom, periodic tile refresh
 
 An open map detects save changes and selects that save's tiles and annotations. Existing rendered tiles remain viewable while the game is stopped, provided Map Rendering remains enabled. The map does not expose the full generated world. Refresh the app page after enabling rendering or after the first tiles are generated to discover the tab.
 
+Refreshes reuse existing player markers and unchanged annotations. World selection and Refresh keep the latest request when an update is already running. Leaving the app page cancels pending map requests and background work.
+
 The UL profile keeps game, mod, and user data inside the app folder, disables EAC, and includes `start_undead_legacy.sh` for standalone launches after copying the folder. Failed or cancelled installations remove their unfinished app folder; reusable downloads remain in the node's `opt/app-install-downloads` cache for 72 hours after their last use, with hourly expiry cleanup.
 
 Managed UL client packs support Windows and Proton. Extract the ZIP into a matching Windows game installation, beside `7DaysToDie.exe`: it includes the complete managed overhaul and selected add-ons under `Mods/`, the pinned BepInEx/Doorstop runtime at the game root, an optional `Start Undead Legacy.cmd` launcher with EAC disabled, and `README-Undead-Legacy.txt` with installation and Proton instructions. Proton users launch through Steam with `WINEDLLOVERRIDES="winhttp.dll=n,b" %command%` and EAC disabled in the game launcher. Native Linux clients are deferred.
