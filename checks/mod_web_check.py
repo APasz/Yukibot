@@ -6220,6 +6220,7 @@ class ModWebTests(unittest.TestCase):
                 patch.object(config, "MOD_WEB_SERVER", server),
                 patch.object(config, "load_bot_configuration", return_value=bot_config),
                 patch.object(config, "authority_cache_path", return_value=missing_cache),
+                patch.object(ModWebService, "_known_bot_snapshot_cache", None),
             ):
                 links = ModWebService()._node_links()
 

@@ -3,9 +3,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import shutil
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -91,6 +93,7 @@ from apps.sevendays.map import SevenDaysMap, SevenDaysMapCache
 from apps.sevendays.overhaul_settings import MAX_WANDERING_HORDE_ENEMIES, SevenDaysSettingGroup, undead_legacy_settings
 from archive_safety import validated_zip_entries
 from config import Activity_Manager
+from map_annotations import MapCoordinate
 from relay_notices import (
     GameDeathKind,
     GameDeathNotice,
@@ -248,8 +251,11 @@ _SEVENDAYS_PLAYER_COUNT_RE: Pattern[str] = re.compile(
     _SEVENDAYS_CONSOLE_LINE_PREFIX + r"Total of\s+(?P<count>\d+)\s+in the game\s*$",
 )
 _SEVENDAYS_PLAYER_DETAIL_RE: Pattern[str] = re.compile(
-    _SEVENDAYS_CONSOLE_LINE_PREFIX + r"(?P<index>\d+)\. id=\d+,\s*(?P<player>.+), pos=\(.*$",
+    _SEVENDAYS_CONSOLE_LINE_PREFIX
+    + r"(?P<index>\d+)\. id=(?P<entity_id>\d+),\s*(?P<player>.+), pos=\((?P<position>[^)]*)\).*$",
 )
+SEVENDAYS_PLAYER_POLL_INTERVAL_SECONDS: Final[float] = 5.0
+SEVENDAYS_PLAYER_SNAPSHOT_MAX_AGE_SECONDS: Final[float] = 3 * SEVENDAYS_PLAYER_POLL_INTERVAL_SECONDS
 _SEVENDAYS_PLAYER_CAPACITY_RE: Pattern[str] = re.compile(
     _SEVENDAYS_CONSOLE_LINE_PREFIX
     + r"(?:Max players\s*:\s*|GamePref\.ServerMaxPlayerCount\s*=\s*)(?P<capacity>\d+)\s*$",
@@ -3294,6 +3300,8 @@ class SevenDays(App[App_Config]):
             directory=self.directory,
             server_log=self.server_log,
         )
+        # Settings may select another save while the game is still starting.
+        runtime_save = self._save_directory_path() if serverconfig_path.is_file() else None
         await self._std_launch()
 
         try:
@@ -3329,7 +3337,7 @@ class SevenDays(App[App_Config]):
                     timeout_seconds=900.0,
                     ready_label="server readiness",
                 )
-            await self._players.start(read_telnet=runtime_log is not None)
+            await self._players.start(save=runtime_save, read_telnet=runtime_log is not None)
             await self._activities.start()
             self._running = True
             self._schedule_startup_sandbox_options_request()
@@ -3367,6 +3375,9 @@ class SevenDays(App[App_Config]):
 
     def connected_player_names(self) -> tuple[str, ...]:
         return self._players.connected_player_names()
+
+    def map_player_snapshot(self, *, save: Path) -> "SevenDaysPlayerSnapshot | None":
+        return self._players.map_snapshot(save=save)
 
     @property
     def sandbox_options_path(self) -> Path:
@@ -3605,6 +3616,24 @@ def _register_console_response_matchers(
     app._console_response_matchers.update(matchers)
 
 
+@dataclass(frozen=True, slots=True)
+class SevenDaysPlayer:
+    entity_id: int
+    name: str
+    position: MapCoordinate | None
+
+
+@dataclass(frozen=True, slots=True)
+class SevenDaysPlayerSnapshot:
+    players: tuple[SevenDaysPlayer, ...]
+    save: Path | None
+    updated_at: float
+
+    @property
+    def remaining_seconds(self) -> float:
+        return max(0.0, SEVENDAYS_PLAYER_SNAPSHOT_MAX_AGE_SECONDS - (time.monotonic() - self.updated_at))
+
+
 class Players:
     def __init__(self, app: SevenDays) -> None:
         self.app = app
@@ -3612,16 +3641,18 @@ class Players:
         self._running = False
         self._online: int | None = None
         self._max: int | None = None
-        self._player_names: tuple[str, ...] = ()
-        self._pending_player_names: dict[int, str] = {}
+        self._snapshot: SevenDaysPlayerSnapshot | None = None
+        self._pending_players: dict[int, SevenDaysPlayer] = {}
+        self._runtime_save: Path | None = None
         self._read_telnet = False
         self._telnet_reader: asyncio.StreamReader | None = None
         self._response_tail: Tailer | None = None
         _register_console_response_matchers(app, self.match_players)
 
-    async def start(self, *, read_telnet: bool = False) -> None:
+    async def start(self, *, save: Path | None, read_telnet: bool = False) -> None:
         if self._players_task and not self._players_task.done():
             return
+        self._runtime_save = save.resolve() if save is not None else None
         self._read_telnet = read_telnet
         self._telnet_reader = None if read_telnet else self.app._relay.reader
         self._running = True
@@ -3646,33 +3677,54 @@ class Players:
             self._response_tail = None
             self._telnet_reader = None
             self._clear_player_snapshot()
+            self._runtime_save = None
             self._max = None
 
     def _clear_player_snapshot(self) -> None:
         self._online = None
-        self._player_names = ()
-        self._pending_player_names.clear()
+        self._snapshot = None
+        self._pending_players.clear()
 
     async def match_players(self, line: str) -> None:
         line = line.strip()
         if match := _SEVENDAYS_PLAYER_COUNT_RE.fullmatch(line):
             self._online = int(match.group("count"))
-            if len(self._pending_player_names) == self._online and all(
-                index in self._pending_player_names for index in range(self._online)
+            if len(self._pending_players) == self._online and all(
+                index in self._pending_players for index in range(self._online)
             ):
-                self._player_names = tuple(sorted(self._pending_player_names.values(), key=str.casefold))
+                self._snapshot = SevenDaysPlayerSnapshot(
+                    players=tuple(sorted(self._pending_players.values(), key=lambda player: (player.name.casefold(), player.entity_id))),
+                    save=self._runtime_save,
+                    updated_at=time.monotonic(),
+                )
             else:
-                self._player_names = ()
-            self._pending_player_names.clear()
+                self._snapshot = None
+            self._pending_players.clear()
         elif match := _SEVENDAYS_PLAYER_CAPACITY_RE.fullmatch(line):
             self._max = int(match.group("capacity"))
         elif match := _SEVENDAYS_PLAYER_DETAIL_RE.fullmatch(line):
             index = int(match.group("index"))
             if index == 0:
-                self._pending_player_names.clear()
+                self._pending_players.clear()
             player = match.group("player").strip()
             if player:
-                self._pending_player_names[index] = player
+                self._pending_players[index] = SevenDaysPlayer(
+                    entity_id=int(match.group("entity_id")), name=player,
+                    position=self._parse_position(match.group("position")),
+                )
+
+    @staticmethod
+    def _parse_position(raw_value: str) -> MapCoordinate | None:
+        components = raw_value.split(",")
+        if len(components) != 3:
+            return None
+        try:
+            x, y, z = (float(component.strip()) for component in components)
+            if not math.isfinite(y):
+                return None
+            return MapCoordinate(x=x, z=z)
+        except ValueError:
+            return None
 
     async def _sync_response_reader(self) -> None:
         reader = self.app._relay.reader
@@ -3697,11 +3749,11 @@ class Players:
 
     async def _listplayers(self) -> None:
         while self._running:
-            self._pending_player_names.clear()
+            self._pending_players.clear()
             if not await self.app._relay.send("listplayers"):
                 self._clear_player_snapshot()
             await self._sync_response_reader()
-            await asyncio.sleep(5)
+            await asyncio.sleep(SEVENDAYS_PLAYER_POLL_INTERVAL_SECONDS)
 
     async def count(self) -> tuple[int, int] | None:
         if not config.SILENT_DEBUG:
@@ -3711,7 +3763,19 @@ class Players:
         return None
 
     def connected_player_names(self) -> tuple[str, ...]:
-        return self._player_names
+        snapshot = self._snapshot
+        return tuple(player.name for player in snapshot.players) if snapshot is not None else ()
+
+    def map_snapshot(self, *, save: Path) -> SevenDaysPlayerSnapshot | None:
+        """Return fresh positions belonging to the save this process started with."""
+        snapshot = self._snapshot
+        if (
+            snapshot is None or snapshot.save != save or not self._running
+            or snapshot.remaining_seconds <= 0
+            or not self.app.check_running() or not self.app._relay.is_connected
+        ):
+            return None
+        return snapshot
 
 
 class Activities:

@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import struct
 import zlib
-from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from apps.sevendays import SevenDays
+from apps._telnet import TelnetClient
+from apps.sevendays import Players, SevenDays
 from apps.sevendays.installation import UNDEAD_LEGACY_MANIFEST, UndeadLegacyInstallation
 from apps.sevendays.map import SevenDaysMap, SevenDaysMapCache
 from map_annotations import MapAnnotationDraft, MapAnnotationShape, MapCoordinate, MapManifest, MapProvider
@@ -47,6 +49,9 @@ def _app(root: Path, *, overhaul: bool = False) -> SevenDays:
     app.name = "sevendays_alpha"
     app.friendly = "7D2D"
     app._rendered_map_cache = SevenDaysMapCache()
+    app._tail_matchers = set()
+    app._console_response_matchers = set()
+    app._players = Players(app)
     _configure(app)
     return app
 
@@ -126,15 +131,54 @@ def test_native_manifest_and_tile_orientation_need_no_game_web_server(tmp_path: 
         assert settings["zoom"]["def"] == 4
         assert settings["north_positive"] is True
         assert settings["spawn"] == {"x": -192.0, "z": 448.0}
-        assert settings["player_tracker"] == {"enabled": False}
+        assert settings["player_tracker"]["enabled"] is True
+        assert settings["player_tracker"]["max_age_seconds"] == 15
         assert json.loads(service.world_response(app, world, "markers").content) == []
-        assert json.loads(service.players_response(app).content) == []
+        assert json.loads(service.players_response(app).content) == {"players": [], "max_age_seconds": 0.0}
         response = service.tile_response(app, world, 4, "-2_-4.png")
         assert response.media_type == "image/png"
         assert response.content == (root / "4" / "-2" / "3.png").read_bytes()
         with pytest.raises(HTTPException) as failure:
             service.tile_response(app, world, 4, "-2_3.png")
         assert failure.value.status_code == 404
+
+
+@pytest.mark.parametrize("nested_map", [False, True])
+def test_map_api_exposes_only_fresh_positions_for_the_selected_running_save(tmp_path: Path, nested_map: bool) -> None:
+    app = _app(tmp_path)
+    root = _tiles(app)
+    if nested_map:
+        destination = root.parent / "cache" / "rendered"
+        destination.parent.mkdir()
+        root.rename(destination)
+        root.symlink_to(destination, target_is_directory=True)
+    app.process = Mock()
+    app.process.poll.return_value = None
+    app._relay = Mock(spec=TelnetClient)
+    app._relay.send = AsyncMock(return_value=True)
+    app._relay.reader = None
+    app._relay.is_connected = True
+    service = _service()
+    world_id = service.build_manifest(app).initial_world_name
+
+    async def check() -> None:
+        try:
+            await app._players.start(save=app._save_directory_path())
+            await app._players.match_players("0. id=177, Alice <3, pos=(-10.5, 72, 20.25), rot=(0, 0, 0), ip=private")
+            await app._players.match_players("Total of 1 in the game")
+            response = json.loads(service.players_response(app).content)
+            assert response["players"] == [{"uuid": "177", "name": "Alice <3", "world": world_id, "x": -10.5, "z": 20.25}]
+            assert 0 < response["max_age_seconds"] <= 15
+            _configure(app, save="Another Save")
+            _tiles(app)
+            assert json.loads(service.players_response(app).content)["players"] == []
+            _configure(app)
+            app._relay.is_connected = False
+            assert json.loads(service.players_response(app).content)["players"] == []
+        finally:
+            await app._players.stop()
+
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize("tile_name, zoom", [("../../serverconfig.xml", 4), ("0_0.png", -1), ("0_0.png", 5)])

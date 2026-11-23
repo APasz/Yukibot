@@ -15,7 +15,11 @@ from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 import requests
 
 from apps._app import App
-from apps.sevendays import SevenDays
+from apps.sevendays import (
+    SEVENDAYS_PLAYER_POLL_INTERVAL_SECONDS,
+    SEVENDAYS_PLAYER_SNAPSHOT_MAX_AGE_SECONDS,
+    SevenDays,
+)
 from apps.sevendays.map import SevenDaysMap
 from http_sessions import ThreadLocalHttpSessions
 from map_annotations import (
@@ -139,8 +143,18 @@ class NodeMapService:
 
     def players_response(self, app: App, raw_query: str = "") -> NodeMapProxyResponse:
         if isinstance(app, SevenDays):
-            self._sevendays_map(app)
-            return self._json_response([])
+            rendered = self._sevendays_map(app)
+            snapshot = app.map_player_snapshot(save=rendered.save)
+            return self._json_response({
+                "players": [
+                    {
+                        "uuid": str(player.entity_id), "name": player.name, "world": rendered.world_id,
+                        **player.position.to_mapping(),
+                    }
+                    for player in snapshot.players if player.position is not None
+                ] if snapshot is not None else [],
+                "max_age_seconds": snapshot.remaining_seconds if snapshot is not None else 0.0,
+            })
         return self.proxy_response(app=app, relative_path="tiles/players.json", raw_query=raw_query)
 
     def world_response(
@@ -155,8 +169,8 @@ class NodeMapService:
                 "spawn": rendered.center.to_mapping(),
                 "tile_size": rendered.tile_size,
                 "north_positive": True,
-                "player_tracker": {"enabled": False},
-                "marker_update_interval": 5,
+                "player_tracker": {"enabled": True, "max_age_seconds": SEVENDAYS_PLAYER_SNAPSHOT_MAX_AGE_SECONDS},
+                "marker_update_interval": SEVENDAYS_PLAYER_POLL_INTERVAL_SECONDS,
                 "tiles_update_interval": 15,
             })
         return self.proxy_response(

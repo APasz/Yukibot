@@ -30,6 +30,7 @@ type _FileSignature = tuple[int, int, int, int]
 
 @dataclass(frozen=True, slots=True)
 class SevenDaysMap:
+    save: Path
     root: Path
     world_id: str
     display_name: str
@@ -87,6 +88,7 @@ class SevenDaysMap:
                                 continue
                             scale = tile_size * (1 << (max_zoom - zoom))
                             return cls(
+                                save=save,
                                 root=root,
                                 world_id=world_id,
                                 display_name=f"{save.parent.name} / {save.name}",

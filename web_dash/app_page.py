@@ -1585,6 +1585,8 @@ class ModWebAppPageMixin(
         snap_id = f"{container_id}-snap"
         status_id = f"{container_id}-status"
         notice_id = f"{container_id}-notice"
+        players_id = f"{container_id}-players"
+        coordinates_id = f"{container_id}-coordinates"
         mode_id = f"{container_id}-mode"
         prompt_id = f"{container_id}-prompt"
         prompt_title_id = f"{container_id}-prompt-title"
@@ -1639,6 +1641,10 @@ class ModWebAppPageMixin(
               {read_only_note}
               <div class="mod-card mod-card-plain mod-map-status-panel">
                 <div id="{notice_id}" class="mod-map-notice mod-subtitle">Loading rendered map…</div>
+                <div class="mod-map-live-row">
+                  <div id="{players_id}" class="mod-map-players" aria-label="Online players" hidden></div>
+                  <output id="{coordinates_id}" class="mod-map-coordinates mod-subtitle" aria-label="Map coordinates">Centre: —</output>
+                </div>
               </div>
               <div class="mod-card mod-card-plain mod-map-stage">
                 <div id="{canvas_frame_id}" class="mod-map-canvas-frame">
@@ -1676,6 +1682,8 @@ class ModWebAppPageMixin(
                     "snapToggleId": snap_id,
                     "statusId": status_id,
                     "noticeId": notice_id,
+                    "playersId": players_id,
+                    "coordinatesId": coordinates_id,
                     "modeId": mode_id,
                     "promptId": prompt_id,
                     "promptTitleId": prompt_title_id,
@@ -1817,6 +1825,32 @@ class ModWebAppPageMixin(
               }
               .mod-map-status-panel {
                 align-items: flex-start;
+              }
+              .mod-map-live-row,
+              .mod-map-players {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 0.5rem;
+                min-width: 0;
+              }
+              .mod-map-live-row {
+                width: 100%;
+                justify-content: space-between;
+              }
+              .mod-map-players[hidden] {
+                display: none;
+              }
+              .mod-map-player-button {
+                padding: 0.25rem 0.55rem;
+                max-width: 100%;
+                white-space: normal;
+                overflow-wrap: anywhere;
+              }
+              .mod-map-coordinates {
+                margin-left: auto;
+                font-variant-numeric: tabular-nums;
+                white-space: nowrap;
               }
               .mod-map-label-prompt[hidden] {
                 display: none;
@@ -2218,6 +2252,7 @@ class ModWebAppPageMixin(
                   const instances = new Map();
                   const MAP_SOURCE_LIVE = "live";
                   const MAP_SOURCE_STALE = "stale";
+                  const MAP_REQUEST_TIMEOUT_MS = 15000;
 
                   const get = (id) => document.getElementById(id);
                   const escapeHtml = (value) =>
@@ -2229,6 +2264,23 @@ class ModWebAppPageMixin(
                       .replaceAll("'", "&#39;");
                   const toLatLng = (world, point) => [(world.north_positive ? point.z : -point.z) * world.scale, point.x * world.scale];
                   const toPoint = (world, latlng) => ({ x: latlng.lng / world.scale, z: (world.north_positive ? latlng.lat : -latlng.lat) / world.scale });
+                  const playerName = (player) => player.display_name || player.name;
+                  const playerSnapshotExpired = (expiresAt) => expiresAt !== null && Date.now() >= expiresAt;
+                  const formatCoordinates = (world, point) => {
+                    const north = Math.round(world.north_positive ? point.z : -point.z);
+                    const east = Math.round(point.x);
+                    return `${Math.abs(north)} ${north < 0 ? "S" : "N"} · ${Math.abs(east)} ${east < 0 ? "W" : "E"}`;
+                  };
+                  const updateCoordinates = (state, latlng = null) => {
+                    if (!state.currentWorld || !state.coordinatesEl) {
+                      return;
+                    }
+                    const point = toPoint(state.currentWorld, latlng || state.map.getCenter());
+                    const text = `${latlng ? "Cursor" : "Centre"}: ${formatCoordinates(state.currentWorld, point)}`;
+                    if (state.coordinatesEl.textContent !== text) {
+                      state.coordinatesEl.textContent = text;
+                    }
+                  };
                   const convertNestedPoints = (world, points) =>
                     Array.isArray(points)
                       ? points.map((point) => (Array.isArray(point) ? convertNestedPoints(world, point) : toLatLng(world, point)))
@@ -2425,26 +2477,42 @@ class ModWebAppPageMixin(
                     return `HTTP ${response.status}`;
                   };
                   const fetchJsonDetailed = async (url, options = {}) => {
-                    const response = await fetch(url, {
-                      ...options,
-                      headers: {
-                        Accept: "application/json",
-                        ...(options.headers || {}),
-                      },
-                    });
-                    if (!response.ok) {
-                      throw new Error(await responseErrorMessage(response));
+                    const controller = new AbortController();
+                    const cancelRequest = () => controller.abort(options.signal.reason);
+                    if (options.signal?.aborted) {
+                      cancelRequest();
+                    } else {
+                      options.signal?.addEventListener("abort", cancelRequest, { once: true });
                     }
-                    return {
-                      data: await response.json(),
-                      source:
-                        response.headers.get("X-Yukibot-Map-Source") === MAP_SOURCE_STALE
-                          ? MAP_SOURCE_STALE
-                          : MAP_SOURCE_LIVE,
-                      cacheUpdatedAtUnixMs: parseMapCacheUpdatedAt(
-                        response.headers.get("X-Yukibot-Map-Cache-Updated-At"),
-                      ),
-                    };
+                    const timeoutId = window.setTimeout(
+                      () => controller.abort(new Error("Map request timed out.")), MAP_REQUEST_TIMEOUT_MS,
+                    );
+                    try {
+                      const response = await fetch(url, {
+                        ...options,
+                        signal: controller.signal,
+                        headers: {
+                          Accept: "application/json",
+                          ...(options.headers || {}),
+                        },
+                      });
+                      if (!response.ok) {
+                        throw new Error(await responseErrorMessage(response));
+                      }
+                      return {
+                        data: await response.json(),
+                        source:
+                          response.headers.get("X-Yukibot-Map-Source") === MAP_SOURCE_STALE
+                            ? MAP_SOURCE_STALE
+                            : MAP_SOURCE_LIVE,
+                        cacheUpdatedAtUnixMs: parseMapCacheUpdatedAt(
+                          response.headers.get("X-Yukibot-Map-Cache-Updated-At"),
+                        ),
+                      };
+                    } finally {
+                      window.clearTimeout(timeoutId);
+                      options.signal?.removeEventListener("abort", cancelRequest);
+                    }
                   };
                   const fetchJson = async (url, options = {}) => (await fetchJsonDetailed(url, options)).data;
                   const apiUrl = (state, suffix, extraParams = {}) => {
@@ -2635,14 +2703,14 @@ class ModWebAppPageMixin(
                   const bindAnnotationLayer = (state, layer, annotation) => {
                     layer.bindPopup(annotationPopupHtml(annotation, state.config.canWrite, state.config.containerId));
                     if (annotation.shape === "marker") {
-                      layer.bindTooltip(annotation.label, {
+                      layer.bindTooltip(escapeHtml(annotation.label), {
                         permanent: true,
                         direction: "top",
                         className: "mod-map-annotation-label",
                         offset: [0, -8],
                       });
                     } else {
-                      layer.bindTooltip(annotation.label, {
+                      layer.bindTooltip(escapeHtml(annotation.label), {
                         sticky: true,
                         direction: "top",
                         className: "mod-map-annotation-label",
@@ -2689,41 +2757,112 @@ class ModWebAppPageMixin(
                   const refreshAnnotations = async (state) => {
                     replaceLayerGroup(state, "annotationLayer", await loadAnnotationLayer(state));
                   };
-                  const loadPlayerLayer = async (state) => {
-                    const nextLayer = window.L.layerGroup();
-                    if (!state.currentWorld) {
-                      return { result: { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true }, layer: nextLayer };
+                  const focusPlayer = (state, player) => {
+                    if (playerSnapshotExpired(state.playersExpireAt)) {
+                      clearPlayers(state);
+                      return;
                     }
-                    if (!state.currentWorld.player_tracker?.enabled) {
-                      return { result: { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true }, layer: nextLayer };
+                    if (!player || player.world !== state.currentWorld?.name) {
+                      return;
                     }
+                    if (state.zooming) {
+                      state.pendingPlayerFocus = player;
+                      return;
+                    }
+                    state.map.panTo(toLatLng(state.currentWorld, player));
+                    setStatus(state, `Centred on ${playerName(player)}.`, "success");
+                  };
+                  const finishPlayerZoom = (state) => {
+                    state.zooming = false;
+                    const pending = state.pendingPlayerFocus;
+                    state.pendingPlayerFocus = null;
+                    if (pending) {
+                      const player = state.visiblePlayers.find((candidate) => candidate.world === pending.world
+                        && (pending.uuid ? candidate.uuid === pending.uuid : playerName(candidate) === playerName(pending)));
+                      focusPlayer(state, player);
+                    }
+                  };
+                  const updatePlayerControls = (state, players) => {
+                    state.visiblePlayers = players;
+                    if (!state.playersEl) {
+                      return;
+                    }
+                    state.playersEl.hidden = !state.currentWorld?.player_tracker?.enabled;
+                    const signature = JSON.stringify(players.map((player) => [player.uuid, playerName(player)]));
+                    if (signature === state.playerListSignature) {
+                      return;
+                    }
+                    state.playerListSignature = signature;
+                    state.playersEl.replaceChildren();
+                    if (players.length === 0) {
+                      state.playersEl.textContent = "No live player positions.";
+                      return;
+                    }
+                    const caption = document.createElement("span");
+                    caption.textContent = "Players:";
+                    state.playersEl.appendChild(caption);
+                    players.forEach((player, index) => {
+                      const button = document.createElement("button");
+                      button.type = "button";
+                      button.className = "mod-list-button secondary mod-map-player-button";
+                      button.textContent = playerName(player);
+                      button.addEventListener("click", () => focusPlayer(state, state.visiblePlayers[index]));
+                      state.playersEl.appendChild(button);
+                    });
+                  };
+                  const clearPlayers = (state) => {
+                    state.playerLayer.clearLayers();
+                    state.playersExpireAt = null;
+                    state.pendingPlayerFocus = null;
+                    updatePlayerControls(state, []);
+                  };
+                  const loadPlayerSnapshot = async (state) => {
+                    if (!state.currentWorld?.player_tracker?.enabled) {
+                      return { players: [], expiresAt: null };
+                    }
+                    const requestedAt = Date.now();
                     const result = await fetchJsonDetailed(apiUrl(state, "/players"));
                     const payload = result.data;
-                    const players = Array.isArray(payload?.players)
-                      ? payload.players
-                      : Array.isArray(payload)
-                        ? payload
-                        : [];
-                    if (players.length === 0) {
-                      return { result, layer: nextLayer };
+                    const players = Array.isArray(payload) ? payload : payload?.players;
+                    if (!Array.isArray(players)) {
+                      throw new Error("Player positions are invalid.");
                     }
+                    const maxAgeSeconds = payload?.max_age_seconds ?? state.currentWorld.player_tracker.max_age_seconds;
+                    if (maxAgeSeconds !== undefined && (!Number.isFinite(maxAgeSeconds) || maxAgeSeconds < 0)) {
+                      throw new Error("Player position freshness is invalid.");
+                    }
+                    const expiresAt = maxAgeSeconds === undefined ? null : requestedAt + maxAgeSeconds * 1000;
+                    const visiblePlayers = result.source === MAP_SOURCE_STALE || playerSnapshotExpired(expiresAt)
+                      ? []
+                      : players.filter((player) => player && player.world === state.currentWorld.name
+                        && Number.isFinite(player.x) && Number.isFinite(player.z) && typeof playerName(player) === "string");
+                    return { players: visiblePlayers, expiresAt };
+                  };
+                  const applyPlayerSnapshot = (state, { players, expiresAt }) => {
+                    if (players.length === 0 || playerSnapshotExpired(expiresAt)) {
+                      clearPlayers(state);
+                      return;
+                    }
+                    const nextLayer = window.L.layerGroup();
                     for (const player of players) {
-                      if (!player || player.world !== state.currentWorld.name) {
-                        continue;
-                      }
                       const marker = window.L.circleMarker(toLatLng(state.currentWorld, player), {
                         radius: 6,
                         color: "#0f172a",
                         fillColor: "#22c55e",
                         fillOpacity: 0.95,
                         weight: 2,
+                        bubblingMouseEvents: false,
                       }).addTo(nextLayer);
-                      marker.bindTooltip(player.display_name || player.name, {
+                      marker.bindTooltip(escapeHtml(playerName(player)), {
+                        permanent: state.manifest?.provider === "sevendays",
                         direction: "top",
                         className: "mod-map-player-label",
                       });
+                      marker.on("click", () => focusPlayer(state, player));
                     }
-                    return { result, layer: nextLayer };
+                    replaceLayerGroup(state, "playerLayer", nextLayer);
+                    state.playersExpireAt = expiresAt;
+                    updatePlayerControls(state, players);
                   };
                   const squaremapMarkerLayer = (state, markerData) => {
                     const world = state.currentWorld;
@@ -2959,15 +3098,11 @@ class ModWebAppPageMixin(
                     }
                   };
                   const postAnnotation = async (state, payload) => {
-                    const response = await fetch(apiUrl(state, "/annotations"), {
+                    return await fetchJson(apiUrl(state, "/annotations"), {
                       method: "POST",
                       headers: { "Content-Type": "application/json", Accept: "application/json" },
                       body: JSON.stringify(payload),
                     });
-                    if (!response.ok) {
-                      throw new Error(await responseErrorMessage(response));
-                    }
-                    return await response.json();
                   };
                   const createMarkerAnnotation = async (state, point, anchorPoint = null) => {
                     const label = await requestAnnotationLabel(state, "point", anchorPoint);
@@ -3027,9 +3162,14 @@ class ModWebAppPageMixin(
                     const previousSquaremapSource = state.squaremapSource;
                     const [markerResult, playerResult, annotationResult] = await Promise.allSettled([
                       loadSquaremapMarkerLayer(state),
-                      loadPlayerLayer(state),
+                      loadPlayerSnapshot(state),
                       loadAnnotationLayer(state),
                     ]);
+                    if (playerResult.status === "fulfilled") {
+                      applyPlayerSnapshot(state, playerResult.value);
+                    } else {
+                      clearPlayers(state);
+                    }
                     if (annotationResult.status !== "fulfilled") {
                       throw annotationResult.reason;
                     }
@@ -3037,12 +3177,8 @@ class ModWebAppPageMixin(
                     if (markerResult.status === "fulfilled") {
                       replaceLayerGroup(state, "squaremapLayer", markerResult.value.layer);
                     }
-                    if (playerResult.status === "fulfilled") {
-                      replaceLayerGroup(state, "playerLayer", playerResult.value.layer);
-                    }
                     setToolState(state, state.tool);
                     const markersLoaded = markerResult.status === "fulfilled" ? markerResult.value.result : null;
-                    const playersLoaded = playerResult.status === "fulfilled" ? playerResult.value.result : null;
                     const playersFailed = playerResult.status === "rejected";
                     if (markersLoaded && markersLoaded.source === MAP_SOURCE_LIVE) {
                       await refreshTiles(state, { force: forceTiles });
@@ -3050,7 +3186,7 @@ class ModWebAppPageMixin(
                       if (playersFailed) {
                         setNotice(
                           state,
-                          "Squaremap tiles and markers are live, but player positions could not be refreshed.",
+                          "Map terrain is live, but player positions could not be refreshed.",
                           "warning",
                         );
                         if (announce || previousSquaremapSource !== MAP_SOURCE_LIVE) {
@@ -3113,15 +3249,16 @@ class ModWebAppPageMixin(
                       resetTileLayers(state);
                       replaceLayerGroup(state, "annotationLayer", window.L.layerGroup());
                       replaceLayerGroup(state, "squaremapLayer", window.L.layerGroup());
-                      replaceLayerGroup(state, "playerLayer", window.L.layerGroup());
+                      clearPlayers(state);
                       state.tileRevision = 0;
                       state.lastTileRefreshAt = null;
                       cancelPendingAnnotation(state, { focusMap: false });
                       setToolState(state, "pan");
                     }
                     if (!preserveView || !sameWorld) {
-                      state.map.setView(toLatLng(nextWorld, nextWorld.spawn), nextWorld.zoom.def);
+                      state.map.setView(toLatLng(nextWorld, nextWorld.spawn), nextWorld.zoom.def, { animate: false });
                     }
+                    updateCoordinates(state);
                     if (worldSettingsResult.source === MAP_SOURCE_STALE) {
                       setSquaremapStaleNotice(state, worldSettingsResult.cacheUpdatedAtUnixMs);
                     }
@@ -3172,6 +3309,7 @@ class ModWebAppPageMixin(
                     return await pending;
                   };
                   const handleBootstrapFailure = (state, error) => {
+                    clearPlayers(state);
                     const detail =
                       error instanceof Error
                         ? normalizeMapError(error.message, "Map data is unavailable.")
@@ -3198,7 +3336,8 @@ class ModWebAppPageMixin(
                   };
                   const bindControls = (state) => {
                     state.worldSelect?.addEventListener("change", () => {
-                      void runMapSync(state, () => loadWorld(state, state.worldSelect.value));
+                      void runMapSync(state, () => loadWorld(state, state.worldSelect.value))
+                        .catch((error) => handleBootstrapFailure(state, error));
                     });
                     state.refreshButton?.addEventListener("click", () => {
                       void runMapSync(state, () =>
@@ -3246,17 +3385,13 @@ class ModWebAppPageMixin(
                       return;
                     }
                     try {
-                      const response = await fetch(
+                      await fetchJson(
                         apiUrl(state, `/annotations/${encodeURIComponent(annotationId)}/delete`),
                         {
                           method: "POST",
                           headers: { Accept: "application/json" },
                         },
                       );
-                      if (!response.ok) {
-                        setStatus(state, `Delete failed: ${await responseErrorMessage(response)}`, "error");
-                        return;
-                      }
                       setStatus(state, "Annotation deleted.", "success");
                       await refreshAnnotations(state);
                     } catch (error) {
@@ -3293,6 +3428,11 @@ class ModWebAppPageMixin(
                       tileLayer: null,
                       squaremapLayer: window.L.layerGroup(),
                       playerLayer: window.L.layerGroup(),
+                      playersExpireAt: null,
+                      visiblePlayers: [],
+                      playerListSignature: null,
+                      pendingPlayerFocus: null,
+                      zooming: false,
                       annotationLayer: window.L.layerGroup(),
                       previewLayerGroup: window.L.layerGroup(),
                       previewLayer: null,
@@ -3306,6 +3446,8 @@ class ModWebAppPageMixin(
                       snapToggle: get(config.snapToggleId),
                       statusEl: get(config.statusId),
                       noticeEl: get(config.noticeId),
+                      playersEl: get(config.playersId),
+                      coordinatesEl: get(config.coordinatesId),
                       modeEl: get(config.modeId),
                       refreshButton: get(config.refreshButtonId),
                       labelPrompt: get(config.promptId),
@@ -3390,6 +3532,7 @@ class ModWebAppPageMixin(
                       setToolState(state, "line");
                     });
                     state.map.on("mousemove", (event) => {
+                      updateCoordinates(state, event.latlng);
                       if (!state.config.canWrite || !state.currentWorld || state.tool !== "line" || state.pendingLine.length === 0) {
                         return;
                       }
@@ -3399,6 +3542,9 @@ class ModWebAppPageMixin(
                         anchor && state.snapToggle?.checked ? snapLinePoint(anchor, rawPoint) : rawPoint;
                       updatePreview(state, snappedPoint);
                     });
+                    state.map.on("moveend mouseout", () => updateCoordinates(state));
+                    state.map.on("zoomstart", () => { state.zooming = true; });
+                    state.map.on("zoomend", () => finishPlayerZoom(state));
                     state.map.on("dblclick", (event) => {
                       if (!state.config.canWrite || !state.currentWorld || isLabelPromptOpen(state) || state.tool !== "line") {
                         return;
@@ -3424,6 +3570,9 @@ class ModWebAppPageMixin(
                       setStatus(state, "Cancelled line draft.");
                     });
                     state.visibilityTimer = window.setInterval(() => {
+                      if (playerSnapshotExpired(state.playersExpireAt)) {
+                        clearPlayers(state);
+                      }
                       if (state.container.offsetParent !== null) {
                         state.map.invalidateSize(false);
                       }

@@ -1,9 +1,11 @@
 import asyncio
+import time
 import unittest
 import zipfile
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator, Sequence
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -37,6 +39,7 @@ from apps.sevendays import (
     Players,
     Provider_Time,
     Receiver,
+    SEVENDAYS_PLAYER_SNAPSHOT_MAX_AGE_SECONDS,
     SevenDays,
     SevenDaysAdminAddRequest,
     SevenDaysSandboxOption,
@@ -1489,6 +1492,78 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(players.connected_player_names(), ())
         self.assertEqual(await players.count(), (0, 4))
 
+    async def test_positions_publish_only_with_a_complete_player_list(self) -> None:
+        players = self._players()
+        try:
+            await players.start(save=Path("/test-save"))
+            await players.match_players("0. id=177, Zoë, the Builder, pos=(-100.25, 72.5, 2.5e2), rot=(0, 0, 0)")
+            self.assertIsNone(players.map_snapshot(save=Path("/test-save")))
+            await players.match_players("Total of 1 in the game")
+            snapshot = players.map_snapshot(save=Path("/test-save"))
+            assert snapshot is not None
+            self.assertEqual(snapshot.players[0].name, "Zoë, the Builder")
+            self.assertEqual(snapshot.players[0].entity_id, 177)
+            assert snapshot.players[0].position is not None
+            self.assertEqual(snapshot.players[0].position.to_mapping(), {"x": -100.25, "z": 250.0})
+            await players.match_players("Total of 2 in the game")
+            self.assertIsNone(players.map_snapshot(save=Path("/test-save")))
+        finally:
+            await players.stop()
+
+    async def test_invalid_positions_preserve_player_names_without_plotting_bad_coordinates(self) -> None:
+        players = self._players()
+        try:
+            await players.start(save=Path("/test-save"))
+            for position in ("nan, 2, 3", "1, inf, 3", "1, 2, -inf", "1, 2", "1, 2, 3, 4", "bad, 2, 3"):
+                with self.subTest(position=position):
+                    await players.match_players(f"0. id=177, Alice <3, pos=({position})")
+                    await players.match_players("Total of 1 in the game")
+                    snapshot = players.map_snapshot(save=Path("/test-save"))
+                    assert snapshot is not None
+                    self.assertIsNone(snapshot.players[0].position)
+                    self.assertEqual(players.connected_player_names(), ("Alice <3",))
+        finally:
+            await players.stop()
+
+    async def test_position_snapshots_expire_and_require_a_running_connected_server(self) -> None:
+        players = self._players()
+        try:
+            await players.start(save=Path("/test-save"))
+            await players.match_players("0. id=177, Alice, pos=(1, 2, 3)")
+            await players.match_players("Total of 1 in the game")
+            snapshot = players.map_snapshot(save=Path("/test-save"))
+            assert snapshot is not None
+            players._snapshot = replace(snapshot, updated_at=time.monotonic() - SEVENDAYS_PLAYER_SNAPSHOT_MAX_AGE_SECONDS)
+            self.assertIsNone(players.map_snapshot(save=Path("/test-save")))
+            players._snapshot = snapshot
+            players.app._relay.is_connected = False
+            self.assertIsNone(players.map_snapshot(save=Path("/test-save")))
+            players.app._relay.is_connected = True
+            players.app.check_running = lambda: False
+            self.assertIsNone(players.map_snapshot(save=Path("/test-save")))
+            players.app.check_running = lambda: True
+            self.assertIsNotNone(players.map_snapshot(save=Path("/test-save")))
+        finally:
+            await players.stop()
+        self.assertIsNone(players.map_snapshot(save=Path("/test-save")))
+
+    async def test_position_snapshots_stay_with_the_running_save_until_restart(self) -> None:
+        players = self._players()
+        try:
+            await players.start(save=Path("/test-save"))
+            await players.start(save=Path("/next-save"))
+            await players.match_players("0. id=177, Alice, pos=(1, 2, 3)")
+            await players.match_players("Total of 1 in the game")
+            self.assertIsNone(players.map_snapshot(save=Path("/next-save")))
+            self.assertIsNotNone(players.map_snapshot(save=Path("/test-save")))
+            await players.stop()
+            await players.start(save=Path("/next-save"))
+            await players.match_players("0. id=177, Alice, pos=(1, 2, 3)")
+            await players.match_players("Total of 1 in the game")
+            self.assertIsNotNone(players.map_snapshot(save=Path("/next-save")))
+        finally:
+            await players.stop()
+
     async def test_player_names_preserve_punctuation_unicode_and_duplicate_names(self) -> None:
         players = self._players()
         for line in (
@@ -1526,9 +1601,9 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         await players.match_players("GamePref.ServerMaxPlayerCount = 8")
         await players.match_players("Total of 2 in the game")
         try:
-            await players.start()
+            await players.start(save=None)
             task = players._players_task
-            await players.start()
+            await players.start(save=None)
             self.assertIs(players._players_task, task)
             await asyncio.sleep(0)
             self.assertEqual(await players.count(), (2, 8))
@@ -1565,7 +1640,7 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         chat_matcher = AsyncMock()
         players.app._tail_matchers.add(chat_matcher)
         try:
-            await players.start(read_telnet=True)
+            await players.start(save=None, read_telnet=True)
             reader.feed_data(
                 b"Max players: 8\nChat: 'APasz': hello\n"
                 b"0. id=177, CustardCreamTV, pos=(1, 2, 3)\n"
@@ -1589,7 +1664,7 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         chat = AsyncMock()
         players.app._tail_matchers.add(chat)
         try:
-            await players.start(read_telnet=True)
+            await players.start(save=None, read_telnet=True)
             reader.feed_data(
                 b"Max players: 8\nTotal of 2 in the game\nDay 14, 18:30\n"
                 b"GameStat.BloodMoonDay = 14\nGameStat.BloodMoonWarning = 8\n"
@@ -1635,7 +1710,7 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         old_reader = asyncio.StreamReader()
         players.app._relay.reader = old_reader
         try:
-            await players.start(read_telnet=True)
+            await players.start(save=None, read_telnet=True)
             old_reader.feed_data(
                 b"Max players: 8\n0. id=177, CustardCreamTV, pos=(1, 2, 3)\nTotal of 1 in the game\n"
             )
@@ -1663,7 +1738,7 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         players.app._tail = tail
         try:
             await tail.start(players.app._tail_matchers)
-            await players.start()
+            await players.start(save=None)
             first.feed_data(b"Max players: 8\nTotal of 1 in the game\n")
             await self._wait_for_count(players, (1, 8))
             players.app._relay.reader = second
@@ -1682,7 +1757,7 @@ class SevenDaysPlayerTests(unittest.IsolatedAsyncioTestCase):
         players = self._players()
         players.app._relay.reader = asyncio.StreamReader()
         try:
-            await players.start(read_telnet=False)
+            await players.start(save=None, read_telnet=False)
             await asyncio.sleep(0)
             self.assertIsNone(players._response_tail)
             await players.match_players("Max players: 8")
@@ -1910,7 +1985,8 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs, {"timeout_seconds": 900.0, "ready_label": "server readiness"})
             call_order.append("ready")
 
-        async def start_players(*, read_telnet: bool) -> None:
+        async def start_players(*, save: Path | None, read_telnet: bool) -> None:
+            self.assertIsNone(save)
             self.assertFalse(read_telnet)
             call_order.append("players")
 
@@ -1942,11 +2018,14 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         tailer_args = tailer_cls.call_args.args
         self.assertEqual(tailer_args[1:], (relay_reader, app.file_stdout))
 
-    async def test_start_prefers_launch_created_runtime_log_file_over_existing_timestamped_logs(self) -> None:
+    async def test_start_retains_launch_log_and_save_when_settings_change_during_startup(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             serverconfig_path = root / "serverconfig.xml"
-            serverconfig_path.write_text("<ServerSettings />", encoding="utf-8")
+            serverconfig_path.write_text(
+                '<ServerSettings><property name="GameWorld" value="Kotavu County" />'
+                '<property name="GameName" value="The Leg" /></ServerSettings>', encoding="utf-8",
+            )
             log_dir = root / "7DaysToDieServer_Data"
             log_dir.mkdir(parents=True)
             older_runtime_log = log_dir / "output_log__2026-06-17__02-27-35.txt"
@@ -1970,7 +2049,13 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
                 setup=AsyncMock(return_value=object()),
                 connected_event=asyncio.Event(),
             )
-            app.wait_for_ready_event = AsyncMock()
+            def select_next_save(*_args: object, **_kwargs: object) -> None:
+                serverconfig_path.write_text(
+                    serverconfig_path.read_text(encoding="utf-8").replace('value="The Leg"', 'value="Next Save"'),
+                    encoding="utf-8",
+                )
+
+            app.wait_for_ready_event = AsyncMock(side_effect=select_next_save)
             app._players = SimpleNamespace(start=AsyncMock())
             app._activities = SimpleNamespace(start=AsyncMock())
             app._running = False
@@ -1987,7 +2072,9 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         tailer_cls.assert_called_once()
         self.assertEqual(tailer_cls.call_args.args[1:], (runtime_log, app.file_stdout))
-        app._players.start.assert_awaited_once_with(read_telnet=True)
+        app._players.start.assert_awaited_once_with(
+            save=root / "userdata" / "Saves" / "Kotavu County" / "The Leg", read_telnet=True,
+        )
         link_mock.assert_called_once_with(runtime_log, app.file_stdout.with_name(runtime_log.name))
         self.assertIn(f'name="UserDataFolder" value="{(root / "userdata").as_posix()}"', redirected_config)
         self.assertIn('name="ServerPort" value="26900"', redirected_config)
