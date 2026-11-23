@@ -2138,10 +2138,8 @@ class SevenDays_Settings(App_Settings):
                 [],
                 default=False,
                 power_level=Power_Level.sudo,
-                desc="Render explored areas to map image tiles. Enables Webdashboard; restart required.",
-                forced_state_rules=(
-                    SettingStateForceRule(True, ForcedSettingState("WebDashboardEnabled", True)),
-                ),
+                desc="Render explored areas to map image tiles. Enables Webdashboard.",
+                forced_state_rules=(SettingStateForceRule(True, ForcedSettingState("WebDashboardEnabled", True)),),
             ),
             Setting[int](
                 IntSettingSpec(),
