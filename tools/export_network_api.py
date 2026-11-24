@@ -1,4 +1,4 @@
-"""Export diagnostics contracts and shared theme tokens without starting Yukibot."""
+"""Export frontend contracts and shared theme tokens without starting Yukibot."""
 
 from __future__ import annotations
 
@@ -15,11 +15,27 @@ sys.path.insert(0, str(ROOT))
 from mod_web_theme import DEFAULT_MOD_WEB_THEME  # noqa: E402
 from web_api.network_models import NetworkReportInput  # noqa: E402
 from web_api.network_routes import create_network_router  # noqa: E402
+from map_annotations import (  # noqa: E402
+    MapAnnotationDraft,
+    MapAnnotationList,
+    MapManifest,
+    MapTileIndexResponse,
+    MapWorldSettings,
+)
 
 
 def main() -> None:
     application = FastAPI()
     application.include_router(create_network_router())
+
+    def contract_only() -> None:
+        raise RuntimeError("Schema-only route.")
+
+    for name, model in (
+        ("manifest", MapManifest), ("annotations", MapAnnotationList), ("draft", MapAnnotationDraft),
+        ("tiles", MapTileIndexResponse), ("world", MapWorldSettings),
+    ):
+        application.add_api_route(f"/contracts/map/{name}", contract_only, response_model=model)
     destination = ROOT / "frontend" / "src" / "generated"
     destination.mkdir(parents=True, exist_ok=True)
     for name, schema in (

@@ -2697,6 +2697,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         query: Mapping[str, object] | None = None,
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
         request: Request | None = None,
+        passthrough_errors: bool = False,
     ) -> StarletteResponse:
         transfer_id: int | None = None
         range_requested = request is not None and "range" in request.headers
@@ -2720,7 +2721,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             session = await self._remote_http_client()
             upstream_headers = {"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"}
             if request is not None:
-                for header in ("Range", "If-Range"):
+                for header in ("Range", "If-Range", "If-None-Match", "If-Modified-Since"):
                     if (value := request.headers.get(header)) is not None:
                         upstream_headers[header] = value
             response_context = session.get(
@@ -2745,7 +2746,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 await response_context.__aexit__(None, None, None)
 
             try:
-                if response.status >= 400 and response.status != 416:
+                if response.status >= 400 and response.status != 416 and not passthrough_errors:
                     detail = await self._aiohttp_response_detail(response)
                     raise RuntimeError(f"Remote node rejected the request: url={url} status={response.status} detail={detail}")
                 forwarded_headers = {
@@ -2753,10 +2754,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     for header_name in (
                         "Cache-Control", "Content-Disposition", "Content-Length", "Content-Encoding",
                         "ETag", "Expires", "Last-Modified", "Accept-Ranges", "Content-Range",
+                        "X-Yukibot-Map-Source", "X-Yukibot-Map-Cache-Updated-At",
                     )
                     if (header_value := response.headers.get(header_name))
                 }
                 forwarded_headers["Referrer-Policy"] = "no-referrer"
+                if response.status == 304:
+                    await close_upstream()
+                    return StarletteResponse(status_code=304, headers=forwarded_headers)
                 async def stream_body() -> AsyncIterator[bytes]:
                     async for chunk in response.content.iter_chunked(_REMOTE_NODE_STREAM_CHUNK_SIZE_BYTES):
                         if chunk:

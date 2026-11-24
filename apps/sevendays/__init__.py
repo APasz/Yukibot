@@ -89,11 +89,11 @@ from apps.sevendays.installation import (
     sevendays_content_userdata_root,
     undead_legacy_download_cache_directory,
 )
-from apps.sevendays.map import SevenDaysMap, SevenDaysMapCache
+from apps.sevendays.map import MapTileIndex, SevenDaysMap, SevenDaysMapCache
 from apps.sevendays.overhaul_settings import MAX_WANDERING_HORDE_ENEMIES, SevenDaysSettingGroup, undead_legacy_settings
 from archive_safety import validated_zip_entries
 from config import Activity_Manager
-from map_annotations import MapCoordinate
+from map_annotations import MapCoordinate, MapReadiness
 from relay_notices import (
     GameDeathKind,
     GameDeathNotice,
@@ -2729,27 +2729,44 @@ class SevenDays(App[App_Config]):
     _serverconfig_cache: _SevenDaysServerConfigCache | None = None
     _overhaul_installation: UndeadLegacyInstallation | None = None
     _rendered_map_cache: SevenDaysMapCache | None = None
+    _map_rendering_at_start: bool | None = None
+
+    @property
+    def map_readiness(self) -> MapReadiness:
+        return self.map_state()[0]
+
+    def map_state(self) -> tuple[MapReadiness, SevenDaysMap | None]:
+        serverconfig = self._load_serverconfig_snapshot()
+        enabled = _sevendays_serverconfig_bool_from_value(
+            serverconfig.value("EnableMapRendering"), property_name="EnableMapRendering",
+        )
+        if not enabled:
+            return MapReadiness.DISABLED, None
+        if self._map_rendering_at_start is False and self.check_running():
+            return MapReadiness.RESTART_REQUIRED, None
+        save = self._save_directory_path(serverconfig=serverconfig)
+        if save is None:
+            return MapReadiness.WAITING_FOR_TILES, None
+        rendered = self._get_rendered_map_cache().load(
+            save=save, world_id=self._save_root_id(PurePosixPath(save.parent.name, save.name)),
+        )
+        return (MapReadiness.READY, rendered) if rendered is not None else (MapReadiness.WAITING_FOR_TILES, None)
+
+    def rendered_tile_index(self, rendered: SevenDaysMap) -> MapTileIndex:
+        return self._get_rendered_map_cache().tile_index(rendered)
+
+    def _get_rendered_map_cache(self) -> SevenDaysMapCache:
+        if self._rendered_map_cache is None:
+            self._rendered_map_cache = SevenDaysMapCache()
+        return self._rendered_map_cache
 
     @property
     def rendered_map(self) -> SevenDaysMap | None:
-        serverconfig = self._load_serverconfig_snapshot()
-        enabled = _sevendays_serverconfig_bool_from_value(
-            serverconfig.value("EnableMapRendering"), property_name="EnableMapRendering"
-        )
-        if not enabled:
-            return None
-        save = self._save_directory_path(serverconfig=serverconfig)
-        if save is None:
-            return None
-        if self._rendered_map_cache is None:
-            self._rendered_map_cache = SevenDaysMapCache()
-        return self._rendered_map_cache.load(
-            save=save, world_id=self._save_root_id(PurePosixPath(save.parent.name, save.name)),
-        )
+        return self.map_state()[1]
 
     @property
     def supports_map(self) -> bool:
-        return self.rendered_map is not None
+        return True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         overhaul = load_undead_legacy_installation(cfg.directory)
@@ -3300,6 +3317,9 @@ class SevenDays(App[App_Config]):
         )
         # Settings may select another save while the game is still starting.
         runtime_save = self._save_directory_path() if serverconfig_path.is_file() else None
+        self._map_rendering_at_start = _sevendays_serverconfig_bool_from_value(
+            self._load_serverconfig_snapshot().value("EnableMapRendering"), property_name="EnableMapRendering",
+        ) if serverconfig_path.is_file() else None
         await self._std_launch()
 
         try:

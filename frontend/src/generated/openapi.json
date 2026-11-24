@@ -275,6 +275,96 @@
           }
         }
       }
+    },
+    "/contracts/map/manifest": {
+      "get": {
+        "summary": "Contract Only",
+        "operationId": "contract_only_contracts_map_manifest_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MapManifest"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/contracts/map/annotations": {
+      "get": {
+        "summary": "Contract Only",
+        "operationId": "contract_only_contracts_map_annotations_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MapAnnotationList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/contracts/map/draft": {
+      "get": {
+        "summary": "Contract Only",
+        "operationId": "contract_only_contracts_map_draft_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MapAnnotationDraft"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/contracts/map/tiles": {
+      "get": {
+        "summary": "Contract Only",
+        "operationId": "contract_only_contracts_map_tiles_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MapTileIndexResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/contracts/map/world": {
+      "get": {
+        "summary": "Contract Only",
+        "operationId": "contract_only_contracts_map_world_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MapWorldSettings"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -384,6 +474,439 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "MapAnnotation": {
+        "properties": {
+          "annotation_id": {
+            "type": "string",
+            "title": "Annotation Id"
+          },
+          "world_name": {
+            "type": "string",
+            "title": "World Name"
+          },
+          "shape": {
+            "$ref": "#/components/schemas/MapAnnotationShape"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "color_hex": {
+            "type": "string",
+            "title": "Color Hex"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/MapCoordinate"
+            },
+            "type": "array",
+            "title": "Points"
+          },
+          "created_at_unix_ms": {
+            "type": "integer",
+            "title": "Created At Unix Ms"
+          },
+          "created_by_user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By User Id"
+          },
+          "created_by_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "annotation_id",
+          "world_name",
+          "shape",
+          "label",
+          "color_hex",
+          "points",
+          "created_at_unix_ms"
+        ],
+        "title": "MapAnnotation"
+      },
+      "MapAnnotationDraft": {
+        "properties": {
+          "world_name": {
+            "type": "string",
+            "title": "World Name"
+          },
+          "shape": {
+            "$ref": "#/components/schemas/MapAnnotationShape"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "color_hex": {
+            "type": "string",
+            "title": "Color Hex"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/MapCoordinate"
+            },
+            "type": "array",
+            "title": "Points"
+          }
+        },
+        "type": "object",
+        "required": [
+          "world_name",
+          "shape",
+          "label",
+          "color_hex",
+          "points"
+        ],
+        "title": "MapAnnotationDraft"
+      },
+      "MapAnnotationList": {
+        "properties": {
+          "app_name": {
+            "type": "string",
+            "title": "App Name"
+          },
+          "app_friendly": {
+            "type": "string",
+            "title": "App Friendly"
+          },
+          "node_name": {
+            "type": "string",
+            "title": "Node Name"
+          },
+          "annotations": {
+            "items": {
+              "$ref": "#/components/schemas/MapAnnotation"
+            },
+            "type": "array",
+            "title": "Annotations"
+          }
+        },
+        "type": "object",
+        "required": [
+          "app_name",
+          "app_friendly",
+          "node_name",
+          "annotations"
+        ],
+        "title": "MapAnnotationList"
+      },
+      "MapAnnotationShape": {
+        "type": "string",
+        "enum": [
+          "marker",
+          "polyline"
+        ],
+        "title": "MapAnnotationShape"
+      },
+      "MapCoordinate": {
+        "properties": {
+          "x": {
+            "type": "number",
+            "title": "X"
+          },
+          "z": {
+            "type": "number",
+            "title": "Z"
+          }
+        },
+        "type": "object",
+        "required": [
+          "x",
+          "z"
+        ],
+        "title": "MapCoordinate"
+      },
+      "MapIndexedTile": {
+        "properties": {
+          "x": {
+            "type": "integer",
+            "title": "X"
+          },
+          "y": {
+            "type": "integer",
+            "title": "Y"
+          },
+          "revision": {
+            "type": "string",
+            "title": "Revision"
+          }
+        },
+        "type": "object",
+        "required": [
+          "x",
+          "y",
+          "revision"
+        ],
+        "title": "MapIndexedTile"
+      },
+      "MapManifest": {
+        "properties": {
+          "app_name": {
+            "type": "string",
+            "title": "App Name"
+          },
+          "app_friendly": {
+            "type": "string",
+            "title": "App Friendly"
+          },
+          "node_name": {
+            "type": "string",
+            "title": "Node Name"
+          },
+          "public_map_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Public Map Url"
+          },
+          "icon_base_url": {
+            "type": "string",
+            "title": "Icon Base Url"
+          },
+          "initial_world_name": {
+            "type": "string",
+            "title": "Initial World Name"
+          },
+          "worlds": {
+            "items": {
+              "$ref": "#/components/schemas/MapWorldSummary"
+            },
+            "type": "array",
+            "title": "Worlds"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/MapProvider",
+            "default": "squaremap"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/MapReadiness",
+            "default": "ready"
+          },
+          "supports_tile_index": {
+            "type": "boolean",
+            "title": "Supports Tile Index",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "app_name",
+          "app_friendly",
+          "node_name",
+          "public_map_url",
+          "icon_base_url",
+          "initial_world_name",
+          "worlds"
+        ],
+        "title": "MapManifest"
+      },
+      "MapPlayerTrackerSettings": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "max_age_seconds": {
+            "type": "number",
+            "title": "Max Age Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "MapPlayerTrackerSettings"
+      },
+      "MapProvider": {
+        "type": "string",
+        "enum": [
+          "squaremap",
+          "sevendays"
+        ],
+        "title": "MapProvider"
+      },
+      "MapReadiness": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "disabled",
+          "restart_required",
+          "waiting_for_tiles"
+        ],
+        "title": "MapReadiness"
+      },
+      "MapTileIndexResponse": {
+        "properties": {
+          "zoom": {
+            "type": "integer",
+            "title": "Zoom"
+          },
+          "tiles": {
+            "items": {
+              "$ref": "#/components/schemas/MapIndexedTile"
+            },
+            "type": "array",
+            "title": "Tiles"
+          },
+          "bounds": {
+            "anyOf": [
+              {
+                "prefixItems": [
+                  {
+                    "$ref": "#/components/schemas/MapCoordinate"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MapCoordinate"
+                  }
+                ],
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bounds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "zoom",
+          "tiles",
+          "bounds"
+        ],
+        "title": "MapTileIndexResponse"
+      },
+      "MapWorldSettings": {
+        "properties": {
+          "zoom": {
+            "$ref": "#/components/schemas/MapZoomSettings"
+          },
+          "spawn": {
+            "$ref": "#/components/schemas/MapCoordinate"
+          },
+          "tile_size": {
+            "type": "integer",
+            "title": "Tile Size"
+          },
+          "north_positive": {
+            "type": "boolean",
+            "title": "North Positive"
+          },
+          "bounds": {
+            "anyOf": [
+              {
+                "prefixItems": [
+                  {
+                    "$ref": "#/components/schemas/MapCoordinate"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MapCoordinate"
+                  }
+                ],
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bounds"
+          },
+          "player_tracker": {
+            "$ref": "#/components/schemas/MapPlayerTrackerSettings"
+          },
+          "marker_update_interval": {
+            "type": "number",
+            "title": "Marker Update Interval"
+          },
+          "tiles_update_interval": {
+            "type": "number",
+            "title": "Tiles Update Interval"
+          }
+        },
+        "type": "object",
+        "required": [
+          "zoom",
+          "spawn"
+        ],
+        "title": "MapWorldSettings"
+      },
+      "MapWorldSummary": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "world_type": {
+            "type": "string",
+            "title": "World Type"
+          },
+          "order": {
+            "type": "integer",
+            "title": "Order"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "display_name",
+          "world_type",
+          "order"
+        ],
+        "title": "MapWorldSummary"
+      },
+      "MapZoomSettings": {
+        "properties": {
+          "max": {
+            "type": "integer",
+            "title": "Max"
+          },
+          "def": {
+            "type": "integer",
+            "title": "Def"
+          },
+          "extra": {
+            "type": "integer",
+            "title": "Extra"
+          }
+        },
+        "type": "object",
+        "required": [
+          "max",
+          "def",
+          "extra"
+        ],
+        "title": "MapZoomSettings"
       },
       "NetworkAppContext": {
         "properties": {

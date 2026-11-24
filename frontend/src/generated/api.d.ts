@@ -107,6 +107,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/contracts/map/manifest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Contract Only */
+        get: operations["contract_only_contracts_map_manifest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/contracts/map/annotations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Contract Only */
+        get: operations["contract_only_contracts_map_annotations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/contracts/map/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Contract Only */
+        get: operations["contract_only_contracts_map_draft_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/contracts/map/tiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Contract Only */
+        get: operations["contract_only_contracts_map_tiles_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/contracts/map/world": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Contract Only */
+        get: operations["contract_only_contracts_map_world_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -147,6 +232,164 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** MapAnnotation */
+        MapAnnotation: {
+            /** Annotation Id */
+            annotation_id: string;
+            /** World Name */
+            world_name: string;
+            shape: components["schemas"]["MapAnnotationShape"];
+            /** Label */
+            label: string;
+            /** Color Hex */
+            color_hex: string;
+            /** Points */
+            points: components["schemas"]["MapCoordinate"][];
+            /** Created At Unix Ms */
+            created_at_unix_ms: number;
+            /** Created By User Id */
+            created_by_user_id?: number | null;
+            /** Created By Name */
+            created_by_name?: string | null;
+        };
+        /** MapAnnotationDraft */
+        MapAnnotationDraft: {
+            /** World Name */
+            world_name: string;
+            shape: components["schemas"]["MapAnnotationShape"];
+            /** Label */
+            label: string;
+            /** Color Hex */
+            color_hex: string;
+            /** Points */
+            points: components["schemas"]["MapCoordinate"][];
+        };
+        /** MapAnnotationList */
+        MapAnnotationList: {
+            /** App Name */
+            app_name: string;
+            /** App Friendly */
+            app_friendly: string;
+            /** Node Name */
+            node_name: string;
+            /** Annotations */
+            annotations: components["schemas"]["MapAnnotation"][];
+        };
+        /**
+         * MapAnnotationShape
+         * @enum {string}
+         */
+        MapAnnotationShape: "marker" | "polyline";
+        /** MapCoordinate */
+        MapCoordinate: {
+            /** X */
+            x: number;
+            /** Z */
+            z: number;
+        };
+        /** MapIndexedTile */
+        MapIndexedTile: {
+            /** X */
+            x: number;
+            /** Y */
+            y: number;
+            /** Revision */
+            revision: string;
+        };
+        /** MapManifest */
+        MapManifest: {
+            /** App Name */
+            app_name: string;
+            /** App Friendly */
+            app_friendly: string;
+            /** Node Name */
+            node_name: string;
+            /** Public Map Url */
+            public_map_url: string | null;
+            /** Icon Base Url */
+            icon_base_url: string;
+            /** Initial World Name */
+            initial_world_name: string;
+            /** Worlds */
+            worlds: components["schemas"]["MapWorldSummary"][];
+            /** @default squaremap */
+            provider: components["schemas"]["MapProvider"];
+            /** @default ready */
+            readiness: components["schemas"]["MapReadiness"];
+            /**
+             * Supports Tile Index
+             * @default false
+             */
+            supports_tile_index: boolean;
+        };
+        /** MapPlayerTrackerSettings */
+        MapPlayerTrackerSettings: {
+            /** Enabled */
+            enabled: boolean;
+            /** Max Age Seconds */
+            max_age_seconds?: number;
+        };
+        /**
+         * MapProvider
+         * @enum {string}
+         */
+        MapProvider: "squaremap" | "sevendays";
+        /**
+         * MapReadiness
+         * @enum {string}
+         */
+        MapReadiness: "ready" | "disabled" | "restart_required" | "waiting_for_tiles";
+        /** MapTileIndexResponse */
+        MapTileIndexResponse: {
+            /** Zoom */
+            zoom: number;
+            /** Tiles */
+            tiles: components["schemas"]["MapIndexedTile"][];
+            /** Bounds */
+            bounds: [
+                components["schemas"]["MapCoordinate"],
+                components["schemas"]["MapCoordinate"]
+            ] | null;
+        };
+        /** MapWorldSettings */
+        MapWorldSettings: {
+            zoom: components["schemas"]["MapZoomSettings"];
+            spawn: components["schemas"]["MapCoordinate"];
+            /** Tile Size */
+            tile_size?: number;
+            /** North Positive */
+            north_positive?: boolean;
+            /** Bounds */
+            bounds?: [
+                components["schemas"]["MapCoordinate"],
+                components["schemas"]["MapCoordinate"]
+            ] | null;
+            player_tracker?: components["schemas"]["MapPlayerTrackerSettings"];
+            /** Marker Update Interval */
+            marker_update_interval?: number;
+            /** Tiles Update Interval */
+            tiles_update_interval?: number;
+        };
+        /** MapWorldSummary */
+        MapWorldSummary: {
+            /** Name */
+            name: string;
+            /** Display Name */
+            display_name: string;
+            /** World Type */
+            world_type: string;
+            /** Order */
+            order: number;
+        };
+        /** MapZoomSettings */
+        MapZoomSettings: {
+            /** Max */
+            max: number;
+            /** Def */
+            def: number;
+            /** Extra */
+            extra: number;
         };
         /** NetworkAppContext */
         NetworkAppContext: {
@@ -717,6 +960,106 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    contract_only_contracts_map_manifest_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MapManifest"];
+                };
+            };
+        };
+    };
+    contract_only_contracts_map_annotations_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MapAnnotationList"];
+                };
+            };
+        };
+    };
+    contract_only_contracts_map_draft_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MapAnnotationDraft"];
+                };
+            };
+        };
+    };
+    contract_only_contracts_map_tiles_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MapTileIndexResponse"];
+                };
+            };
+        };
+    };
+    contract_only_contracts_map_world_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MapWorldSettings"];
                 };
             };
         };

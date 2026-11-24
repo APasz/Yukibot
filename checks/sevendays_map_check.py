@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import struct
+import threading
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -11,16 +12,23 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
+from pydantic import TypeAdapter
 from starlette.requests import Request
+from starlette.responses import Response
 
 from apps._telnet import TelnetClient
 from apps.sevendays import Players, SevenDays
 from apps.sevendays.installation import UNDEAD_LEGACY_MANIFEST, UndeadLegacyInstallation
-from apps.sevendays.map import SevenDaysMap, SevenDaysMapCache
-from map_annotations import MapAnnotationDraft, MapAnnotationShape, MapCoordinate, MapManifest, MapProvider
+from apps.sevendays.map import MapTileIndex, MapTileRange, SevenDaysMap, SevenDaysMapCache
+from map_annotations import MapAnnotationDraft, MapAnnotationShape, MapCoordinate, MapManifest, MapProvider, MapReadiness, MapWorldSettings
+from node_api.map_routes import register_map_routes
 from node_api.app_state import NodeAppEntry
 from node_api.map_service import NodeMapProxyResponse, NodeMapService
+from mod_web_auth import ModWebUser
+from node_auth import NodeApiScope
+from web_dash.types import ModWebNodeLink
 from web_dash.page_handlers import ModWebPageHandlersMixin
 from web_dash.service import ModWebService
 from web_dash.types import ModWebAppTabContext
@@ -83,22 +91,41 @@ def _service() -> NodeMapService:
 
 
 @pytest.mark.parametrize("overhaul", [False, True])
-def test_map_availability_requires_setting_metadata_and_real_tiles(tmp_path: Path, overhaul: bool) -> None:
+def test_rendered_map_requires_setting_metadata_and_real_tiles(tmp_path: Path, overhaul: bool) -> None:
     app = _app(tmp_path, overhaul=overhaul)
-    assert not app.supports_map
+    assert app.rendered_map is None
+
     root = _tiles(app)
-    assert app.supports_map
+    assert app.rendered_map is not None
     assert ("UndeadLegacy" in root.parts) is overhaul
     _configure(app, enabled=False)
-    assert not app.supports_map
+    assert app.rendered_map is None
     with pytest.raises(HTTPException) as failure:
         _service().tile_response(app, "unknown", 4, "-2_-4.png")
     assert failure.value.status_code == 404
     _configure(app)
     (root / "4" / "-2" / "3.png").write_bytes(b"incomplete")
-    assert not app.supports_map
+    assert app.rendered_map is None
     (root / "4" / "-2" / "3.png").unlink()
-    assert not app.supports_map
+    assert app.rendered_map is None
+
+
+def test_map_capability_and_readiness_survive_enabling_rendering(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    service = _service()
+    assert app.supports_map
+    _configure(app, enabled=False)
+    manifest = service.build_manifest(app)
+    assert manifest.readiness is MapReadiness.DISABLED and not manifest.worlds
+    assert MapManifest.from_mapping(manifest.to_mapping()) == manifest
+    _configure(app)
+    assert service.build_manifest(app).readiness is MapReadiness.WAITING_FOR_TILES
+    _tiles(app)
+    assert service.build_manifest(app).readiness is MapReadiness.READY
+    app._map_rendering_at_start = False
+    app.process = Mock()
+    app.process.poll.return_value = None
+    assert service.build_manifest(app).readiness is MapReadiness.RESTART_REQUIRED
 
 
 def test_current_save_controls_tiles_and_annotation_identity(tmp_path: Path) -> None:
@@ -107,7 +134,7 @@ def test_current_save_controls_tiles_and_annotation_identity(tmp_path: Path) -> 
     original = app.rendered_map
     assert original is not None
     _configure(app, save="Another Save")
-    assert not app.supports_map
+    assert app.rendered_map is None
     _tiles(app)
     current = app.rendered_map
     assert current is not None and current.world_id != original.world_id
@@ -123,6 +150,7 @@ def test_native_manifest_and_tile_orientation_need_no_game_web_server(tmp_path: 
     with patch("node_api.map_service.requests.Session.get", side_effect=AssertionError("No upstream requests")):
         manifest = service.build_manifest(app)
         assert manifest.provider is MapProvider.SEVENDAYS
+        assert manifest.supports_tile_index
         assert manifest.public_map_url is None
         assert MapManifest.from_mapping(manifest.to_mapping()) == manifest
         world = manifest.initial_world_name
@@ -216,14 +244,44 @@ def test_tiles_and_metadata_cannot_follow_links_outside_the_map(tmp_path: Path) 
         SevenDaysMap.load(save=root.parent, world_id="test")
 
 
+@pytest.mark.parametrize("relative_path", ["4/-2/3.png", "4/-2", "4"])
+def test_tile_index_rejects_links_outside_the_map(tmp_path: Path, relative_path: str) -> None:
+    app = _app(tmp_path)
+    root = _tiles(app)
+    rendered = app.rendered_map
+    assert rendered is not None
+    source = root / relative_path
+    outside = tmp_path / "outside"
+    source.rename(outside)
+    source.symlink_to(outside, target_is_directory=outside.is_dir())
+    with pytest.raises(ValueError, match="outside"):
+        rendered.tile_index()
+
+
+def test_tile_discovery_and_index_share_path_rules_and_allow_internal_links(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    root = _tiles(app)
+    tile = root / "4" / "-2" / "3.png"
+    target = root / "sample.png"
+    tile.rename(target)
+    tile.symlink_to(target)
+    (root / "0").write_text("Not a zoom directory")
+    (root / "4" / "99").write_text("Not a column directory")
+    (root / "4" / "-2" / "5.png").mkdir()
+    rendered = SevenDaysMap.load(save=root.parent, world_id="test")
+    assert rendered is not None
+    assert set(rendered.tile_index().tiles) == {(4, -2, -4)}
+    assert rendered.read_tile(zoom=4, tile_name="-2_-4.png") == _png()
+
+
 @pytest.mark.parametrize("metadata", ['[]', '{"blockSize":true,"maxZoom":4}', '{"blockSize":128,"maxZoom":-1}', '{'])
-def test_invalid_metadata_does_not_enable_the_tab(tmp_path: Path, metadata: str) -> None:
+def test_invalid_metadata_leaves_the_map_waiting(tmp_path: Path, metadata: str) -> None:
     app = _app(tmp_path)
     root = _tiles(app)
     (root / "mapinfo.json").write_text(metadata)
     with pytest.raises(ValueError):
         SevenDaysMap.load(save=root.parent, world_id="test")
-    assert not app.supports_map
+    assert app.rendered_map is None
 
 
 def test_internal_map_capability_survives_node_transport_and_selects_tab() -> None:
@@ -278,7 +336,7 @@ def test_map_selection_uses_one_consistent_configuration_snapshot(tmp_path: Path
     app = _app(tmp_path)
     _tiles(app)
     with patch.object(app, "_load_serverconfig_snapshot", wraps=app._load_serverconfig_snapshot) as snapshot:
-        assert app.supports_map
+        assert app.rendered_map is not None
     assert snapshot.call_count == 1
 
 
@@ -291,12 +349,12 @@ def test_map_discovery_retries_after_a_short_negative_cache(tmp_path: Path) -> N
         patch("apps.sevendays.map.time.monotonic", return_value=100.0) as clock,
         patch.object(SevenDaysMap, "load", wraps=SevenDaysMap.load) as discover,
     ):
-        assert not app.supports_map
+        assert app.rendered_map is None
         tile.write_bytes(_png())
-        assert not app.supports_map
+        assert app.rendered_map is None
         assert discover.call_count == 1
         clock.return_value += 3
-        assert app.supports_map
+        assert app.rendered_map is not None
         assert discover.call_count == 2
 
 
@@ -310,7 +368,7 @@ def test_invalid_metadata_does_not_cause_repeated_discovery_or_log_spam(tmp_path
         patch("apps.sevendays.map.log.warning") as warning,
     ):
         for _ in range(10):
-            assert not app.supports_map
+            assert app.rendered_map is None
         assert discover.call_count == warning.call_count == 1
 
 
@@ -336,6 +394,207 @@ def test_cached_map_cannot_follow_a_replaced_root_link(tmp_path: Path) -> None:
     root.symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="outside"):
         rendered.read_tile(zoom=4, tile_name="-2_-4.png")
+
+
+def test_tile_index_is_bounded_shared_and_reuses_validated_pngs(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    root = _tiles(app)
+    rendered = app.rendered_map
+    assert rendered is not None
+    with (
+        patch("apps.sevendays.map.time.monotonic", return_value=100.0) as clock,
+        patch.object(SevenDaysMap, "tile_index", wraps=rendered.tile_index) as scan,
+    ):
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            indexes = list(workers.map(lambda _: app.rendered_tile_index(rendered), range(32)))
+        assert scan.call_count == 1
+        assert all(index is indexes[0] for index in indexes)
+        content, etag = indexes[0].viewport_response(MapTileRange(zoom=4, min_x=-2, max_x=-2, min_y=-4, max_y=-4))
+        assert len(json.loads(content)["tiles"]) == 1
+        empty, _ = indexes[0].viewport_response(MapTileRange(zoom=4, min_x=0, max_x=0, min_y=0, max_y=0))
+        assert json.loads(empty)["tiles"] == []
+        (root / "4" / "-2" / "5.png").write_bytes(_png())
+        assert len(app.rendered_tile_index(rendered).tiles) == 1
+        clock.return_value = 116.0
+        updated = app.rendered_tile_index(rendered)
+        assert len(updated.tiles) == 2
+        assert updated.viewport_response(MapTileRange(zoom=4, min_x=-2, max_x=-2, min_y=-4, max_y=-4))[1] != etag
+    with pytest.raises(ValueError, match="4096"):
+        MapTileRange(zoom=4, min_x=0, max_x=100, min_y=0, max_y=100)
+
+
+def test_incomplete_tile_updates_retain_the_previous_index_revision(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    root = _tiles(app)
+    rendered = app.rendered_map
+    assert rendered is not None
+    old = rendered.tile_index()
+    tile = root / "4" / "-2" / "3.png"
+    tile.write_bytes(_png()[:-12])
+    assert rendered.tile_index(old).tiles == old.tiles
+    tile.write_bytes(_png((5, 15, 25, 255)))
+    assert rendered.tile_index(old).tiles != old.tiles
+    tile.unlink()
+    assert not rendered.tile_index(old).tiles
+
+
+def test_tile_index_scan_does_not_block_tile_reads(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    _tiles(app)
+    rendered = app.rendered_map
+    assert rendered is not None
+    scanning = threading.Event()
+    release = threading.Event()
+
+    def scan(previous: MapTileIndex | None = None) -> MapTileIndex:
+        scanning.set()
+        assert release.wait(timeout=5)
+        return MapTileIndex()
+
+    with patch.object(SevenDaysMap, "tile_index", side_effect=scan), ThreadPoolExecutor(max_workers=2) as workers:
+        pending_index = workers.submit(app.rendered_tile_index, rendered)
+        try:
+            assert scanning.wait(timeout=2)
+            tile = workers.submit(_service().tile_response, app, rendered.world_id, 4, "-2_-4.png")
+            assert tile.result(timeout=2).content == _png()
+        finally:
+            release.set()
+        pending_index.result(timeout=2)
+
+
+def test_tile_index_cache_lifetime_starts_after_scan_finishes(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    _tiles(app)
+    rendered = app.rendered_map
+    assert rendered is not None
+    with (
+        patch("apps.sevendays.map.time.monotonic", side_effect=[100.0, 120.0, 121.0]),
+        patch.object(SevenDaysMap, "tile_index", wraps=rendered.tile_index) as scan,
+    ):
+        assert app.rendered_tile_index(rendered) is app.rendered_tile_index(rendered)
+        assert scan.call_count == 1
+
+
+def test_map_http_revalidates_tiles_and_indexes_after_authentication(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    _tiles(app)
+    maps = _service()
+    world = maps.build_manifest(app).initial_world_name
+    auth = Mock()
+    auth.node_name = "erin"
+    api = FastAPI()
+    register_map_routes(
+        api, auth=auth, resolve_app=lambda _: app, maps=maps, api_prefix="/api/node",
+        map_annotation_creator_name=lambda *_: None, traffic_log=logging.getLogger(__name__),
+    )
+    base = f"/api/node/apps/{app.name}/map/worlds/{world}"
+    async def check() -> None:
+        async with AsyncClient(transport=ASGITransport(app=api), base_url="http://map.test") as client:
+            settings = await client.get(f"{base}/settings")
+            TypeAdapter(MapWorldSettings).validate_json(settings.content)
+            for path in (f"{base}/tiles/4/-2_-4.png", f"{base}/tiles/index?zoom=4&min_x=-2&max_x=-2&min_y=-4&max_y=-4"):
+                response = await client.get(path)
+                assert response.status_code == 200
+                assert response.headers["cache-control"] == "private, no-cache"
+                etag = response.headers["etag"]
+                unchanged = await client.get(path, headers={"If-None-Match": f"W/{etag}"})
+                assert unchanged.status_code == 304 and unchanged.content == b""
+                auth.require_access.side_effect = HTTPException(403, "Access revoked")
+                assert (await client.get(path, headers={"If-None-Match": etag})).status_code == 403
+                auth.require_access.side_effect = None
+            assert (await client.get(f"{base}/tiles/index?zoom=4&min_x=0&max_x=100&min_y=0&max_y=100")).status_code == 400
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("status", [200, 304, 404])
+def test_portal_map_proxy_preserves_validators_freshness_and_status(status: int) -> None:
+    service = ModWebService()
+    node = ModWebNodeLink(
+        node_name="erin", label="Erin", url="/mod-web/nodes/erin",
+        api_base_url="https://erin.example/api/node", api_url="/api/node-proxy/erin/apps", is_current=False,
+    )
+    user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+    context = AsyncMock()
+
+    async def chunks(_: int):
+        yield b"map response"
+
+    response = Mock()
+    response.status = status
+    response.headers = {
+        "Content-Type": "application/json", "Cache-Control": "private, no-cache", "ETag": '"tile-one"',
+        "X-Yukibot-Map-Source": "stale", "X-Yukibot-Map-Cache-Updated-At": "1234",
+    }
+    response.content_length = 12
+    response.content.iter_chunked = chunks
+    context.__aenter__.return_value = response
+    session = Mock()
+    session.get.return_value = context
+    request = Request({"type": "http", "headers": [(b"if-none-match", b'"tile-one"')], "query_string": b""})
+
+    async def check() -> None:
+        with (
+            patch.object(service, "_remote_http_client", new=AsyncMock(return_value=session)),
+            patch.object(service, "_remote_token", return_value="read-only-token"),
+        ):
+            result = await service._remote_stream_response_async(
+                node=node, app_name="sevendays_alpha", path="/apps/sevendays_alpha/map/players",
+                scopes=(NodeApiScope.MAP_READ,), user=user, request=request, passthrough_errors=True,
+            )
+            assert result.status_code == status
+            assert result.headers["etag"] == '"tile-one"'
+            assert result.headers["x-yukibot-map-source"] == "stale"
+            assert session.get.call_args.kwargs["headers"]["If-None-Match"] == '"tile-one"'
+            messages: list[dict[str, object]] = []
+
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def send(message):
+                messages.append(message)
+
+            await result({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+            assert b"".join(message.get("body", b"") for message in messages) == (b"" if status == 304 else b"map response")
+            context.__aexit__.assert_awaited_once()
+
+    asyncio.run(check())
+
+
+def test_portal_tile_route_forwards_revisions_without_forwarding_url_credentials() -> None:
+    service = ModWebService()
+    api = FastAPI()
+    route_app = Mock()
+    route_app.get.side_effect = api.get
+    route_app.post.side_effect = api.post
+    route_app.put.side_effect = api.put
+    route_app.exception_handlers = {}
+    with patch.object(service._backend, "register_node_api_routes"):
+        service._register_routes(nicegui_app=route_app, ui=Mock())
+    node = ModWebNodeLink(
+        node_name="erin", label="Erin", url="/mod-web/nodes/erin",
+        api_base_url="https://erin.example/api/node", api_url="/api/node-proxy/erin/apps", is_current=False,
+    )
+    user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+    stream = AsyncMock(return_value=Response(b"tile", media_type="image/png"))
+
+    async def check() -> None:
+        with (
+            patch.object(service, "_require_http_user", return_value=user),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(service, "_remote_stream_response_async", stream),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=api), base_url="http://map.test") as client:
+                response = await client.get(
+                    "/api/node-proxy/erin/apps/minecraft/map/worlds/world/tiles/4/0_0.png"
+                    "?revision=current&tile_rev=legacy&access_token=untrusted&extra=ignored"
+                )
+                assert response.status_code == 200 and response.content == b"tile"
+        assert stream.await_args is not None
+        assert stream.await_args.kwargs["query"] == {"revision": "current", "tile_rev": "legacy"}
+        assert stream.await_args.kwargs["scopes"] == (NodeApiScope.MAP_READ,)
+
+    asyncio.run(check())
 
 
 def _draft(world_id: str, label: str = "Marker") -> MapAnnotationDraft:
@@ -409,6 +668,24 @@ def test_map_manifest_rejects_invalid_explicit_provider(tmp_path: Path, provider
     payload = _service().build_manifest(app).to_mapping()
     payload["provider"] = provider
     with pytest.raises(ValueError):
+        MapManifest.from_mapping(payload)
+
+
+def test_legacy_manifest_defaults_to_unindexed_tiles(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    _tiles(app)
+    payload = _service().build_manifest(app).to_mapping()
+    del payload["supports_tile_index"]
+    assert not MapManifest.from_mapping(payload).supports_tile_index
+
+
+@pytest.mark.parametrize("capability", [None, 0, 1, "true"])
+def test_map_manifest_requires_a_boolean_tile_index_capability(tmp_path: Path, capability: object) -> None:
+    app = _app(tmp_path)
+    _tiles(app)
+    payload = _service().build_manifest(app).to_mapping()
+    payload["supports_tile_index"] = capability
+    with pytest.raises(ValueError, match="supports_tile_index"):
         MapManifest.from_mapping(payload)
 
 

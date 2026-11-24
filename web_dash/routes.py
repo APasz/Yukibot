@@ -696,15 +696,15 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
             return {"node": node.node_name, "apps": [entry.to_mapping() for entry in apps]}
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/manifest")
-        async def _proxy_map_manifest(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+        async def _proxy_map_manifest(node_name: str, app_name: str, request: Request) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            return await self._remote_json_async(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/manifest",
                 scopes=(NodeApiScope.MAP_READ,),
-                user=user,
+                user=user, request=request, passthrough_errors=True,
             )
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/annotations")
@@ -768,7 +768,7 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/players",
                 scopes=(NodeApiScope.MAP_READ,),
-                user=user,
+                user=user, request=request, passthrough_errors=True,
             )
 
         @nicegui_app.get(
@@ -787,7 +787,7 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/worlds/{quote(world_name, safe='')}/settings",
                 scopes=(NodeApiScope.MAP_READ,),
-                user=user,
+                user=user, request=request, passthrough_errors=True,
             )
 
         @nicegui_app.get(
@@ -806,7 +806,21 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/worlds/{quote(world_name, safe='')}/markers",
                 scopes=(NodeApiScope.MAP_READ,),
-                user=user,
+                user=user, request=request, passthrough_errors=True,
+            )
+
+        @nicegui_app.get(
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/worlds/{{world_name}}/tiles/index"
+        )
+        async def _proxy_map_tile_index(node_name: str, app_name: str, world_name: str, request: Request) -> StarletteResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            return await self._remote_stream_response_async(
+                node=node, app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/map/worlds/{quote(world_name, safe='')}/tiles/index",
+                scopes=(NodeApiScope.MAP_READ,), user=user, request=request, passthrough_errors=True,
+                query={key: value for key, value in request.query_params.items()
+                       if key in {"zoom", "min_x", "max_x", "min_y", "max_y"}},
             )
 
         @nicegui_app.get(
@@ -829,8 +843,9 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
                     f"/apps/{quote(app_name, safe='')}/map/worlds/{quote(world_name, safe='')}/tiles/"
                     f"{z}/{quote(tile_name, safe='')}"
                 ),
+                query={key: value for key, value in request.query_params.items() if key in {"revision", "tile_rev"}},
                 scopes=(NodeApiScope.MAP_READ,),
-                user=user,
+                user=user, request=request, passthrough_errors=True,
             )
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/assets/{{asset_path:path}}")
@@ -847,7 +862,7 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/assets/{quote(asset_path, safe='/')}",
                 scopes=(NodeApiScope.MAP_READ,),
-                user=user,
+                user=user, request=request, passthrough_errors=True,
             )
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/minecraft/recipes/item-icon")

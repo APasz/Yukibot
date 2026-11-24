@@ -20821,7 +20821,7 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("mod-tab-toolbar mod-tab-toolbar-surface mod-map-toolbar", markup)
         self.assertIn('class="mod-map-toolbar-main"', markup)
         self.assertIn('class="mod-map-mode mod-subtitle">Loading map…</div>', markup)
-        self.assertIn('class="mod-map-status mod-subtitle">Loading map data…</div>', markup)
+        self.assertIn('role="status" aria-live="polite">Loading map data…</div>', markup)
         self.assertIn("mod-tab-toolbar-actions mod-map-toolbar-actions", markup)
         self.assertNotIn("mod-map-toolset", markup)
         self.assertIn('class="mod-map-toolbar-group mod-map-toolbar-group-dimension"', markup)
@@ -20832,102 +20832,12 @@ class ModWebTests(unittest.TestCase):
         self.assertIn('class="mod-map-label-prompt"', markup)
         self.assertIn('class="mod-map-canvas-frame"', markup)
         self.assertIn('aria-label="Annotation label"', markup)
-        self.assertNotIn(">Cancel</button>", markup)
+        self.assertIn('data-map-action="cancel"', markup)
         self.assertNotIn(">Pan</button>", markup)
-        self.assertNotIn(">Finish</button>", markup)
+        self.assertIn('data-map-action="finish"', markup)
         self.assertNotIn('id="mod-map-yuki-minecraft-alpha-finish"', markup)
         self.assertNotIn('id="mod-map-yuki-minecraft-alpha-cancel"', markup)
-        self.assertIn('aria-label="Dimension"', markup)
-
-    def test_map_client_refresh_keeps_existing_layers_visible_until_replacements_are_ready(
-        self,
-    ) -> None:
-        assets_html = ModWebService._map_client_assets_html()
-
-        self.assertIn(
-            'applyAnnotationLayer(state, annotationResult.value);',
-            assets_html,
-        )
-        self.assertIn("nextTileLayer.setOpacity(state.tileLayer ? 0 : 1);", assets_html)
-        self.assertIn('nextTileLayer.once("load", finish);', assets_html)
-        self.assertIn(
-            "const requestAnnotationLabel = async (state, labelKind, anchorPoint = null) => {",
-            assets_html,
-        )
-        self.assertNotIn("window.prompt(", assets_html)
-        self.assertIn("state.labelPrompt.hidden = false;", assets_html)
-        self.assertIn("background: rgba(0, 0, 0, 0.96);", assets_html)
-        self.assertIn("placeLabelPrompt(state, anchorPoint);", assets_html)
-        self.assertIn("const placeLabelPrompt = (state, anchorPoint = null) => {", assets_html)
-        self.assertIn("transform: translate(-50%, calc(-100% - 0.85rem));", assets_html)
-        self.assertIn("width: 100%;", assets_html)
-        self.assertIn(
-            "const resolveLabelPrompt = (state, value, { focusMap = true } = {}) => {",
-            assets_html,
-        )
-        self.assertIn(
-            "const cancelPendingAnnotation = (state, { focusMap = true } = {}) => {",
-            assets_html,
-        )
-        self.assertIn(
-            'document.addEventListener("pointerdown", state.documentPointerDownListener, true);',
-            assets_html,
-        )
-        self.assertIn(
-            'document.addEventListener("contextmenu", state.documentContextMenuListener, true);',
-            assets_html,
-        )
-        self.assertIn("cancelPendingAnnotation(state, { focusMap: false });", assets_html)
-        self.assertIn(
-            "state.labelPromptInput.placeholder = `Enter a label for this ${labelKind}`;",
-            assets_html,
-        )
-        self.assertIn(
-            "void createMarkerAnnotation(state, rawPoint, event.containerPoint).catch((error) =>",
-            assets_html,
-        )
-        self.assertIn(
-            "void finishLineAnnotation(state, event.containerPoint).catch((error) =>",
-            assets_html,
-        )
-        self.assertNotIn("state.labelPromptCancel?.addEventListener(", assets_html)
-        self.assertIn('if (state.tool === "marker") {', assets_html)
-        self.assertIn("doubleClickZoom: false,", assets_html)
-        self.assertIn(
-            "if (event.originalEvent?.detail && event.originalEvent.detail > 1) {",
-            assets_html,
-        )
-        self.assertIn('state.map.on("dblclick", (event) => {', assets_html)
-        self.assertIn('state.map.on("contextmenu", (event) => {', assets_html)
-        self.assertIn('setToolState(state, "pan");', assets_html)
-        self.assertIn("toggle.disabled = !enabled;", assets_html)
-        self.assertIn('toggleLabel.dataset.disabled = enabled ? "false" : "true";', assets_html)
-        self.assertIn('.mod-map-toggle[data-disabled="true"]', assets_html)
-        self.assertIn("width: 100%;", assets_html)
-        self.assertIn("gap: 0.55rem;", assets_html)
-        self.assertIn("justify-content: space-between;", assets_html)
-        self.assertIn("text-align: right;", assets_html)
-        self.assertIn("justify-content: center;", assets_html)
-        self.assertIn("aspect-ratio: 1 / 1;", assets_html)
-        self.assertIn("border-radius: 0;", assets_html)
-        self.assertIn(
-            'const defaultWorldName = state.worldByName.has("minecraft_overworld")',
-            assets_html,
-        )
-        self.assertIn('typeof layer.bringToFront === "function"', assets_html)
-        self.assertIn("void fetch(state.config.clientErrorUrl, {", assets_html)
-        self.assertIn('console.error("[mod-map]", context, error);', assets_html)
-        self.assertIn("const apiSubpathUrl = (state, baseSuffix, relativePath) => {", assets_html)
-        self.assertIn("iconUrl: apiSubpathUrl(", assets_html)
-        self.assertIn(
-            "if (markersLoaded && markersLoaded.source === MAP_SOURCE_STALE) {",
-            assets_html,
-        )
-        self.assertIn("if (forceTiles) {", assets_html)
-        self.assertIn("await refreshTiles(state, { force: true });", assets_html)
-        self.assertIn("await refreshTiles(state, { force: forceTiles });", assets_html)
-        self.assertIn("const isOfflineError = isSquaremapOfflineError(detail);", assets_html)
-        self.assertIn('setStatus(state, "Map data is unavailable.", "error");', assets_html)
+        self.assertIn('aria-label="Map world or save"', markup)
 
     def test_app_link_tabs_include_map_when_public_map_exists(self) -> None:
         service = ModWebService()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -10,7 +11,8 @@ import struct
 import threading
 import time
 import zlib
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -22,10 +24,67 @@ _TILE_NAME = re.compile(rf"({_INDEX})_({_INDEX})\.png")
 _PNG_HEADER = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 _PNG_END = b"\x00\x00\x00\x00IEND\xaeB`\x82"
 _MAP_DISCOVERY_INTERVAL_SECONDS = 2.0
+MAP_TILE_UPDATE_INTERVAL_SECONDS = 15.0
 _MAX_METADATA_BYTES = 16 * 1024
+_MAX_VIEWPORT_TILES = 4096
 log = logging.getLogger(__name__)
 
 type _FileSignature = tuple[int, int, int, int]
+
+
+def _signature(info: os.stat_result) -> _FileSignature:
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+
+
+def _revision(signature: _FileSignature) -> str:
+    return "-".join(f"{part:x}" for part in signature)
+
+
+def matches_etag(validator: str | None, etag: str) -> bool:
+    """Apply weak comparison for authenticated conditional GET requests."""
+    return validator is not None and any(
+        item.strip().removeprefix("W/") in {"*", etag} for item in validator.split(",")
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MapTileRange:
+    zoom: int
+    min_x: int
+    max_x: int
+    min_y: int
+    max_y: int
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not int for value in (self.zoom, self.min_x, self.max_x, self.min_y, self.max_y)):
+            raise ValueError("Map tile coordinates must be integers.")
+        if not 0 <= self.zoom <= 16 or self.min_x > self.max_x or self.min_y > self.max_y:
+            raise ValueError("Invalid map tile range.")
+        if (self.max_x - self.min_x + 1) * (self.max_y - self.min_y + 1) > _MAX_VIEWPORT_TILES:
+            raise ValueError(f"Map tile range exceeds {_MAX_VIEWPORT_TILES} tiles.")
+        if any(not -(1 << 31) <= value < (1 << 31) for value in (self.min_x, self.max_x, self.min_y, self.max_y)):
+            raise ValueError("Map tile coordinates are outside the supported range.")
+
+
+@dataclass(frozen=True, slots=True)
+class MapTileIndex:
+    """Validated tile revisions; PNG contents remain on disk."""
+
+    tiles: dict[tuple[int, int, int], _FileSignature] = field(default_factory=dict)
+    bounds: tuple[MapCoordinate, MapCoordinate] | None = None
+
+    def viewport_response(self, area: MapTileRange) -> tuple[bytes, str]:
+        tiles = [
+            {"x": x, "y": y, "revision": _revision(signature)}
+            for x in range(area.min_x, area.max_x + 1)
+            for y in range(area.min_y, area.max_y + 1)
+            if (signature := self.tiles.get((area.zoom, x, y))) is not None
+        ]
+        content = json.dumps({
+            "zoom": area.zoom, "tiles": tiles,
+            "bounds": [point.to_mapping() for point in self.bounds] if self.bounds is not None else None,
+        }, separators=(",", ":")).encode()
+        return content, f'"{hashlib.sha256(content).hexdigest()}"'
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,41 +127,31 @@ class SevenDaysMap:
         preferred_zoom = max(0, max_zoom - 2)
         zoom_levels = (preferred_zoom, *(zoom for zoom in range(max_zoom, -1, -1) if zoom != preferred_zoom))
         for zoom in zoom_levels:
-            level = _contained_path(root, root / str(zoom))
-            if not level.is_dir():
-                continue
-            with os.scandir(level) as columns:
-                for column in columns:
-                    column_index = _parse_index(column.name)
-                    if column_index is None or not column.is_dir():
-                        continue
-                    column_path = _contained_path(root, Path(column.path))
-                    with os.scandir(column_path) as tiles:
-                        for entry in tiles:
-                            name = Path(entry.name)
-                            tile_index = _parse_index(name.stem)
-                            if name.suffix != ".png" or tile_index is None:
-                                continue
-                            tile = _contained_path(root, Path(entry.path))
-                            if not _has_tile_data(tile, tile_size):
-                                continue
-                            scale = tile_size * (1 << (max_zoom - zoom))
-                            return cls(
-                                save=save,
-                                root=root,
-                                world_id=world_id,
-                                display_name=f"{save.parent.name} / {save.name}",
-                                tile_size=tile_size,
-                                max_zoom=max_zoom,
-                                initial_zoom=zoom,
-                                center=MapCoordinate(
-                                    x=(column_index + 0.5) * scale, z=(tile_index + 0.5) * scale,
-                                ),
-                                sample_tile=tile,
-                            )
+            scale = tile_size * (1 << (max_zoom - zoom))
+            for column, row, tile in _tiles_at_zoom(root, zoom):
+                if not _has_tile_data(tile, tile_size):
+                    continue
+                return cls(
+                    save=save,
+                    root=root,
+                    world_id=world_id,
+                    display_name=f"{save.parent.name} / {save.name}",
+                    tile_size=tile_size,
+                    max_zoom=max_zoom,
+                    initial_zoom=zoom,
+                    center=MapCoordinate(x=(column + 0.5) * scale, z=(row + 0.5) * scale),
+                    sample_tile=tile,
+                )
         return None
 
     def read_tile(self, *, zoom: int, tile_name: str) -> bytes:
+        content, _ = self.read_tile_result(zoom=zoom, tile_name=tile_name)
+        assert content is not None
+        return content
+
+    def read_tile_result(
+        self, *, zoom: int, tile_name: str, if_none_match: str | None = None,
+    ) -> tuple[bytes | None, str]:
         match = _TILE_NAME.fullmatch(tile_name)
         if match is None or not 0 <= zoom <= self.max_zoom:
             raise ValueError("Invalid 7D2D map tile coordinates.")
@@ -114,10 +163,73 @@ class SevenDaysMap:
         if not path.is_file():
             raise FileNotFoundError("This map tile has not been rendered.")
         with path.open("rb") as stream:
+            signature = _signature(os.fstat(stream.fileno()))
+            etag = f'"{_revision(signature)}"'
+            if matches_etag(if_none_match, etag):
+                return None, etag
             content = stream.read(_maximum_tile_bytes(self.tile_size) + 1)
+            if signature != _signature(os.fstat(stream.fileno())):
+                raise OSError("7D2D map tile changed while being read; retry shortly.")
         if not _complete_tile(content[:33], content[-12:], len(content), self.tile_size):
             raise OSError("7D2D map tile is incomplete or invalid; waiting for it to be rendered again.")
-        return content
+        return content, etag
+
+    def tile_index(self, previous: MapTileIndex | None = None) -> MapTileIndex:
+        tiles: dict[tuple[int, int, int], _FileSignature] = {}
+        min_x = min_z = float("inf")
+        max_x = max_z = float("-inf")
+        bounds_zoom = -1
+        for zoom in range(self.max_zoom + 1):
+            scale = self.tile_size * (1 << (self.max_zoom - zoom))
+            for x, row, path in _tiles_at_zoom(self.root, zoom):
+                signature = _file_signature(path)
+                key = (zoom, x, -row - 1)
+                if signature is None:
+                    continue
+                if previous is None or previous.tiles.get(key) != signature:
+                    if not _has_tile_data(path, self.tile_size):
+                        signature = previous.tiles.get(key) if previous is not None else None
+                        if signature is None:
+                            continue
+                tiles[key] = signature
+                if bounds_zoom != zoom:
+                    min_x = min_z = float("inf")
+                    max_x = max_z = float("-inf")
+                    bounds_zoom = zoom
+                min_x, min_z = min(min_x, x * scale), min(min_z, row * scale)
+                max_x, max_z = max(max_x, (x + 1) * scale), max(max_z, (row + 1) * scale)
+        bounds = (MapCoordinate(x=min_x, z=min_z), MapCoordinate(x=max_x, z=max_z)) if tiles else None
+        return MapTileIndex(tiles=tiles, bounds=bounds)
+
+
+def _tiles_at_zoom(root: Path, zoom: int) -> Iterator[tuple[int, int, Path]]:
+    """Enumerate rendered files, resolving directories once and checking file symlinks."""
+    level = _contained_path(root, root / str(zoom))
+    try:
+        columns = os.scandir(level)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    with columns:
+        for column in columns:
+            x = _parse_index(column.name)
+            if x is None or not column.is_dir():
+                continue
+            column_path = _contained_path(root, Path(column.path))
+            try:
+                entries = os.scandir(column_path)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            with entries:
+                for entry in entries:
+                    if not entry.name.endswith(".png"):
+                        continue
+                    row = _parse_index(entry.name[:-4])
+                    if row is None or not entry.is_file():
+                        continue
+                    path = Path(entry.path)
+                    if entry.is_symlink():
+                        path = _contained_path(root, path)
+                    yield x, row, path
 
 
 def _contained_path(root: Path, path: Path) -> Path:
@@ -170,7 +282,7 @@ def _file_signature(path: Path) -> _FileSignature | None:
         info = path.stat()
     except FileNotFoundError:
         return None
-    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+    return _signature(info)
 
 
 class SevenDaysMapCache:
@@ -178,11 +290,26 @@ class SevenDaysMapCache:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._index_lock = threading.Lock()
         self._identity: tuple[Path, str] | None = None
         self._metadata_signature: _FileSignature | None = None
         self._sample_signature: _FileSignature | None = None
         self._map: SevenDaysMap | None = None
         self._expires_at = 0.0
+        self._index_identity: tuple[Path, str, int, int] | None = None
+        self._index = MapTileIndex()
+        self._index_expires_at = 0.0
+
+    def tile_index(self, rendered: SevenDaysMap) -> MapTileIndex:
+        identity = (rendered.root, rendered.world_id, rendered.tile_size, rendered.max_zoom)
+        with self._index_lock:
+            now = time.monotonic()
+            if self._index_identity != identity or now >= self._index_expires_at:
+                previous = self._index if self._index_identity == identity else None
+                self._index = rendered.tile_index(previous)
+                self._index_identity = identity
+                self._index_expires_at = time.monotonic() + MAP_TILE_UPDATE_INTERVAL_SECONDS
+            return self._index
 
     def load(self, *, save: Path, world_id: str) -> SevenDaysMap | None:
         identity = (save, world_id)

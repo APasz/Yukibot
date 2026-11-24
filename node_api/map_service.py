@@ -20,7 +20,7 @@ from apps.sevendays import (
     SEVENDAYS_PLAYER_SNAPSHOT_MAX_AGE_SECONDS,
     SevenDays,
 )
-from apps.sevendays.map import SevenDaysMap
+from apps.sevendays.map import MAP_TILE_UPDATE_INTERVAL_SECONDS, MapTileRange, SevenDaysMap, matches_etag
 from http_sessions import ThreadLocalHttpSessions
 from map_annotations import (
     AppMapAnnotationStore,
@@ -28,6 +28,7 @@ from map_annotations import (
     MapAnnotationList,
     MapAnnotationMutationResult,
     MapManifest,
+    MapCoordinate,
     MapProvider,
     MapWorldSummary,
 )
@@ -43,6 +44,7 @@ class NodeMapProxyResponse:
     headers: tuple[tuple[str, str], ...] = ()
     is_stale: bool = False
     cache_updated_at_unix_ms: int | None = None
+    status_code: int = 200
 
 
 class NodeMapService:
@@ -74,7 +76,7 @@ class NodeMapService:
         self, app: App
     ) -> tuple[MapManifest, NodeMapProxyResponse]:
         if isinstance(app, SevenDays):
-            rendered = self._sevendays_map(app)
+            readiness, rendered = app.map_state()
             return (
                 MapManifest(
                     app_name=app.name,
@@ -82,11 +84,13 @@ class NodeMapService:
                     node_name=self._node_name(),
                     public_map_url=None,
                     icon_base_url="./assets",
-                    initial_world_name=rendered.world_id,
+                    initial_world_name=rendered.world_id if rendered is not None else app.name,
                     worlds=(MapWorldSummary(
                         name=rendered.world_id, display_name=rendered.display_name, world_type="normal", order=0,
-                    ),),
+                    ),) if rendered is not None else (),
                     provider=MapProvider.SEVENDAYS,
+                    readiness=readiness,
+                    supports_tile_index=True,
                 ),
                 self._json_response({}),
             )
@@ -164,14 +168,20 @@ class NodeMapService:
             rendered = self._sevendays_map(app, world_name)
             if part == "markers":
                 return self._json_response([])
+            index = app.rendered_tile_index(rendered)
+            bounds = index.bounds
+            center = MapCoordinate(
+                x=(bounds[0].x + bounds[1].x) / 2, z=(bounds[0].z + bounds[1].z) / 2,
+            ) if bounds is not None else rendered.center
             return self._json_response({
                 "zoom": {"max": rendered.max_zoom, "def": rendered.initial_zoom, "extra": 2},
-                "spawn": rendered.center.to_mapping(),
+                "spawn": center.to_mapping(),
+                "bounds": [point.to_mapping() for point in bounds] if bounds is not None else None,
                 "tile_size": rendered.tile_size,
                 "north_positive": True,
                 "player_tracker": {"enabled": True, "max_age_seconds": SEVENDAYS_PLAYER_SNAPSHOT_MAX_AGE_SECONDS},
                 "marker_update_interval": SEVENDAYS_PLAYER_POLL_INTERVAL_SECONDS,
-                "tiles_update_interval": 15,
+                "tiles_update_interval": MAP_TILE_UPDATE_INTERVAL_SECONDS,
             })
         return self.proxy_response(
             app=app, relative_path=f"tiles/{quote(world_name, safe='')}/{part}.json",
@@ -180,11 +190,12 @@ class NodeMapService:
 
     def tile_response(
         self, app: App, world_name: str, zoom: int, tile_name: str, raw_query: str = "",
+        *, if_none_match: str | None = None,
     ) -> NodeMapProxyResponse:
         if isinstance(app, SevenDays):
             rendered = self._sevendays_map(app, world_name)
             try:
-                content = rendered.read_tile(zoom=zoom, tile_name=tile_name)
+                content, etag = rendered.read_tile_result(zoom=zoom, tile_name=tile_name, if_none_match=if_none_match)
             except FileNotFoundError as xcp:
                 raise self._http_exception(404, "This map tile has not been rendered.") from xcp
             except ValueError as xcp:
@@ -192,11 +203,28 @@ class NodeMapService:
             except OSError as xcp:
                 raise self._http_exception(503, "This map tile is temporarily unavailable. Try refreshing shortly.") from xcp
             return NodeMapProxyResponse(
-                content=content, media_type="image/png", headers=(("Cache-Control", "no-store"),),
+                content=content or b"", media_type="image/png",
+                headers=(("Cache-Control", "private, no-cache"), ("ETag", etag)),
+                status_code=304 if content is None else 200,
             )
         return self.proxy_response(
             app=app, relative_path=f"tiles/{quote(world_name, safe='')}/{zoom}/{quote(tile_name, safe='')}",
             raw_query=raw_query,
+        )
+
+    def tile_index_response(
+        self, app: App, world_name: str, area: MapTileRange, if_none_match: str | None = None,
+    ) -> NodeMapProxyResponse:
+        if not isinstance(app, SevenDays):
+            raise self._http_exception(404, "This map does not expose a rendered tile index.")
+        rendered = self._sevendays_map(app, world_name)
+        if area.zoom > rendered.max_zoom:
+            raise self._http_exception(400, "Invalid map tile zoom.")
+        content, etag = app.rendered_tile_index(rendered).viewport_response(area)
+        unchanged = matches_etag(if_none_match, etag)
+        return NodeMapProxyResponse(
+            content=b"" if unchanged else content, media_type="application/json",
+            headers=(("Cache-Control", "private, no-cache"), ("ETag", etag)), status_code=304 if unchanged else 200,
         )
 
     def build_annotation_list(self, app: App) -> MapAnnotationList:

@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import NotRequired, TypedDict, cast
 
 _ANNOTATION_FILE_VERSION = 1
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -297,6 +297,44 @@ class MapProvider(StrEnum):
     SEVENDAYS = "sevendays"
 
 
+class MapReadiness(StrEnum):
+    READY = "ready"
+    DISABLED = "disabled"
+    RESTART_REQUIRED = "restart_required"
+    WAITING_FOR_TILES = "waiting_for_tiles"
+
+
+MapZoomSettings = TypedDict("MapZoomSettings", {"max": int, "def": int, "extra": int})
+
+
+class MapPlayerTrackerSettings(TypedDict):
+    enabled: bool
+    max_age_seconds: NotRequired[float]
+
+
+class MapWorldSettings(TypedDict):
+    zoom: MapZoomSettings
+    spawn: MapCoordinate
+    tile_size: NotRequired[int]
+    north_positive: NotRequired[bool]
+    bounds: NotRequired[tuple[MapCoordinate, MapCoordinate] | None]
+    player_tracker: NotRequired[MapPlayerTrackerSettings]
+    marker_update_interval: NotRequired[float]
+    tiles_update_interval: NotRequired[float]
+
+
+class MapIndexedTile(TypedDict):
+    x: int
+    y: int
+    revision: str
+
+
+class MapTileIndexResponse(TypedDict):
+    zoom: int
+    tiles: list[MapIndexedTile]
+    bounds: tuple[MapCoordinate, MapCoordinate] | None
+
+
 @dataclass(frozen=True, slots=True)
 class MapManifest:
     app_name: str
@@ -307,6 +345,8 @@ class MapManifest:
     initial_world_name: str
     worlds: tuple[MapWorldSummary, ...]
     provider: MapProvider = MapProvider.SQUAREMAP
+    readiness: MapReadiness = MapReadiness.READY
+    supports_tile_index: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.provider, MapProvider):
@@ -325,8 +365,14 @@ class MapManifest:
             raise ValueError("Map manifest icon_base_url is invalid.")
         if not self.initial_world_name.strip():
             raise ValueError("Map manifest initial_world_name is invalid.")
-        if not self.worlds:
+        if not isinstance(self.readiness, MapReadiness):
+            raise ValueError("Map manifest readiness is invalid.")
+        if not isinstance(self.supports_tile_index, bool):
+            raise ValueError("Map manifest supports_tile_index is invalid.")
+        if not self.worlds and self.readiness is MapReadiness.READY:
             raise ValueError("Map manifest requires at least one world.")
+        if self.provider is MapProvider.SQUAREMAP and self.readiness is not MapReadiness.READY:
+            raise ValueError("Squaremap manifests must expose a ready world.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "MapManifest":
@@ -346,6 +392,8 @@ class MapManifest:
             initial_world_name=_required_text(payload, "initial_world_name"),
             worlds=worlds,
             provider=MapProvider(_required_text(payload, "provider")) if "provider" in payload else MapProvider.SQUAREMAP,
+            readiness=MapReadiness(_required_text(payload, "readiness")) if "readiness" in payload else MapReadiness.READY,
+            supports_tile_index=cast(bool, payload.get("supports_tile_index", False)),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -355,6 +403,8 @@ class MapManifest:
             "node_name": self.node_name,
             "public_map_url": self.public_map_url,
             "provider": self.provider.value,
+            "readiness": self.readiness.value,
+            "supports_tile_index": self.supports_tile_index,
             "icon_base_url": self.icon_base_url,
             "initial_world_name": self.initial_world_name,
             "worlds": [world.to_mapping() for world in self.worlds],

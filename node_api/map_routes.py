@@ -8,10 +8,11 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import Response
 
 from _async_utils import run_blocking
+from apps.sevendays.map import MapTileRange
 from apps._app import App
 from map_annotations import MapAnnotationDraft
 from mod_web_auth import ModWebUser
@@ -219,11 +220,33 @@ def register_map_routes(
         )
         auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
         app = resolve_app(app_name)
-        proxy_response = await run_blocking(maps.tile_response, app, world_name, z, tile_name, request.url.query)
+        proxy_response = await run_blocking(
+            maps.tile_response, app, world_name, z, tile_name, request.url.query,
+            if_none_match=request.headers.get("if-none-match"),
+        )
         return Response(
             content=proxy_response.content,
             media_type=proxy_response.media_type,
             headers=_response_headers(proxy_response),
+            status_code=proxy_response.status_code,
+        )
+
+    @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/map/worlds/{{world_name}}/tiles/index")
+    async def _map_tile_index(
+        app_name: str, world_name: str, request: Request,
+        zoom: int, min_x: int, max_x: int, min_y: int, max_y: int,
+        access_token: str | None = None,
+    ) -> Response:
+        auth.require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+        app = resolve_app(app_name)
+        try:
+            area = MapTileRange(zoom=zoom, min_x=min_x, max_x=max_x, min_y=min_y, max_y=max_y)
+        except ValueError as xcp:
+            raise HTTPException(400, str(xcp)) from xcp
+        result = await run_blocking(maps.tile_index_response, app, world_name, area, request.headers.get("if-none-match"))
+        return Response(
+            content=result.content, media_type=result.media_type,
+            headers=_response_headers(result), status_code=result.status_code,
         )
 
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/map/assets/{{asset_path:path}}")
