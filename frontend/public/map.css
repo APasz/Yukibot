@@ -35,37 +35,20 @@
   outline: 2px solid var(--mod-accent-text-strong);
   outline-offset: 2px;
 }
-.mod-map-expanded {
-  position: fixed;
-  inset: 0.75rem;
-  z-index: 10000;
-  width: auto;
-  padding: 0.75rem;
-  box-sizing: border-box;
-  overflow: auto;
-  background: var(--mod-bg);
-}
-.mod-map-expanded .mod-map-stage {
-  flex: 1;
-  min-height: 16rem;
-}
-.mod-map-expanded .mod-map-canvas-frame {
-  max-width: none;
-  height: 100%;
-}
-.mod-map-expanded .mod-map-canvas {
-  height: 100%;
-}
 @media (max-width: 768px) {
-  .mod-map-expanded {
-    inset: 0;
+  .mod-map-coordinate-form {
+    width: 100%;
   }
   .mod-map-coordinate-form label {
-    flex: 1;
+    flex: 1 1 9rem;
+    min-width: 0;
   }
   .mod-map-coordinate-form input {
     width: 100%;
     min-width: 0;
+  }
+  .mod-map-coordinate-form button {
+    flex: 1 1 100%;
   }
 }
 .mod-map-status-panel {
@@ -90,19 +73,12 @@
   box-sizing: border-box;
   gap: 0.65rem;
 }
-.mod-map-toolbar-main,
 .mod-map-toolbar-group,
 .mod-map-toolbar-pair,
 .mod-map-toolbar-actions {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-}
-.mod-map-toolbar-main {
-  width: 100%;
-  min-width: 0;
-  flex-wrap: nowrap;
-  justify-content: space-between;
 }
 .mod-map-toolbar-actions {
   width: 100%;
@@ -326,22 +302,15 @@
 }
 .mod-map-readonly,
 .mod-map-notice,
-.mod-map-mode,
 .mod-map-help {
   color: var(--mod-subtitle, #4b5563);
   font-size: 0.92rem;
-}
-.mod-map-mode {
-  min-width: 0;
-  white-space: nowrap;
 }
 .mod-map-status {
   color: var(--mod-subtitle, #4b5563);
   font-size: 0.92rem;
   font-weight: 600;
-  margin-left: auto;
-  text-align: right;
-  white-space: nowrap;
+  width: 100%;
 }
 .mod-map-help {
   width: 100%;
@@ -349,7 +318,8 @@
 .mod-map-notice {
   width: 100%;
 }
-.mod-map-notice:empty {
+.mod-map-notice:empty,
+.mod-map-status:empty {
   display: none;
 }
 .mod-map-status[data-tone='error'] {
@@ -433,7 +403,6 @@
   font-size: 0.8rem;
 }
 @media (max-width: 768px) {
-  .mod-map-toolbar-main,
   .mod-map-toolbar-actions,
   .mod-map-toolbar-group {
     width: 100%;
@@ -451,12 +420,6 @@
   .mod-map-select {
     min-width: 10rem;
     flex: 1 1 11rem;
-  }
-  .mod-map-status {
-    max-width: 55%;
-    min-width: 0;
-    white-space: normal;
-    overflow-wrap: anywhere;
   }
   .mod-map-label-prompt {
     width: calc(100% - 0.6rem);

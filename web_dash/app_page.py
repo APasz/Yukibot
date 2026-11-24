@@ -1586,7 +1586,6 @@ class ModWebAppPageMixin(
         notice_id = f"{container_id}-notice"
         players_id = f"{container_id}-players"
         coordinates_id = f"{container_id}-coordinates"
-        mode_id = f"{container_id}-mode"
         prompt_id = f"{container_id}-prompt"
         prompt_title_id = f"{container_id}-prompt-title"
         prompt_form_id = f"{container_id}-prompt-form"
@@ -1604,6 +1603,12 @@ class ModWebAppPageMixin(
                 "</div>"
             )
         )
+        navigation_controls = (
+            '<div class="mod-map-toolbar-pair mod-map-toolbar-pair-tools">'
+            f'<button id="{refresh_id}" type="button" class="mod-list-button secondary mod-toolbar-button mod-map-button">Refresh</button>'
+            '<button type="button" data-map-action="fit" class="mod-list-button secondary mod-map-button">Fit terrain</button>'
+            "</div>"
+        )
         write_toolbar_controls = (
             ""
             if not model.can_write_map_annotations
@@ -1620,7 +1625,7 @@ class ModWebAppPageMixin(
                 f'<button id="{marker_id}" type="button" class="mod-list-button secondary mod-toolbar-button mod-map-button">Point</button>'
                 f'<button id="{line_id}" type="button" class="mod-list-button secondary mod-toolbar-button mod-map-button">Line</button>'
                 f"</div>"
-                f'<button id="{refresh_id}" type="button" class="mod-list-button secondary mod-toolbar-button mod-map-button">Refresh</button>'
+                f"{navigation_controls}"
                 f"</div>"
             )
         )
@@ -1628,15 +1633,9 @@ class ModWebAppPageMixin(
             f"""
             <div id="{container_id}" class="mod-map-shell">
               <div class="mod-card mod-card-plain mod-tab-toolbar mod-tab-toolbar-surface mod-map-toolbar">
-                <div class="mod-map-toolbar-main">
-                  <div id="{mode_id}" class="mod-map-mode mod-subtitle">Loading map…</div>
-                  <div id="{status_id}" class="mod-map-status mod-subtitle" role="status" aria-live="polite">Loading map data…</div>
-                </div>
                 <div class="mod-tab-toolbar-actions mod-map-toolbar-actions">
                   {write_toolbar_controls}
-                  {"" if model.can_write_map_annotations else f'<select id="{world_id}" class="mod-map-select" aria-label="Map world or save"></select><button id="{refresh_id}" type="button" class="mod-list-button secondary mod-toolbar-button mod-map-button">Refresh</button>'}
-                  <button type="button" data-map-action="fit" class="mod-list-button secondary mod-map-button">Fit explored terrain</button>
-                  <button type="button" data-map-action="expand" aria-pressed="false" class="mod-list-button secondary mod-map-button">Expand map</button>
+                  {"" if model.can_write_map_annotations else f'<select id="{world_id}" class="mod-map-select" aria-label="Map world or save"></select>{navigation_controls}'}
                 </div>
                 <div class="mod-map-draft-actions" hidden>
                   <button type="button" data-map-action="finish" class="mod-list-button mod-map-button">Finish</button>
@@ -1647,7 +1646,8 @@ class ModWebAppPageMixin(
               </div>
               {read_only_note}
               <div class="mod-card mod-card-plain mod-map-status-panel">
-                <div id="{notice_id}" class="mod-map-notice mod-subtitle" role="status" aria-live="polite">Loading rendered map…</div>
+                <div id="{notice_id}" class="mod-map-notice mod-subtitle" role="status" aria-live="polite"></div>
+                <div id="{status_id}" class="mod-map-status mod-subtitle" role="status" aria-live="polite">Loading map…</div>
                 <div class="mod-map-live-row">
                   <div id="{players_id}" class="mod-map-players" aria-label="Online players" hidden></div>
                   <output id="{coordinates_id}" class="mod-map-coordinates mod-subtitle" aria-label="Map coordinates">Centre: —</output>
@@ -1697,7 +1697,6 @@ class ModWebAppPageMixin(
                     "noticeId": notice_id,
                     "playersId": players_id,
                     "coordinatesId": coordinates_id,
-                    "modeId": mode_id,
                     "promptId": prompt_id,
                     "promptTitleId": prompt_title_id,
                     "promptFormId": prompt_form_id,

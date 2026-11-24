@@ -1,6 +1,6 @@
 import type * as Leaflet from 'leaflet';
 import L, { MAP_PANES } from './leaflet';
-import { apiUrl, fetchJson, LatestTask } from './api';
+import { apiUrl, fetchJson, LatestTask, MAP_REQUEST_TIMEOUT_MS } from './api';
 import {
   formatCoordinates,
   isBounds,
@@ -30,6 +30,8 @@ import type {
 } from './types';
 
 const instances = new Map<string, MapController>();
+const pendingMounts = new Map<string, () => void>();
+const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const playerName = (player: Player) => player.display_name || player.name;
 const playerKey = (player: Player, index: number) =>
   player.uuid ?? `${playerName(player)}:${index}`;
@@ -44,13 +46,32 @@ const updateMessage = (element: HTMLElement, text: string, tone: Tone) => {
   if (element.dataset.tone !== tone) element.dataset.tone = tone;
 };
 const readinessMessages: Record<Manifest['readiness'], string> = {
-  ready: 'Showing shared explored terrain. Unexplored areas remain blank.',
+  ready: '',
   disabled: 'Map Rendering is disabled. Enable it in Settings, then restart the game server.',
   restart_required:
     'Restart the game server to apply Map Rendering. Then join and explore to generate tiles.',
   waiting_for_tiles:
     'Waiting for explored terrain. Start or restart the game server with Map Rendering enabled, then join and explore. This page checks automatically.',
 };
+
+function reportError(config: MapConfig, context: string, error: unknown): void {
+  console.error('[mod-map]', context, error);
+  void fetch(config.clientErrorUrl, {
+    method: 'POST',
+    keepalive: true,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      context,
+      message: errorMessage(error),
+      stack: error instanceof Error ? error.stack : null,
+      page_path: window.location.pathname,
+      app_name: config.appName,
+      node_name: config.nodeName,
+      map_api_url: config.mapApiUrl,
+      public_map_url: config.publicMapUrl,
+    }),
+  }).catch(() => {});
+}
 
 interface PlayerMarker {
   player: Player;
@@ -82,7 +103,6 @@ export class MapController {
   private readonly status: HTMLElement;
   private readonly notice: HTMLElement;
   private readonly coordinates: HTMLElement;
-  private readonly mode: HTMLElement;
   private readonly worldSelect: HTMLSelectElement;
   private readonly playersEl: HTMLElement;
   private readonly prompt: HTMLElement;
@@ -128,7 +148,6 @@ export class MapController {
     this.status = required(config.statusId, HTMLElement);
     this.notice = required(config.noticeId, HTMLElement);
     this.coordinates = required(config.coordinatesId, HTMLElement);
-    this.mode = required(config.modeId, HTMLElement);
     this.worldSelect = required(config.worldSelectId, HTMLSelectElement);
     this.playersEl = required(config.playersId, HTMLElement);
     this.prompt = required(config.promptId, HTMLElement);
@@ -206,40 +225,20 @@ export class MapController {
         'warning',
       );
     } else {
-      this.setNotice(
-        this.manifest?.provider === 'sevendays'
-          ? readinessMessages.ready
-          : 'Squaremap is live. Shared dashboard annotations are available.',
-        'success',
-      );
+      this.setNotice('');
     }
   }
 
   private failure(error: unknown, context: string, revision = this.revision): void {
     if (!this.isCurrent(revision) || this.signal.aborted) return;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     this.message(message, 'error');
     const key = `${context}:${message}`;
     const now = performance.now();
     if (now - (this.errorReports.get(key) ?? -Infinity) < 30000) return;
     if (this.errorReports.size >= 32) this.errorReports.clear();
     this.errorReports.set(key, now);
-    console.error('[mod-map]', context, error);
-    void fetch(this.config.clientErrorUrl, {
-      method: 'POST',
-      keepalive: true,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        context,
-        message,
-        stack: error instanceof Error ? error.stack : null,
-        page_path: window.location.pathname,
-        app_name: this.config.appName,
-        node_name: this.config.nodeName,
-        map_api_url: this.config.mapApiUrl,
-        public_map_url: this.config.publicMapUrl,
-      }),
-    }).catch(() => {});
+    reportError(this.config, context, error);
   }
 
   private tick(force = false, refreshMetadata = true): void {
@@ -312,8 +311,7 @@ export class MapController {
       delete this.worldSelect.dataset.signature;
       this.worldSelect.disabled = true;
       this.setNotice(readinessMessages[manifest.readiness], 'warning');
-      this.message('Checking map readiness automatically.');
-      this.mode.textContent = 'Map not ready';
+      this.message('');
       return;
     }
     const summary =
@@ -414,10 +412,10 @@ export class MapController {
     this.source = result.source === 'stale' || settings.source === 'stale' ? 'stale' : 'live';
     this.updateNotice();
     this.coordinatesAt();
+    if (changed || this.status.dataset.tone === 'info') this.message('');
     if (changed) {
       this.lastPlayers = this.lastAnnotations = this.lastTiles = -Infinity;
       this.tick(true, false);
-      this.message(`Loaded ${world.display_name}.`, 'success');
     } else if (trackingChanged) this.tick(false, false);
   }
 
@@ -727,12 +725,6 @@ export class MapController {
 
   private setTool(tool: Tool): void {
     this.tool = tool;
-    this.mode.textContent =
-      tool === 'line'
-        ? `Line tool${this.draft ? `: ${this.draft.points.length} points` : ''}`
-        : tool === 'marker'
-          ? 'Point tool'
-          : 'Pan mode';
     for (const [name, id] of [
       ['marker', this.config.markerButtonId],
       ['line', this.config.lineButtonId],
@@ -943,8 +935,6 @@ export class MapController {
           const next = this.tool === tool ? 'pan' : tool;
           this.cancelDraft();
           this.setTool(next);
-          if (next === 'line')
-            this.message('Click or tap to add points. Finish saves the line; Escape cancels.');
         },
         options,
       );
@@ -971,17 +961,6 @@ export class MapController {
     );
     for (const name of ['cancel', 'cancel-label'])
       this.action(name)?.addEventListener('click', () => this.cancelDraft(), options);
-    const expand = this.action('expand');
-    expand?.addEventListener(
-      'click',
-      () => {
-        const expanded = this.container.classList.toggle('mod-map-expanded');
-        expand.setAttribute('aria-pressed', String(expanded));
-        expand.textContent = expanded ? 'Exit expanded view' : 'Expand map';
-        this.map.invalidateSize({ animate: false });
-      },
-      options,
-    );
     const coordinateForm = this.container.querySelector<HTMLFormElement>(
       '.mod-map-coordinate-form',
     );
@@ -1018,11 +997,9 @@ export class MapController {
     this.container.addEventListener(
       'keydown',
       (event) => {
-        if (event.key !== 'Escape') return;
+        if (event.key !== 'Escape' || this.tool === 'pan') return;
         event.preventDefault();
-        const hadDraft = this.tool !== 'pan';
         this.cancelDraft();
-        if (!hadDraft && this.container.classList.contains('mod-map-expanded')) expand?.click();
       },
       options,
     );
@@ -1122,12 +1099,31 @@ export class MapController {
   }
 }
 
+function mountMap(config: MapConfig): void {
+  pendingMounts.get(config.containerId)?.();
+  if (!document.getElementById(config.containerId)) {
+    // NiceGUI can initialize the client before Vue inserts the tab's HTML.
+    const observer = new MutationObserver(() => {
+      if (document.getElementById(config.containerId)) mountMap(config);
+    });
+    const timer = window.setTimeout(() => {
+      pendingMounts.get(config.containerId)?.();
+      reportError(config, 'mount', new Error('Map tab did not finish rendering.'));
+    }, MAP_REQUEST_TIMEOUT_MS);
+    pendingMounts.set(config.containerId, () => {
+      observer.disconnect();
+      window.clearTimeout(timer);
+      pendingMounts.delete(config.containerId);
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    return;
+  }
+  instances.get(config.containerId)?.destroy();
+  instances.set(config.containerId, new MapController(config));
+}
+
 window.modWebMap = {
-  mount(config) {
-    if (!document.getElementById(config.containerId)) return;
-    instances.get(config.containerId)?.destroy();
-    instances.set(config.containerId, new MapController(config));
-  },
+  mount: mountMap,
   async deleteAnnotation(containerId, id) {
     await instances.get(containerId)?.deleteAnnotation(id);
   },

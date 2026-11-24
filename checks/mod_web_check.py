@@ -20819,9 +20819,14 @@ class ModWebTests(unittest.TestCase):
         self.assertNotIn("Leaflet", ui.head_html[0])
         markup = ui.html_fragments[0]
         self.assertIn("mod-tab-toolbar mod-tab-toolbar-surface mod-map-toolbar", markup)
-        self.assertIn('class="mod-map-toolbar-main"', markup)
-        self.assertIn('class="mod-map-mode mod-subtitle">Loading map…</div>', markup)
-        self.assertIn('role="status" aria-live="polite">Loading map data…</div>', markup)
+        self.assertNotIn("mod-map-toolbar-main", markup)
+        self.assertNotIn("mod-map-mode", markup)
+        self.assertEqual(markup.count("Loading map…"), 1)
+        self.assertNotIn("Loading map data", markup)
+        self.assertNotIn("Loading rendered map", markup)
+        self.assertIn('role="status" aria-live="polite">Loading map…</div>', markup)
+        self.assertIn(">Fit terrain</button>", markup)
+        self.assertNotIn('data-map-action="expand"', markup)
         self.assertIn("mod-tab-toolbar-actions mod-map-toolbar-actions", markup)
         self.assertNotIn("mod-map-toolset", markup)
         self.assertIn('class="mod-map-toolbar-group mod-map-toolbar-group-dimension"', markup)
@@ -20838,6 +20843,21 @@ class ModWebTests(unittest.TestCase):
         self.assertNotIn('id="mod-map-yuki-minecraft-alpha-finish"', markup)
         self.assertNotIn('id="mod-map-yuki-minecraft-alpha-cancel"', markup)
         self.assertIn('aria-label="Map world or save"', markup)
+        self.assertEqual(markup.count(">Refresh</button>"), 1)
+        self.assertEqual(markup.count(">Fit terrain</button>"), 1)
+
+        read_only_ui = FakeUi()
+        service._render_map_section(
+            ui=cast(ModWebUi, cast(object, read_only_ui)),
+            model=replace(model, can_write_map_annotations=False),
+            user=user,
+            tab=tab,
+        )
+        read_only_markup = read_only_ui.html_fragments[0]
+        self.assertEqual(read_only_markup.count(">Refresh</button>"), 1)
+        self.assertEqual(read_only_markup.count(">Fit terrain</button>"), 1)
+        self.assertNotIn(">Point</button>", read_only_markup)
+        self.assertNotIn(">Line</button>", read_only_markup)
 
     def test_app_link_tabs_include_map_when_public_map_exists(self) -> None:
         service = ModWebService()

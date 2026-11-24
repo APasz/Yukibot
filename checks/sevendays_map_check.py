@@ -143,13 +143,19 @@ def test_current_save_controls_tiles_and_annotation_identity(tmp_path: Path) -> 
     assert failure.value.status_code == 404
 
 
-def test_native_manifest_and_tile_orientation_need_no_game_web_server(tmp_path: Path) -> None:
-    app = _app(tmp_path)
+@pytest.mark.parametrize("overhaul", [False, True])
+def test_native_manifest_and_tile_orientation_need_no_game_web_server(tmp_path: Path, overhaul: bool) -> None:
+    app = _app(tmp_path, overhaul=overhaul)
+    app.process = Mock()
+    app.process.poll.return_value = 0
+    app._map_rendering_at_start = False
+    assert not app.check_running()
     root = _tiles(app)
     service = _service()
     with patch("node_api.map_service.requests.Session.get", side_effect=AssertionError("No upstream requests")):
         manifest = service.build_manifest(app)
         assert manifest.provider is MapProvider.SEVENDAYS
+        assert manifest.readiness is MapReadiness.READY
         assert manifest.supports_tile_index
         assert manifest.public_map_url is None
         assert MapManifest.from_mapping(manifest.to_mapping()) == manifest

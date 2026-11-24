@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import L, { MAP_PANES } from './leaflet';
 import type * as Leaflet from 'leaflet';
 import { MapController } from './client';
+import { MAP_REQUEST_TIMEOUT_MS } from './api';
 import { formatCoordinates, readView, snapLinePoint, toPoint } from './coordinates';
 import type { Annotation, Manifest, MapConfig, PlayerResponse, WorldSettings } from './types';
 
@@ -17,7 +18,6 @@ const config: MapConfig = {
   noticeId: 'notice',
   playersId: 'players',
   coordinatesId: 'coordinates',
-  modeId: 'mode',
   promptId: 'prompt',
   promptTitleId: 'prompt-title',
   promptFormId: 'prompt-form',
@@ -91,13 +91,13 @@ beforeEach(() => {
     },
   );
   vi.spyOn(console, 'error').mockImplementation(() => {});
-  document.body.innerHTML = `<div id="map"><div id="mode"></div><div id="status"></div><div id="notice"></div>
+  document.body.innerHTML = `<div id="map"><div id="status">Loading map…</div><div id="notice"></div>
     <select id="world"></select><input id="color" type="color" value="#22c55e"><label class="mod-map-toggle"><input id="snap" type="checkbox" checked></label>
     <button id="refresh"></button><button id="point"></button><button id="line"></button>
     <div id="players"></div><output id="coordinates"></output><div id="frame"><div id="canvas"></div>
     <div id="prompt" hidden><div id="prompt-title"></div><form id="prompt-form"><input id="label" maxlength="80"><button id="save">Save</button>
     <button type="button" data-map-action="cancel-label">Cancel</button></form></div></div>
-    <button data-map-action="fit"></button><button data-map-action="expand"></button>
+    <button data-map-action="fit"></button>
     <div class="mod-map-draft-actions" hidden><button data-map-action="finish"></button><button data-map-action="undo"></button><button data-map-action="cancel"></button></div>
     <form class="mod-map-coordinate-form"><input name="north" value="-123"><input name="east" value="456"><button data-map-action="go"></button></form></div>`;
   Object.defineProperty(element('map'), 'offsetParent', {
@@ -172,6 +172,77 @@ async function refresh(): Promise<void> {
   await settle();
   await advance(150);
 }
+
+it('waits for the map DOM when initialization arrives before the tab renders', async () => {
+  const container = element('map');
+  container.remove();
+  window.modWebMap!.mount(config);
+  window.modWebMap!.mount(config);
+  await settle();
+  expect(fetcher).not.toHaveBeenCalled();
+  document.body.append(container);
+  await settle();
+  await advance(150);
+  expect(element<HTMLSelectElement>('world').value).toBe(summary.name);
+  expect(element('status').textContent).toBe('');
+  expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/manifest'))).toHaveLength(1);
+  container.remove();
+  await advance(1000);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('cleans up and reports an initialization wait if the tab never renders', async () => {
+  const container = element('map');
+  container.remove();
+  window.modWebMap!.mount(config);
+  await advance(MAP_REQUEST_TIMEOUT_MS);
+  expect(fetcher).toHaveBeenCalledWith(
+    config.clientErrorUrl,
+    expect.objectContaining({ body: expect.stringContaining('"context":"mount"') }),
+  );
+  expect(vi.getTimerCount()).toBe(0);
+  document.body.append(container);
+  await settle();
+  expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/manifest'))).toBe(false);
+});
+
+it('clears loading feedback once ready and keeps a successful refresh quiet', async () => {
+  expect(element('status').textContent).toBe('Loading map…');
+  expect(element('notice').textContent).toBe('');
+  await mount();
+  expect(element('status').textContent).toBe('');
+  expect(element('notice').textContent).toBe('');
+  expect(element<HTMLSelectElement>('world').selectedOptions[0]?.textContent).toBe(
+    summary.display_name,
+  );
+  element('refresh').click();
+  expect(element('status').textContent).toBe('Refreshing map data…');
+  await settle();
+  expect(element('status').textContent).toBe('');
+  expect(element('notice').textContent).toBe('');
+});
+
+it('preserves a concurrent annotation error when a metadata refresh finishes', async () => {
+  await mount();
+  const original = fetcher.getMockImplementation()!;
+  let release!: (response: Response) => void;
+  fetcher.mockImplementation((url, options) => {
+    if (String(url).endsWith('/settings'))
+      return new Promise<Response>((resolve) => {
+        release = resolve;
+      });
+    if (String(url).endsWith('/annotations'))
+      return Promise.reject(new Error('Annotations offline'));
+    return original(url, options);
+  });
+  await advance(1000);
+  element('refresh').click();
+  await advance(14000);
+  expect(element('status').textContent).toBe('Annotations offline');
+  release(response(settings));
+  await settle();
+  expect(element('status').textContent).toBe('Annotations offline');
+});
 
 it('renders terrain from an older native node and adopts indexing after its upgrade', async () => {
   delete (manifest as Partial<Manifest>).supports_tile_index;
@@ -280,7 +351,7 @@ it('keeps the active provider when refreshed world settings fail to load', async
   );
   manifest.provider = 'squaremap';
   await refresh();
-  expect(element('notice').textContent).toContain('Showing shared explored terrain');
+  expect(element('status').textContent).toContain('Settings unavailable');
   const indexes = fetcher.mock.calls.filter(([url]) => String(url).includes('/tiles/index')).length;
   await advance(15000);
   expect(
@@ -584,6 +655,7 @@ it.each(['disabled', 'restart_required', 'waiting_for_tiles'] as const)(
     manifest.worlds = [];
     await mount();
     expect(element('notice').textContent).not.toBe('');
+    expect(element('status').textContent).toBe('');
     expect(element<HTMLButtonElement>('point').disabled).toBe(true);
     manifest.readiness = 'ready';
     manifest.worlds = [summary];
@@ -591,6 +663,8 @@ it.each(['disabled', 'restart_required', 'waiting_for_tiles'] as const)(
     expect(element<HTMLSelectElement>('world').options[0]?.textContent).toBe(summary.display_name);
     expect(element<HTMLButtonElement>('point').disabled).toBe(false);
     expect(element('players').textContent).toContain('Zoë <3');
+    expect(element('notice').textContent).toBe('');
+    expect(element('status').textContent).toBe('');
   },
 );
 
@@ -667,13 +741,15 @@ it.each(['', '1e20'])(
   },
 );
 
-it('expands accessibly and removes timers and handlers on destruction', async () => {
+it('leaves Escape available while panning and removes timers and handlers on destruction', async () => {
   await mount();
-  action('expand').click();
-  expect(element('map').classList.contains('mod-map-expanded')).toBe(true);
-  expect(action('expand').getAttribute('aria-pressed')).toBe('true');
-  element('map').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  expect(element('map').classList.contains('mod-map-expanded')).toBe(false);
+  const escape = new KeyboardEvent('keydown', {
+    key: 'Escape',
+    bubbles: true,
+    cancelable: true,
+  });
+  element('map').dispatchEvent(escape);
+  expect(escape.defaultPrevented).toBe(false);
   controller.destroy();
   const count = fetcher.mock.calls.length;
   element('refresh').click();

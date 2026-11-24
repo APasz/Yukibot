@@ -34,7 +34,6 @@ export interface MapConfig {
   noticeId: string;
   playersId: string;
   coordinatesId: string;
-  modeId: string;
   promptId: string;
   promptTitleId: string;
   promptFormId: string;

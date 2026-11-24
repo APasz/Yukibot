@@ -162,7 +162,7 @@ Unrendered areas remain blank. The map includes pan, zoom, periodic tile refresh
 
 An open map detects save changes and selects that save's tiles and annotations. Existing rendered tiles remain viewable while the game is stopped, provided Map Rendering remains enabled. The map does not expose the full generated world. The page checks readiness and save selection every fifteen seconds.
 
-The map provides **Fit explored terrain**, **Go to coordinates** (positive north/east, negative south/west), and an expanded view, and remembers the centre and zoom separately for each save in browser storage. Drawing shows contextual **Finish**, **Undo point**, and **Cancel** controls; Escape cancels a draft. Failed saves retain the draft and label for retry.
+The map provides **Fit terrain** and **Go to coordinates** (positive north/east, negative south/west), and remembers the centre and zoom separately for each save in browser storage. Drawing shows contextual **Finish**, **Undo point**, and **Cancel** controls; Escape cancels a draft. Failed saves retain the draft and label for retry.
 
 7D2D terrain uses a shared, fifteen-second tile index, restricted to the current viewport. Unexplored tiles make no PNG requests, and only changed tile revisions are downloaded. PNGs and indexes use authenticated private conditional requests; slow, incomplete, or failed replacements keep the last good image. Player, annotation, metadata, and terrain updates run independently, with annotations checked every fifteen seconds. Refreshes reuse existing player markers and unchanged annotations. World selection and Refresh keep the latest request when an update is already running. Leaving the app page cancels pending map requests and background work.
 
