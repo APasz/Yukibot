@@ -2734,6 +2734,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
             try:
                 response: aiohttp.ClientResponse = await response_context.__aenter__()
             except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
+                if passthrough_errors:
+                    timed_out = isinstance(xcp, asyncio.TimeoutError)
+                    reason = "did not respond in time" if timed_out else "is temporarily unavailable"
+                    raise _http_exception(
+                        504 if timed_out else 503,
+                        f"{node.label} {reason}. The map will retry automatically.",
+                    ) from xcp
                 raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
             if request is not None:
                 log.info(

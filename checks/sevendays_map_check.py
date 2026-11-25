@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
+import aiohttp
 import pytest
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
@@ -88,6 +89,18 @@ def _service() -> NodeMapService:
         node_name=lambda: "erin", http_exception=lambda status, detail: HTTPException(status, detail),
         logger=logging.getLogger(__name__),
     )
+
+
+def _portal_map_api(service: ModWebService) -> FastAPI:
+    api = FastAPI()
+    route_app = Mock()
+    route_app.get.side_effect = api.get
+    route_app.post.side_effect = api.post
+    route_app.put.side_effect = api.put
+    route_app.exception_handlers = {}
+    with patch.object(service._backend, "register_node_api_routes"):
+        service._register_routes(nicegui_app=route_app, ui=Mock())
+    return api
 
 
 @pytest.mark.parametrize("overhaul", [False, True])
@@ -188,10 +201,11 @@ def test_map_api_exposes_only_fresh_positions_for_the_selected_running_save(tmp_
         root.symlink_to(destination, target_is_directory=True)
     app.process = Mock()
     app.process.poll.return_value = None
-    app._relay = Mock(spec=TelnetClient)
-    app._relay.send = AsyncMock(return_value=True)
-    app._relay.reader = None
-    app._relay.is_connected = True
+    relay = Mock(spec=TelnetClient)
+    relay.send = AsyncMock(return_value=True)
+    relay.reader = None
+    relay.is_connected = True
+    app._relay = relay
     service = _service()
     world_id = service.build_manifest(app).initial_world_name
 
@@ -207,7 +221,7 @@ def test_map_api_exposes_only_fresh_positions_for_the_selected_running_save(tmp_
             _tiles(app)
             assert json.loads(service.players_response(app).content)["players"] == []
             _configure(app)
-            app._relay.is_connected = False
+            relay.is_connected = False
             assert json.loads(service.players_response(app).content)["players"] == []
         finally:
             await app._players.stop()
@@ -513,9 +527,11 @@ def test_map_http_revalidates_tiles_and_indexes_after_authentication(tmp_path: P
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("status", [200, 304, 404])
-def test_portal_map_proxy_preserves_validators_freshness_and_status(status: int) -> None:
+@pytest.mark.parametrize("status", [200, 304, 403, 404, 500, 503])
+@pytest.mark.parametrize("resource", ["players", "annotations"])
+def test_portal_map_proxy_preserves_validators_freshness_and_status(status: int, resource: str) -> None:
     service = ModWebService()
+    api = _portal_map_api(service)
     node = ModWebNodeLink(
         node_name="erin", label="Erin", url="/mod-web/nodes/erin",
         api_base_url="https://erin.example/api/node", api_url="/api/node-proxy/erin/apps", is_current=False,
@@ -537,46 +553,70 @@ def test_portal_map_proxy_preserves_validators_freshness_and_status(status: int)
     context.__aenter__.return_value = response
     session = Mock()
     session.get.return_value = context
-    request = Request({"type": "http", "headers": [(b"if-none-match", b'"tile-one"')], "query_string": b""})
 
     async def check() -> None:
         with (
+            patch.object(service, "_require_http_user", return_value=user),
+            patch.object(service, "_remote_node_link", return_value=node),
             patch.object(service, "_remote_http_client", new=AsyncMock(return_value=session)),
             patch.object(service, "_remote_token", return_value="read-only-token"),
         ):
-            result = await service._remote_stream_response_async(
-                node=node, app_name="sevendays_alpha", path="/apps/sevendays_alpha/map/players",
-                scopes=(NodeApiScope.MAP_READ,), user=user, request=request, passthrough_errors=True,
-            )
+            async with AsyncClient(transport=ASGITransport(app=api), base_url="http://map.test") as client:
+                result = await client.get(
+                    f"/api/node-proxy/erin/apps/sevendays/map/{resource}",
+                    headers={"If-None-Match": '"tile-one"'},
+                )
             assert result.status_code == status
             assert result.headers["etag"] == '"tile-one"'
             assert result.headers["x-yukibot-map-source"] == "stale"
             assert session.get.call_args.kwargs["headers"]["If-None-Match"] == '"tile-one"'
-            messages: list[dict[str, object]] = []
-
-            async def receive():
-                return {"type": "http.request", "body": b"", "more_body": False}
-
-            async def send(message):
-                messages.append(message)
-
-            await result({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
-            assert b"".join(message.get("body", b"") for message in messages) == (b"" if status == 304 else b"map response")
+            assert result.content == (b"" if status == 304 else b"map response")
             context.__aexit__.assert_awaited_once()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("suffix", [
+    "/manifest", "/annotations", "/players", "/worlds/save-one/settings",
+    "/worlds/save-one/tiles/index?zoom=4&min_x=0&max_x=1&min_y=0&max_y=1",
+])
+@pytest.mark.parametrize("error, status, detail", [
+    (aiohttp.ClientConnectionError("Connection refused"), 503, "is temporarily unavailable"),
+    (aiohttp.ConnectionTimeoutError("Connection timed out"), 504, "did not respond in time"),
+])
+def test_portal_map_reads_explain_node_outages(suffix: str, error: Exception, status: int, detail: str) -> None:
+    service = ModWebService()
+    api = _portal_map_api(service)
+    node = ModWebNodeLink(
+        node_name="erin", label="Erin", url="/mod-web/nodes/erin",
+        api_base_url="https://erin.example/api/node", api_url="/api/node-proxy/erin/apps", is_current=False,
+    )
+    user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+    context = AsyncMock()
+    context.__aenter__.side_effect = error
+    session = Mock()
+    session.get.return_value = context
+    service._record_remote_node_failure(node)
+
+    async def check() -> None:
+        with (
+            patch.object(service, "_require_http_user", return_value=user),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(service, "_remote_token", return_value="read-only-token"),
+            patch.object(service, "_remote_http_client", new=AsyncMock(return_value=session)),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=api), base_url="http://map.test") as client:
+                response = await client.get(f"/api/node-proxy/erin/apps/sevendays/map{suffix}")
+        assert response.status_code == status
+        assert response.json() == {"detail": f"Erin {detail}. The map will retry automatically."}
+        session.get.assert_called_once()
 
     asyncio.run(check())
 
 
 def test_portal_tile_route_forwards_revisions_without_forwarding_url_credentials() -> None:
     service = ModWebService()
-    api = FastAPI()
-    route_app = Mock()
-    route_app.get.side_effect = api.get
-    route_app.post.side_effect = api.post
-    route_app.put.side_effect = api.put
-    route_app.exception_handlers = {}
-    with patch.object(service._backend, "register_node_api_routes"):
-        service._register_routes(nicegui_app=route_app, ui=Mock())
+    api = _portal_map_api(service)
     node = ModWebNodeLink(
         node_name="erin", label="Erin", url="/mod-web/nodes/erin",
         api_base_url="https://erin.example/api/node", api_url="/api/node-proxy/erin/apps", is_current=False,

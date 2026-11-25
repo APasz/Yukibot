@@ -708,15 +708,15 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
             )
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/annotations")
-        async def _proxy_map_annotations(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+        async def _proxy_map_annotations(node_name: str, app_name: str, request: Request) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            return await self._remote_json_async(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/annotations",
                 scopes=(NodeApiScope.MAP_READ,),
-                user=user,
+                user=user, request=request, passthrough_errors=True,
             )
 
         @nicegui_app.post(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/annotations")

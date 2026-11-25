@@ -53,6 +53,7 @@ let players: PlayerResponse;
 let annotations: Annotation[];
 let controller: MapController;
 let annotationDelay: Promise<Response> | null;
+let annotationFailure: Error | null;
 let mutation: (options: RequestInit) => Promise<Response>;
 let fetcher: ReturnType<typeof vi.fn>;
 let visible: boolean;
@@ -125,6 +126,7 @@ beforeEach(() => {
   };
   annotations = [];
   annotationDelay = null;
+  annotationFailure = null;
   mutation = async () => response({});
   fetcher = vi.fn((url: string, options: RequestInit = {}) => {
     const path = new URL(url, location.origin).pathname;
@@ -133,8 +135,10 @@ beforeEach(() => {
     if (path.endsWith('/manifest')) return Promise.resolve(response(manifest));
     if (path.endsWith('/settings')) return Promise.resolve(response(settings));
     if (path.endsWith('/players')) return Promise.resolve(response(players));
-    if (path.endsWith('/annotations'))
+    if (path.endsWith('/annotations')) {
+      if (annotationFailure) return Promise.reject(annotationFailure);
       return annotationDelay ?? Promise.resolve(response({ annotations }));
+    }
     if (path.endsWith('/markers')) return Promise.resolve(response([]));
     if (path.endsWith('/tiles/index'))
       return Promise.resolve(
@@ -171,6 +175,15 @@ async function refresh(): Promise<void> {
   element('refresh').click();
   await settle();
   await advance(150);
+}
+
+async function expectAnnotationReadRecovery(): Promise<void> {
+  annotationFailure = new Error('Annotations unavailable');
+  await advance(16000);
+  expect(element('status').textContent).toBe('Annotations unavailable');
+  annotationFailure = null;
+  await advance(16000);
+  expect(element('status').textContent).toBe('');
 }
 
 it('waits for the map DOM when initialization arrives before the tab renders', async () => {
@@ -243,6 +256,134 @@ it('preserves a concurrent annotation error when a metadata refresh finishes', a
   await settle();
   expect(element('status').textContent).toBe('Annotations offline');
 });
+
+it.each(['/manifest', '/settings', '/players', '/annotations', '/markers', '/tiles/index'])(
+  'clears a recovered %s error during automatic polling',
+  async (suffix) => {
+    if (suffix === '/markers') manifest.provider = 'squaremap';
+    await mount();
+    const original = fetcher.getMockImplementation()!;
+    let offline = true;
+    fetcher.mockImplementation((url, options) =>
+      offline && new URL(String(url), location.origin).pathname.endsWith(suffix)
+        ? Promise.resolve(
+            new Response(JSON.stringify({ detail: 'Erin is unavailable' }), { status: 503 }),
+          )
+        : original(url, options),
+    );
+    await advance(16000);
+    expect(element('status').textContent).toBe('Erin is unavailable');
+    offline = false;
+    await advance(16000);
+    expect(element('status').textContent).toBe('');
+    expect(element('notice').textContent).toBe('');
+  },
+);
+
+it.each(['/manifest', '/settings'])(
+  'retries a failed Squaremap %s refresh automatically until it recovers',
+  async (suffix) => {
+    manifest.provider = 'squaremap';
+    await mount();
+    const original = fetcher.getMockImplementation()!;
+    let offline = true;
+    fetcher.mockImplementation((url, options) =>
+      offline && String(url).endsWith(suffix)
+        ? Promise.reject(new Error('Metadata unavailable'))
+        : original(url, options),
+    );
+    await refresh();
+    expect(element('status').textContent).toBe('Metadata unavailable');
+    offline = false;
+    await advance(16000);
+    expect(element('status').textContent).toBe('');
+    const metadataRequests = fetcher.mock.calls.filter(([url]) =>
+      String(url).endsWith('/manifest'),
+    ).length;
+    await advance(16000);
+    expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith('/manifest'))).toHaveLength(
+      metadataRequests,
+    );
+  },
+);
+
+it('restores an unresolved player error when annotations recover', async () => {
+  settings.marker_update_interval = 60;
+  await mount();
+  const original = fetcher.getMockImplementation()!;
+  let playersOffline = true;
+  let annotationsOffline = true;
+  fetcher.mockImplementation((url, options) => {
+    if (playersOffline && String(url).endsWith('/players'))
+      return Promise.reject(new Error('Players unavailable'));
+    if (annotationsOffline && String(url).endsWith('/annotations'))
+      return Promise.reject(new Error('Annotations unavailable'));
+    return original(url, options);
+  });
+  await refresh();
+  expect(element('status').textContent).toBe('Annotations unavailable');
+  annotationsOffline = false;
+  await advance(16000);
+  expect(element('status').textContent).toBe('Players unavailable');
+  playersOffline = false;
+  await advance(60000);
+  expect(element('status').textContent).toBe('');
+});
+
+it('recovers automatically when the initial manifest request fails', async () => {
+  const original = fetcher.getMockImplementation()!;
+  fetcher.mockImplementationOnce(() => Promise.reject(new Error('Erin is unavailable')));
+  await mount();
+  expect(element('status').textContent).toBe('Erin is unavailable');
+  fetcher.mockImplementation(original);
+  await advance(16000);
+  expect(element('status').textContent).toBe('');
+  expect(element('players').textContent).toContain('Zoë <3');
+});
+
+it.each(['retry', 'cancel'] as const)('keeps a failed save until %s retires it', async (action) => {
+  await mount();
+  mutation = async () => {
+    throw new Error('Could not save point');
+  };
+  element('point').click();
+  mapClick(10, 20);
+  element<HTMLInputElement>('label').value = 'Retry this point';
+  element('prompt-form').dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  expect(element('status').textContent).toBe('Could not save point');
+  await advance(16000);
+  expect(element('status').textContent).toBe('Could not save point');
+  expect(element('prompt').hidden).toBe(false);
+  mutation = async () => response({});
+  if (action === 'retry')
+    element('prompt-form').dispatchEvent(new Event('submit', { cancelable: true }));
+  else
+    element('prompt').querySelector<HTMLButtonElement>('[data-map-action="cancel-label"]')!.click();
+  await settle();
+  expect(element('prompt').hidden).toBe(true);
+  await expectAnnotationReadRecovery();
+});
+
+it.each(['retry', 'switch saves'] as const)(
+  'retires a failed deletion after %s',
+  async (action) => {
+    await mount();
+    mutation = async () => {
+      throw new Error('Could not delete point');
+    };
+    await controller.deleteAnnotation('point-one');
+    expect(element('status').textContent).toBe('Could not delete point');
+    mutation = async () => response({});
+    if (action === 'retry') await controller.deleteAnnotation('point-one');
+    else {
+      manifest.worlds = [{ ...summary, name: 'save-two' }];
+      manifest.initial_world_name = 'save-two';
+      await refresh();
+    }
+    await expectAnnotationReadRecovery();
+  },
+);
 
 it('renders terrain from an older native node and adopts indexing after its upgrade', async () => {
   delete (manifest as Partial<Manifest>).supports_tile_index;
@@ -542,6 +683,25 @@ it('releases saved draft controls while the subsequent annotation read is stalle
   expect(element<HTMLInputElement>('label').disabled).toBe(false);
   release(response({ annotations: [] }));
   await settle();
+});
+
+it('ignores an older annotation read failure after the post-save read succeeds', async () => {
+  let reject!: (error: Error) => void;
+  annotationDelay = new Promise((_resolve, fail) => {
+    reject = fail;
+  });
+  await mount();
+  annotationDelay = null;
+  element('point').click();
+  mapClick(10, 20);
+  element<HTMLInputElement>('label').value = 'Saved';
+  element('prompt-form').dispatchEvent(new Event('submit', { cancelable: true }));
+  await settle();
+  expect(element('status').textContent).toBe('Added Saved.');
+  reject(new Error('Obsolete annotation request failed'));
+  await settle();
+  expect(element('status').textContent).toBe('Added Saved.');
+  expect(fetcher.mock.calls.filter(([url]) => url === '/errors')).toHaveLength(0);
 });
 
 it('reports a follow-up read failure separately from a successful annotation save', async () => {

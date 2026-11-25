@@ -54,7 +54,7 @@ const readinessMessages: Record<Manifest['readiness'], string> = {
     'Waiting for explored terrain. Start or restart the game server with Map Rendering enabled, then join and explore. This page checks automatically.',
 };
 
-function reportError(config: MapConfig, context: string, error: unknown): void {
+function reportError(config: MapConfig, context: FailureContext | 'mount', error: unknown): void {
   console.error('[mod-map]', context, error);
   void fetch(config.clientErrorUrl, {
     method: 'POST',
@@ -77,6 +77,14 @@ interface PlayerMarker {
   player: Player;
   marker: Leaflet.CircleMarker;
 }
+type FailureContext =
+  | 'metadata'
+  | 'players'
+  | 'annotations'
+  | 'markers'
+  | 'terrain'
+  | 'save-annotation'
+  | 'delete-annotation';
 interface Draft {
   worldName: string;
   revision: number;
@@ -142,6 +150,8 @@ export class MapController {
   private terrainFailed = false;
   private pendingFit = false;
   private readonly errorReports = new Map<string, number>();
+  private readonly failures = new Map<FailureContext, string>();
+  private failureContext: FailureContext | null = null;
 
   constructor(readonly config: MapConfig) {
     this.container = required(config.containerId, HTMLElement);
@@ -182,7 +192,7 @@ export class MapController {
     this.setTool('pan');
     void this.metadataTask
       .run(() => this.bootstrap())
-      .catch((error) => this.failure(error, 'bootstrap'));
+      .catch((error) => this.failure(error, 'metadata'));
   }
 
   private get visible(): boolean {
@@ -204,7 +214,16 @@ export class MapController {
   }
   private message(text: string, tone: Tone = 'info'): void {
     if (this.destroyed) return;
+    this.failureContext = null;
     updateMessage(this.status, text, tone);
+  }
+  private recovered(context: FailureContext): void {
+    this.failures.delete(context);
+    if (this.failureContext !== context) return;
+    let latest: [FailureContext, string] | undefined;
+    for (const entry of this.failures) latest = entry;
+    this.message(latest?.[1] ?? '', latest ? 'error' : 'info');
+    this.failureContext = latest?.[0] ?? null;
   }
   private setNotice(text: string, tone: Tone = 'info'): void {
     if (this.destroyed) return;
@@ -229,10 +248,13 @@ export class MapController {
     }
   }
 
-  private failure(error: unknown, context: string, revision = this.revision): void {
+  private failure(error: unknown, context: FailureContext, revision = this.revision): void {
     if (!this.isCurrent(revision) || this.signal.aborted) return;
     const message = errorMessage(error);
+    this.failures.delete(context);
+    this.failures.set(context, message);
     this.message(message, 'error');
+    this.failureContext = context;
     const key = `${context}:${message}`;
     const now = performance.now();
     if (now - (this.errorReports.get(key) ?? -Infinity) < 30000) return;
@@ -253,7 +275,9 @@ export class MapController {
     const now = performance.now();
     if (
       refreshMetadata &&
-      (force || (this.manifest?.provider !== 'squaremap' && now - this.lastMetadata >= 15000))
+      (force ||
+        ((this.manifest?.provider !== 'squaremap' || this.failures.has('metadata')) &&
+          now - this.lastMetadata >= 15000))
     ) {
       this.lastMetadata = now;
       void this.metadataTask
@@ -389,7 +413,10 @@ export class MapController {
         world,
         manifest.supports_tile_index ?? false,
         (index) => {
-          if (this.world === world) this.world.bounds = index.bounds;
+          if (this.world === world) {
+            this.world.bounds = index.bounds;
+            this.recovered('terrain');
+          }
         },
         (failed) => {
           if (this.world !== world) return;
@@ -413,6 +440,7 @@ export class MapController {
     this.updateNotice();
     this.coordinatesAt();
     if (changed || this.status.dataset.tone === 'info') this.message('');
+    this.recovered('metadata');
     if (changed) {
       this.lastPlayers = this.lastAnnotations = this.lastTiles = -Infinity;
       this.tick(true, false);
@@ -424,6 +452,8 @@ export class MapController {
     this.worldLifetime.abort();
     this.worldLifetime = new AbortController();
     this.revision++;
+    this.failures.clear();
+    this.failureContext = null;
     this.tileLayer?.remove();
     this.tileLayer = null;
     this.worldLayers.clearLayers();
@@ -453,6 +483,7 @@ export class MapController {
     const world = this.world;
     if (!world?.player_tracker?.enabled) {
       this.clearPlayers();
+      this.recovered('players');
       return;
     }
     const revision = this.revision;
@@ -473,6 +504,7 @@ export class MapController {
       const expires = maxAge === undefined ? null : requestedAt + maxAge * 1000;
       if (result.source === 'stale' || (expires !== null && performance.now() >= expires)) {
         this.clearPlayers();
+        this.recovered('players');
         return;
       }
       const visible = players.filter(
@@ -520,6 +552,7 @@ export class MapController {
         }
       this.playersExpireAt = expires;
       this.updatePlayerList(visible);
+      this.recovered('players');
     } catch (error) {
       if (this.isCurrent(revision)) this.clearPlayers();
       throw error;
@@ -576,6 +609,9 @@ export class MapController {
     const request = ++this.annotationRequest;
     const result = await fetchJson<AnnotationList>(this.url('/annotations'), {
       signal: this.signal,
+    }).catch((error: unknown) => {
+      if (request === this.annotationRequest) throw error;
+      return null;
     });
     if (!result || !this.isCurrent(revision) || request !== this.annotationRequest) return;
     if (!Array.isArray(result.data.annotations)) throw new Error('Map annotations are invalid.');
@@ -583,11 +619,13 @@ export class MapController {
       (annotation) => annotation.world_name === world.name,
     );
     const signature = JSON.stringify(annotations);
-    if (signature === this.annotationSignature) return;
-    const layers = annotations.map((annotation) => this.annotationLayer(world, annotation));
-    this.annotationsLayer.clearLayers();
-    layers.forEach((layer) => layer.addTo(this.annotationsLayer));
-    this.annotationSignature = signature;
+    if (signature !== this.annotationSignature) {
+      const layers = annotations.map((annotation) => this.annotationLayer(world, annotation));
+      this.annotationsLayer.clearLayers();
+      layers.forEach((layer) => layer.addTo(this.annotationsLayer));
+      this.annotationSignature = signature;
+    }
+    this.recovered('annotations');
   }
 
   private refreshAnnotationsAfterMutation(revision: number): void {
@@ -654,7 +692,10 @@ export class MapController {
     this.source = result.source;
     this.updateNotice();
     const signature = JSON.stringify(result.data);
-    if (signature === this.markerSignature) return;
+    if (signature === this.markerSignature) {
+      this.recovered('markers');
+      return;
+    }
     const next = L.layerGroup();
     for (const group of result.data) {
       if (group.hide || !group.markers) continue;
@@ -673,6 +714,7 @@ export class MapController {
     this.worldLayers.clearLayers();
     next.addTo(this.worldLayers);
     this.markerSignature = signature;
+    this.recovered('markers');
   }
 
   private scheduleTiles(): void {
@@ -786,6 +828,7 @@ export class MapController {
     this.preview = null;
     this.prompt.hidden = true;
     this.labelInput.value = '';
+    this.recovered('save-annotation');
     this.setTool('pan');
   }
 
@@ -891,6 +934,7 @@ export class MapController {
         signal: this.signal,
       });
       if (!this.isCurrent(revision)) return;
+      this.recovered('delete-annotation');
       this.message('Annotation deleted.', 'success');
       this.refreshAnnotationsAfterMutation(revision);
     } catch (error) {
@@ -908,7 +952,7 @@ export class MapController {
           .run(() => this.bootstrap(name), true)
           .catch((error) => {
             this.worldSelect.value = this.world?.name ?? '';
-            this.failure(error, 'world-selection');
+            this.failure(error, 'metadata');
           });
       },
       options,
@@ -921,7 +965,7 @@ export class MapController {
         void this.metadataTask
           .run(() => this.bootstrap(name), true)
           .then(() => this.tick(true, false))
-          .catch((error) => this.failure(error, 'refresh'));
+          .catch((error) => this.failure(error, 'metadata'));
       },
       options,
     );
