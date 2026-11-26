@@ -5634,6 +5634,9 @@ class ModWebTheme:
                 .mod-app-details-actions {{
                     margin-top: 0.15rem;
                 }}
+                .q-dialog__inner:has(> .mod-mod-details-dialog-card) {{
+                    padding: 0.5rem;
+                }}
                 .mod-mod-details-dialog-card {{
                     width: min(48rem, calc(100vw - 1.5rem)) !important;
                     max-height: min(56rem, calc(100vh - 1rem));
@@ -5762,6 +5765,9 @@ class ModWebTheme:
                     backdrop-filter: blur(14px);
                 }}
                 @media (max-width: 640px) {{
+                    .q-dialog__inner:has(> .mod-mod-details-dialog-card) {{
+                        padding: 0.375rem;
+                    }}
                     .mod-mod-details-dialog-card {{
                         width: calc(100vw - 0.75rem) !important;
                         max-height: calc(100vh - 0.75rem);

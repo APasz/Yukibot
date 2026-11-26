@@ -3138,14 +3138,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
             with ui.card().classes(
                 "mod-card mod-dialog-card mod-app-details-dialog-card mod-mod-details-dialog-card"
             ):
-                    with ui.column().classes("w-full mod-mod-details-shell"):
-                        with ui.column().classes("w-full gap-0 mod-mod-details-header"):
-                            ui.label(entry.friendly).classes("text-xl font-black mod-title-small")
-                            ui.label(entry.name).classes("mod-subtitle text-sm break-all")
-                            ui.label(entry.source.label).classes("mod-pill self-start")
-                        with ui.grid(columns=2).classes("mod-detail-grid mod-mod-details-summary"):
-                            self._render_mod_detail_item(ui=ui, label="Source", value=entry.source.label)
-                            self._render_mod_detail_item(ui=ui, label="Placement", value=entry.placement.label)
+                with ui.column().classes("w-full mod-mod-details-shell"):
+                    with ui.column().classes("w-full gap-0 mod-mod-details-header"):
+                        ui.label(entry.friendly).classes("text-xl font-black mod-title-small")
+                        ui.label(entry.name).classes("mod-subtitle text-sm break-all")
+                        ui.label(entry.source.label).classes("mod-pill self-start")
+                    with ui.grid(columns=2).classes("mod-detail-grid mod-mod-details-summary"):
+                        self._render_mod_detail_item(ui=ui, label="Source", value=entry.source.label)
+                        self._render_mod_detail_item(ui=ui, label="Placement", value=entry.placement.label)
                         self._render_mod_detail_item(ui=ui, label="Type", value=entry.mod_type.label)
                         self._render_mod_detail_item(ui=ui, label="Version", value=version_text)
                         self._render_mod_detail_item(ui=ui, label="Size", value=entry.size_text)

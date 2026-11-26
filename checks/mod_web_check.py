@@ -1841,6 +1841,42 @@ class ModWebTests(unittest.TestCase):
 
         self.assertNotIn("Description", labels)
 
+    def test_mod_info_dialog_keeps_all_sections_in_its_scroll_container(self) -> None:
+        from fastapi import APIRouter
+        from nicegui import ui
+        from nicegui.client import Client
+        from nicegui.elements.label import Label
+        from nicegui.page import page
+
+        service = ModWebService()
+        entry = self._mod_entry(
+            name="TradersAlwaysOpen", friendly="Traders Always Open",
+            description="Makes all traders always open (24/7).",
+        )
+        model = replace(
+            self._overview_model_with_config_and_chat(),
+            node_name="yuki", app_name="sevendays_alpha", app_friendly="7 Days to Die",
+            app_scope="sevendays",
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        client = Client(page("/mod-dialog-check", api_router=APIRouter()))
+        self.addCleanup(client.delete)
+        with client, patch.object(service, "_user_has_level", return_value=True):
+            dialog = service._render_mod_info_dialog(ui=cast(ModWebUi, ui), entry=entry, model=model, user=user)
+        card = dialog.default_slot.children[0]
+        shell = card.default_slot.children[0]
+        self.assertIn("mod-mod-details-shell", shell.classes)
+        self.assertEqual(list(card), [shell])
+        sections = {name for child in shell for name in child.classes}
+        self.assertTrue({
+            "mod-mod-details-header", "mod-mod-details-summary", "mod-mod-details-description",
+            "mod-mod-details-notes", "mod-mod-details-classification-section",
+            "mod-mod-details-editor", "mod-mod-details-danger-zone", "mod-mod-details-footer",
+        }.issubset(sections))
+        summary = next(child for child in shell if "mod-mod-details-summary" in child.classes)
+        labels = [child.text for child in summary.descendants() if isinstance(child, Label)]
+        self.assertTrue({"Source", "Placement", "Type", "Version", "Size", "Origin", "Added"}.issubset(labels))
+
     def test_render_mod_info_dialog_offers_the_collection_client_requirement_toggle(self) -> None:
         button_labels: list[str] = []
         labels = self._render_mod_info_dialog_labels(
