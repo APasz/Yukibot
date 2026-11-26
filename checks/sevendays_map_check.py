@@ -614,6 +614,56 @@ def test_portal_map_reads_explain_node_outages(suffix: str, error: Exception, st
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("suffix", ["/annotations", "/annotations/point-one/delete"])
+@pytest.mark.parametrize("error, status, detail", [
+    (None, 403, "Annotation change rejected"),
+    (None, 404, "Annotation change rejected"),
+    (None, 409, "Annotation change rejected"),
+    (None, 503, "Annotation change rejected"),
+    (aiohttp.ClientConnectionError("Connection refused"), 503,
+     "Erin is temporarily unavailable. Refresh the map to check whether the change was applied before trying again."),
+    (aiohttp.ConnectionTimeoutError("Connection timed out"), 504,
+     "Erin did not respond in time. Refresh the map to check whether the change was applied before trying again."),
+])
+def test_portal_annotation_mutations_explain_node_errors(
+    suffix: str, error: Exception | None, status: int, detail: str,
+) -> None:
+    service = ModWebService()
+    api = _portal_map_api(service)
+    node = ModWebNodeLink(
+        node_name="erin", label="Erin", url="/mod-web/nodes/erin",
+        api_base_url="https://erin.example/api/node", api_url="/api/node-proxy/erin/apps", is_current=False,
+    )
+    user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+    response = AsyncMock()
+    response.status = status
+    response.text.return_value = json.dumps({"detail": detail})
+    context = AsyncMock()
+    context.__aenter__.return_value = response
+    context.__aenter__.side_effect = error
+    session = Mock()
+    session.request.return_value = context
+
+    async def check() -> None:
+        with (
+            patch.object(service, "_require_http_user", return_value=user),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(service, "_remote_http_client", new=AsyncMock(return_value=session)),
+            patch.object(service, "_remote_token", return_value="write-token"),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=api), base_url="http://map.test") as client:
+                result = await client.post(f"/api/node-proxy/erin/apps/sevendays/map{suffix}", json={})
+        assert result.status_code == status
+        assert result.json() == {"detail": detail}
+        session.request.assert_called_once()
+        if error is None:
+            context.__aexit__.assert_awaited_once()
+        else:
+            context.__aexit__.assert_not_awaited()
+
+    asyncio.run(check())
+
+
 def test_portal_tile_route_forwards_revisions_without_forwarding_url_credentials() -> None:
     service = ModWebService()
     api = _portal_map_api(service)

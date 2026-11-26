@@ -736,6 +736,7 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
                 user=user,
                 method="POST",
                 json_payload=payload,
+                passthrough_errors=True,
             )
 
         @nicegui_app.post(
@@ -757,6 +758,7 @@ class ModWebRoutesMixin(ModWebNetworkMixin):
                 user=user,
                 method="POST",
                 json_payload={},
+                passthrough_errors=True,
             )
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/players")

@@ -1561,6 +1561,17 @@ def save_bot_configuration(path: Path, bot_config: BotConfiguration) -> None:
     write_json_object(path, bot_config.model_dump(mode="json", by_alias=True))
 
 
+def save_restart_auto_start_apps(path: Path, app_names: tuple[str, ...]) -> tuple[str, ...]:
+    """Persist the apps to restore while retaining the rest of a node configuration."""
+    bot_config = load_bot_configuration(path)
+    restart_state = PersistedRestartState(auto_start_apps=app_names)
+    if bot_config.restart_state == restart_state:
+        return restart_state.auto_start_apps
+    bot_config.restart_state = restart_state
+    save_bot_configuration(path, bot_config)
+    return restart_state.auto_start_apps
+
+
 def save_discord_settings(path: Path, settings: DiscordSettings) -> DiscordSettings:
     """Persist Discord activity settings while retaining the rest of a node configuration."""
     bot_config = load_bot_configuration(path)

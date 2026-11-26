@@ -137,7 +137,10 @@ beforeEach(() => {
     if (path.endsWith('/players')) return Promise.resolve(response(players));
     if (path.endsWith('/annotations')) {
       if (annotationFailure) return Promise.reject(annotationFailure);
-      return annotationDelay ?? Promise.resolve(response({ annotations }));
+      return (
+        annotationDelay?.then((result) => result.clone()) ??
+        Promise.resolve(response({ annotations }))
+      );
     }
     if (path.endsWith('/markers')) return Promise.resolve(response([]));
     if (path.endsWith('/tiles/index'))
@@ -255,6 +258,42 @@ it('preserves a concurrent annotation error when a metadata refresh finishes', a
   release(response(settings));
   await settle();
   expect(element('status').textContent).toBe('Annotations offline');
+});
+
+it('keeps unresolved errors visible through a manual refresh and successful actions', async () => {
+  await mount();
+  annotationFailure = new Error('Annotations offline');
+  await advance(16000);
+  expect(element('status').textContent).toBe('Annotations offline');
+  annotationFailure = null;
+  let release!: (result: Response) => void;
+  annotationDelay = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  await refresh();
+  expect(element('status').textContent).toBe('Annotations offline');
+  await controller.deleteAnnotation('point-one');
+  expect(element('status').textContent).toBe('Annotations offline');
+
+  release(response({ annotations }));
+  await settle();
+  expect(element('status').textContent).toBe('');
+});
+
+it('keeps polling a Squaremap manifest until the map becomes ready', async () => {
+  manifest.provider = 'squaremap';
+  manifest.readiness = 'waiting_for_tiles';
+  manifest.worlds = [];
+  await mount();
+  expect(element('notice').textContent).toContain('Waiting for explored terrain');
+  manifest.readiness = 'ready';
+  manifest.worlds = [summary];
+
+  await advance(16000);
+
+  expect(element('notice').textContent).toBe('');
+  expect(element('players').textContent).toContain('Zoë <3');
 });
 
 it.each(['/manifest', '/settings', '/players', '/annotations', '/markers', '/tiles/index'])(

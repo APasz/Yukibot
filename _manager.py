@@ -1940,15 +1940,7 @@ class App_Manager(metaclass=config.Singleton):
                 continue
             seen_names.add(app_name)
             resolved_names.append(app_name)
-        resolved_name_tuple = tuple(resolved_names)
-
-        bot_config = self._load_bot_configuration()
-        if bot_config.restart_state.auto_start_apps == resolved_name_tuple:
-            return resolved_name_tuple
-
-        bot_config.restart_state = bot_config.restart_state.model_copy(update={"auto_start_apps": resolved_name_tuple})
-        config.save_bot_configuration(self._bot_configuration_path, bot_config)
-        return resolved_name_tuple
+        return config.save_restart_auto_start_apps(self._bot_configuration_path, tuple(resolved_names))
 
     def _remove_restart_auto_start_app(self, app_name: str) -> None:
         bot_config = self._load_bot_configuration()

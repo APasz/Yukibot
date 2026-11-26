@@ -11,7 +11,10 @@ from subprocess import CalledProcessError
 from tempfile import TemporaryDirectory
 from unittest.mock import call, patch
 
+import config
+import requests
 import rupdater
+from node_auth import NodeApiScope, verify_node_token
 
 
 class RupdaterSyncPlanTests(unittest.TestCase):
@@ -104,11 +107,103 @@ class RupdaterSyncPlanTests(unittest.TestCase):
         )
 
 
-def _arguments(*, release: bool = False, check: bool = False, dry: bool = False, all_tracked: bool = False) -> Namespace:
+def _arguments(
+    *,
+    release: bool = False,
+    restart: bool = False,
+    no_auto_restart: bool = False,
+    check: bool = False,
+    dry: bool = False,
+    all_tracked: bool = False,
+) -> Namespace:
     return Namespace(
-        targets=["portal"], targets_file=Path("targets.json"), release=release, restart=release,
-        check=check, dry=dry, all_tracked=all_tracked,
+        targets=["portal"], targets_file=Path("targets.json"), release=release, restart=restart or release,
+        no_auto_restart=no_auto_restart, check=check, dry=dry, all_tracked=all_tracked,
     )
+
+
+class RupdaterRestartTests(unittest.TestCase):
+    def setUp(self) -> None:
+        root = Path(self.enterContext(TemporaryDirectory()))
+        self.config_path = root / "configuration.json"
+        config.save_bot_configuration(
+            self.config_path,
+            config.BotConfiguration(
+                steamcmd_path="custom-steamcmd",
+                restart_state=config.PersistedRestartState(auto_start_apps=("stale_app",)),
+            ),
+        )
+        self.enterContext(patch.object(config, "BOT_CONFIGURATION_PATH", self.config_path))
+        self.enterContext(patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[config.BotProfileName.YUKI]))
+        self.enterContext(patch.object(config, "NODE_NAME", "test-node"))
+        self.enterContext(patch.object(config, "NODE_API_TOKEN_SECRET", "test-secret"))
+        self.enterContext(patch.object(config, "LOCAL_NODE_API_BASE_URL", "http://127.0.0.1:8082/api/node"))
+        self.enterContext(patch.object(rupdater.time, "time", return_value=1000))
+        session = self.enterContext(patch("requests.Session"))
+        self.client = session.return_value.__enter__.return_value
+        self.client.get.return_value.json.return_value = {"running_app_ids": ["minecraft_alpha", "factorio_alpha"]}
+        self.enterContext(redirect_stdout(io.StringIO()))
+
+    def test_restart_flag_restores_apps_by_default_and_supports_opt_out(self) -> None:
+        for no_auto_restart in (False, True):
+            with self.subTest(no_auto_restart=no_auto_restart):
+                arguments = ["rupdater.py", "portal", "--restart"]
+                if no_auto_restart:
+                    arguments.append("--no-auto-restart")
+                with patch("sys.argv", arguments):
+                    args = rupdater.parse_args()
+                self.assertTrue(args.restart)
+                self.assertEqual(args.no_auto_restart, no_auto_restart)
+
+    def test_prepare_restart_saves_running_app_ids_and_authenticates_locally(self) -> None:
+        app_names = rupdater.prepare_restart_auto_start_apps(enabled=True)
+
+        self.assertEqual(app_names, ("minecraft_alpha", "factorio_alpha"))
+        loaded = config.load_bot_configuration(self.config_path)
+        self.assertEqual(loaded.restart_state.auto_start_apps, app_names)
+        self.assertEqual(loaded.steamcmd_path, "custom-steamcmd")
+        self.assertFalse(self.client.trust_env)
+        self.client.get.return_value.raise_for_status.assert_called_once()
+        request = self.client.get.call_args
+        self.assertEqual(request.args, ("http://127.0.0.1:8082/api/node/system",))
+        self.assertEqual(request.kwargs["timeout"], rupdater.RESTART_SNAPSHOT_TIMEOUT_SECONDS)
+        token = request.kwargs["headers"]["Authorization"].removeprefix("Bearer ")
+        grant = verify_node_token(
+            secret="test-secret", token=token, node="test-node", app=None,
+            required_scopes=(NodeApiScope.APPS_READ,), now=1000,
+        )
+        self.assertEqual(grant.scopes, frozenset({NodeApiScope.APPS_READ}))
+
+    def test_empty_running_list_clears_stale_restart_apps(self) -> None:
+        self.client.get.return_value.json.return_value = {"running_app_ids": []}
+
+        self.assertEqual(rupdater.prepare_restart_auto_start_apps(enabled=True), ())
+        self.assertEqual(config.load_bot_configuration(self.config_path).restart_state.auto_start_apps, ())
+
+    def test_opt_out_and_portal_clear_restart_apps_without_querying_the_api(self) -> None:
+        for portal in (False, True):
+            with self.subTest(portal=portal):
+                profile = config.BotProfileName.PORTAL if portal else config.BotProfileName.YUKI
+                config.save_restart_auto_start_apps(self.config_path, ("stale_app",))
+                with patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[profile]):
+                    self.assertEqual(rupdater.prepare_restart_auto_start_apps(enabled=portal), ())
+                self.client.get.assert_not_called()
+                self.assertEqual(config.load_bot_configuration(self.config_path).restart_state.auto_start_apps, ())
+
+    def test_failed_capture_preserves_state_and_raises(self) -> None:
+        self.client.get.side_effect = requests.ConnectionError("Node API unavailable")
+
+        with self.assertRaisesRegex(requests.ConnectionError, "Node API unavailable"):
+            rupdater.prepare_restart_auto_start_apps(enabled=True)
+        self.assertEqual(config.load_bot_configuration(self.config_path).restart_state.auto_start_apps, ("stale_app",))
+
+    def test_invalid_or_missing_running_list_is_rejected(self) -> None:
+        for payload in ({}, {"running_app_ids": "minecraft_alpha"}, {"running_app_ids": [None]}):
+            with self.subTest(payload=payload):
+                self.client.get.return_value.json.return_value = payload
+                with self.assertRaisesRegex(ValueError, "running_app_ids"):
+                    rupdater.prepare_restart_auto_start_apps(enabled=True)
+                self.assertEqual(config.load_bot_configuration(self.config_path).restart_state.auto_start_apps, ("stale_app",))
 
 
 def _frontend_fixture(root: Path) -> list[Path]:
@@ -120,6 +215,8 @@ def _frontend_fixture(root: Path) -> list[Path]:
         Path("frontend/dist/assets/app-new.js"): b"export const ready = true;",
         Path("frontend/dist/assets/font.woff2"): b"\x00\xff\x01",
         Path("main.py"): b"",
+        Path("rupdater.py"): b"",
+        Path("config.py"): b"",
         Path("pyproject.toml"): b"",
         Path("uv.lock"): b"",
     }
@@ -150,8 +247,10 @@ class RupdaterFrontendTests(unittest.TestCase):
             password=None, remote_root=PurePosixPath("/srv/yukibot"),
         )
         session = rupdater.RemoteSession(target=target, control_path=Path("/tmp/test-ssh"))
-        for fails in (False, True):
-            with self.subTest(transfer_fails=fails), TemporaryDirectory() as directory:
+        for fails, restart, no_auto_restart in (
+            (False, False, False), (True, True, False), (False, True, False), (False, True, True),
+        ):
+            with self.subTest(transfer_fails=fails, restart=restart, no_auto_restart=no_auto_restart), TemporaryDirectory() as directory:
                 root = Path(directory)
                 _frontend_fixture(root)
                 events: list[str] = []
@@ -163,7 +262,7 @@ class RupdaterFrontendTests(unittest.TestCase):
 
                 with (
                     patch.object(rupdater, "REPO_ROOT", root),
-                    patch.object(rupdater, "parse_args", return_value=_arguments()),
+                    patch.object(rupdater, "parse_args", return_value=_arguments(restart=restart, no_auto_restart=no_auto_restart)),
                     patch.object(rupdater, "require_program"),
                     patch.object(rupdater, "configured_targets", return_value=[target]),
                     patch.object(rupdater, "build_frontend"),
@@ -176,6 +275,7 @@ class RupdaterFrontendTests(unittest.TestCase):
                     patch.object(rupdater, "sync_files", side_effect=sync),
                     patch.object(rupdater, "delete_remote_files", side_effect=lambda *_: events.append("delete")),
                     patch.object(rupdater, "sync_remote_dependencies"),
+                    patch.object(rupdater, "restart_remote") as restart_remote,
                     patch.object(rupdater, "close_remote_session") as close,
                     redirect_stdout(io.StringIO()),
                 ):
@@ -185,6 +285,10 @@ class RupdaterFrontendTests(unittest.TestCase):
                     else:
                         self.assertEqual(rupdater.main(), 0)
                     close.assert_called_once_with(session)
+                    if restart and not fails:
+                        restart_remote.assert_called_once_with(session, auto_restart_apps=not no_auto_restart)
+                    else:
+                        restart_remote.assert_not_called()
                 self.assertEqual(events, ["transfer"] if fails else ["transfer", "delete"])
 
     def test_frontend_is_optional_but_incomplete_builds_fail(self) -> None:

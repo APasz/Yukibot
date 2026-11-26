@@ -188,6 +188,18 @@ class _RemoteNodeHttpError(RuntimeError):
         super().__init__(f"Remote node rejected the request: url={url} status={status_code} detail={detail}")
 
 
+def _remote_map_unavailable_error(
+    *, node: ModWebNodeLink, error: Exception, automatic_retry: bool,
+) -> Exception:
+    timed_out = isinstance(error, asyncio.TimeoutError)
+    reason = "did not respond in time" if timed_out else "is temporarily unavailable"
+    recovery = (
+        "The map will retry automatically." if automatic_retry
+        else "Refresh the map to check whether the change was applied before trying again."
+    )
+    return _http_exception(504 if timed_out else 503, f"{node.label} {reason}. {recovery}")
+
+
 @dataclass(frozen=True, slots=True)
 class _PathCacheSignature:
     exists: bool
@@ -2555,6 +2567,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         method: Literal["GET", "PUT", "POST", "DELETE"] = "GET",
         json_payload: Mapping[str, object] | None = None,
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+        passthrough_errors: bool = False,
     ) -> dict[str, object]:
         if method == "GET":
             self._raise_if_remote_node_circuit_open(node)
@@ -2608,6 +2621,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 if attempt >= max_attempts:
                     if method == "GET":
                         self._record_remote_node_failure(node)
+                    if passthrough_errors:
+                        raise _remote_map_unavailable_error(
+                            node=node, error=xcp, automatic_retry=method == "GET",
+                        ) from xcp
                     raise RuntimeError(
                         f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}"
                     ) from xcp
@@ -2623,6 +2640,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             except _RemoteNodeHttpError as xcp:
                 if method == "GET" and xcp.status_code in {500, 502, 503, 504}:
                     self._record_remote_node_failure(node)
+                if passthrough_errors:
+                    raise _http_exception(xcp.status_code, xcp.detail) from xcp
                 raise
         raise RuntimeError("Remote node request attempts were unexpectedly exhausted.")
 
@@ -2735,12 +2754,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 response: aiohttp.ClientResponse = await response_context.__aenter__()
             except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
                 if passthrough_errors:
-                    timed_out = isinstance(xcp, asyncio.TimeoutError)
-                    reason = "did not respond in time" if timed_out else "is temporarily unavailable"
-                    raise _http_exception(
-                        504 if timed_out else 503,
-                        f"{node.label} {reason}. The map will retry automatically.",
-                    ) from xcp
+                    raise _remote_map_unavailable_error(node=node, error=xcp, automatic_retry=True) from xcp
                 raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
             if request is not None:
                 log.info(

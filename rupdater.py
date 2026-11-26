@@ -29,6 +29,8 @@ DEFAULT_TARGETS_FILE: Final[Path] = REPO_ROOT / "rupdater.targets.json"
 SSH_CONNECTION_TIMEOUT_SECONDS = 5
 SSH_CONTROL_PERSIST_SECONDS = 30
 RESTART_INTERVAL_SECONDS: Final[int] = 5
+RESTART_SNAPSHOT_TIMEOUT_SECONDS: Final[int] = 10
+RESTART_SNAPSHOT_TOKEN_TTL_SECONDS: Final[int] = 60
 REMOTE_MKDIR_PATH = "/bin/mkdir"
 REMOTE_CAT_PATH = "/bin/cat"
 REMOTE_RM_PATH = "/bin/rm"
@@ -44,6 +46,8 @@ REMOTE_SYSTEM_PATH_PREFIXES: tuple[str, ...] = (
     "/bin",
 )
 ALWAYS_SYNCED_FILES: tuple[Path, ...] = (
+    Path("rupdater.py"),
+    Path("config.py"),
     Path("pyproject.toml"),
     Path("uv.lock"),
 )
@@ -114,7 +118,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--restart",
         action="store_true",
-        help="Run each target's restart_command after syncing.",
+        help="Run each target's restart_command after syncing and restore its running apps.",
+    )
+    parser.add_argument(
+        "--no-auto-restart",
+        action="store_true",
+        help="Leave managed apps stopped after restarting the bot services.",
     )
     parser.add_argument(
         "--dry",
@@ -666,8 +675,16 @@ def delete_remote_files(session: RemoteSession, files: list[Path]) -> None:
     )
 
 
+def build_remote_command_group(command: str) -> str:
+    """Keep every command in a script behind its caller's shell prerequisites."""
+    return f"{{\n{command}\n}}"
+
+
 def build_remote_project_command(target: RemoteTarget, command: str) -> str:
-    return f"{build_remote_path_setup_command()}cd {shlex.quote(target.remote_root.as_posix())} && {command}"
+    return (
+        f"{build_remote_path_setup_command()}cd {shlex.quote(target.remote_root.as_posix())} && "
+        f"{build_remote_command_group(command)}"
+    )
 
 
 def build_pending_restart_kind_write_command(kind: RestartKind) -> str:
@@ -678,10 +695,63 @@ def build_pending_restart_kind_write_command(kind: RestartKind) -> str:
     return f"printf '%s\\n' {shlex.quote(payload)} > {sentinel_path}"
 
 
-def build_remote_restart_command(target: RemoteTarget, kind: RestartKind = RestartKind.UPDATE_BOT) -> str:
+def prepare_restart_auto_start_apps(*, enabled: bool) -> tuple[str, ...]:
+    """Run on the target to preserve its running apps before the service stops."""
+    import config
+    import requests
+
+    from node_api.system import NodeSystemSummary
+    from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
+
+    app_names: tuple[str, ...] = ()
+    if enabled and config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
+        headers: dict[str, str] = {}
+        secret: str | None = config.NODE_API_TOKEN_SECRET
+        if secret is not None:
+            token = issue_node_token(
+                secret=secret,
+                grant=NodeAccessGrant(
+                    subject="rupdater",
+                    node=config.NODE_NAME,
+                    app=None,
+                    scopes=frozenset({NodeApiScope.APPS_READ}),
+                    expires_at=int(time.time()) + RESTART_SNAPSHOT_TOKEN_TTL_SECONDS,
+                ),
+            )
+            headers["Authorization"] = f"Bearer {token}"
+        with requests.Session() as client:
+            client.trust_env = False
+            response = client.get(
+                f"{config.LOCAL_NODE_API_BASE_URL}/system",
+                headers=headers,
+                timeout=RESTART_SNAPSHOT_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            payload = _json_object(value=response.json(), label="Node system summary")
+        if "running_app_ids" not in payload:
+            raise ValueError("Node system summary does not include running_app_ids; refusing to restart.")
+        app_names = NodeSystemSummary.from_mapping(payload).running_app_ids
+    app_names = config.save_restart_auto_start_apps(config.BOT_CONFIGURATION_PATH, app_names)
+    print(f"Apps to restore after restart: {', '.join(app_names) if app_names else 'none'}")
+    return app_names
+
+
+def build_remote_restart_command(
+    target: RemoteTarget,
+    kind: RestartKind = RestartKind.UPDATE_BOT,
+    *,
+    auto_restart_apps: bool = True,
+) -> str:
     if target.restart_command is None:
         raise ValueError(f"{target.name.value} restart_command is not configured")
-    return f"{build_pending_restart_kind_write_command(kind)} && {target.restart_command}"
+    prepare_script = (
+        "from rupdater import prepare_restart_auto_start_apps; "
+        f"prepare_restart_auto_start_apps(enabled={auto_restart_apps!r})"
+    )
+    return (
+        f"uv run --no-sync python -c {shlex.quote(prepare_script)} && "
+        f"{build_pending_restart_kind_write_command(kind)} && {build_remote_command_group(target.restart_command)}"
+    )
 
 
 def build_remote_program_check_command(program_name: str) -> str:
@@ -819,14 +889,17 @@ def print_synced_files(target: RemoteTarget, files: list[Path], delete_files: li
             print(f"    {remote_file_path(target, path).as_posix()}")
 
 
-def restart_remote(session: RemoteSession) -> None:
+def restart_remote(session: RemoteSession, *, auto_restart_apps: bool = True) -> None:
     run_checked(
         [
             "ssh",
             *ssh_connection_options(control_path=session.control_path, use_password=False),
             session.target.ssh_destination,
             build_remote_shell_command(
-                build_remote_project_command(session.target, build_remote_restart_command(session.target))
+                build_remote_project_command(
+                    session.target,
+                    build_remote_restart_command(session.target, auto_restart_apps=auto_restart_apps),
+                )
             ),
         ],
         password=None,
@@ -851,7 +924,7 @@ def ordered_restart_targets(targets: list[RemoteTarget]) -> list[RemoteTarget]:
 
 def configured_targets(*, target_names: list[str], target_file: Path) -> list[RemoteTarget]:
     targets_by_name: dict[TargetName, RemoteTarget] = load_remote_targets(target_file=target_file)
-    targets: list[RemoteTarget] = [targets_by_name[TargetName(name)] for name in target_names]
+    targets: list[RemoteTarget] = [targets_by_name[TargetName(name)] for name in dict.fromkeys(target_names)]
     for target in targets:
         target.validate()
     return targets
@@ -945,7 +1018,7 @@ def main() -> int:
                 if delay_seconds > 0:
                     print(f"Waiting {delay_seconds}s before restarting {target.name.value}")
                     time.sleep(delay_seconds)
-                restart_remote(sessions_by_name[target.name])
+                restart_remote(sessions_by_name[target.name], auto_restart_apps=not args.no_auto_restart)
     finally:
         for session in sessions_by_name.values():
             close_remote_session(session)

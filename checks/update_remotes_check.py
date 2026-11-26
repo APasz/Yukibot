@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import rupdater
 from deployment_metadata import DeploymentMetadata
@@ -30,12 +33,32 @@ class UpdateRemotesTests(unittest.TestCase):
     def test_planned_sync_files_appends_required_project_files(self) -> None:
         files = rupdater.planned_sync_files([Path("main.py")])
 
-        self.assertEqual(files, [Path("main.py"), Path("pyproject.toml"), Path("uv.lock")])
+        self.assertEqual(files, [Path("main.py"), Path("rupdater.py"), Path("config.py"), Path("pyproject.toml"), Path("uv.lock")])
 
     def test_planned_sync_files_deduplicates_required_project_files(self) -> None:
-        files = rupdater.planned_sync_files([Path("main.py"), Path("pyproject.toml")])
+        files = rupdater.planned_sync_files([Path("main.py"), Path("rupdater.py"), Path("config.py"), Path("pyproject.toml")])
 
-        self.assertEqual(files, [Path("main.py"), Path("pyproject.toml"), Path("uv.lock")])
+        self.assertEqual(files, [Path("main.py"), Path("rupdater.py"), Path("config.py"), Path("pyproject.toml"), Path("uv.lock")])
+
+    def test_partial_updates_include_the_restart_helpers(self) -> None:
+        files = rupdater.planned_sync_files([Path("main.py")])
+
+        self.assertTrue({Path("rupdater.py"), Path("config.py")}.issubset(files))
+
+    def test_configured_targets_deduplicates_names_in_selection_order(self) -> None:
+        targets = {
+            name: rupdater.RemoteTarget(
+                name=name, host="example.invalid", user="bot", password=None,
+                remote_root=PurePosixPath(f"/srv/{name.value}"),
+            )
+            for name in rupdater.TargetName
+        }
+        with patch.object(rupdater, "load_remote_targets", return_value=targets):
+            selected = rupdater.configured_targets(
+                target_names=["portal", "wakusei", "portal"], target_file=Path("targets.json"),
+            )
+
+        self.assertEqual([target.name for target in selected], [rupdater.TargetName.PORTAL, rupdater.TargetName.WAKUSEI])
 
     def test_parse_changed_python_files_returns_modified_and_untracked_paths(self) -> None:
         files = rupdater.parse_changed_python_files(" M main.py\n?? apps/_app.py\n")
@@ -202,7 +225,8 @@ class UpdateRemotesTests(unittest.TestCase):
 
         self.assertEqual(
             command,
-            'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"; cd /srv/yukibot && uv sync',
+            'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"; '
+            'cd /srv/yukibot && {\nuv sync\n}',
         )
 
     def test_build_pending_restart_kind_write_command_writes_update_restart_sentinel(self) -> None:
@@ -229,9 +253,64 @@ class UpdateRemotesTests(unittest.TestCase):
         self.assertEqual(
             command,
             'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"; '
-            """cd /srv/yukibot && printf '%s\\n' '{"kind": "update_bot"}' > """
-            "pending_restart_type_sentinel.json && systemctl --user restart yukibot",
+            "cd /srv/yukibot && {\nuv run --no-sync python -c 'from rupdater import prepare_restart_auto_start_apps; "
+            "prepare_restart_auto_start_apps(enabled=True)' && "
+            """printf '%s\\n' '{"kind": "update_bot"}' > """
+            "pending_restart_type_sentinel.json && {\nsystemctl --user restart yukibot\n}\n}",
         )
+
+        opt_out_command = rupdater.build_remote_restart_command(target, auto_restart_apps=False)
+        self.assertIn("prepare_restart_auto_start_apps(enabled=False)", opt_out_command)
+        self.assertTrue(opt_out_command.endswith("&& {\nsystemctl --user restart yukibot\n}"))
+
+    def test_failed_app_capture_prevents_service_restart_and_restart_sentinel(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            uv = root / "uv"
+            uv.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            uv.chmod(0o700)
+            target = rupdater.RemoteTarget(
+                name=rupdater.TargetName.WAKUSEI,
+                host="example.invalid",
+                user="bot",
+                password=None,
+                remote_root=PurePosixPath(root.as_posix()),
+                restart_command="printf first > service-first; printf restarted > service-restarted",
+            )
+
+            result = subprocess.run(
+                [rupdater.REMOTE_SH_PATH, "-c", rupdater.build_remote_restart_command(target)],
+                cwd=root,
+                env={**os.environ, "PATH": root.as_posix()},
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((root / "service-first").exists())
+            self.assertFalse((root / "service-restarted").exists())
+            self.assertFalse((root / rupdater.PENDING_PROCESS_RESTART_KIND_PATH).exists())
+
+    def test_missing_project_directory_prevents_every_command_in_a_script(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "command-ran"
+            target = rupdater.RemoteTarget(
+                name=rupdater.TargetName.WAKUSEI, host="example.invalid", user="bot", password=None,
+                remote_root=PurePosixPath((root / "missing").as_posix()),
+            )
+            command = rupdater.build_remote_project_command(
+                target, f":; printf ran > {shlex.quote(marker.as_posix())}",
+            )
+
+            result = subprocess.run(
+                [rupdater.REMOTE_SH_PATH, "-c", command],
+                cwd=root, check=False, capture_output=True, text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(marker.exists())
 
     def test_build_deployment_metadata_write_command_writes_ignored_project_file(self) -> None:
         metadata = DeploymentMetadata(

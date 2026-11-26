@@ -151,7 +151,6 @@ export class MapController {
   private pendingFit = false;
   private readonly errorReports = new Map<string, number>();
   private readonly failures = new Map<FailureContext, string>();
-  private failureContext: FailureContext | null = null;
 
   constructor(readonly config: MapConfig) {
     this.container = required(config.containerId, HTMLElement);
@@ -214,16 +213,12 @@ export class MapController {
   }
   private message(text: string, tone: Tone = 'info'): void {
     if (this.destroyed) return;
-    this.failureContext = null;
-    updateMessage(this.status, text, tone);
+    let failure: string | undefined;
+    for (const message of this.failures.values()) failure = message;
+    updateMessage(this.status, failure ?? text, failure === undefined ? tone : 'error');
   }
   private recovered(context: FailureContext): void {
-    this.failures.delete(context);
-    if (this.failureContext !== context) return;
-    let latest: [FailureContext, string] | undefined;
-    for (const entry of this.failures) latest = entry;
-    this.message(latest?.[1] ?? '', latest ? 'error' : 'info');
-    this.failureContext = latest?.[0] ?? null;
+    if (this.failures.delete(context)) this.message('');
   }
   private setNotice(text: string, tone: Tone = 'info'): void {
     if (this.destroyed) return;
@@ -253,8 +248,7 @@ export class MapController {
     const message = errorMessage(error);
     this.failures.delete(context);
     this.failures.set(context, message);
-    this.message(message, 'error');
-    this.failureContext = context;
+    this.message('');
     const key = `${context}:${message}`;
     const now = performance.now();
     if (now - (this.errorReports.get(key) ?? -Infinity) < 30000) return;
@@ -276,7 +270,9 @@ export class MapController {
     if (
       refreshMetadata &&
       (force ||
-        ((this.manifest?.provider !== 'squaremap' || this.failures.has('metadata')) &&
+        ((this.manifest?.provider !== 'squaremap' ||
+          this.manifest.readiness !== 'ready' ||
+          this.failures.has('metadata')) &&
           now - this.lastMetadata >= 15000))
     ) {
       this.lastMetadata = now;
@@ -453,7 +449,6 @@ export class MapController {
     this.worldLifetime = new AbortController();
     this.revision++;
     this.failures.clear();
-    this.failureContext = null;
     this.tileLayer?.remove();
     this.tileLayer = null;
     this.worldLayers.clearLayers();
