@@ -66,12 +66,15 @@ class ModWebUserPlateAction(StrEnum):
     """Actions a user may pin beside their account identity."""
 
     MIRRORS = "mirrors"
+    INSTALL_APP = "install_app"
     SETTINGS = "settings"
+    NETWORK_DIAGNOSTICS = "network_diagnostics"
     STANDARD_DRINKS = "standard_drinks"
     CURRENCY = "currency"
     DISCORD_TIME = "discord_time"
     UNIT_CONVERTER = "unit_converter"
     ALIASES = "aliases"
+    ABOUT = "about"
     LOG_OUT = "log_out"
 
 
@@ -169,7 +172,8 @@ class ModWebUserSettingsStore:
         validated_user_id: int = self._validate_user_id(user_id)
         with self._lock:
             self._ensure_loaded()
-            return self._settings_by_user_id.get(validated_user_id, ModWebUserSettings())
+            settings = self._settings_by_user_id.get(validated_user_id)
+            return settings if settings is not None else ModWebUserSettings()
 
     def set(self, *, user_id: int, settings: ModWebUserSettings) -> bool:
         validated_user_id: int = self._validate_user_id(user_id)

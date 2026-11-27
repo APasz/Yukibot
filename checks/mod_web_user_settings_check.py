@@ -39,6 +39,9 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
                     visible_actions=(
                         ModWebUserPlateAction.SETTINGS,
                         ModWebUserPlateAction.CURRENCY,
+                        ModWebUserPlateAction.INSTALL_APP,
+                        ModWebUserPlateAction.NETWORK_DIAGNOSTICS,
+                        ModWebUserPlateAction.ABOUT,
                     )
                 ),
                 timestamp=ModWebTimestampSettings(
@@ -53,6 +56,9 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
                 self.assertEqual(store.get(user_id=42), ModWebUserSettings())
                 self.assertTrue(store.set(user_id=42, settings=settings))
                 self.assertFalse(store.set(user_id=42, settings=settings))
+                with patch("web_dash.user_settings.ModWebUserSettings", wraps=ModWebUserSettings) as settings_model:
+                    self.assertIs(store.get(user_id=42), settings)
+                    settings_model.assert_not_called()
                 restored = ModWebUserSettingsStore(path).get(user_id=42)
 
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -66,7 +72,7 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
         self.assertEqual(payload["users"]["42"]["appearance"]["info_color_hex"], "#0EA5E9")
         self.assertFalse(payload["users"]["42"]["appearance"]["tooltip_above_on_touch_device"])
         self.assertEqual(payload["users"]["42"]["user_plate"], {
-            "visible_actions": ["settings", "currency"],
+            "visible_actions": ["settings", "currency", "install_app", "network_diagnostics", "about"],
         })
         self.assertEqual(payload["users"]["42"]["timestamp"], {
             "timezone_name": "Australia/Melbourne",

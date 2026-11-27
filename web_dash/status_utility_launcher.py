@@ -129,19 +129,17 @@ class ModWebStatusUtilityLauncherMixin(ModWebStatusFeatureSupport):
             )
         if self._user_has_level(user, Power_Level.sudo):
             action_specs.append(
-                _UtilityActionSpec(
-                    label="Install App",
-                    icon="download",
-                    action=lambda: ui.navigate.to("/mod-web/app-installer"),
+                _plate_action(
+                    ModWebUserPlateAction.INSTALL_APP,
+                    lambda: ui.navigate.to("/mod-web/app-installer"),
                 )
             )
         action_specs.append(_plate_action(ModWebUserPlateAction.SETTINGS, open_user_settings))
         if self._user_has_level(user, Power_Level.visitor):
             action_specs.append(
-                _UtilityActionSpec(
-                    label="Network Diagnostics",
-                    icon="network_check",
-                    action=lambda: ui.navigate.to("/mod-web/network"),
+                _plate_action(
+                    ModWebUserPlateAction.NETWORK_DIAGNOSTICS,
+                    lambda: ui.navigate.to("/mod-web/network"),
                 )
             )
         action_specs.append(_plate_action(ModWebUserPlateAction.STANDARD_DRINKS, open_standard_drinks))
@@ -149,7 +147,7 @@ class ModWebStatusUtilityLauncherMixin(ModWebStatusFeatureSupport):
         action_specs.append(_plate_action(ModWebUserPlateAction.DISCORD_TIME, open_time_formatter))
         action_specs.append(_plate_action(ModWebUserPlateAction.UNIT_CONVERTER, open_unit_converter))
         action_specs.append(_plate_action(ModWebUserPlateAction.ALIASES, _open_alias_page))
-        action_specs.append(_UtilityActionSpec(label="About", icon="info", action=_open_about_page))
+        action_specs.append(_plate_action(ModWebUserPlateAction.ABOUT, _open_about_page))
         action_specs.append(
             _plate_action(ModWebUserPlateAction.LOG_OUT, lambda: ui.navigate.to("/auth/logout"))
         )
@@ -167,7 +165,7 @@ class ModWebStatusUtilityLauncherMixin(ModWebStatusFeatureSupport):
             if action_spec.icon is None:
                 continue
             plate_button = ui.button("", on_click=_action_handler(action_spec.action)).props(
-                f"icon={action_spec.icon} flat aria-label={action_spec.label}"
+                f'icon={action_spec.icon} flat aria-label="{action_spec.label}"'
             ).classes(f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-plate-button")
             ModWebUiHelpersMixin._attach_badge_tooltip(
                 ui=ui,

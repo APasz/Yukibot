@@ -18,12 +18,15 @@ class UserPlateActionSpec:
 
 _USER_PLATE_ACTION_SPECS: tuple[UserPlateActionSpec, ...] = (
     UserPlateActionSpec(ModWebUserPlateAction.MIRRORS, "Mirrors", "cloud_sync"),
+    UserPlateActionSpec(ModWebUserPlateAction.INSTALL_APP, "Install App", "download"),
     UserPlateActionSpec(ModWebUserPlateAction.SETTINGS, "Settings", "settings"),
+    UserPlateActionSpec(ModWebUserPlateAction.NETWORK_DIAGNOSTICS, "Network Diagnostics", "network_check"),
     UserPlateActionSpec(ModWebUserPlateAction.STANDARD_DRINKS, "Standard drinks", "local_bar"),
     UserPlateActionSpec(ModWebUserPlateAction.CURRENCY, "Currency", "currency_exchange"),
     UserPlateActionSpec(ModWebUserPlateAction.DISCORD_TIME, "Discord Time", "schedule"),
     UserPlateActionSpec(ModWebUserPlateAction.UNIT_CONVERTER, "Unit converter", "straighten"),
     UserPlateActionSpec(ModWebUserPlateAction.ALIASES, "Aliases", "badge"),
+    UserPlateActionSpec(ModWebUserPlateAction.ABOUT, "About", "info"),
     UserPlateActionSpec(ModWebUserPlateAction.LOG_OUT, "Log out", "logout"),
 )
 _USER_PLATE_ACTION_SPEC_BY_ACTION: dict[ModWebUserPlateAction, UserPlateActionSpec] = {

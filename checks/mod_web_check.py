@@ -22,6 +22,7 @@ from aiohttp.client_reqrep import RequestInfo
 from modmux.models import Provider
 from multidict import CIMultiDict, CIMultiDictProxy
 from nicegui.elements.link import Link
+from nicegui.props import Props
 from starlette.types import Message
 from yarl import URL
 
@@ -323,6 +324,7 @@ from web_dash.types import (
     _ModWebNotificationTrayItem,
     _ModWebTabActionSpec,
 )
+from web_dash.user_plate import user_plate_action_options
 from web_dash.user_settings import (
     ModWebAppearanceSettings,
     ModWebUserPlateAction,
@@ -22821,6 +22823,9 @@ class ModWebTests(unittest.TestCase):
                     visible_actions=(
                         ModWebUserPlateAction.SETTINGS,
                         ModWebUserPlateAction.CURRENCY,
+                        ModWebUserPlateAction.INSTALL_APP,
+                        ModWebUserPlateAction.NETWORK_DIAGNOSTICS,
+                        ModWebUserPlateAction.ABOUT,
                     )
                 )
             )
@@ -22829,11 +22834,12 @@ class ModWebTests(unittest.TestCase):
         user = ModWebUser(discord_id=42, username="sudo", global_name="Finch", avatar_hash=None)
 
         with (
+            patch.object(config, "INDEV", True),
             patch.object(service, "_user_can_use_fake_chat_preview", return_value=False),
             patch.object(
                 service,
                 "_user_has_level",
-                side_effect=lambda _user, level: level is Power_Level.sudo,
+                side_effect=lambda _user, level: level in (Power_Level.sudo, Power_Level.visitor),
             ),
             patch.object(service, "_web_display_name", return_value="Finch"),
         ):
@@ -22847,6 +22853,7 @@ class ModWebTests(unittest.TestCase):
                 "Clear Transfers",
                 "Install App",
                 "Settings",
+                "Network Diagnostics",
                 "Standard drinks",
                 "Currency",
                 "Discord Time",
@@ -22857,19 +22864,26 @@ class ModWebTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            [button.props_value for button in ui.buttons[:3]],
+            [Props.parse(button.props_value) for button in ui.buttons],
             [
-                "icon=settings flat aria-label=Settings",
-                "icon=currency_exchange flat aria-label=Currency",
-                "icon=menu flat aria-label=Utilities",
+                {"icon": "download", "flat": True, "aria-label": "Install App"},
+                {"icon": "settings", "flat": True, "aria-label": "Settings"},
+                {"icon": "network_check", "flat": True, "aria-label": "Network Diagnostics"},
+                {"icon": "currency_exchange", "flat": True, "aria-label": "Currency"},
+                {"icon": "info", "flat": True, "aria-label": "About"},
+                {"icon": "menu", "flat": True, "aria-label": "Utilities"},
             ],
         )
-        self.assertEqual(ui.tooltips, ["Settings", "Currency", "Utilities"])
+        self.assertEqual(
+            ui.tooltips,
+            ["Install App", "Settings", "Network Diagnostics", "Currency", "About", "Utilities"],
+        )
         self.assertEqual(
             ui.icons,
             [
                 "download",
                 "settings",
+                "network_check",
                 "local_bar",
                 "currency_exchange",
                 "schedule",
@@ -22879,6 +22893,22 @@ class ModWebTests(unittest.TestCase):
                 "logout",
             ],
         )
+        for label, destination in (
+            ("Install App", "/mod-web/app-installer"),
+            ("Network Diagnostics", "/mod-web/network"),
+            ("About", "/auth/about"),
+        ):
+            with self.subTest(destination=destination):
+                button = next(
+                    button
+                    for button in ui.buttons
+                    if Props.parse(button.props_value).get("aria-label") == label
+                )
+                on_click = button.on_click
+                assert on_click is not None
+                on_click(None)
+                self.assertEqual(ui.navigated_to[-1], destination)
+        ui.navigated_to.clear()
         install_item = next(item for item in ui.menu_items if item.text == "Install App")
         if install_item.on_click is None:
             raise AssertionError("Install App menu item is missing a click handler.")
@@ -23072,6 +23102,39 @@ class ModWebTests(unittest.TestCase):
         about_item.on_click(None)
         self.assertEqual(ui.navigated_to, ["/mod-web/app-installer", "/aliases", "/auth/about"])
 
+        required_levels: dict[ModWebUserPlateAction, Power_Level] = {
+            ModWebUserPlateAction.MIRRORS: Power_Level.user,
+            ModWebUserPlateAction.INSTALL_APP: Power_Level.sudo,
+            ModWebUserPlateAction.NETWORK_DIAGNOSTICS: Power_Level.visitor,
+        }
+        all_selected_settings = ModWebUserSettings(
+            user_plate=ModWebUserPlateSettings(visible_actions=tuple(ModWebUserPlateAction))
+        )
+        for user_level in Power_Level:
+            with self.subTest(user_level=user_level):
+                restricted_ui = FakeUi()
+                with (
+                    patch.object(config, "INDEV", False),
+                    patch.object(service._backend, "user_settings_for", return_value=all_selected_settings),
+                    patch.object(service, "_user_has_level", side_effect=lambda _user, level: user_level >= level),
+                ):
+                    service._render_user_utility_launcher(
+                        ui=cast(ModWebUi, cast(object, restricted_ui)),
+                        user=user,
+                        include_mirrors=user_level >= Power_Level.user,
+                    )
+                expected_labels = [
+                    label
+                    for action, label in user_plate_action_options().items()
+                    if user_level >= required_levels.get(ModWebUserPlateAction(action), Power_Level.guest)
+                ]
+                self.assertEqual([item.text for item in restricted_ui.menu_items], expected_labels)
+                self.assertEqual(
+                    [Props.parse(button.props_value).get("aria-label") for button in restricted_ui.buttons],
+                    [*expected_labels, "Utilities"],
+                )
+                self.assertEqual(restricted_ui.tooltips, [*expected_labels, "Utilities"])
+
     def test_user_settings_panel_saves_and_resets_appearance_colours(self) -> None:
         class FakeContainer:
             def __init__(self) -> None:
@@ -23261,10 +23324,13 @@ class ModWebTests(unittest.TestCase):
                 self.assertEqual(ui.selects[0].value, "AU")
                 self.assertEqual(ui.inputs[5].value, "UTC")
                 self.assertEqual(ui.selects[1].value, ["settings"])
+                self.assertEqual(set(ui.selects[1].options), {action.value for action in ModWebUserPlateAction})
                 self.assertEqual(ui.selects[2].value, "24")
                 self.assertIn('v-bind="props.itemProps"', ui.selects[1].slots["option"])
                 self.assertIn("cloud_sync", ui.selects[1].slots["option"])
                 self.assertIn("currency_exchange", ui.selects[1].slots["option"])
+                for icon in ("download", "network_check", "info"):
+                    self.assertIn(icon, ui.selects[1].slots["option"])
                 self.assertIn('display-value="1 button selected"', ui.selects[1].props_value)
                 self.assertTrue(ui.checkboxes[0].value)
                 self.assertEqual(
@@ -23298,7 +23364,7 @@ class ModWebTests(unittest.TestCase):
                 ui.inputs[3].value = "#ef4444"
                 ui.inputs[4].value = "#0ea5e9"
                 ui.selects[0].value = "US"
-                ui.selects[1].value = ["settings", "currency"]
+                ui.selects[1].value = ["settings", "currency", "install_app", "network_diagnostics", "about"]
                 ui.inputs[5].value = "Australia/Melbourne"
                 ui.selects[2].value = "12"
                 ui.checkboxes[0].value = False
@@ -23324,6 +23390,9 @@ class ModWebTests(unittest.TestCase):
                         visible_actions=(
                             ModWebUserPlateAction.SETTINGS,
                             ModWebUserPlateAction.CURRENCY,
+                            ModWebUserPlateAction.INSTALL_APP,
+                            ModWebUserPlateAction.NETWORK_DIAGNOSTICS,
+                            ModWebUserPlateAction.ABOUT,
                         )
                     ),
                 )
