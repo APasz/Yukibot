@@ -3278,6 +3278,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     def test_instance_install_defaults_follow_existing_ids_and_use_gmod_folder(self) -> None:
         manager = object.__new__(App_Manager)
+        self.enterContext(patch.object(manager, "_load_scope_types", return_value=(_DummyApp, App_Config)))
         original_cwd = Path.cwd()
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -3536,6 +3537,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     def test_create_instance_replaces_or_clears_template_version(self) -> None:
         manager = object.__new__(App_Manager)
+        self.enterContext(patch.object(manager, "_load_scope_types", return_value=(_DummyApp, App_Config)))
         original_cwd = Path.cwd()
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -3889,6 +3891,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     def test_list_create_scopes_includes_scope_with_builtin_template_and_no_instances(self) -> None:
         manager = object.__new__(App_Manager)
+        self.enterContext(patch.object(manager, "_load_scope_types", return_value=(_DummyApp, App_Config)))
         original_cwd = Path.cwd()
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -3917,6 +3920,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     def test_create_instance_writes_new_entry_from_builtin_template(self) -> None:
         manager = object.__new__(App_Manager)
+        self.enterContext(patch.object(manager, "_load_scope_types", return_value=(_DummyApp, App_Config)))
         original_cwd = Path.cwd()
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

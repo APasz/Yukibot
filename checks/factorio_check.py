@@ -27,6 +27,7 @@ from apps._config import (
 )
 from apps._console import ConsoleResponseSource, execute_console_action
 from apps._mod import Mod_Manager
+from apps._platform import AppPlatform, LINUX_ARM64, LINUX_X86_64
 from apps._updater import AppUpdateOperationKind, AppUpdateProviderKind, AppUpdateState
 from apps.factorio import (
     Factorio,
@@ -240,7 +241,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
     def test_selected_save_changes_the_generated_start_command(self) -> None:
         app = cast(Any, object.__new__(Factorio))
-        with patch("apps.factorio.config.env_req", return_value="secret"):
+        with patch("apps.factorio.config.env_req", return_value="secret"), patch.object(AppPlatform, "current", return_value=LINUX_X86_64):
             command = app._factorio_start_command(
                 Path("/srv/factorio/data/server-settings.json"),
                 save_file="Alpha.zip",
@@ -259,6 +260,31 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
         self.assertFalse(app.supports_save_rename)
 
+    def test_arm_server_and_fresh_world_commands_use_the_arm_binary(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = cast(Factorio, object.__new__(Factorio))
+            app.directory = root
+            app.friendly = "ARM Factorio"
+            commands: list[list[str]] = []
+
+            async def create_world(_function: object, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                (root / "saves" / "ARM.zip").write_bytes(b"fresh world")
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                patch.object(AppPlatform, "current", return_value=LINUX_ARM64),
+                patch("apps.factorio.config.env_req", return_value="secret"),
+                patch("apps.factorio.run_blocking", new=AsyncMock(side_effect=create_world)),
+            ):
+                command = app._factorio_start_command(root / "settings.json", save_file="ARM.zip", game_port=34197)
+                asyncio.run(app._create_fresh_world("ARM.zip"))
+
+            self.assertEqual(command[:3], ["bin/arm64/factorio", "--start-server", "saves/ARM.zip"])
+            self.assertEqual(commands[0][:3], ["bin/arm64/factorio", "--create", "saves/ARM.zip"])
+            self.assertTrue((root / "saves/ARM.zip").is_file())
+
     def test_create_fresh_world_generates_selected_save_with_map_settings(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -275,7 +301,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
                 (root / "saves" / "Orbit.zip").write_bytes(b"fresh world")
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch("apps.factorio.run_blocking", new=AsyncMock(side_effect=run_create)):
+            with patch("apps.factorio.run_blocking", new=AsyncMock(side_effect=run_create)), patch.object(AppPlatform, "current", return_value=LINUX_X86_64):
                 asyncio.run(app._create_fresh_world("Orbit.zip"))
 
             self.assertTrue((root / "saves" / "Orbit.zip").is_file())
@@ -1457,13 +1483,57 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
 class FactorioUpdaterTests(unittest.TestCase):
     def test_factorio_download_archive_path_uses_tmp_root_without_subdirectory(self) -> None:
-        archive_path = _factorio_download_archive_path(
-            tmp_dir=Path("/tmp/erinbot"),
-            branch=FactorioUpdateBranch.EXPERIMENTAL,
-            version_text="2.0.68",
-        )
+        with patch.object(AppPlatform, "current", return_value=LINUX_X86_64):
+            archive_path = _factorio_download_archive_path(
+                tmp_dir=Path("/tmp/erinbot"),
+                branch=FactorioUpdateBranch.EXPERIMENTAL,
+                version_text="2.0.68",
+            )
 
-        self.assertEqual(archive_path, Path("/tmp/erinbot/factorio-experimental-2.0.68.tar.xz"))
+        self.assertEqual(archive_path, Path("/tmp/erinbot/factorio-experimental-linux64-2.0.68.tar.xz"))
+
+    def test_factorio_downloads_follow_the_selected_architecture(self) -> None:
+        async def download() -> None:
+            with TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                updater = Factorio_Updater(_FakeFactorioUpdateApp(root), base=True)
+                for target, download_target in ((LINUX_X86_64, "linux64"), (LINUX_ARM64, "linux-arm64")):
+                    for branch in FactorioUpdateBranch:
+                        response = MagicMock(status=200, content_length=7)
+                        response.__aenter__.return_value = response
+                        response.content.iter_chunked.return_value.__aiter__.return_value = [b"release"]
+                        session = MagicMock()
+                        session.__aenter__.return_value = session
+                        session.get.return_value = response
+                        with (
+                            self.subTest(target=target, branch=branch),
+                            patch.object(AppPlatform, "current", return_value=target),
+                            patch("apps.factorio.config.DIR_TMP", root),
+                            patch("apps.factorio.aiohttp.ClientSession", return_value=session),
+                        ):
+                            archive = await updater.download_release(branch=branch, version_text="2.1.25")
+                            session.get.assert_called_once_with(
+                                f"https://factorio.com/get-download/2.1.25/headless/{download_target}"
+                            )
+                            self.assertEqual(archive.name, f"factorio-{branch.value}-{download_target}-2.1.25.tar.xz")
+                            self.assertEqual(archive.read_bytes(), b"release")
+
+        asyncio.run(download())
+
+    def test_invalid_download_versions_are_rejected_before_network_or_file_access(self) -> None:
+        async def download() -> None:
+            with TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                updater = Factorio_Updater(_FakeFactorioUpdateApp(root), base=True)
+                original_files = set(root.rglob("*"))
+                with patch("apps.factorio.aiohttp.ClientSession") as session:
+                    for version in ("", "stable", "../2.1.25", "2.1.25/headless/linux64"):
+                        with self.subTest(version=version), self.assertRaisesRegex(ValueError, "Factorio download version"):
+                            await updater.download_release(branch=FactorioUpdateBranch.STABLE, version_text=version)
+                session.assert_not_called()
+                self.assertEqual(set(root.rglob("*")), original_files)
+
+        asyncio.run(download())
 
     def test_factorio_latest_release_parser_reads_stable_and_experimental_versions(self) -> None:
         versions = _factorio_latest_headless_versions(
@@ -1665,6 +1735,7 @@ class FactorioUpdaterTests(unittest.TestCase):
             with tarfile.open(archive_path, mode="w:xz") as archive:
                 archive.add(source_root / "factorio", arcname="factorio")
             with (
+                patch.object(AppPlatform, "current", return_value=LINUX_X86_64),
                 patch("apps.factorio._owner_group", return_value=("yuki", "games")),
                 patch("apps.factorio.shutil.chown"),
             ):
@@ -1686,6 +1757,61 @@ class FactorioUpdaterTests(unittest.TestCase):
             finally:
                 first._operation_running = False
                 first._release_scope_update_lock()
+
+    def test_installing_an_arm_release_preserves_the_expected_binary_permissions(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = _FakeFactorioUpdateApp(root / "installed")
+            updater = Factorio_Updater(app, base=True)
+            source = root / "source/factorio/bin/arm64/factorio"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"ARM binary")
+            source.chmod(0o644)
+            archive_path = root / "arm.tar.xz"
+            with tarfile.open(archive_path, "w:xz") as archive:
+                archive.add(root / "source/factorio", arcname="factorio")
+            with (
+                patch.object(AppPlatform, "current", return_value=LINUX_ARM64),
+                patch("apps.factorio._owner_group", return_value=("yuki", "games")),
+                patch("apps.factorio.shutil.chown"),
+            ):
+                updater._install_release_archive(archive_path)
+            installed = app.directory / "bin/arm64/factorio"
+            self.assertEqual(installed.read_bytes(), b"ARM binary")
+            self.assertEqual(installed.stat().st_mode & 0o777, 0o755)
+            self.assertFalse((app.directory / "bin/x64/factorio").exists())
+
+    def test_a_release_for_the_wrong_architecture_cannot_modify_the_installation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = _FakeFactorioUpdateApp(root / "installed")
+            updater = Factorio_Updater(app, base=True)
+            installed = app.directory / "bin/arm64/factorio"
+            installed.parent.mkdir(parents=True)
+            installed.write_bytes(b"keep installed ARM binary")
+            settings = app.directory / "settings.json"
+            settings.write_bytes(b"keep settings")
+            source = root / "source/factorio/bin/x64/factorio"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"wrong architecture")
+            (root / "source/factorio/settings.json").write_bytes(b"replace settings")
+            archive_path = root / "wrong-architecture.tar.xz"
+            with tarfile.open(archive_path, "w:xz") as archive:
+                archive.add(root / "source/factorio", arcname="factorio")
+            with patch.object(AppPlatform, "current", return_value=LINUX_ARM64):
+                with self.assertRaisesRegex(FileNotFoundError, "bin/arm64/factorio"):
+                    updater._install_release_archive(archive_path)
+            self.assertEqual(installed.read_bytes(), b"keep installed ARM binary")
+            self.assertEqual(settings.read_bytes(), b"keep settings")
+            self.assertFalse((app.directory / "bin/x64").exists())
+
+    def test_unsupported_architectures_cannot_start_an_update(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            updater = Factorio_Updater(_FakeFactorioUpdateApp(Path(temp_dir)), base=True)
+            with patch.object(AppPlatform, "current", side_effect=ValueError("Unsupported CPU architecture: riscv64")):
+                with self.assertRaisesRegex(ValueError, "Unsupported CPU architecture"):
+                    updater._begin_selected_operation(AppUpdateOperationKind.UPDATE)
+            self.assertFalse(updater.status().running)
 
 
 class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):

@@ -43,13 +43,13 @@ def main() -> None:
         ("report.schema.json", NetworkReportInput.model_json_schema()),
     ):
         (destination / name).write_text(
-            json.dumps(schema, indent=2) + "\n", encoding="utf-8"
+            json.dumps(schema, indent=2) + "\n", encoding="utf-8", newline="\n"
         )
     (destination / "theme.css").write_text(
         "/* Generated from mod_web_theme.py. */\n"
         + dedent(DEFAULT_MOD_WEB_THEME.root_variables_css()).strip()
         + "\n",
-        encoding="utf-8",
+        encoding="utf-8", newline="\n",
     )
 
 

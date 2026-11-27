@@ -6,6 +6,7 @@ from collections.abc import Generator, Iterable, Sequence
 from contextlib import contextmanager, ExitStack, nullcontext
 from dataclasses import dataclass, fields
 import os
+from ntpath import isreserved
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import stat
 import subprocess
@@ -88,6 +89,8 @@ def validated_archive_member_path(member_name: str, *, archive_label: str) -> Pu
         or ".." in path.parts
     ):
         raise ValueError(f"{archive_label} member path is invalid: {member_name}")
+    if isreserved(member_name):
+        raise ValueError(f"{archive_label} member path is not supported on Windows: {member_name}")
     return path
 
 

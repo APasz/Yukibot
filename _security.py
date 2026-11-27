@@ -1,7 +1,5 @@
-import grp
 import logging
 import os
-import pwd
 from collections.abc import Iterable, Mapping
 from enum import IntEnum
 from pathlib import Path
@@ -13,10 +11,16 @@ from _authority import AuthorityResource
 
 log = logging.getLogger(__name__)
 
+
 def _owner_group() -> tuple[str, str]:
-    user: str = pwd.getpwuid(os.geteuid()).pw_name
-    group: str = grp.getgrgid(os.getegid()).gr_name
-    return user, group
+    """Resolve POSIX ownership only when a Linux app needs to apply it."""
+    if os.name != "posix":
+        raise NotImplementedError("POSIX file ownership is unavailable on this platform.")
+    import grp
+    import pwd
+
+    return pwd.getpwuid(os.geteuid()).pw_name, grp.getgrgid(os.getegid()).gr_name
+
 
 class Power_Level(IntEnum):
     guest = 0

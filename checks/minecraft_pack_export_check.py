@@ -317,6 +317,34 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
                     (ArchiveDataEntry(PurePosixPath(path), b"data"),), self._spec(PackFormat.GENERIC_ZIP),
                 )
 
+    async def test_client_exports_and_publication_reject_windows_reserved_paths(self) -> None:
+        for name in ("CON.txt", "config/nul.json", "config/file:stream", "config/trailing."):
+            entries = (ArchiveDataEntry(PurePosixPath(name), b"data"),)
+            with self.subTest(name=name):
+                for hash_pack in (client_pack_content_hash, client_pack_source_fingerprint):
+                    with self.assertRaisesRegex(ClientPackValidationError, "not supported on Windows"):
+                        hash_pack(entries, format_name="test")
+                with self.assertRaisesRegex(ValueError, "not supported on Windows"):
+                    await preflight_minecraft_pack(entries, self._spec(PackFormat.GENERIC_ZIP))
+                with patch.object(config, "DIR_ZIPS", self.zips), self.assertRaisesRegex(ValueError, "not supported on Windows"):
+                    await export_minecraft_pack(entries, self._spec(PackFormat.GENERIC_ZIP), "invalid-windows")
+                self.assertFalse((self.zips / "invalid-windows.zip").exists())
+
+    def test_modrinth_metadata_rejects_nonportable_download_names(self) -> None:
+        metadata = ModrinthModMetadata(
+            page_url="https://modrinth.com/mod/example", project_id="project", version_id="version",
+            download_url="https://cdn.modrinth.com/example.jar",
+        )
+        for filename in (
+            "CON.jar", "bad:stream.jar", "mods\\example.jar", "example.jar.",
+            "example.jar ", "example.jar\n", "example.jar\t", "", " ", True, 123,
+        ):
+            with self.subTest(filename=filename), self.assertRaises(ValueError):
+                ModrinthModMetadata.model_validate({**metadata.model_dump(), "filename": filename})
+
+        preserved = ModrinthModMetadata.model_validate({**metadata.model_dump(), "filename": " example.jar"})
+        self.assertEqual(preserved.filename, " example.jar")
+
     def test_client_pack_fingerprinting_rejects_unreadable_directories(self) -> None:
         entries = (ArchiveEntry(self.overrides, PurePosixPath("overrides")),)
         with patch("os.scandir", side_effect=PermissionError("Unreadable directory")):

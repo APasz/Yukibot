@@ -5,11 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import replace
 from itertools import chain
-from ntpath import isreserved
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from _mod_ops import ArchiveDataEntry, ArchiveEntry, ClientPackValidationError, ModArchiveEntry
-from archive_safety import validate_archive_member_layout, validated_archive_member_path
+from archive_safety import validate_archive_member_layout
 from apps._config import AppVersion
 from apps._mod import Mod_Manager
 from apps.sevendays.installation import (
@@ -81,14 +80,7 @@ def _client_members(entries: tuple[ArchiveEntry | ArchiveDataEntry, ...]) -> Ite
 
 
 def _validate_client_layout(entries: tuple[ArchiveEntry | ArchiveDataEntry, ...]) -> None:
-    def windows_members() -> Iterator[tuple[PurePosixPath, bool]]:
-        for path, is_directory in _client_members(entries):
-            validated_archive_member_path(path.as_posix(), archive_label="UL Windows client pack")
-            if isreserved(path.as_posix()):
-                raise ValueError(f"Client-pack path is not supported on Windows: {path}")
-            yield path, is_directory
-
-    validate_archive_member_layout(windows_members(), archive_label="UL Windows client pack")
+    validate_archive_member_layout(_client_members(entries), archive_label="UL Windows client pack")
 
 
 def _windows_launcher(release: UndeadLegacyRelease) -> bytes:

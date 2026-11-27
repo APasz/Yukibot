@@ -16,6 +16,8 @@ from pathlib import Path
 from tempfile import gettempdir
 from time import monotonic, sleep
 
+import psutil
+
 _STOP_TIMEOUT_SECONDS = 10.0
 _TERMINAL_WIDTH = 88
 _STATE_DIRECTORY = Path(gettempdir()) / "yukibot-dev-cluster"
@@ -396,13 +398,7 @@ class DevClusterManager:
 
     @staticmethod
     def _pid_exists(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
+        return psutil.pid_exists(pid)
 
     def _terminate_process_group(self, *, member: ClusterMember, pid: int) -> None:
         try:

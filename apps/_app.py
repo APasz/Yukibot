@@ -54,6 +54,7 @@ from apps._config_files import (
 from apps._console import ConsoleAction, ConsoleResponseSource
 from apps._mod import Mod, Mod_Manager
 from apps._mod_catalog import LocalModSource, ModCatalog, ModInventorySource
+from apps._platform import AppPlatform, LINUX_X86_64
 from apps._save_files import AppSaveEntry, AppSaveRoot, list_app_save_files, resolve_app_save_path
 from apps._settings import App_Settings, Settings_Manager
 from apps._steam import SteamGameServerLoginTokenStatus, normalise_steam_game_server_login_token
@@ -330,6 +331,7 @@ class AppActivityProviderEntry:
 
 
 class App(Generic[ConfigT], ABC):
+    supported_platforms: ClassVar[frozenset[AppPlatform]] = frozenset({LINUX_X86_64})
     cfg_cls: type[ConfigT] = cast(type[ConfigT], App_Config)
     bot: hikari.GatewayBot
     cfg: ConfigT
@@ -384,6 +386,37 @@ class App(Generic[ConfigT], ABC):
     config_file_write_level_override: Power_Level | None = None
     save_file_write_level_override: Power_Level | None = None
 
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+        if not isinstance(cls.supported_platforms, frozenset) or any(
+            not isinstance(target, AppPlatform) for target in cls.supported_platforms
+        ):
+            raise TypeError(f"{cls.__name__}.supported_platforms must be a frozenset of AppPlatform values.")
+        if not cls.supported_platforms:
+            raise ValueError(f"{cls.__name__}.supported_platforms must not be empty.")
+
+    @classmethod
+    def platform_support_error(cls, host: AppPlatform | None = None) -> str | None:
+        """Explain why this adapter is unavailable on the current host."""
+        try:
+            current = AppPlatform.current() if host is None else host
+        except ValueError as error:
+            reason = f"{cls.__name__} cannot run on this host: {error} Supported platforms:"
+        else:
+            if current in cls.supported_platforms:
+                return None
+            reason = f"{cls.__name__} does not support {current.display_name}; supported platforms:"
+        supported_names = ", ".join(sorted(target.display_name for target in cls.supported_platforms))
+        return f"{reason} {supported_names}."
+
+    @classmethod
+    def require_supported_platform(cls) -> AppPlatform:
+        """Reject unsupported hosts before adapter-specific work begins."""
+        current = AppPlatform.current()
+        if error := cls.platform_support_error(current):
+            raise ValueError(error)
+        return current
+
     def __init__(
         self,
         bot: hikari.GatewayBot,
@@ -393,6 +426,7 @@ class App(Generic[ConfigT], ABC):
         mod_cls: type[Mod] | None = None,
         modcf_cls: type[Mod_Config] | None = None,
     ) -> None:
+        self.require_supported_platform()
         if not bot:
             raise ValueError("App missing bot")  # pyright: ignore[reportUnreachable]
         if not cfg:
@@ -1502,6 +1536,7 @@ class App(Generic[ConfigT], ABC):
         return {}
 
     async def _launch_process(self):
+        self.require_supported_platform()
         self.log_launch_context()
         environment = os.environ.copy()
         environment.update(self.launch_environment())
@@ -1530,6 +1565,7 @@ class App(Generic[ConfigT], ABC):
     async def _postlaunch_tasks(self): ...
 
     async def _std_launch(self):
+        self.require_supported_platform()
         await self._prelaunch_tasks()
         await self._launch_process()
         await self._postlaunch_tasks()

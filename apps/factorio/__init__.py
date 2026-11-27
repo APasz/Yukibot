@@ -18,7 +18,8 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mappi
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from re import Match, Pattern
-from typing import Generic, TypeAlias, TypeVar, assert_never, cast, overload
+from types import MappingProxyType
+from typing import ClassVar, Final, Generic, TypeAlias, TypeVar, assert_never, cast, overload
 from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
@@ -64,6 +65,7 @@ from apps._config import (
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot, prepare_instance_config_update
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleExecutor, ConsoleResponseSource
 from apps._mod import Mod, humanise_mod_identifier
+from apps._platform import AppPlatform, LINUX_ARM64, LINUX_X86_64
 from apps._rcon import RconClient
 from apps._save_files import (
     AppSaveEntry,
@@ -120,6 +122,22 @@ _FACTORIO_MOD_VERSION_RE: Pattern[str] = re.compile(
     r"_(?P<version>v?\d+(?:\.\d+)+(?:[-+._][A-Za-z0-9]+)*)$",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _FactorioPlatformBuild:
+    download_target: str
+    binary_path: PurePosixPath
+
+
+_FACTORIO_PLATFORM_BUILDS: Final[Mapping[AppPlatform, _FactorioPlatformBuild]] = MappingProxyType({
+    LINUX_X86_64: _FactorioPlatformBuild("linux64", PurePosixPath("bin/x64/factorio")),
+    LINUX_ARM64: _FactorioPlatformBuild("linux-arm64", PurePosixPath("bin/arm64/factorio")),
+})
+
+
+def _factorio_platform_build() -> _FactorioPlatformBuild:
+    return _FACTORIO_PLATFORM_BUILDS[Factorio.require_supported_platform()]
 
 
 def _factorio_game_port(join_port: int | None) -> int:
@@ -525,10 +543,8 @@ def _factorio_latest_headless_versions(payload: Mapping[str, object]) -> dict[Fa
     return versions
 
 
-def _factorio_download_url(branch: FactorioUpdateBranch) -> str:
-    if branch is FactorioUpdateBranch.STABLE:
-        return "https://factorio.com/get-download/stable/headless/linux64"
-    return "https://factorio.com/get-download/experimental/headless/linux64"
+def _factorio_download_url(version_text: str) -> str:
+    return f"https://factorio.com/get-download/{version_text}/headless/{_factorio_platform_build().download_target}"
 
 
 def parse_factorio_mod_portal_url(raw_url: str) -> str:
@@ -941,7 +957,7 @@ def _normalise_factorio_archive_member_path(member_name: str) -> Path:
 
 
 def _factorio_download_archive_path(*, tmp_dir: Path, branch: FactorioUpdateBranch, version_text: str) -> Path:
-    return tmp_dir / f"factorio-{branch.value}-{version_text}.tar.xz"
+    return tmp_dir / f"factorio-{branch.value}-{_factorio_platform_build().download_target}-{version_text}.tar.xz"
 
 
 def _ensure_factorio_binary_executable(binary_path: Path) -> None:
@@ -1908,6 +1924,7 @@ _FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
 
 
 class Factorio(App[App_Config]):
+    supported_platforms: ClassVar[frozenset[AppPlatform]] = frozenset(_FACTORIO_PLATFORM_BUILDS)
     _instance = None
     chat_relay_outbound = True
     relay_advancement_terms = RelayAdvancementTerms("Research", "Research")
@@ -1917,6 +1934,7 @@ class Factorio(App[App_Config]):
     rcon_requires_online_players_default = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
+        self.require_supported_platform()
         self.manage_embed_color = 0xDC6B0F
         self.proc_name = "factorio"
         self.proc_cmd = [self.proc_name, "--start-server"]
@@ -1997,7 +2015,7 @@ class Factorio(App[App_Config]):
             else ["--start-server", f"saves/{_normalise_factorio_save_filename(save_file)}"]
         )
         return [
-            "bin/x64/factorio",
+            _factorio_platform_build().binary_path.as_posix(),
             *load_argument,
             "--server-settings",
             f"{file_settings}",
@@ -2010,13 +2028,14 @@ class Factorio(App[App_Config]):
         ]
 
     async def _create_fresh_world(self, save_file: str) -> None:
+        binary_path = _factorio_platform_build().binary_path.as_posix()
         filename = _normalise_factorio_save_filename(save_file)
         save_path = self.directory / "saves" / filename
         if save_path.exists():
             raise FileExistsError(f"Cannot create a fresh Factorio world because the save already exists: {filename}")
         save_path.parent.mkdir(parents=True, exist_ok=True)
         command = [
-            "bin/x64/factorio",
+            binary_path,
             "--create",
             f"saves/{filename}",
             "--map-gen-settings",
@@ -2275,7 +2294,7 @@ class Factorio(App[App_Config]):
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")
-        _ensure_factorio_binary_executable(self.directory / "bin" / "x64" / "factorio")
+        _ensure_factorio_binary_executable(self.directory / _factorio_platform_build().binary_path)
         self._startup_error = None
 
         selected_save_file = self.cfg.factorio_save_file
@@ -2653,6 +2672,7 @@ class Factorio_Updater(Update_Manager):
         return result.version_text
 
     def _begin_selected_operation(self, kind: AppUpdateOperationKind) -> FactorioUpdateBranch:
+        Factorio.require_supported_platform()
         if self.app.check_running():
             raise RuntimeError(f"{self.app.friendly} must be stopped before {kind.value}.")
         branch = self._factorio_update_config().selected_branch
@@ -2794,7 +2814,8 @@ class Factorio_Updater(Update_Manager):
             self._release_scope_update_lock()
 
     async def download_release(self, *, branch: FactorioUpdateBranch, version_text: str) -> Path:
-        url = _factorio_download_url(branch)
+        version_text = self.stringise(_parse_factorio_version_text(version_text, label="Factorio download version"))
+        url = _factorio_download_url(version_text)
         archive_path = _factorio_download_archive_path(
             tmp_dir=config.DIR_TMP,
             branch=branch,
@@ -2877,11 +2898,12 @@ class Factorio_Updater(Update_Manager):
             shutil.copy2(source, target)
 
     def _install_release_archive(self, archive_path: Path) -> None:
+        binary_path = _factorio_platform_build().binary_path
         with tempfile.TemporaryDirectory(prefix="yukibot-factorio-update-") as temp_dir:
             staging_dir = Path(temp_dir)
             extracted_root = self._extract_archive_root(archive_path, staging_dir)
+            _ensure_factorio_binary_executable(extracted_root / binary_path)
             self._overlay_directory(extracted_root, self.app.directory)
-        _ensure_factorio_binary_executable(self.app.directory / "bin" / "x64" / "factorio")
         self._apply_directory_ownership(self.app.directory)
         self._append_log(f"Installed archive into {self.app.directory}")
 

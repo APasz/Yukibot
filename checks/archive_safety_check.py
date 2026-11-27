@@ -18,6 +18,30 @@ from safe_http import PublicAddressResolver, UnsafeOutboundUrlError, validate_pu
 
 
 class ArchiveSafetyTests(unittest.TestCase):
+    def test_zip_paths_reject_windows_reserved_names_and_aliases(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mod.zip"
+            for name in (
+                "CON.txt", "mods/aux.jar", "config/LPT1.json", "mods/COM¹.txt",
+                "config/file:stream", "config/trailing.", "config/trailing ",
+                "config/bad?.txt", "config/control\x01.txt", "NUL/settings.json",
+            ):
+                with self.subTest(name=name):
+                    with zipfile.ZipFile(path, "w") as archive:
+                        archive.writestr(name, b"data")
+                    with self.assertRaisesRegex(ValueError, "not supported on Windows"):
+                        validated_zip_entries(path, archive_label="Mod", limits=ZipArchiveLimits())
+
+    def test_zip_paths_allow_portable_unicode_and_device_name_prefixes(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "mod.zip"
+            names = ("config/日本語.json", "mods/console.jar", "config/COM10.json", "mods/auxiliary.jar")
+            with zipfile.ZipFile(path, "w") as archive:
+                for name in names:
+                    archive.writestr(name, b"data")
+            entries = validated_zip_entries(path, archive_label="Mod", limits=ZipArchiveLimits())
+            self.assertEqual(tuple(member.as_posix() for _, member in entries), names)
+
     def test_windows_separator_opt_in_normalizes_paths_but_rejects_traversal(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "mod.zip"

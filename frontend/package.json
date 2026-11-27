@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "format": "prettier --write .",
-    "api:generate": "../.venv/bin/python ../tools/export_network_api.py && openapi-typescript src/generated/openapi.json -o src/generated/api.d.ts",
+    "api:generate": "uv run --locked --project .. python ../tools/export_network_api.py && openapi-typescript src/generated/openapi.json -o src/generated/api.d.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "build": "pnpm api:generate && pnpm check && vite build"

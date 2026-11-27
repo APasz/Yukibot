@@ -120,6 +120,7 @@ def next_available_instance_key(existing_instance_keys: Iterable[str]) -> str:
 
 
 class AppStartBlockerKind(enum.StrEnum):
+    PLATFORM = "platform"
     ALREADY_RUNNING = "already_running"
     SAME_SCOPE = "same_scope"
     NETWORK_PORT = "network_port"
@@ -361,9 +362,11 @@ class AppInstanceTemplate:
 class StartupDisabledAppNotice:
     app_name: str
     reason: str
+    disabled_in_configuration: bool = True
 
     def format_line(self) -> str:
-        return f"Auto-disabled: {self.app_name} ({self.reason})"
+        action = "Auto-disabled" if self.disabled_in_configuration else "Skipped"
+        return f"{action}: {self.app_name} ({self.reason})"
 
 
 def _required_scope_steam_update_template(scope: str) -> SteamUpdateConfig:
@@ -760,6 +763,8 @@ class App_Manager(metaclass=config.Singleton):
         *,
         include_current_activity: bool = True,
     ) -> AppStartBlocker | None:
+        if error := app.platform_support_error():
+            return AppStartBlocker(kind=AppStartBlockerKind.PLATFORM, message=error)
         pending_names = self._pending_start_name_keys()
         if include_current_activity and (app.check_running() or app.name.casefold() in pending_names):
             return AppStartBlocker(
@@ -867,6 +872,15 @@ class App_Manager(metaclass=config.Singleton):
 
             raw = self._read_json_object(instances_path)
             app_cls, cfg_cls = self._load_scope_types(entry.name)
+            if error := app_cls.platform_support_error():
+                self.startup_disabled_instances.extend(
+                    StartupDisabledAppNotice(
+                        app_name=f"{entry.name}_{instance_name}", reason=error, disabled_in_configuration=False,
+                    )
+                    for instance_name in raw
+                )
+                log.warning("Skipping app scope `%s`: %s Configuration was not changed.", entry.name, error)
+                continue
             for instance_name, raw_cfg in raw.items():
                 try:
                     instance_payload = self._as_json_mapping(raw_cfg)
@@ -921,7 +935,7 @@ class App_Manager(metaclass=config.Singleton):
             self._register_lookup_aliases(name, app)
         if self.startup_disabled_instances:
             log.warning(
-                "Auto-disabled %s app instance(s) during startup: %s",
+                "Skipped %s app instance(s) during startup: %s",
                 len(self.startup_disabled_instances),
                 "; ".join(notice.format_line() for notice in self.startup_disabled_instances),
             )
@@ -1650,6 +1664,8 @@ class App_Manager(metaclass=config.Singleton):
         scope_path = Path("apps") / scope_key
         if not scope_path.is_dir():
             raise ValueError(f"Unknown app scope: {scope_key}")
+        app_cls, _ = self._load_scope_types(scope_key)
+        app_cls.require_supported_platform()
         existing_instance_keys = tuple(self._read_json_object(scope_path / "instances.json"))
         instance_key = next_available_instance_key(existing_instance_keys)
         subfolder = (
@@ -1729,6 +1745,8 @@ class App_Manager(metaclass=config.Singleton):
         scope_path = Path("apps") / scope
         if not scope_path.is_dir():
             raise ValueError(f"Unknown app scope: {scope}")
+        app_cls, _ = self._load_scope_types(scope)
+        app_cls.require_supported_platform()
 
         instances_path = scope_path / "instances.json"
         raw = self._read_json_object(instances_path)
@@ -1807,6 +1825,8 @@ class App_Manager(metaclass=config.Singleton):
         scope_path = Path("apps") / resolved_scope
         if not scope_path.is_dir():
             raise ValueError(f"Unknown app scope: {resolved_scope}")
+        app_cls, cfg_cls = self._load_scope_types(resolved_scope)
+        app_cls.require_supported_platform()
         instances_path = scope_path / "instances.json"
         raw = self._read_json_object(instances_path)
         instance_payload = self._require_instance_payload(
@@ -1817,7 +1837,6 @@ class App_Manager(metaclass=config.Singleton):
         app_name = f"{resolved_scope}_{resolved_instance_key}"
         if app_name in self.apps:
             raise ValueError(f"App instance `{app_name}` is already loaded.")
-        app_cls, cfg_cls = self._load_scope_types(resolved_scope)
         cfg = self._build_app_config(
             scope=resolved_scope,
             scope_path=scope_path,
@@ -2248,6 +2267,7 @@ class App_Manager(metaclass=config.Singleton):
         app_cls: ManagedAppType,
         cfg: App_Config,
     ) -> ManagedApp:
+        app_cls.require_supported_platform()
         if self.activity_manager is None:
             raise SystemError("Activity_Manager not setup")
         app = app_cls(bot, self.activity_manager, cfg)
@@ -2462,6 +2482,9 @@ class App_Manager(metaclass=config.Singleton):
 
     def _scope_supports_create(self, scope_path: Path) -> bool:
         if not (scope_path / "__init__.py").exists():
+            return False
+        app_cls, _ = self._load_scope_types(scope_path.name)
+        if app_cls.platform_support_error() is not None:
             return False
         instances_path = scope_path / "instances.json"
         raw = self._read_json_object(instances_path)

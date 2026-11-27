@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import json
+import runpy
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import config
-from _security import Access_Control, Power_Level
+from _security import Access_Control, Power_Level, _owner_group
 
 
 class SecurityTests(unittest.TestCase):
+    def test_access_control_imports_without_posix_account_modules(self) -> None:
+        with patch.dict(sys.modules, {"grp": None, "pwd": None}):
+            namespace = runpy.run_path(str(Path(__file__).resolve().parents[1] / "_security.py"))
+        self.assertIn("Access_Control", namespace)
+
+    def test_posix_ownership_fails_explicitly_on_windows(self) -> None:
+        with patch("_security.os.name", "nt"), self.assertRaisesRegex(NotImplementedError, "POSIX file ownership"):
+            _owner_group()
+
     def test_power_level_order_includes_visitor_between_guest_and_user(self) -> None:
         self.assertLess(Power_Level.guest, Power_Level.visitor)
         self.assertLess(Power_Level.visitor, Power_Level.user)

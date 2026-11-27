@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import signal
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -57,6 +59,16 @@ class DevClusterDotenvTests(unittest.TestCase):
 
 
 class DevClusterSettingsTests(unittest.TestCase):
+    def test_pid_probe_keeps_a_running_process_alive(self) -> None:
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            self.assertTrue(DevClusterManager._pid_exists(process.pid))
+            self.assertIsNone(process.poll())
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+        self.assertFalse(DevClusterManager._pid_exists(process.pid))
+
     def test_settings_from_environment_uses_expected_token_fallbacks(self) -> None:
         settings = settings_from_environment(
             env={

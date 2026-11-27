@@ -17,6 +17,37 @@ uv sync
 `uv` will create `.venv` automatically. The project requires Python `3.14+`.
 Set `BOT_PROFILE` in `.env` before running anything. Startup now fails if it is missing.
 
+### Platform compatibility
+
+Native Windows startup remains blocked in `config.py` while compatibility work continues. Bot and Portal support is assessed separately from managed games. Existing adapters default to Linux/x86_64; Factorio also supports Linux/ARM64.
+
+Adapters declare a non-empty `frozenset[AppPlatform]` through `App.supported_platforms`. Each immutable platform pairs an `AppOperatingSystem` (`LINUX`, `WINDOWS`, `MACOS`) with an `AppArchitecture` (`X86_64`, `ARM64`). Explicit pairs prevent support for Linux/ARM64 and Windows/x86_64 from accidentally enabling Windows/ARM64. These are code declarations, not instance configuration overrides. For example, an adapter verified on Linux/x86_64 and Windows/x86_64 would declare:
+
+```python
+from apps._platform import AppArchitecture, AppOperatingSystem, AppPlatform, LINUX_X86_64
+
+supported_platforms = frozenset({
+    LINUX_X86_64,
+    AppPlatform(AppOperatingSystem.WINDOWS, AppArchitecture.X86_64),
+})
+```
+
+Checks use the game node's operating system and architecture. `AMD64`, `x64`, and `x86_64` normalise to `X86_64`; `aarch64` and `arm64` normalise to `ARM64`. Unknown systems and architectures fail explicitly, and emulation is not inferred. Unsupported scopes and installation recipes are omitted from discovery. Startup skips their existing instances with a notice and preserves their saved configuration, including enabled flags. Direct creation, loading, and launch attempts are also rejected before adapter construction or process launch.
+
+Factorio derives its supported platforms, native download target, and executable path from one build table. Linux/ARM64 uses the official `linux-arm64` headless release and `bin/arm64/factorio`; Linux/x86_64 retains `linux64` and `bin/x64/factorio`. Server startup, fresh-world generation, updates, and verification use that same selection. Updates download the exact version reported by release metadata and check for the expected binary in staging before changing installed files. Native ARM64 execution still needs a host smoke test; the package layout has been checked against the official archive.
+
+Frontend builds use `uv` to select Python, POSIX ownership imports are deferred until a game needs them, and dev-cluster PID checks use `psutil.pid_exists`. Archive imports, exports, and Modrinth download metadata share Windows-safe name validation. Generated frontend contracts use consistent LF line endings.
+
+The locked Python 3.14 dependency plan resolves for Windows x64 (`uv sync --locked --dry-run --python-platform x86_64-pc-windows-msvc --python 3.14 --no-python-downloads`). This checks the installation plan without installing or running Windows packages.
+
+Before removing the startup blocker, the remaining work includes:
+
+- Replacing POSIX FIFO use in `cmd_music.py` for generated audio.
+- Handling Windows Portal shutdown signals and dev-cluster process-tree termination.
+- Validating private cache access through Windows permissions rather than POSIX mode bits.
+- Providing platform-specific host reboot and updater behaviour. The updater currently assumes OpenSSH control sockets, optional `sshpass`, and POSIX remote commands; text sent to remote shells also needs explicit LF handling.
+- Running native Windows dependency installation, startup/shutdown, authentication/cache, file-operation, and frontend checks. Linux tests and Windows-targeted type analysis do not establish runtime compatibility.
+
 ### Run
 
 ```bash
@@ -157,7 +188,7 @@ On Yuki, the public authority endpoint also falls back to `PUBLIC_BASE_URL`, but
 
 Fresh 7 Days to Die instances offer **Vanilla** and **Undead Legacy** installation profiles. Undead Legacy currently pairs game 2.6 (`v2.6`) with UL 2.7.40. It downloads both pinned official release archives, or accepts an absolute path to a complete ZIP already on the selected node. Existing instances cannot be converted. The regular Steam updater is disabled for this profile while overhaul updating is deferred.
 
-7 Days to Die exposes **Map Rendering** in Settings (`EnableMapRendering` in `serverconfig.xml`). Enabling it also enables **Webdashboard** (`WebDashboardEnabled`): the shipped renderer initializes when the game's web server starts. The settings UI shows a toast explaining the automatic change before saving. Webdashboard stays enabled while Map Rendering is enabled; disabling Map Rendering leaves Webdashboard enabled. Restart the game server after changing these settings, then join and explore to generate tiles. The **Map** tab is always available for 7D2D and explains whether rendering is disabled, a restart is required, or explored tiles have not appeared yet. It discovers usable tiles automatically. It reads the game's shared explored map directly through the authenticated node API, including Undead Legacy's save layout.
+7 Days to Die exposes **Map Rendering** in Settings (`EnableMapRendering` in `serverconfig.xml`). Enabling it also enables **Webdashboard** (`WebDashboardEnabled`): the shipped renderer initialises when the game's web server starts. The settings UI shows a toast explaining the automatic change before saving. Webdashboard stays enabled while Map Rendering is enabled; disabling Map Rendering leaves Webdashboard enabled. Restart the game server after changing these settings, then join and explore to generate tiles. The **Map** tab is always available for 7D2D and explains whether rendering is disabled, a restart is required, or explored tiles have not appeared yet. It discovers usable tiles automatically. It reads the game's shared explored map directly through the authenticated node API, including Undead Legacy's save layout.
 
 Unrendered areas remain blank. The map includes pan, zoom, periodic tile refresh, shared dashboard annotations, and named online-player markers. Click a player or their name to centre the map without changing zoom. The coordinate readout shows the cursor position, or the map centre on touch devices, using north/south and east/west coordinates. Player positions reuse the existing five-second console poll and expire after fifteen seconds without an update; disconnected players disappear on the next successful poll. Positions are hidden when the game or console connection stops, and belong only to the running save.
 

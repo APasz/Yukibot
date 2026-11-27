@@ -18,6 +18,7 @@ from modmux.models import Provider
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 import config
+from archive_safety import validated_archive_member_path
 from _resolator import Resolutator
 from _security import Access_Control, Power_Level
 
@@ -1416,15 +1417,18 @@ class ModrinthModMetadata(BaseModel):
     def validate_identifier(cls, raw: object) -> str:
         return _normalise_required_text(raw, field_name="Modrinth identifier")
 
-    @field_validator("filename", mode="before")
+    @field_validator("filename", mode="plain")
     @classmethod
     def validate_filename(cls, raw: object) -> str | None:
+        """Preserve provider filenames without stripping invalid trailing characters."""
         if raw is None:
             return None
-        filename = _normalise_required_text(raw, field_name="Modrinth filename")
-        if PurePosixPath(filename).name != filename or filename in {".", ".."}:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("Modrinth filename must be a non-empty string")
+        if PurePosixPath(raw).name != raw or raw in {".", ".."}:
             raise ValueError("Modrinth filename must be a single file name")
-        return filename
+        validated_archive_member_path(raw, archive_label="Modrinth filename")
+        return raw
 
     @field_validator("description", mode="before")
     @classmethod
